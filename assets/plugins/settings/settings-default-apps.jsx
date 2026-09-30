@@ -1,5 +1,5 @@
 // @jsx h
-// Rust owns association discovery and the virtual catalog geometry.
+// Association discovery stays native; this component owns the bounded catalog view.
 function App() {
     const data = nickel.data;
     return <div className="default-app-page">
@@ -28,6 +28,15 @@ function App() {
             </div>
         </div>
         <div className="default-app-catalog">
+            {data.catalogLoading ? <Text className="default-app-detail">Loading file and protocol associations…</Text> : null}
+            {!data.catalogLoading && data.catalogTotal === 0 ? <Text className="default-app-detail">{data.catalogEmpty}</Text> : null}
+            {data.catalogHasPages ? <div className="default-app-pages">
+                <Button id="default-app-previous" className="default-app-family" disabled={!data.catalogCanPrevious}
+                    onClick={() => nickel.request({type: 'page-targets', direction: 'previous'})}>Previous</Button>
+                <Text className="default-app-detail">{data.catalogPageLabel}</Text>
+                <Button id="default-app-next" className="default-app-family" disabled={!data.catalogCanNext}
+                    onClick={() => nickel.request({type: 'page-targets', direction: 'next'})}>Next</Button>
+            </div> : null}
             {data.catalogRows.map(row => <div key={row.key} className="default-app-row">
                 <div className="default-app-label">
                     <Text className="default-app-name">{row.key}</Text>
@@ -36,6 +45,7 @@ function App() {
                 <Button id={`default-app-target-${row.index}`} className="default-app-action"
                     onClick={() => nickel.request({type: 'browse-target', index: row.index, key: row.key})}>Choose app</Button>
             </div>)}
+
         </div>
     </div>;
 }

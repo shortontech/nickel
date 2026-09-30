@@ -1,8 +1,5 @@
 use super::*;
-use nickel_ui::{
-    Collection, CollectionPresentation, CollectionState, Column, Container, NavigationScope, Row,
-    Text,
-};
+use nickel_ui::{CollectionState, Column, ComponentBuilderExt, Container, Row};
 
 pub(crate) fn codex_switch_state(state: &FeatureState) -> SwitchState {
     let available = state.capability.support == FeatureSupport::Supported
@@ -262,7 +259,6 @@ impl SettingsApp {
             return AnyView::new(Container::new());
         }
         let theme = self.ui_theme();
-        let palette = self.palette();
         let matching_targets = crate::default_apps_plugin::matching_targets(self);
         let rendered = if self.settings_jsx_enabled {
             let data = crate::default_apps_plugin::projection_for_targets(self, &matching_targets);
@@ -278,11 +274,7 @@ impl SettingsApp {
         } else {
             Err("Settings plugin is disabled".into())
         };
-        let crate::default_apps_plugin::DefaultAppsRendered {
-            curated,
-            catalog_nodes,
-            stylesheet: catalog_stylesheet,
-        } = match rendered {
+        let content = match rendered {
             Ok(rendered) => rendered,
             Err(error) => {
                 return self.settings_plugin_recovery(
@@ -292,68 +284,6 @@ impl SettingsApp {
                 );
             }
         };
-        let target_results = if self.default_apps_loading && self.default_app_targets.is_empty() {
-            AnyView::new(
-                Text::new(
-                    self.localizer
-                        .text("ui-pages-loading-file-and-protocol-associations"),
-                )
-                .color(palette.muted),
-            )
-        } else if matching_targets.is_empty() {
-            AnyView::new(
-                Text::new(if self.default_app_target_status.is_some() {
-                    "The operating-system association catalog is unavailable."
-                } else {
-                    "No additional registered file or link types match."
-                })
-                .color(palette.muted),
-            )
-        } else {
-            let collection = Collection::try_new(
-                CollectionState::Ready(matching_targets),
-                |target| target.platform_key(),
-                move |target: nickel_platform::AssociationTarget| {
-                    let key = target.platform_key();
-                    if let Some(node) = catalog_nodes.get(&key) {
-                        return node.view_as::<SettingsMessage>(
-                            &nickel_plugin_presentation::components::PluginImages::new(),
-                            &catalog_stylesheet,
-                        );
-                    }
-                    AnyView::new(
-                        Text::new(format!("{key} is unavailable")).color(theme.text.secondary),
-                    )
-                },
-            )
-            .expect("platform association targets are deduplicated")
-            .id("default-app-target-catalog")
-            .accessibility_label("Registered file and protocol associations")
-            .gap(2.0)
-            .navigation_scope(NavigationScope::group())
-            .presentation(CollectionPresentation::VirtualList {
-                item_height: 58.0,
-                offset: self.default_app_catalog_scroll_offset,
-                viewport_height: 300.0,
-                overscan: 116.0,
-            });
-            AnyView::new(
-                nickel_ui::VerticalScroll::new(
-                    SettingsMessage::DefaultAppsScroll(
-                        self.default_app_catalog_scroll_offset.to_bits(),
-                    ),
-                    self.default_app_catalog_scroll_offset,
-                )
-                .on_scroll(default_apps_scroll_message)
-                .controlled(true)
-                .height(300.0)
-                .id("default-app-target-scroll")
-                .navigation_scope(NavigationScope::group())
-                .theme(theme)
-                .child(collection),
-            )
-        };
-        let content = Column::new().gap(10.0).child(curated).child(target_results);
         AnyView::new(ui! {
             <Column grow={1.0} padding={Insets { top: 16.0, right: 24.0, bottom: 20.0, left: 20.0 }} gap={10.0}>
                 <VerticalScroll id={"default-apps-list"} on_scroll={SettingsMessage::DefaultAppsPageScroll} offset={0.0} theme={theme}>
@@ -474,61 +404,12 @@ impl SettingsApp {
                 };
                 let content: AnyView<SettingsMessage> = match plugin_picker {
                     Ok(Some(rendered)) => {
-                        let plugin_nodes = rendered.candidates;
-                        let plugin_stylesheet = rendered.stylesheet;
-                        let collection = Collection::try_new(
-                            state,
-                            |handler: &nickel_platform::ApplicationHandler| handler.id.clone(),
-                            move |handler: nickel_platform::ApplicationHandler| {
-                                if let Some(node) = plugin_nodes.get(&handler.id) {
-                                    return node.view_as_scoped::<SettingsMessage>(
-                                        &nickel_plugin_presentation::components::PluginImages::new(),
-                                        &plugin_stylesheet,
-                                        Some("default-app-picker"),
-                                    );
-                                }
-                                AnyView::new(
-                                    Text::new(format!("{} is unavailable", handler.name))
-                                        .color(theme.text.secondary),
-                                )
-                            },
-                        )
-                        .expect("application handler identities are unique")
-                        .id(format!("default-app-handler-list-{row_index}"))
-                        .accessibility_label(format!("Applications for {}", row.label))
-                        .item_label(|handler| handler.name.clone())
-                        .empty_label("No installed applications match")
-                        .loading_label("Loading installed applications")
-                        .error_prefix("Applications could not be loaded: ")
-                        .gap(2.0)
-                        .navigation_scope(NavigationScope::group())
-                        .reveal_on_focus(&context)
-                        .presentation(CollectionPresentation::VirtualList {
-                            item_height: 58.0,
-                            offset: self.default_app_handler_scroll_offset,
-                            viewport_height: 320.0,
-                            overscan: 116.0,
-                        });
-                        let results = nickel_ui::VerticalScroll::new(
-                            SettingsMessage::DefaultAppHandlerScroll(
-                                self.default_app_handler_scroll_offset.to_bits(),
-                            ),
-                            self.default_app_handler_scroll_offset,
-                        )
-                        .on_scroll(default_app_handler_scroll_message)
-                        .controlled(true)
-                        .height(320.0)
-                        .id(format!("default-app-handler-scroll-{row_index}"))
-                        .navigation_scope(NavigationScope::group())
-                        .theme(theme)
-                        .child(collection);
                         AnyView::new(
                             Column::new()
                                 .gap(8.0)
                                 .padding(Insets::all(10.0))
                                 .background(palette.surface)
-                                .child(rendered.header)
-                                .child(results),
+                                .child(rendered),
                         )
                     }
                     Ok(None) => AnyView::new(Container::new()),

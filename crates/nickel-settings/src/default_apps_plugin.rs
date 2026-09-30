@@ -1,29 +1,21 @@
 //! Default application rows declared by the bundled Settings plugin.
 //! The host retains association discovery, virtual list geometry, and the picker.
 
-use std::collections::BTreeMap;
-
 use nickel_plugin_presentation::{
-    components::{PanelNode, PluginImages},
-    css::StyleSheet,
+    components::PluginImages,
     page::{JsxPage, STALE_DATA},
 };
-use nickel_ui::{AnyView, Column, SemanticTheme, VirtualWindow};
+use nickel_ui::{AnyView, SemanticTheme};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::{SettingsApp, SettingsMessage, SettingsPage, settings_plugin::StyledSettingsPage};
 
 const STALE_STATUS: &str = STALE_DATA;
+const CATALOG_PAGE_SIZE: usize = 4;
 
 pub(super) struct DefaultAppsPage {
     page: StyledSettingsPage,
-}
-
-pub(super) struct DefaultAppsRendered {
-    pub curated: AnyView<SettingsMessage>,
-    pub catalog_nodes: BTreeMap<String, PanelNode>,
-    pub stylesheet: StyleSheet,
 }
 
 impl DefaultAppsPage {
@@ -50,64 +42,13 @@ impl DefaultAppsPage {
         &mut self,
         data: &Value,
         theme: SemanticTheme,
-    ) -> Result<DefaultAppsRendered, String> {
+    ) -> Result<AnyView<SettingsMessage>, String> {
         let (root, stylesheet) = self.page.render(
             data,
             theme,
             include_str!("../../../assets/plugins/settings/settings-default-apps.css"),
         )?;
-        let PanelNode::Div { children, .. } = root else {
-            return Err("Default Apps page structure is invalid".into());
-        };
-        root.direct_child_with_class("default-app-curated")
-            .ok_or("Default Apps curated section is unavailable")?;
-        root.direct_child_with_class("default-app-advanced")
-            .ok_or("Default Apps advanced section is unavailable")?;
-        let catalog_section = root
-            .direct_child_with_class("default-app-catalog")
-            .ok_or("Default Apps catalog is unavailable")?;
-        let PanelNode::Div {
-            children: catalog, ..
-        } = catalog_section
-        else {
-            return Err("Default Apps catalog structure is invalid".into());
-        };
-        let projected = data["catalogRows"]
-            .as_array()
-            .ok_or("Default Apps catalog projection is invalid")?;
-        if catalog.len() != projected.len() || catalog.len() > 32 {
-            return Err("Default Apps catalog row count changed".into());
-        }
-        let catalog_nodes = projected
-            .iter()
-            .zip(catalog)
-            .map(|(row, node)| {
-                Ok((
-                    row["key"]
-                        .as_str()
-                        .ok_or("Default Apps catalog target is invalid")?
-                        .to_owned(),
-                    node.clone(),
-                ))
-            })
-            .collect::<Result<BTreeMap<_, _>, String>>()?;
-        if catalog_nodes.len() != catalog.len() {
-            return Err("Default Apps catalog has duplicate targets".into());
-        }
-        let images = PluginImages::new();
-        let view = AnyView::new(
-            Column::new().fill_width().gap(16.0).children(
-                children
-                    .iter()
-                    .filter(|child| !std::ptr::eq(*child, catalog_section))
-                    .map(|child| child.view_as::<SettingsMessage>(&images, stylesheet)),
-            ),
-        );
-        Ok(DefaultAppsRendered {
-            curated: view,
-            catalog_nodes,
-            stylesheet: stylesheet.clone(),
-        })
+        Ok(root.view_as::<SettingsMessage>(&PluginImages::new(), stylesheet))
     }
 
     fn dispatch(
@@ -139,6 +80,7 @@ enum DefaultAppsRequest {
     SearchTargets { value: String },
     SetFamily { index: usize },
     BrowseTarget { index: usize, key: String },
+    PageTargets { direction: String },
 }
 
 fn validate_request(request: DefaultAppsRequest, data: &Value) -> Result<SettingsMessage, String> {
@@ -204,6 +146,18 @@ fn validate_request(request: DefaultAppsRequest, data: &Value) -> Result<Setting
             }
             Ok(SettingsMessage::BrowseDefaultAppTarget(target))
         }
+        DefaultAppsRequest::PageTargets { direction } => {
+            let offset = data["catalogOffset"].as_u64().ok_or(STALE_STATUS)? as usize;
+            let total = data["catalogTotal"].as_u64().ok_or(STALE_STATUS)? as usize;
+            let next = match direction.as_str() {
+                "previous" if offset > 0 => offset.saturating_sub(CATALOG_PAGE_SIZE),
+                "next" if offset + CATALOG_PAGE_SIZE < total => offset + CATALOG_PAGE_SIZE,
+                _ => return Err(STALE_STATUS.into()),
+            };
+            Ok(SettingsMessage::DefaultAppsScroll(
+                (next as f32 * 58.0).to_bits(),
+            ))
+        }
     }
 }
 
@@ -246,14 +200,9 @@ pub(super) fn projection_for_targets(
     app: &SettingsApp,
     matching: &[nickel_platform::AssociationTarget],
 ) -> Value {
-    let heights = vec![58.0; matching.len()];
-    let window = VirtualWindow::from_heights(
-        &heights,
-        2.0,
-        app.default_app_catalog_scroll_offset,
-        300.0,
-        116.0,
-    );
+    let last_page = matching.len().saturating_sub(1) / CATALOG_PAGE_SIZE * CATALOG_PAGE_SIZE;
+    let start = ((app.default_app_catalog_scroll_offset / 58.0) as usize).min(last_page);
+    let end = (start + CATALOG_PAGE_SIZE).min(matching.len());
     json!({
         "rows":app.default_apps.iter().enumerate().map(|(index,row)| {
             let current = row.snapshot.as_ref()
@@ -285,20 +234,30 @@ pub(super) fn projection_for_targets(
                 "selected":app.default_app_target_family == family,
             }))
         }).collect::<Vec<_>>(),
-        "catalogRows":matching[window.range.clone()].iter().enumerate().map(|(offset,target)| {
+        "catalogRows":matching[start..end].iter().enumerate().map(|(offset,target)| {
             let (kind,value) = match target {
                 nickel_platform::AssociationTarget::Extension(value) => ("extension",value),
                 nickel_platform::AssociationTarget::Mime(value) => ("mime",value),
                 nickel_platform::AssociationTarget::Scheme(value) => ("scheme",value),
             };
             json!({
-                "index":window.range.start + offset,
+                "index":start + offset,
                 "key":target.platform_key(),
                 "family":target.family().label(),
                 "targetKind":kind,
                 "targetValue":value,
             })
-        }).collect::<Vec<_>>()
+        }).collect::<Vec<_>>(),
+        "catalogOffset":start,
+        "catalogTotal":matching.len(),
+        "catalogHasPages":matching.len() > CATALOG_PAGE_SIZE,
+        "catalogCanPrevious":start > 0,
+        "catalogCanNext":end < matching.len(),
+        "catalogPageLabel":format!("{}–{end} of {}", start + 1, matching.len()),
+        "catalogLoading":app.default_apps_loading && app.default_app_targets.is_empty(),
+        "catalogEmpty":if app.default_app_target_status.is_some() {
+            "The operating-system association catalog is unavailable."
+        } else { "No additional registered file or link types match." },
     })
 }
 
@@ -440,12 +399,7 @@ mod tests {
         app.default_app_target_query = "x-nickel-fixture-249".into();
         let data = projection(&app);
         let mut page = DefaultAppsPage::new().unwrap();
-        let rendered = page.render(&data, app.ui_theme()).unwrap();
-        assert!(
-            rendered
-                .catalog_nodes
-                .contains_key("application/x-nickel-fixture-249")
-        );
+        page.render(&data, app.ui_theme()).unwrap();
         let action = page.action_for_id("default-app-target-0").unwrap();
         assert_eq!(
             page.dispatch(action, Value::Null, &data).unwrap(),
@@ -462,6 +416,23 @@ mod tests {
                 &data,
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn catalog_page_buttons_advance_bounded_window() {
+        let mut app = SettingsApp::with_initial_page(SettingsPage::DefaultApps);
+        app.default_app_targets = (0..100)
+            .map(|index| nickel_platform::AssociationTarget::mime(format!("application/x-{index}")))
+            .collect();
+        let data = projection(&app);
+        assert_eq!(data["catalogTotal"], 100);
+        let mut page = DefaultAppsPage::new().unwrap();
+        page.render(&data, app.ui_theme()).unwrap();
+        let next = page.action_for_id("default-app-next").unwrap();
+        assert_eq!(
+            page.dispatch(next, Value::Null, &data).unwrap(),
+            SettingsMessage::DefaultAppsScroll((4.0_f32 * 58.0).to_bits())
         );
     }
 }

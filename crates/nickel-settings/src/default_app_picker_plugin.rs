@@ -1,30 +1,22 @@
 //! JSX candidate controls inside the host-owned default application popover.
 
-use std::collections::BTreeMap;
-
 use nickel_plugin_presentation::{
-    components::{PanelNode, PluginImages},
-    css::StyleSheet,
+    components::PluginImages,
     page::{JsxPage, STALE_DATA},
 };
-use nickel_ui::{AnyView, CollectionState, SemanticTheme, VirtualWindow};
+use nickel_ui::{AnyView, CollectionState, SemanticTheme};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::{SettingsApp, SettingsMessage, settings_plugin::StyledSettingsPage};
 
 const STALE_STATUS: &str = STALE_DATA;
+const HANDLER_PAGE_SIZE: usize = 4;
 
 pub(super) struct DefaultAppPickerPage {
     page: StyledSettingsPage,
     data: Option<Value>,
     data_bytes: usize,
-}
-
-pub(super) struct DefaultAppPickerRendered {
-    pub header: AnyView<SettingsMessage>,
-    pub candidates: BTreeMap<String, PanelNode>,
-    pub stylesheet: StyleSheet,
 }
 
 impl DefaultAppPickerPage {
@@ -53,60 +45,19 @@ impl DefaultAppPickerPage {
         &mut self,
         data: &Value,
         theme: SemanticTheme,
-    ) -> Result<DefaultAppPickerRendered, String> {
+    ) -> Result<AnyView<SettingsMessage>, String> {
         let (root, stylesheet) = self.page.render(
             data,
             theme,
             include_str!("../../../assets/plugins/settings/settings-default-app-picker.css"),
         )?;
-        let PanelNode::Div { .. } = root else {
-            return Err("Default application picker structure is invalid".into());
-        };
-        let header = root
-            .direct_child_with_class("app-picker-header")
-            .ok_or("Default application picker header is unavailable")?;
-        let PanelNode::Div {
-            children: candidates,
-            ..
-        } = root
-            .direct_child_with_class("app-picker-candidates")
-            .ok_or("Default application candidates are unavailable")?
-        else {
-            return Err("Default application candidate list is invalid".into());
-        };
-        let projected = data["handlers"]
-            .as_array()
-            .ok_or("Default application candidates are invalid")?;
-        if candidates.len() != projected.len() || candidates.len() > 32 {
-            return Err("Default application candidate count changed".into());
-        }
-        let nodes = projected
-            .iter()
-            .zip(candidates)
-            .map(|(handler, node)| {
-                Ok((
-                    handler["id"]
-                        .as_str()
-                        .ok_or("Default application candidate ID is invalid")?
-                        .to_owned(),
-                    node.clone(),
-                ))
-            })
-            .collect::<Result<BTreeMap<_, _>, String>>()?;
-        if nodes.len() != candidates.len() {
-            return Err("Default application candidate IDs are duplicated".into());
-        }
         self.data = Some(data.clone());
         self.data_bytes = data.to_string().len();
-        Ok(DefaultAppPickerRendered {
-            header: header.view_as_scoped::<SettingsMessage>(
-                &PluginImages::new(),
-                stylesheet,
-                Some("default-app-picker"),
-            ),
-            candidates: nodes,
-            stylesheet: stylesheet.clone(),
-        })
+        Ok(root.view_as_scoped::<SettingsMessage>(
+            &PluginImages::new(),
+            stylesheet,
+            Some("default-app-picker"),
+        ))
     }
 
     pub(super) fn dispatch(
@@ -145,6 +96,9 @@ enum PickerRequest {
         row: usize,
         target: String,
         handler: String,
+    },
+    PageHandlers {
+        direction: String,
     },
 }
 
@@ -210,6 +164,18 @@ fn validate_request(
                 handler_id: handler,
             })
         }
+        PickerRequest::PageHandlers { direction } => {
+            let offset = data["handlerOffset"].as_u64().ok_or(STALE_STATUS)? as usize;
+            let total = data["handlerTotal"].as_u64().ok_or(STALE_STATUS)? as usize;
+            let next = match direction.as_str() {
+                "previous" if offset > 0 => offset.saturating_sub(HANDLER_PAGE_SIZE),
+                "next" if offset + HANDLER_PAGE_SIZE < total => offset + HANDLER_PAGE_SIZE,
+                _ => return Err(STALE_STATUS.into()),
+            };
+            Ok(SettingsMessage::DefaultAppHandlerScroll(
+                (next as f32 * 58.0).to_bits(),
+            ))
+        }
     }
 }
 
@@ -229,13 +195,9 @@ pub(super) fn projection(
         CollectionState::Ready(handlers) => handlers.as_slice(),
         _ => &[],
     };
-    let window = VirtualWindow::from_heights(
-        &vec![58.0; handlers.len()],
-        2.0,
-        app.default_app_handler_scroll_offset,
-        320.0,
-        116.0,
-    );
+    let last_page = handlers.len().saturating_sub(1) / HANDLER_PAGE_SIZE * HANDLER_PAGE_SIZE;
+    let start = ((app.default_app_handler_scroll_offset / 58.0) as usize).min(last_page);
+    let end = (start + HANDLER_PAGE_SIZE).min(handlers.len());
     json!({
         "row":row,
         "target":target.target.platform_key(),
@@ -244,7 +206,19 @@ pub(super) fn projection(
         "searchPlaceholder":app.localizer.text("settings-default-app-picker-search-placeholder"),
         "currentLabel":"Current",
         "chooseLabel":"Choose",
-        "handlers":handlers[window.range].iter().map(|handler| {
+        "handlerOffset":start,
+        "handlerTotal":handlers.len(),
+        "handlerHasPages":handlers.len() > HANDLER_PAGE_SIZE,
+        "handlerCanPrevious":start > 0,
+        "handlerCanNext":end < handlers.len(),
+        "handlerPageLabel":format!("{}–{end} of {}", start + 1, handlers.len()),
+        "handlerState":match state {
+            CollectionState::Loading => "Loading installed applications",
+            CollectionState::Error(_) => "Applications could not be loaded",
+            _ if handlers.is_empty() => "No installed applications match",
+            _ => "",
+        },
+        "handlers":handlers[start..end].iter().map(|handler| {
             let is_current = current.is_some_and(|current| current.id == handler.id);
             json!({
                 "id":handler.id,
@@ -307,8 +281,7 @@ mod tests {
         let state = CollectionState::Ready(vec![handler]);
         let data = projection(&app, 0, &state, true, "Choose an application below.");
         let mut page = DefaultAppPickerPage::new().unwrap();
-        let rendered = page.render(&data, app.ui_theme()).unwrap();
-        assert!(rendered.candidates.contains_key("fixture.desktop"));
+        page.render(&data, app.ui_theme()).unwrap();
         let search = page.action_for_id("default-app-handler-search-0").unwrap();
         assert_eq!(
             page.dispatch(search, Value::String("fixture".into()), &app)
@@ -330,6 +303,29 @@ mod tests {
         assert_eq!(
             page.dispatch(choose, Value::Null, &app).unwrap_err(),
             STALE_STATUS
+        );
+    }
+
+    #[test]
+    fn picker_pages_through_bounded_candidates() {
+        let app = SettingsApp::with_initial_page(crate::SettingsPage::DefaultApps);
+        app.default_app_picker_row.set(Some(0));
+        let handlers = (0..100)
+            .map(|index| nickel_platform::ApplicationHandler {
+                id: format!("fixture-{index}.desktop"),
+                name: format!("Fixture {index}"),
+                icon: None,
+                source: "fixture".into(),
+            })
+            .collect::<Vec<_>>();
+        let state = CollectionState::Ready(handlers);
+        let data = projection(&app, 0, &state, true, "Choose an application below.");
+        let mut page = DefaultAppPickerPage::new().unwrap();
+        page.render(&data, app.ui_theme()).unwrap();
+        let next = page.action_for_id("default-app-handler-next").unwrap();
+        assert_eq!(
+            page.dispatch(next, Value::Null, &app).unwrap(),
+            SettingsMessage::DefaultAppHandlerScroll((4.0_f32 * 58.0).to_bits())
         );
     }
 }

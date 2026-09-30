@@ -663,14 +663,6 @@ fn sidebar_search_message(value: String) -> SettingsMessage {
     SettingsMessage::SidebarSearchChanged(value)
 }
 
-fn default_app_handler_scroll_message(value: f32) -> SettingsMessage {
-    SettingsMessage::DefaultAppHandlerScroll(value.max(0.0).to_bits())
-}
-
-fn default_apps_scroll_message(value: f32) -> SettingsMessage {
-    SettingsMessage::DefaultAppsScroll(value.max(0.0).to_bits())
-}
-
 fn default_app_categories() -> Vec<DefaultAppRow> {
     [
         (

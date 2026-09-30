@@ -33,6 +33,13 @@ div.app-picker-label {
     gap: 2px;
 }
 
+div.app-picker-pages {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 8px;
+}
+
 text.app-picker-status,
 text.app-picker-name {
     height: auto;

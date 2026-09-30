@@ -43,6 +43,13 @@ div.default-app-families {
     gap: 4px;
 }
 
+div.default-app-pages {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 8px;
+}
+
 text.default-app-heading,
 text.default-app-name {
     height: auto;

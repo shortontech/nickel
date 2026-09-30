@@ -93,8 +93,8 @@ Build it with the same command and its source filename.
 
 `settings-default-apps.jsx` and `settings-default-apps.css` render the curated
 association rows, catalog search, family filters, and visible catalog rows
-through shared controls. Rust owns the virtual list's
-scroll geometry and projects only its current bounded window into JavaScript.
+through shared controls. Rust projects bounded pages of association data into
+JavaScript, and the JSX page controls move through larger catalogs.
 Typed chooser requests carry the projected target identity and are checked
 before Rust opens the host-owned handler picker. Build it with the same command
 and its source filename.
@@ -102,10 +102,10 @@ and its source filename.
 `settings-default-app-picker.jsx` and `settings-default-app-picker.css` render
 the open handler picker's search and visible candidate rows through shared
 controls. Its actions carry a source scope so they cannot be confused with
-the parent Default Apps page's actions. Rust owns popover placement, focus return, virtual
-scroll range, association capability, and operating-system consent path. The
+the parent Default Apps page's actions. Rust owns popover placement, focus return,
+bounded candidate data, association capability, and operating-system consent path. The
 host checks the row, target, candidate, and current capability before applying
-a JSX selection. The native picker remains available if this component fails.
+a JSX selection. A recovery card appears if this component fails.
 Build it with the same command and its source filename.
 
 `settings-display.jsx` and `settings-display.css` render the Display arrangement
