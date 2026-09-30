@@ -28,6 +28,12 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<(), String> {
+    let arguments = env::args().skip(1).collect::<Vec<_>>();
+    let screenshot_only = match arguments.as_slice() {
+        [] => false,
+        [mode] if mode == "--screenshot-only" => true,
+        _ => return Err("usage: nickel-nested-acceptance [--screenshot-only]".into()),
+    };
     let host_wayland = env::var_os("WAYLAND_DISPLAY").and_then(|display| {
         let display = PathBuf::from(display);
         let path = if display.is_absolute() {
@@ -130,7 +136,12 @@ fn run() -> Result<(), String> {
         .spawn()
         .map_err(|error| format!("could not start nested compositor: {error}"))?;
 
-    let result = exercise(&mut compositor, &test_input, &capability_file);
+    let result = exercise(
+        &mut compositor,
+        &test_input,
+        &capability_file,
+        screenshot_only,
+    );
     if compositor
         .try_wait()
         .map_err(|error| error.to_string())?
@@ -172,9 +183,15 @@ fn run() -> Result<(), String> {
     }
     let _ = fs::remove_dir_all(&runtime);
     result?;
-    println!(
-        "PASS: shared default shell, optional JSX Settings, scoped Meta input, installed sibling/dialog/overlay lifecycle, native screenshot, component socket layouts, and clean shutdown"
-    );
+    if screenshot_only {
+        println!(
+            "PASS: native screenshot capture, selection, cancellation, reopen, component socket layouts, and clean shutdown"
+        );
+    } else {
+        println!(
+            "PASS: shared default shell, optional JSX Settings, scoped Meta input, installed sibling/dialog/overlay lifecycle, native screenshot, component socket layouts, and clean shutdown"
+        );
+    }
     Ok(())
 }
 
@@ -182,6 +199,7 @@ fn exercise(
     compositor: &mut Child,
     test_input: &Path,
     capability_file: &Path,
+    screenshot_only: bool,
 ) -> Result<(), String> {
     let deadline = Instant::now() + DEADLINE;
     let environment = loop {
@@ -215,6 +233,12 @@ fn exercise(
         }
     }
     verify_native_layout_snapshot(test_input, &environment, "Desktop")?;
+    if screenshot_only {
+        // Exercise capture after the nested backend's three-second startup frame pump ends.
+        // A startup repaint must not conceal a missing redraw wakeup on an idle compositor.
+        thread::sleep(Duration::from_millis(3500));
+        return verify_native_screenshot_lifecycle(test_input, &environment);
+    }
     assert_default_package(test_input, &environment, true)?;
     verify_layout_snapshot(test_input, &environment, "nickel-default/taskbar")?;
     // Meta is sent only through the explicitly enabled nested socket.
