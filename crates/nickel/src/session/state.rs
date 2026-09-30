@@ -8561,7 +8561,7 @@ impl NickelSession {
 
         // The shell itself uses `InProcessSessionHost`; this authenticated
         // endpoint exists only for trusted out-of-process Nickel utilities
-        // such as `nickel-settings`. Ordinary applications have both values
+        // such as trusted diagnostics tools. Ordinary applications have both values
         // stripped from their launch environment.
         let compatibility_control = {
             let protocol_token = production_control_token();

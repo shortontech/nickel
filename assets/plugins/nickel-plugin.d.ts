@@ -304,6 +304,8 @@ interface NickelPluginStatus {
     readonly author:string | null;
     readonly version:string | null;
     readonly enabled:boolean;
+    readonly shell:boolean;
+    readonly selected:boolean;
     readonly health:Readonly<{state:"disabled" | "idle" | "starting" | "running" | "failed";reason?:string}>;
     readonly grants:ReadonlyArray<string>;
     readonly surfaces:ReadonlyArray<string>;
@@ -332,12 +334,13 @@ declare const nickel: Readonly<{
     }>;
     plugins: Readonly<{
         /** Requires plugins-read; unavailable memory counters are null. */
-        get(): Readonly<{available:boolean; writable:boolean; revision?:string; plugins:ReadonlyArray<NickelPluginStatus>; lastResult?:Readonly<{status:string;detail?:string}> | null}>;
+        get(): Readonly<{available:boolean; writable:boolean; revision?:string; selectedShell?:string; plugins:ReadonlyArray<NickelPluginStatus>; lastResult?:Readonly<{status:string;detail?:string}> | null}>;
         list(): ReadonlyArray<NickelPluginStatus>;
         /** Requires plugins-read and plugins-control and a current inventory revision. */
         enable(id:string, revision:string):void;
         disable(id:string, revision:string):void;
         setEnabled(id:string, enabled:boolean, revision:string):void;
+        selectShell(id:string, revision:string):void;
         setSetting(id:string, key:string, value:boolean|number|string, revision:string):void;
     }>;
     /** Read-only reference: native shortcut remapping is currently unsupported. Requires shortcuts-read. */
