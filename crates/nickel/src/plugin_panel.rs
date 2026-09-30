@@ -4607,6 +4607,38 @@ mod tests {
     }
 
     #[test]
+    fn progress_paint_comes_from_css() {
+        let source = "function App() { return h(Panel, {}, h(Progress, {className: 'meter', percent: 50, width: 100, height: 8})); }";
+        let mut application = PluginPanelApplication::new(source).unwrap();
+        let unstyled = nickel_ui::UiHost::new(application, 440, 220);
+        assert!(!unstyled.commands().iter().any(|command| matches!(
+            command,
+            nickel_ui::backend::PaintCommand::Fill {
+                color: 0xffaaaaaa | 0xff555555,
+                ..
+            } | nickel_ui::backend::PaintCommand::RoundedFill {
+                color: 0xffaaaaaa | 0xff555555,
+                ..
+            }
+        )));
+
+        application = PluginPanelApplication::new(source).unwrap();
+        application.stylesheet = StyleSheet::compile(
+            "progress.meter { background: #112233; color: #aabbcc; border-radius: 4px; }",
+        )
+        .unwrap();
+        let styled = nickel_ui::UiHost::new(application, 440, 220);
+        for color in [0xff112233, 0xffaabbcc] {
+            assert!(styled.commands().iter().any(|command| matches!(
+                command,
+                nickel_ui::backend::PaintCommand::Fill { color: painted, .. }
+                    | nickel_ui::backend::PaintCommand::RoundedFill { color: painted, .. }
+                    if *painted == color
+            )));
+        }
+    }
+
+    #[test]
     fn shared_window_root_tracks_resize_and_keeps_css_content_inset() {
         let mut external_manifest = manifest().clone();
         external_manifest.id = "org.example.window-resize".into();

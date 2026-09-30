@@ -2262,29 +2262,36 @@ impl PanelNode {
                 height,
             } => {
                 let style = stylesheet.resolve("progress", None, class_name.as_deref());
-                let radius = style.radius.unwrap_or(0.0);
-                let fill = Container::new()
+                let mut fill = Container::new()
                     .width(*width as f32 * f32::from(*percent) / 100.0)
-                    .height(*height as f32)
-                    .radius(radius);
-                let fill = if style.color == Some(0) {
-                    fill.clear_background()
-                } else {
-                    fill.background(style.color.unwrap_or(0xffaaaaaa))
-                };
-                let track = Container::new()
+                    .height(*height as f32);
+                if let Some(radius) = style.radius {
+                    fill = fill.radius(radius);
+                }
+                if let Some(color) = style.color {
+                    fill = if color == 0 {
+                        fill.clear_background()
+                    } else {
+                        fill.background(color)
+                    };
+                }
+                let mut track = Container::new()
                     .semantic_role(SemanticRole::Status)
                     .accessibility_label(format!("{percent}%"))
                     .width(*width as f32)
                     .height(*height as f32)
                     .align_items(nickel_ui::Align::Start)
-                    .radius(radius)
                     .child(fill);
-                let track = if style.background == Some(0) {
-                    track.clear_background()
-                } else {
-                    track.background(style.background.unwrap_or(0xff555555))
-                };
+                if let Some(radius) = style.radius {
+                    track = track.radius(radius);
+                }
+                if let Some(background) = style.background {
+                    track = if background == 0 {
+                        track.clear_background()
+                    } else {
+                        track.background(background)
+                    };
+                }
                 with_margin(AnyView::new(track), &style)
             }
             Self::Spacer { class_name } => {
