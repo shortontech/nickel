@@ -18,13 +18,18 @@
       "shell.settings": "./src/Settings.js#Settings",
       "shell.settings.navigation": "./src/Settings.js#SettingsNavigation",
       "shell.settings.controls": "./src/Settings.js#SettingControl",
-      "shell.settings.colorPicker": "./src/ColorPicker.js#ColorPicker"
+      "shell.settings.colorPicker": "./src/ColorPicker.js#ColorPicker",
+      "shell.settings.appearance": "./src/Appearance.js#Appearance"
     }
   },
   "capabilities": [
+    "appearance-control",
+    "appearance-read",
     "applications-launch",
     "applications-pin",
     "applications-read",
+    "associations-control",
+    "associations-read",
     "audio-control",
     "audio-read",
     "bluetooth-control",
@@ -49,6 +54,8 @@
     "tray-activate",
     "tray-context",
     "tray-read",
+    "wallpaper-control",
+    "wallpaper-read",
     "windows-context",
     "windows-focus",
     "windows-read",

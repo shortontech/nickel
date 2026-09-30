@@ -1,4 +1,5 @@
 import "./styles/controls.css";
+import "./Appearance.js";
 // @jsx h
 import { Taskbar } from "./Taskbar.js";
 import { Launcher } from "./Launcher.js";

@@ -86,3 +86,17 @@ surface components through these contracts.
 This lookup currently binds the package's own exports. Applying an inherited
 package's replacements and contributions still requires the composition host;
 lookup alone does not activate third-party shell replacement.
+
+## Appearance capability migration
+
+`Appearance.jsx` registers an ordinary Settings page in this package's module
+graph. It reads configured preferences and resolved native hue/intensity, and
+uses `nickel.appearance` / `nickel.wallpaper` for changes. Theme modes, preset
+accent hues, custom hue entry, hue/intensity sliders, system accent inheritance,
+transparency, animations, wallpaper positions/catalog selection/reset, and
+appearance reset are implemented in JSX. The manifest requests the four domain
+grants. No page-specific Rust host or action-index adapter was added.
+
+Wallpaper image previews/names, arbitrary-image choosing, file artwork settings,
+and stock host activation still need migration. Native parser validation and
+synthetic public-client behavior checks passed; live visual acceptance remains.

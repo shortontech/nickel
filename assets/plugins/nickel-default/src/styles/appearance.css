@@ -1,0 +1,25 @@
+column.appearance-page {
+    width: 100%;
+    gap: 16px;
+}
+column.appearance-card {
+    width: 100%;
+    gap: 12px;
+    padding: 16px;
+    background: var(--nickel-surface);
+    border: 1px solid var(--nickel-border);
+    border-radius: var(--nickel-radius-control);
+}
+.appearance-heading {
+    font-size: 20px;
+    line-height: 28px;
+}
+row.appearance-choices, row.appearance-swatches {
+    gap: 8px;
+}
+.appearance-page slider {
+    width: 100%;
+}
+button.appearance-choice.selected {
+    border-color: var(--nickel-accent);
+}
