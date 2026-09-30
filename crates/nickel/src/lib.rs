@@ -128,6 +128,7 @@ mod launcher_icon_cache;
 #[cfg(target_os = "linux")]
 mod lock_auth;
 use launcher::{DashboardProject, DashboardSection, ProjectActivity, normalize_dashboard_projects};
+pub mod connectivity_capabilities;
 mod control_view;
 #[allow(dead_code)] // Wired into the Smithay runtime by the next integration slice.
 #[cfg(target_os = "linux")]

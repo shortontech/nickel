@@ -32,6 +32,7 @@ enum Command {
     SetBluetoothPowered(bool),
     SetBluetoothDiscovery(bool),
     ToggleBluetoothDevice(String),
+    SetBluetoothConnected(String, bool),
     RefreshConnectivity(mpsc::SyncSender<Result<ConnectivityRefresh, String>>),
 }
 
@@ -362,6 +363,13 @@ pub fn toggle_bluetooth_device(id: &str) -> bool {
     backend()
         .commands
         .send(Command::ToggleBluetoothDevice(id.to_owned()))
+        .is_ok()
+}
+
+pub fn set_bluetooth_connected(id: &str, connected: bool) -> bool {
+    backend()
+        .commands
+        .send(Command::SetBluetoothConnected(id.to_owned(), connected))
         .is_ok()
 }
 
@@ -911,6 +919,20 @@ fn prepare_command_with_guard(
                 "StopDiscovery"
             },
         },
+        Command::SetBluetoothConnected(path, connected) => {
+            let objects = managed_bluez_objects(connection).map_err(|error| error.to_string())?;
+            if !objects.iter().any(|(object_path, interfaces)| {
+                object_path.as_str() == path && interfaces.contains_key("org.bluez.Device1")
+            }) {
+                return Err("Bluetooth device is stale".into());
+            }
+            PreparedControl::Method {
+                destination: BLUEZ,
+                path,
+                interface: "org.bluez.Device1",
+                method: if connected { "Connect" } else { "Disconnect" },
+            }
+        }
         Command::ToggleBluetoothDevice(path) => {
             let objects = managed_bluez_objects(connection).map_err(|error| error.to_string())?;
             let connected = objects

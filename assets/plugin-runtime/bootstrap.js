@@ -170,6 +170,14 @@ function __nickelIdentity(id) {
     if (typeof id !== 'string' || !id.length || id.length > 512) throw TypeError('invalid capability identity');
     return id;
 }
+function __nickelConnectivityEffect(resource, operation, value, identity = false) {
+    if (!identity && typeof value !== 'boolean') throw TypeError('invalid connectivity value');
+    const snapshot = __nickelData[resource];
+    if (!snapshot || !snapshot.available || !snapshot.operations?.[operation]) throw Error('connectivity operation is unavailable');
+    const effect = {type:resource + '.' + operation, revision:snapshot.revision};
+    effect[identity ? 'id' : 'value'] = value;
+    __effects.push(effect);
+}
 const nickel = Object.freeze({
     audio: Object.freeze({
         get() { return __nickelResource('audio', {available:false,muted:false,percent:0,devices:[]}); },
@@ -205,6 +213,21 @@ const nickel = Object.freeze({
             if (direction !== -1 && direction !== 1) throw TypeError('pin direction must be -1 or 1');
             __effects.push({type:'applications.movePin',id:__nickelIdentity(id),direction});
         }
+    }),
+    wifi: Object.freeze({
+        get() { return __nickelResource('wifi', {available:false, reason:'Wi-Fi read capability is unavailable', networks:[], operations:{}}); },
+        listNetworks() { return this.get().networks; },
+        setEnabled(value) { __nickelConnectivityEffect('wifi', 'setEnabled', value); },
+        connect(id) { __nickelConnectivityEffect('wifi', 'connect', __nickelIdentity(id), true); }
+    }),
+    bluetooth: Object.freeze({
+        get() { return __nickelResource('bluetooth', {available:false, reason:'Bluetooth read capability is unavailable', devices:[], operations:{}}); },
+        listDevices() { return this.get().devices; },
+        setPowered(value) { __nickelConnectivityEffect('bluetooth', 'setPowered', value); },
+        setDiscovery(value) { __nickelConnectivityEffect('bluetooth', 'setDiscovery', value); },
+        connect(id) { __nickelConnectivityEffect('bluetooth', 'connect', __nickelIdentity(id), true); },
+        disconnect(id) { __nickelConnectivityEffect('bluetooth', 'disconnect', __nickelIdentity(id), true); },
+        pair(id) { __nickelConnectivityEffect('bluetooth', 'pair', __nickelIdentity(id), true); }
     }),
     registerSetting, registerSettingsPage, readPluginSettings, readSettingsPages, readPluginSettingsPages,
     request(effect) { __effects.push(effect); },

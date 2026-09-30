@@ -3097,3 +3097,7 @@ mod tests {
         }
     }
 }
+
+pub(super) fn set_bluetooth_connected(id: &str, connected: bool) -> bool {
+    linux_control::set_bluetooth_connected(id, connected)
+}

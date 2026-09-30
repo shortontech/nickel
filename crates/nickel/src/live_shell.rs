@@ -3555,6 +3555,30 @@ impl LiveShell {
         ))
     }
 
+    fn plugin_connectivity(&self, plugin_id: &str, wifi: bool) -> Option<serde_json::Value> {
+        let manifest = self
+            .external_plugin_packages
+            .get(plugin_id)
+            .map(|package| &package.manifest)
+            .or_else(|| {
+                self.plugin_registry
+                    .get(plugin_id)
+                    .map(|entry| &entry.manifest)
+            })?;
+        let capability = if wifi {
+            nickel_core::plugins::PluginCapability::NetworkRead
+        } else {
+            nickel_core::plugins::PluginCapability::BluetoothRead
+        };
+        manifest.capabilities.contains(&capability).then(|| {
+            if wifi {
+                crate::connectivity_capabilities::wifi_snapshot(&self.network)
+            } else {
+                crate::connectivity_capabilities::bluetooth_snapshot(&self.bluetooth)
+            }
+        })
+    }
+
     fn plugin_audio(&self, plugin_id: &str) -> Option<serde_json::Value> {
         let manifest = self
             .external_plugin_packages
@@ -3850,6 +3874,8 @@ impl LiveShell {
             .filter(|entry| entry.manifest.capabilities.contains(&nickel_core::plugins::PluginCapability::TrayRead))
             .map(|_| serde_json::Value::Array(self.tray.iter().take(128).map(|item| serde_json::json!({"id":item.id,"title":item.title,"icon":false})).collect()));
         let audio = self.plugin_audio(&key.plugin_id);
+        let wifi = self.plugin_connectivity(&key.plugin_id, true);
+        let bluetooth = self.plugin_connectivity(&key.plugin_id, false);
         let displays = self.plugin_displays(&key.plugin_id);
         let keyboard_data = (*key == crate::plugin_panel::on_screen_keyboard_surface_key())
             .then(|| self.keyboard_plugin_data());
@@ -3885,6 +3911,8 @@ impl LiveShell {
                     ("notifications", notifications.as_ref()),
                     ("audio", audio.as_ref()),
                     ("tray", tray.as_ref()),
+                    ("wifi", wifi.as_ref()),
+                    ("bluetooth", bluetooth.as_ref()),
                     ("displays", displays.as_ref()),
                 ]
                 .into_iter()
@@ -6837,6 +6865,31 @@ impl LiveShell {
                             .application_mut()
                             .request_effect(NotificationEffect::CloseHistory);
                         changed |= self.apply_notification_effects();
+                    }
+                }
+                crate::plugin_panel::PluginEffect::Connectivity { plugin_id, effect } => {
+                    let granted = self
+                        .external_plugin_packages
+                        .get(&plugin_id)
+                        .map(|package| &package.manifest)
+                        .or_else(|| {
+                            self.plugin_registry
+                                .get(&plugin_id)
+                                .map(|entry| &entry.manifest)
+                        })
+                        .is_some_and(|manifest| {
+                            manifest.capabilities.contains(&effect.capability())
+                        });
+                    if granted && !self.locked {
+                        match effect.execute() {
+                            Ok(success) => {
+                                log_control_result("connectivity-capability", success);
+                                changed |= success;
+                            }
+                            Err(error) => {
+                                tracing::warn!(%error, "connectivity capability rejected")
+                            }
+                        }
                     }
                 }
                 crate::plugin_panel::PluginEffect::Control(action) => {

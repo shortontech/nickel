@@ -1224,3 +1224,16 @@ pub(crate) use unsupported::refresh_audio_status;
 pub(crate) use unsupported::refresh_connectivity_status;
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]
 pub(crate) use unsupported::{prepare_application_discovery, publish_application_discovery};
+
+/// Explicit connection intent avoids a toggle changing direction while queued.
+pub(crate) fn set_bluetooth_connected(id: &str, connected: bool) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        linux::set_bluetooth_connected(id, connected)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (id, connected);
+        false
+    }
+}

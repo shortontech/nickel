@@ -153,6 +153,42 @@ mod tests {
         assert_eq!(runtime.take_effects().unwrap()[0]["direction"], -1);
     }
 
+    #[test]
+    fn connectivity_clients_copy_snapshots_and_emit_revision_bound_effects() {
+        let mut runtime = super::JsxRuntime::new("", Some(r#"{"wifi":{"available":true,"revision":"0123456789abcdef","operations":{"connect":true,"setEnabled":true},"networks":[{"id":"stable-profile","name":"SSID"}]},"bluetooth":{"available":true,"revision":"fedcba9876543210","operations":{"connect":true},"devices":[{"id":"stable-device"}]}}"#)).unwrap();
+        runtime.eval("nickel.wifi.listNetworks()[0].name = 'mutated'; nickel.wifi.connect('stable-profile'); nickel.bluetooth.connect('stable-device');").unwrap();
+        assert_eq!(
+            runtime
+                .eval_json::<String>("JSON.stringify(nickel.wifi.listNetworks()[0].name)")
+                .unwrap(),
+            "SSID"
+        );
+        let effects = runtime.take_effects().unwrap();
+        assert_eq!(
+            effects[0],
+            serde_json::json!({"type":"wifi.connect","id":"stable-profile","revision":"0123456789abcdef"})
+        );
+        assert_eq!(effects[1]["id"], "stable-device");
+        assert!(runtime.eval("nickel.wifi.setEnabled('yes')").is_err());
+        assert!(
+            runtime
+                .eval("nickel.bluetooth.disconnect('stable-device')")
+                .is_err()
+        );
+        let mut denied = super::JsxRuntime::new("", None).unwrap();
+        assert!(
+            denied
+                .eval("nickel.wifi.connect('stable-profile')")
+                .is_err()
+        );
+        assert_eq!(
+            denied
+                .eval_json::<bool>("nickel.bluetooth.get().available")
+                .unwrap(),
+            false
+        );
+    }
+
     use super::*;
 
     #[test]

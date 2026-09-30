@@ -398,6 +398,10 @@ pub enum PluginEffect {
         id: String,
         direction: i8,
     },
+    Connectivity {
+        plugin_id: String,
+        effect: crate::connectivity_capabilities::ConnectivityEffect,
+    },
     InvokeRegisteredSetting {
         caller: String,
         provider: String,
@@ -1843,6 +1847,8 @@ impl PluginPanelApplication {
                     | "audio"
                     | "displays"
                     | "tray"
+                    | "wifi"
+                    | "bluetooth"
             )
         }) {
             return Err("unknown host data field".into());
@@ -1894,6 +1900,16 @@ impl PluginPanelApplication {
                 .contains(&PluginCapability::DisplayControl)
         {
             return Err("display data requires display-control".into());
+        }
+        for (field, capability) in [
+            ("wifi", PluginCapability::NetworkRead),
+            ("bluetooth", PluginCapability::BluetoothRead),
+        ] {
+            if fields.iter().any(|(name, _)| *name == field)
+                && !self.manifest.capabilities.contains(&capability)
+            {
+                return Err(format!("{field} data requires a read grant"));
+            }
         }
         let Some(data) = self.projection_data.as_deref() else {
             return Err("plugin has no external projection".into());
@@ -2835,6 +2851,40 @@ impl nickel_ui::Application for PluginPanelApplication {
                                 plugin_id: plugin_id.unwrap().to_owned(),
                                 id: id.unwrap().to_owned(),
                             });
+                        }
+                        _ if effect.get("type").and_then(Value::as_str).is_some_and(
+                            |operation| {
+                                operation.starts_with("wifi.")
+                                    || operation.starts_with("bluetooth.")
+                            },
+                        ) =>
+                        {
+                            let request =
+                                crate::connectivity_capabilities::ConnectivityEffect::parse(
+                                    &effect,
+                                )
+                                .and_then(|request| {
+                                    if !self.manifest.capabilities.contains(&request.capability()) {
+                                        return Err("connectivity control is not granted".into());
+                                    }
+                                    let data: Value = self
+                                        .projection_data
+                                        .as_deref()
+                                        .and_then(|data| serde_json::from_str(data).ok())
+                                        .ok_or("connectivity snapshot is unavailable")?;
+                                    request.validate(&data[request.resource()])?;
+                                    Ok(request)
+                                });
+                            match request {
+                                Ok(effect) => approved.push(PluginEffect::Connectivity {
+                                    plugin_id: self.manifest.id.clone(),
+                                    effect,
+                                }),
+                                Err(error) => {
+                                    self.last_error = Some(error);
+                                    return;
+                                }
+                            }
                         }
                         _ if effect.get("type").and_then(Value::as_str)
                             == Some("control-action") =>
@@ -5685,6 +5735,53 @@ mod tests {
         .unwrap();
         assert!(app.sync_host_data_field("audio", &next).unwrap());
         assert!(format!("{:?}", app.node).contains("65"));
+    }
+
+    #[test]
+    fn connectivity_clients_require_read_and_control_grants_and_reject_stale_identity() {
+        let mut manifest = PluginPackage::load(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/plugins/example-window"
+        ))
+        .unwrap()
+        .manifest;
+        manifest.capabilities.clear();
+        let snapshot =
+            crate::connectivity_capabilities::wifi_snapshot(&crate::platform::NetworkStatus {
+                available: true,
+                enabled: true,
+                networks: vec![crate::platform::WifiNetworkStatus {
+                    id: "stable-profile".into(),
+                    saved: true,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            });
+        let source = "function App() { return h(Window, {id:'main',width:520,height:340}, h(Button, {id:'connect',onClick:()=>nickel.wifi.connect('stable-profile')}, 'Connect')); }";
+        let data = serde_json::json!({"wifi": snapshot}).to_string();
+        let mut denied =
+            PluginPanelApplication::new_with_manifest(source, &manifest, Some(data.clone()))
+                .unwrap();
+        assert!(denied.sync_host_data_field("wifi", &snapshot).is_err());
+        denied.update(denied.button_message("connect").unwrap());
+        assert!(denied.take_effects().is_empty());
+        manifest.capabilities.extend([
+            PluginCapability::NetworkRead,
+            PluginCapability::NetworkControl,
+        ]);
+        let mut granted =
+            PluginPanelApplication::new_with_manifest(source, &manifest, Some(data)).unwrap();
+        granted.update(granted.button_message("connect").unwrap());
+        assert!(matches!(
+            granted.take_effects().as_slice(),
+            [PluginEffect::Connectivity { .. }]
+        ));
+        let mut stale = snapshot;
+        stale["networks"] = serde_json::json!([]);
+        granted.sync_host_data_field("wifi", &stale).unwrap();
+        granted.update(granted.button_message("connect").unwrap());
+        assert!(granted.take_effects().is_empty());
+        assert!(granted.last_error().is_some());
     }
 
     #[test]
