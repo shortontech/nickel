@@ -2030,7 +2030,8 @@ impl PluginPanelApplication {
 
     pub(crate) fn sync_application_images(&mut self, images: PluginImages) -> bool {
         let mut combined = self.images.clone();
-        combined.retain(|key, _| !key.starts_with("application:"));
+        combined
+            .retain(|key, _| !key.starts_with("application:") && !key.starts_with("wallpaper:"));
         combined.extend(images);
         self.sync_images(combined)
     }
@@ -6729,6 +6730,13 @@ mod tests {
                 PluginCapability::WallpaperControl,
                 serde_json::json!({"available":true,"writable":true,"generation":1,"configured":{"custom_image_configured":false,"position":"fill"},"images":[{"id":"approved"}]}),
                 "nickel.wallpaper.selectImage('approved')",
+            ),
+            (
+                "wallpaper",
+                PluginCapability::WallpaperRead,
+                PluginCapability::WallpaperControl,
+                serde_json::json!({"available":true,"writable":true,"generation":1,"configured":{"custom_image_configured":false,"position":"fill"},"images":[],"chooser":{"available":true,"pending":false}}),
+                "nickel.wallpaper.chooseImage()",
             ),
         ] {
             let source = format!(

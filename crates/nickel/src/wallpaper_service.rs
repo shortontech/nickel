@@ -46,7 +46,7 @@ pub struct PreparedRead {
     pub(crate) path: PathBuf,
     revision: Option<RegularFileRevision>,
     pub(crate) settings: WallpaperSettings,
-    catalog: Catalog,
+    pub(crate) catalog: Catalog,
 }
 
 impl PreparedRead {
@@ -141,6 +141,29 @@ impl PreparedChange {
             prior,
             staged,
             selected,
+        })
+    }
+
+    pub(crate) fn chosen(
+        prior: PreparedRead,
+        transaction: &Transaction,
+        path: PathBuf,
+        mut check: impl FnMut() -> Result<(), String>,
+    ) -> Result<Self, String> {
+        check()?;
+        if preferences(&prior.settings) != transaction.prior {
+            return Err(STALE.into());
+        }
+        let selected = Catalog::validate_chosen(path, &mut check)?;
+        let mut requested = prior.settings.clone();
+        requested.image = Some(selected.path.clone());
+        let staged =
+            PreparedWallpaperSettings::prepare(prior.path.clone(), &prior.settings, requested)
+                .map_err(|_| STALE.to_owned())?;
+        Ok(Self {
+            prior,
+            staged,
+            selected: Some(selected),
         })
     }
 
@@ -241,6 +264,63 @@ impl WallpaperState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chosen_image_commit_is_atomic_and_checks_authority_and_image_identity() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("wallpaper-settings");
+        let image_path = directory.path().join("picked.png");
+        image::RgbaImage::from_pixel(4, 3, image::Rgba([1, 2, 3, 255]))
+            .save(&image_path)
+            .unwrap();
+        let settings = WallpaperSettings::default();
+        settings.save(&path).unwrap();
+        let mut state = WallpaperState::default();
+        let snapshot = state
+            .observe(&PreparedRead::at(path.clone()).unwrap(), 1)
+            .unwrap();
+        let transaction = Transaction {
+            generation: snapshot.generation,
+            prior: snapshot.configured,
+            change: Change::ResetCustomImage {},
+        };
+        let prepare = || {
+            PreparedChange::chosen(
+                PreparedRead::at(path.clone()).unwrap(),
+                &transaction,
+                image_path.clone(),
+                || Ok(()),
+            )
+            .unwrap()
+        };
+        assert!(
+            state
+                .commit(prepare(), &transaction, || Err(io::Error::other(
+                    "permission retired"
+                )))
+                .is_err()
+        );
+        assert_eq!(WallpaperSettings::load(&path).unwrap(), settings);
+        let prepared = prepare();
+        std::fs::write(&image_path, b"changed after validation").unwrap();
+        assert!(state.commit(prepared, &transaction, || Ok(())).is_err());
+        assert_eq!(WallpaperSettings::load(&path).unwrap(), settings);
+        assert!(
+            PreparedChange::chosen(
+                PreparedRead::at(path.clone()).unwrap(),
+                &transaction,
+                image_path.clone(),
+                || Ok(())
+            )
+            .is_err()
+        );
+        image::RgbaImage::from_pixel(4, 3, image::Rgba([1, 2, 3, 255]))
+            .save(&image_path)
+            .unwrap();
+        let committed = state.commit(prepare(), &transaction, || Ok(())).unwrap();
+        assert_eq!(committed.image, Some(image_path));
+        assert_eq!(committed.position, settings.position);
+    }
 
     #[test]
     fn public_service_rejects_stale_commit_and_resets_image_transactionally() {

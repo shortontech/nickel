@@ -244,6 +244,14 @@ pub use desktop::{DesktopApplication, DesktopCommand, DesktopMessage};
 #[cfg(test)]
 use desktop::{SettingsDestination, retain_unchanged_desktop_icons};
 
+struct WallpaperChooserRequest {
+    plugin_id: String,
+    identity: nickel_core::plugins::PluginManifest,
+    activation: u64,
+    effect: crate::appearance_capabilities::AppearanceEffect,
+    receiver: std::sync::mpsc::Receiver<nickel_platform::FileDialogOutcome>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct WallpaperSourceFingerprint {
     path: std::path::PathBuf,
@@ -588,6 +596,8 @@ impl RetainedPackageRuntime {
 pub struct LiveShell {
     application_scale_service: crate::application_scale_capability::ApplicationScaleService,
     appearance_capabilities: crate::appearance_capabilities::AppearanceCapabilities,
+    wallpaper_chooser: Option<WallpaperChooserRequest>,
+    wallpaper_chooser_results: std::collections::BTreeMap<String, serde_json::Value>,
     preferences_capabilities: crate::preferences_capabilities::PreferencesCapabilities,
     preferences_commit_pending: Option<ShellSettings>,
     session_host: Arc<dyn SessionHost>,
@@ -1646,6 +1656,8 @@ impl LiveShell {
         let mut shell = Self {
             application_scale_service: Default::default(),
             appearance_capabilities: Default::default(),
+            wallpaper_chooser: None,
+            wallpaper_chooser_results: Default::default(),
             preferences_capabilities: Default::default(),
             preferences_commit_pending: None,
             session_host: session_host.clone(),
@@ -2257,6 +2269,7 @@ impl LiveShell {
         let mut changed = self.refresh_secure_storage();
         #[cfg(not(target_os = "linux"))]
         let mut changed = false;
+        changed |= self.poll_wallpaper_chooser();
         changed |= self.appearance_capabilities.refresh_observed();
         if let Ok(catalog) = self.preferences_catalog() {
             let previous = self.preferences_capabilities.snapshot(&catalog);
@@ -3638,6 +3651,141 @@ impl LiveShell {
         .ok()
     }
 
+    fn wallpaper_chooser_identity(
+        &self,
+        plugin_id: &str,
+    ) -> Option<nickel_core::plugins::PluginManifest> {
+        use nickel_core::plugins::PluginCapability;
+        if self.locked
+            || self
+                .plugin_registry
+                .get(plugin_id)
+                .is_none_or(|entry| !entry.desired_enabled)
+        {
+            return None;
+        }
+        let manifest = self
+            .external_plugin_packages
+            .get(plugin_id)
+            .map(|package| &package.manifest)
+            .or_else(|| {
+                self.plugin_registry
+                    .get(plugin_id)
+                    .map(|entry| &entry.manifest)
+            })?;
+        if !manifest
+            .capabilities
+            .contains(&PluginCapability::WallpaperRead)
+            || !manifest
+                .capabilities
+                .contains(&PluginCapability::WallpaperControl)
+        {
+            return None;
+        }
+        Some(manifest.clone())
+    }
+
+    fn record_wallpaper_chooser_result(&mut self, plugin_id: String, result: serde_json::Value) {
+        if self.wallpaper_chooser_results.len() >= 128
+            && !self.wallpaper_chooser_results.contains_key(&plugin_id)
+        {
+            self.wallpaper_chooser_results.pop_first();
+        }
+        self.wallpaper_chooser_results.insert(plugin_id, result);
+    }
+
+    fn begin_wallpaper_chooser(
+        &mut self,
+        plugin_id: String,
+        effect: crate::appearance_capabilities::AppearanceEffect,
+    ) -> bool {
+        let Some(identity) = self.wallpaper_chooser_identity(&plugin_id) else {
+            return false;
+        };
+        if self.wallpaper_chooser.is_some() {
+            return false;
+        }
+        if effect
+            .validate(&self.appearance_capabilities.refresh("wallpaper"))
+            .is_err()
+        {
+            self.record_wallpaper_chooser_result(
+                plugin_id,
+                serde_json::json!({"status":"rejected","reason":"Wallpaper changed; choose again"}),
+            );
+            return true;
+        }
+        let (sender, receiver) = std::sync::mpsc::channel();
+        match nickel_platform::choose_image_file(Box::new(move |outcome| {
+            let _ = sender.send(outcome);
+        })) {
+            Ok(()) => {
+                self.wallpaper_chooser_results.remove(&plugin_id);
+                self.wallpaper_chooser = Some(WallpaperChooserRequest {
+                    plugin_id,
+                    identity,
+                    activation: self.plugin_activation_generation,
+                    effect,
+                    receiver,
+                });
+            }
+            Err(_) => {
+                self.record_wallpaper_chooser_result(plugin_id, serde_json::json!({"status":"failed","reason":"Native image chooser could not be opened"}));
+            }
+        }
+        true
+    }
+
+    fn poll_wallpaper_chooser(&mut self) -> bool {
+        let Some(request) = &self.wallpaper_chooser else {
+            return false;
+        };
+        let outcome = match request.receiver.try_recv() {
+            Ok(outcome) => outcome,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return false,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                nickel_platform::FileDialogOutcome::Failed(String::new())
+            }
+        };
+        let request = self.wallpaper_chooser.take().unwrap();
+        let authorized = self.wallpaper_chooser_identity(&request.plugin_id).as_ref()
+            == Some(&request.identity)
+            && self.plugin_activation_generation == request.activation;
+        let result = if !authorized {
+            serde_json::json!({"status":"rejected","reason":"Wallpaper permission or package identity changed"})
+        } else {
+            match outcome {
+                nickel_platform::FileDialogOutcome::Cancelled => {
+                    serde_json::json!({"status":"cancelled"})
+                }
+                nickel_platform::FileDialogOutcome::Failed(_) => {
+                    serde_json::json!({"status":"failed","reason":"Native image chooser failed"})
+                }
+                nickel_platform::FileDialogOutcome::Selected(path) => match self
+                    .appearance_capabilities
+                    .commit_chosen(&request.effect, path, || {
+                        if authorized {
+                            Ok(())
+                        } else {
+                            Err("Wallpaper permission changed".into())
+                        }
+                    }) {
+                    Ok(settings) => {
+                        self.refresh_configured_wallpaper(settings.image);
+                        self.desktop_application_dirty = true;
+                        self.appearance_capabilities.wallpaper_reconciled();
+                        serde_json::json!({"status":"applied"})
+                    }
+                    Err(_) => {
+                        serde_json::json!({"status":"rejected","reason":"Image is unavailable, invalid, or wallpaper changed; choose again"})
+                    }
+                },
+            }
+        };
+        self.record_wallpaper_chooser_result(request.plugin_id, result);
+        true
+    }
+
     fn plugin_appearance(&mut self, plugin_id: &str, wallpaper: bool) -> Option<serde_json::Value> {
         use nickel_core::plugins::PluginCapability;
         let manifest = self
@@ -3669,6 +3817,9 @@ impl LiveShell {
             "appearance"
         });
         snapshot["writable"] = can_write.into();
+        if wallpaper {
+            snapshot["chooser"] = serde_json::json!({"available": cfg!(any(target_os="linux", target_os="windows")), "pending":self.wallpaper_chooser.is_some(), "result":self.wallpaper_chooser_results.get(plugin_id)});
+        }
         Some(snapshot)
     }
 
@@ -4086,7 +4237,7 @@ impl LiveShell {
         let windows = self.external_plugin_windows(&key.plugin_id);
         let applications = self.external_plugin_applications(&key.plugin_id);
         let application_search = self.plugin_application_search(&key.plugin_id);
-        let application_images =
+        let mut application_images =
             self.plugin_application_images(applications.as_ref(), application_search.as_ref());
         let notifications = self.external_plugin_notifications(&key.plugin_id);
         let tray = self.plugin_registry.get(&key.plugin_id)
@@ -4099,6 +4250,9 @@ impl LiveShell {
         let appearance = self.plugin_appearance(&key.plugin_id, false);
         let wallpaper = self.plugin_appearance(&key.plugin_id, true);
         let session = self.plugin_session(&key.plugin_id);
+        if wallpaper.is_some() {
+            application_images.extend(self.appearance_capabilities.wallpaper_images.clone());
+        }
         let wifi = self.plugin_connectivity(&key.plugin_id, true);
         let bluetooth = self.plugin_connectivity(&key.plugin_id, false);
         let displays = self.plugin_displays(&key.plugin_id);
@@ -7464,6 +7618,13 @@ impl LiveShell {
                     }
                 }
                 crate::plugin_panel::PluginEffect::Appearance { plugin_id, effect } => {
+                    if matches!(
+                        effect,
+                        crate::appearance_capabilities::AppearanceEffect::ChooseImage { .. }
+                    ) {
+                        changed |= self.begin_wallpaper_chooser(plugin_id, effect);
+                        continue;
+                    }
                     let granted = self
                         .external_plugin_packages
                         .get(&plugin_id)

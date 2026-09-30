@@ -118,6 +118,74 @@ impl Catalog {
         Ok(Self { candidates })
     }
 
+    /// Accepts a path only from the native chooser completion, never the public ABI.
+    pub(crate) fn validate_chosen(
+        path: PathBuf,
+        check: impl FnMut() -> Result<(), String>,
+    ) -> Result<ValidatedSelection, String> {
+        if !supported_extension(&path) {
+            return Err("Choose a PNG, JPEG, or WebP image".into());
+        }
+        let path = path
+            .canonicalize()
+            .map_err(|_| "Chosen image is unavailable")?;
+        let revision = regular_file_revision(&path)
+            .map_err(|_| "Chosen image is unavailable")?
+            .ok_or("Chosen image is unavailable")?;
+        let id = opaque_id(&path, &path);
+        let catalog = Self {
+            candidates: vec![Candidate {
+                choice: ImageChoice {
+                    id: id.clone(),
+                    configured: false,
+                },
+                path,
+                revision,
+            }],
+        };
+        catalog.validate_selection(&id, check)
+    }
+
+    pub(crate) fn presentation(&self) -> Vec<(String, String)> {
+        self.candidates
+            .iter()
+            .map(|candidate| {
+                (
+                    candidate.choice.id.clone(),
+                    candidate
+                        .path
+                        .file_stem()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .chars()
+                        .filter(|c| !c.is_control())
+                        .take(120)
+                        .collect(),
+                )
+            })
+            .collect()
+    }
+
+    pub(crate) fn previews(
+        &self,
+    ) -> std::collections::BTreeMap<String, (u16, std::sync::Arc<image::RgbaImage>)> {
+        // Keep observation work and retained thumbnails bounded independently of catalog size.
+        self.candidates
+            .iter()
+            .take(8)
+            .enumerate()
+            .filter_map(|(index, candidate)| {
+                let selected = self
+                    .validate_selection(&candidate.choice.id, || Ok(()))
+                    .ok()?;
+                Some((
+                    format!("wallpaper:{}", candidate.choice.id),
+                    (64_000 + index as u16, selected.preview),
+                ))
+            })
+            .collect()
+    }
+
     pub(crate) fn choices(&self, configured: Option<&Path>) -> Vec<ImageChoice> {
         self.candidates
             .iter()
@@ -202,11 +270,13 @@ impl Catalog {
         Ok(ValidatedSelection {
             path: candidate.path.clone(),
             revision: candidate.revision.clone(),
+            preview: std::sync::Arc::new(decoded.thumbnail(160, 90).to_rgba8()),
         })
     }
 }
 
 pub(crate) struct ValidatedSelection {
+    preview: std::sync::Arc<image::RgbaImage>,
     pub(crate) path: PathBuf,
     revision: RegularFileRevision,
 }
@@ -272,6 +342,33 @@ fn wallpaper_roots() -> Vec<PathBuf> {
 mod tests {
     use super::*;
     use image::{Rgba, RgbaImage};
+
+    #[test]
+    fn native_catalog_previews_are_bounded_and_invalid_images_are_omitted() {
+        let directory = tempfile::tempdir().unwrap();
+        for index in 0..10 {
+            RgbaImage::from_pixel(400, 300, Rgba([1, 2, 3, 255]))
+                .save(directory.path().join(format!("Landscape {index}.png")))
+                .unwrap();
+        }
+        let catalog = Catalog::discover_in(&[directory.path().to_owned()], &mut || Ok(())).unwrap();
+        let previews = catalog.previews();
+        assert_eq!(previews.len(), 8);
+        assert!(
+            previews
+                .values()
+                .all(|(_, image)| image.width() <= 160 && image.height() <= 90)
+        );
+        assert!(
+            catalog
+                .presentation()
+                .iter()
+                .all(|(_, label)| label.starts_with("Landscape ") && !label.contains('/'))
+        );
+        let invalid = directory.path().join("invalid.png");
+        std::fs::write(&invalid, b"not an image").unwrap();
+        assert!(Catalog::validate_chosen(invalid, || Ok(())).is_err());
+    }
 
     #[test]
     fn catalog_ids_cannot_escape_roots_and_selection_is_fully_decoded() {

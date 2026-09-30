@@ -169,6 +169,28 @@ mod tests {
     }
 
     #[test]
+    fn native_wallpaper_chooser_captures_revision_without_exposing_paths() {
+        let mut runtime = super::JsxRuntime::new("", Some(r#"{"wallpaper":{"available":true,"writable":true,"generation":8,"configured":{"custom_image_configured":false,"position":"fill"},"images":[],"chooser":{"available":true,"pending":false}}}"#)).unwrap();
+        runtime.eval("nickel.wallpaper.chooseImage()").unwrap();
+        let effects = runtime.take_effects().unwrap();
+        assert_eq!(
+            effects,
+            vec![
+                serde_json::json!({"type":"wallpaper.chooseImage","transaction":{"generation":8,"prior":{"custom_image_configured":false,"position":"fill"}}})
+            ]
+        );
+        for blocked in [
+            r#"{"wallpaper":{"available":true,"writable":false,"generation":8,"chooser":{"available":true,"pending":false}}}"#,
+            r#"{"wallpaper":{"available":true,"writable":true,"generation":8,"chooser":{"available":true,"pending":true}}}"#,
+            r#"{}"#,
+        ] {
+            runtime.set_data(blocked).unwrap();
+            assert!(runtime.eval("nickel.wallpaper.chooseImage()").is_err());
+            assert!(runtime.take_effects().unwrap().is_empty());
+        }
+    }
+
+    #[test]
     fn appearance_clients_copy_preferences_and_capture_observed_transactions() {
         let mut runtime = super::JsxRuntime::new("", Some(r#"{"appearance":{"available":true,"writable":true,"generation":7,"configured":{"theme":"system","accent_hue":null,"accent_intensity":null,"reduce_transparency":false,"animations":"normal"}},"wallpaper":{"available":true,"writable":true,"generation":8,"configured":{"custom_image_configured":false,"position":"fill"},"images":[{"id":"approved"}]}}"#)).unwrap();
         runtime.eval("let preferences = nickel.appearance.get().configured; preferences.accent_hue = 271; preferences.accent_intensity = 63; nickel.appearance.set(preferences); preferences.accent_hue = 0; nickel.wallpaper.selectImage('approved'); nickel.wallpaper.setPosition('fit'); nickel.wallpaper.resetCustomImage();").unwrap();
@@ -807,3 +829,6 @@ mod tests {
 
 #[cfg(test)]
 mod preferences_page_tests;
+
+#[cfg(test)]
+mod wallpaper_page_tests;

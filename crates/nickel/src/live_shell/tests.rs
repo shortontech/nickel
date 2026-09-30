@@ -21,6 +21,72 @@ fn with_package_runtime_stack(test: impl FnOnce() + Send + 'static) {
 }
 
 #[test]
+fn native_wallpaper_chooser_completion_handles_cancel_failure_and_retired_authority() {
+    with_package_runtime_stack(|| {
+        let mut shell = LiveShell::new().unwrap();
+        let plugin_id = "org.example.wallpaper-dialog".to_owned();
+        let manifest: nickel_core::plugins::PluginManifest = serde_json::from_str(r#"{"api_version":1,"id":"org.example.wallpaper-dialog","name":"Wallpaper dialog","entry":"main.js","capabilities":["wallpaper-read","wallpaper-control"],"surfaces":[{"id":"main","kind":"window","width":400,"height":240}]}"#).unwrap();
+        shell.plugin_registry.register(manifest).unwrap();
+        shell.plugin_registry.set_enabled(&plugin_id, true).unwrap();
+        let identity = shell.wallpaper_chooser_identity(&plugin_id).unwrap();
+        let effect = crate::appearance_capabilities::AppearanceEffect::ChooseImage {
+            generation: 1,
+            prior: crate::wallpaper_service::Preferences {
+                custom_image_configured: false,
+                position: crate::wallpaper_service::Position::Fill,
+            },
+        };
+        for (outcome, locked, retire, expected) in [
+            (
+                nickel_platform::FileDialogOutcome::Cancelled,
+                false,
+                false,
+                "cancelled",
+            ),
+            (
+                nickel_platform::FileDialogOutcome::Failed("/private/dialog/path".into()),
+                false,
+                false,
+                "failed",
+            ),
+            (
+                nickel_platform::FileDialogOutcome::Selected("/private/image.png".into()),
+                true,
+                false,
+                "rejected",
+            ),
+            (
+                nickel_platform::FileDialogOutcome::Selected("/private/image.png".into()),
+                false,
+                true,
+                "rejected",
+            ),
+        ] {
+            let (sender, receiver) = std::sync::mpsc::channel();
+            shell.wallpaper_chooser = Some(super::WallpaperChooserRequest {
+                plugin_id: plugin_id.clone(),
+                identity: identity.clone(),
+                activation: shell.plugin_activation_generation,
+                effect: effect.clone(),
+                receiver,
+            });
+            assert!(!shell.poll_wallpaper_chooser());
+            shell.locked = locked;
+            if retire {
+                shell.plugin_activation_generation += 1;
+            }
+            sender.send(outcome).unwrap();
+            assert!(shell.poll_wallpaper_chooser());
+            assert!(shell.wallpaper_chooser.is_none());
+            let result = &shell.wallpaper_chooser_results[&plugin_id];
+            assert_eq!(result["status"], expected);
+            assert!(!result.to_string().contains("/private"));
+            shell.locked = false;
+        }
+    });
+}
+
+#[test]
 fn embedded_package_visibility_preserves_shared_runtime_until_disable() {
     with_package_runtime_stack(|| {
         use nickel_core::plugins::{

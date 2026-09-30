@@ -29,6 +29,10 @@ pub enum AppearanceEffect {
         prior: appearance::Preferences,
         requested: appearance::Preferences,
     },
+    ChooseImage {
+        generation: u64,
+        prior: wallpaper::Preferences,
+    },
     Wallpaper {
         generation: u64,
         prior: wallpaper::Preferences,
@@ -59,6 +63,23 @@ impl AppearanceEffect {
                     requested: transaction.requested,
                 })
             }
+            Some("wallpaper.chooseImage") => {
+                #[derive(serde::Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Request {
+                    generation: u64,
+                    prior: wallpaper::Preferences,
+                }
+                let request: Request = serde_json::from_value(value["transaction"].clone())
+                    .map_err(|_| "invalid native chooser request")?;
+                if request.generation == 0 {
+                    return Err("wallpaper observation is unavailable".into());
+                }
+                Ok(Self::ChooseImage {
+                    generation: request.generation,
+                    prior: request.prior,
+                })
+            }
             Some("wallpaper.change") => {
                 let transaction: wallpaper::Transaction =
                     serde_json::from_value(value["transaction"].clone())
@@ -83,19 +104,19 @@ impl AppearanceEffect {
     pub(crate) fn resource(&self) -> &'static str {
         match self {
             Self::Appearance { .. } => "appearance",
-            Self::Wallpaper { .. } => "wallpaper",
+            Self::Wallpaper { .. } | Self::ChooseImage { .. } => "wallpaper",
         }
     }
     pub(crate) fn capability(&self) -> PluginCapability {
         match self {
             Self::Appearance { .. } => PluginCapability::AppearanceControl,
-            Self::Wallpaper { .. } => PluginCapability::WallpaperControl,
+            Self::Wallpaper { .. } | Self::ChooseImage { .. } => PluginCapability::WallpaperControl,
         }
     }
     pub(crate) fn read_capability(&self) -> PluginCapability {
         match self {
             Self::Appearance { .. } => PluginCapability::AppearanceRead,
-            Self::Wallpaper { .. } => PluginCapability::WallpaperRead,
+            Self::Wallpaper { .. } | Self::ChooseImage { .. } => PluginCapability::WallpaperRead,
         }
     }
     pub(crate) fn validate(&self, snapshot: &Value) -> Result<(), String> {
@@ -105,7 +126,10 @@ impl AppearanceEffect {
             } => (*generation, serde_json::to_value(prior).unwrap()),
             Self::Wallpaper {
                 generation, prior, ..
-            } => (*generation, serde_json::to_value(prior).unwrap()),
+            }
+            | Self::ChooseImage { generation, prior } => {
+                (*generation, serde_json::to_value(prior).unwrap())
+            }
         };
         if snapshot["available"] != true
             || snapshot["generation"].as_u64() != Some(generation)
@@ -141,6 +165,8 @@ pub(crate) struct AppearanceCapabilities {
     wallpaper: wallpaper::WallpaperState,
     appearance_snapshot: Option<Value>,
     wallpaper_snapshot: Option<Value>,
+    pub(crate) wallpaper_images: crate::plugin_panel::PluginImages,
+    preview_revisions: Option<Vec<crate::wallpaper_selection::CandidateRevision>>,
 }
 impl Default for AppearanceCapabilities {
     fn default() -> Self {
@@ -150,6 +176,8 @@ impl Default for AppearanceCapabilities {
             wallpaper: Default::default(),
             appearance_snapshot: None,
             wallpaper_snapshot: None,
+            wallpaper_images: Default::default(),
+            preview_revisions: None,
         }
     }
 }
@@ -165,9 +193,30 @@ impl AppearanceCapabilities {
                 Ok(value)
             })
         } else {
-            wallpaper::PreparedRead::prepare_with_check(|| Ok(()))
-                .and_then(|read| self.wallpaper.observe(&read, observed_at_us))
-                .and_then(|snapshot| serde_json::to_value(snapshot).map_err(|e| e.to_string()))
+            wallpaper::PreparedRead::prepare_with_check(|| Ok(())).and_then(|read| {
+                let snapshot = self.wallpaper.observe(&read, observed_at_us)?;
+                let revisions = read.catalog.revisions();
+                if self.preview_revisions.as_ref() != Some(&revisions) {
+                    self.wallpaper_images = read.catalog.previews();
+                    self.preview_revisions = Some(revisions);
+                }
+                let labels = read.catalog.presentation();
+                let mut value = serde_json::to_value(snapshot).map_err(|e| e.to_string())?;
+                for image in value["images"].as_array_mut().into_iter().flatten() {
+                    let id = image["id"].as_str().unwrap_or_default().to_owned();
+                    image["label"] = labels
+                        .iter()
+                        .find(|(key, _)| key == &id)
+                        .map(|(_, label)| label.clone())
+                        .unwrap_or_else(|| "Wallpaper".into())
+                        .into();
+                    let asset = format!("wallpaper:{id}");
+                    if self.wallpaper_images.contains_key(&asset) {
+                        image["previewAsset"] = asset.into();
+                    }
+                }
+                Ok(value)
+            })
         };
         let mut value = result.unwrap_or_else(|reason| json!({"available":false,"reason":reason}));
         if value.get("generation").is_some() {
@@ -211,6 +260,34 @@ impl AppearanceCapabilities {
         }
     }
 
+    pub(crate) fn commit_chosen(
+        &mut self,
+        effect: &AppearanceEffect,
+        path: std::path::PathBuf,
+        mut check: impl FnMut() -> Result<(), String>,
+    ) -> Result<WallpaperSettings, String> {
+        check()?;
+        effect.validate(&self.refresh("wallpaper"))?;
+        let AppearanceEffect::ChooseImage { generation, prior } = effect else {
+            return Err("invalid chooser request".into());
+        };
+        let transaction = wallpaper::Transaction {
+            generation: *generation,
+            prior: prior.clone(),
+            change: wallpaper::Change::ResetCustomImage {},
+        };
+        let read = wallpaper::PreparedRead::prepare_with_check(&mut check)?;
+        let prepared = wallpaper::PreparedChange::chosen(read, &transaction, path, &mut check)?;
+        let settings = self.wallpaper.commit(prepared, &transaction, || {
+            check().map_err(std::io::Error::other)
+        })?;
+        self.refresh("wallpaper");
+        if let Some(snapshot) = &mut self.wallpaper_snapshot {
+            snapshot["selected_image_decoded"] = true.into();
+        }
+        Ok(settings)
+    }
+
     pub(crate) fn execute(
         &mut self,
         effect: &AppearanceEffect,
@@ -219,6 +296,9 @@ impl AppearanceCapabilities {
         check()?;
         effect.validate(&self.refresh(effect.resource()))?;
         let committed = match effect {
+            AppearanceEffect::ChooseImage { .. } => {
+                return Err("native chooser requires asynchronous completion".into());
+            }
             AppearanceEffect::Appearance {
                 generation,
                 prior,
@@ -274,6 +354,25 @@ mod tests {
     fn appearance_request() -> Value {
         json!({"type":"appearance.set","transaction":{"generation":1,"prior":{"theme":"system","accent_hue":null,"accent_intensity":null,"reduce_transparency":false,"animations":"normal"},"requested":{"theme":"dark","accent_hue":359,"accent_intensity":0,"reduce_transparency":true,"animations":"reduced"}}})
     }
+    #[test]
+    fn native_chooser_boundary_rejects_paths_and_stale_observations() {
+        let value = json!({"type":"wallpaper.chooseImage","transaction":{"generation":7,"prior":{"custom_image_configured":false,"position":"fill"}}});
+        let effect = AppearanceEffect::parse(&value).unwrap();
+        assert_eq!(effect.capability(), PluginCapability::WallpaperControl);
+        assert_eq!(effect.read_capability(), PluginCapability::WallpaperRead);
+        let snapshot = json!({"available":true,"generation":7,"configured":{"custom_image_configured":false,"position":"fill"}});
+        effect.validate(&snapshot).unwrap();
+        let mut stale = snapshot.clone();
+        stale["generation"] = 8.into();
+        assert!(effect.validate(&stale).is_err());
+        let mut path = value.clone();
+        path["transaction"]["path"] = "/private/image.png".into();
+        assert!(AppearanceEffect::parse(&path).is_err());
+        path = value;
+        path["path"] = "file:///private/image.png".into();
+        assert!(AppearanceEffect::parse(&path).is_err());
+    }
+
     #[test]
     fn resolved_preferences_keep_inherited_and_custom_color_values() {
         let system = nickel_core::theme::Appearance {

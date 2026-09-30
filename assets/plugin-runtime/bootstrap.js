@@ -249,6 +249,12 @@ const nickel = Object.freeze({
         listImages() { return this.get().images; },
         setPosition(position) { __nickelAppearanceEffect('wallpaper', {kind:'set_position',position}); },
         resetCustomImage() { __nickelAppearanceEffect('wallpaper', {kind:'reset_custom_image'}); },
+        chooseImage() {
+            if (arguments.length) throw TypeError('chooseImage takes no arguments');
+            const snapshot = this.get();
+            if (!snapshot.available || snapshot.writable !== true || !Number.isSafeInteger(snapshot.generation) || snapshot.generation < 1 || !snapshot.chooser || snapshot.chooser.available !== true || snapshot.chooser.pending) throw Error('Native image chooser is unavailable');
+            __effects.push({type:'wallpaper.chooseImage',transaction:{generation:snapshot.generation,prior:JSON.parse(JSON.stringify(snapshot.configured))}});
+        },
         selectImage(id) { __nickelAppearanceEffect('wallpaper', {kind:'select_approved_image',image_id:__nickelIdentity(id)}); }
     }),
     session: Object.freeze({
