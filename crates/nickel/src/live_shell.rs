@@ -3874,13 +3874,11 @@ impl LiveShell {
             if !self.control_plugin_active() {
                 return None;
             }
-            return Some(self.scene(SurfaceRole::ControlCenter, width, height));
         }
         if *key == crate::plugin_panel::notification_surface_key() {
             if !self.notification_plugin_active() {
                 return None;
             }
-            return Some(self.scene(SurfaceRole::Notification, width, height));
         }
         self.plugin_panel_scene_for_output(key, output, width, height)
     }
