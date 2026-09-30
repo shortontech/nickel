@@ -803,15 +803,11 @@ impl PluginPanelApplication {
             let owner = host_ref.resolution().active.clone();
             let runtime = host_ref.shared_owner_runtime(&owner)?;
             let manifests = host_ref
-                .resolution()
-                .inheritance_chain
-                .iter()
+                .participating_owners()
                 .map(|identity| (identity.clone(), catalog[&identity.id].manifest.clone()))
                 .collect();
             let css = host_ref
-                .resolution()
-                .inheritance_chain
-                .iter()
+                .participating_owners()
                 .map(|identity| {
                     let package = &catalog[&identity.id];
                     let imports = package_module_graph(package)?
@@ -830,7 +826,7 @@ impl PluginPanelApplication {
             let host = host.borrow();
             let mut images = PluginImages::new();
             let mut pixels = 0_u64;
-            for owner in &host.resolution().inheritance_chain {
+            for owner in host.participating_owners() {
                 for (name, (_, image)) in package_images(&catalog[&owner.id])? {
                     pixels =
                         pixels.saturating_add(u64::from(image.width()) * u64::from(image.height()));
@@ -855,9 +851,7 @@ impl PluginPanelApplication {
         let node = parse_panel_for_manifest(&rendered.node, &manifest, Some(&surface.id))?;
         let snapshots = {
             let host = host.borrow();
-            host.resolution()
-                .inheritance_chain
-                .iter()
+            host.participating_owners()
                 .map(|owner| Ok((owner.clone(), host.snapshot(owner)?.clone())))
                 .collect::<Result<std::collections::BTreeMap<_, _>, String>>()?
         };
@@ -904,6 +898,59 @@ impl PluginPanelApplication {
         }
     }
 
+    /// Refresh presentation resources for the host's currently admitted owners.
+    /// The root mount is retained so the shell's hooks survive membership changes.
+    pub(crate) fn refresh_composition_catalog(
+        &mut self,
+        catalog: &std::collections::BTreeMap<String, PluginPackage>,
+    ) -> Result<bool, String> {
+        let Some(state) = &mut self.composition else {
+            return Ok(false);
+        };
+        let host = state.host.borrow();
+        let owners = host.participating_owners().cloned().collect::<Vec<_>>();
+        let mut css = String::new();
+        let mut images = PluginImages::new();
+        let mut pixels = 0u64;
+        for owner in &owners {
+            let package = catalog
+                .get(&owner.id)
+                .ok_or("admitted composition package is unavailable")?;
+            let imports = package_module_graph(package)?
+                .map(|graph| graph.stylesheet())
+                .transpose()?
+                .unwrap_or_default();
+            css.push_str(&package.stylesheet);
+            css.push('\n');
+            css.push_str(&imports);
+            css.push('\n');
+            for (name, (_, image)) in package_images(package)? {
+                pixels =
+                    pixels.saturating_add(u64::from(image.width()) * u64::from(image.height()));
+                if pixels > 4_000_000 || images.len() >= 0x5fff {
+                    return Err("composed package images exceed resource budget".into());
+                }
+                let alias = host
+                    .asset_key(owner, &name)
+                    .ok_or("missing composed asset owner")?;
+                images.insert(alias.into(), ((images.len() + 1) as u16, image));
+            }
+        }
+        let stylesheet = StyleSheet::compile(&css)?;
+        state.manifests = owners
+            .iter()
+            .map(|owner| (owner.clone(), catalog[&owner.id].manifest.clone()))
+            .collect();
+        state.snapshots = owners
+            .iter()
+            .map(|owner| Ok((owner.clone(), host.snapshot(owner)?.clone())))
+            .collect::<Result<_, String>>()?;
+        drop(host);
+        self.stylesheet = stylesheet;
+        self.sync_images(images);
+        self.refresh_composition_snapshots()
+    }
+
     pub(crate) fn refresh_composition_snapshots(&mut self) -> Result<bool, String> {
         let Some(state) = &mut self.composition else {
             return Ok(false);
@@ -931,6 +978,12 @@ impl PluginPanelApplication {
         self.composition.as_ref().map(|state| state.host.clone())
     }
 
+    pub(crate) fn validate_provider_resources(package: &PluginPackage) -> Result<(), String> {
+        package_stylesheet(package)?;
+        package_images(package)?;
+        Ok(())
+    }
+
     pub fn validate_package(package: &PluginPackage) -> Result<(), String> {
         package_stylesheet(package)?;
         package_images(package)?;
@@ -940,7 +993,11 @@ impl PluginPanelApplication {
             .iter()
             .map(|setting| (setting.id.clone(), setting.kind.default_value()))
             .collect();
-        if package.manifest.surfaces.is_empty() {
+        if package.manifest.surfaces.is_empty() && package.manifest.composition.is_some() {
+            let catalog =
+                std::collections::BTreeMap::from([(package.manifest.id.clone(), package.clone())]);
+            ShellCompositionRuntime::new(&catalog, &package.manifest.id, &Default::default())?;
+        } else if package.manifest.surfaces.is_empty() {
             let application = Self::from_package_with_settings(package, &settings)?;
             if !package.manifest.contributes.is_empty() {
                 application.validate_contribution()?;

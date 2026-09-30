@@ -16,6 +16,7 @@ use serde_json::Value;
 use crate::{JsxModuleGraph, JsxRuntime, ModuleSource};
 
 static NEXT_RUNTIME: AtomicU64 = AtomicU64::new(1);
+static NEXT_SHARED_MOUNT: AtomicU64 = AtomicU64::new(1);
 const MAX_MOUNTS: usize = 512;
 const MAX_NODES: usize = 4096;
 const MAX_JSON_BYTES: usize = 1024 * 1024;
@@ -26,6 +27,7 @@ pub struct ComponentReference {
     runtime: u64,
     owner: PackageIdentity,
     implementation: String,
+    incarnation: u64,
 }
 impl ComponentReference {
     pub fn owner(&self) -> &PackageIdentity {
@@ -58,6 +60,7 @@ pub struct OwnedComponentEffect {
     runtime: u64,
     owner: PackageIdentity,
     value: Value,
+    incarnation: u64,
 }
 impl OwnedComponentEffect {
     pub fn owner(&self) -> &PackageIdentity {
@@ -97,12 +100,24 @@ struct OwnedChildGrant {
     events: BTreeMap<u64, ComponentEventHandle>,
 }
 
+#[derive(Clone)]
 struct PackageRuntime {
     runtime: std::rc::Rc<std::cell::RefCell<JsxRuntime>>,
     data: Value,
     exports: BTreeMap<String, String>,
     assets: BTreeMap<String, String>,
+    incarnation: u64,
+    source_digest: String,
+    manifest: nickel_core::plugins::PluginManifest,
 }
+/// An opaque package context retained by native lifecycle ownership. Importing
+/// it into another composition host never copies executable code or grants.
+#[derive(Clone)]
+pub struct ProviderContext {
+    owner: PackageIdentity,
+    package: PackageRuntime,
+}
+
 #[derive(Clone)]
 struct MountState {
     reference: ComponentReference,
@@ -139,6 +154,57 @@ pub struct ShellCompositionRuntime {
     checkpoint: Option<CompositionCheckpoint>,
 }
 
+fn extend_installed_contributions(
+    resolution: &mut ResolvedShellPackage,
+    manifests: &BTreeMap<String, nickel_core::package_composition::ShellPackageComposition>,
+) -> Result<(), String> {
+    use nickel_core::package_composition::{MAX_RESOLVED_CONTRIBUTIONS, ResolvedContribution};
+    let mut count = resolution
+        .contributions
+        .values()
+        .map(Vec::len)
+        .sum::<usize>();
+    for package in manifests.values() {
+        if resolution
+            .inheritance_chain
+            .iter()
+            .any(|owner| owner.id == package.id)
+        {
+            continue;
+        }
+        // Validate the provider's own dependency requirements/replacements too;
+        // they never replace the active shell's public contracts.
+        let own = resolve_shell_package(manifests, &package.id)
+            .map_err(|e| format!("contributor composition failed: {e:?}"))?;
+        for entry in &package.contributions {
+            count += 1;
+            if count > MAX_RESOLVED_CONTRIBUTIONS {
+                return Err("too many installed contributions".into());
+            }
+            resolution
+                .contributions
+                .entry(entry.collection.clone())
+                .or_default()
+                .push(ResolvedContribution {
+                    collection: entry.collection.clone(),
+                    id: entry.id.clone(),
+                    implementation: entry.implementation.clone(),
+                    priority: entry.priority,
+                    contributed_by: own.active.clone(),
+                });
+        }
+    }
+    for entries in resolution.contributions.values_mut() {
+        entries.sort_by(|a, b| {
+            b.priority
+                .cmp(&a.priority)
+                .then_with(|| a.contributed_by.id.cmp(&b.contributed_by.id))
+                .then_with(|| a.id.cmp(&b.id))
+        });
+    }
+    Ok(())
+}
+
 impl ShellCompositionRuntime {
     /// Catalog contents and per-package capability snapshots must already have
     /// passed the host's installation/approval checks. No dependency receives
@@ -147,6 +213,15 @@ impl ShellCompositionRuntime {
         catalog: &BTreeMap<String, PluginPackage>,
         active: &str,
         snapshots: &BTreeMap<PackageIdentity, Value>,
+    ) -> Result<Self, String> {
+        Self::new_with_contexts(catalog, active, snapshots, &BTreeMap::new())
+    }
+
+    pub fn new_with_contexts(
+        catalog: &BTreeMap<String, PluginPackage>,
+        active: &str,
+        snapshots: &BTreeMap<PackageIdentity, Value>,
+        contexts: &BTreeMap<PackageIdentity, ProviderContext>,
     ) -> Result<Self, String> {
         let manifests = catalog
             .iter()
@@ -161,8 +236,9 @@ impl ShellCompositionRuntime {
                 Ok((id.clone(), composition))
             })
             .collect::<Result<BTreeMap<_, _>, String>>()?;
-        let resolution = resolve_shell_package(&manifests, active)
+        let mut resolution = resolve_shell_package(&manifests, active)
             .map_err(|error| format!("composition failed: {error:?}"))?;
+        extend_installed_contributions(&mut resolution, &manifests)?;
         let mut host = Self {
             id: NEXT_RUNTIME.fetch_add(1, Ordering::Relaxed),
             resolution,
@@ -192,7 +268,7 @@ impl ShellCompositionRuntime {
                                 serde_json::json!({
                                     "id":entry.id, "provider":entry.contributed_by.id,
                                     "version":entry.contributed_by.version.to_string(),
-                                    "key":Self::contribution_key(entry),
+                                    "key":host.contribution_key(entry),
                                 })
                             })
                             .collect(),
@@ -202,7 +278,15 @@ impl ShellCompositionRuntime {
             .collect::<serde_json::Map<_, _>>();
         let mut asset_count = 0usize;
         let mut source_bytes = 0usize;
-        for owner in host.resolution.inheritance_chain.clone() {
+        let mut owners = host.resolution.inheritance_chain.clone();
+        for (id, package) in &manifests {
+            if !owners.iter().any(|owner| owner.id == *id) {
+                let provider = resolve_shell_package(&manifests, &package.id)
+                    .map_err(|e| format!("contributor composition failed: {e:?}"))?;
+                owners.push(provider.active);
+            }
+        }
+        for owner in owners {
             let package = &catalog[&owner.id];
             if package.modules.len() > nickel_core::plugins::MAX_PLUGIN_MODULES {
                 return Err("too many package source modules".into());
@@ -217,6 +301,24 @@ impl ShellCompositionRuntime {
             }
             if source_bytes > 16 * 1024 * 1024 {
                 return Err("composition source exceeds size limit".into());
+            }
+            if let Some(context) = contexts.get(&owner) {
+                if context.owner != owner
+                    || context.package.source_digest != catalog[&owner.id].source_digest()
+                    || context.package.manifest != catalog[&owner.id].manifest
+                {
+                    return Err("provider context identity mismatch".into());
+                }
+                let mut package = context.package.clone();
+                if let Some(data) = snapshots.get(&owner) {
+                    bounded_json(data)?;
+                    if !data.is_object() {
+                        return Err("package snapshot must be an object".into());
+                    }
+                    package.data = data.clone();
+                }
+                host.packages.insert(owner.clone(), package);
+                continue;
             }
             let composition = &manifests[&owner.id];
             let mut exports = BTreeMap::new();
@@ -240,30 +342,9 @@ impl ShellCompositionRuntime {
             }
             exports.extend(composition.exports.clone());
             exports.extend(composition.replaces.clone());
-            let mut local_components = host
-                .resolution
-                .exports
-                .iter()
-                .filter(|(_, entry)| entry.implemented_by == owner)
-                .map(|(contract, entry)| {
-                    (
-                        format!("export:{contract}"),
-                        Value::String(export_keys[&entry.implementation].clone()),
-                    )
-                })
-                .collect::<serde_json::Map<_, _>>();
-            for entry in host
-                .resolution
-                .contributions
-                .values()
-                .flatten()
-                .filter(|entry| entry.contributed_by == owner)
-            {
-                local_components.insert(
-                    format!("contribution:{}", Self::contribution_key(entry)),
-                    Value::String(export_keys[&entry.implementation].clone()),
-                );
-            }
+            // Public exports always resolve through the invoking host. An
+            // imported context must not retain its original shell's selection.
+            let local_components = serde_json::Map::new();
             // Only local modules enter this context. Cross-package reuse is
             // mediated by Rust references below, never by copying foreign code.
             let graph = JsxModuleGraph::new(
@@ -303,7 +384,10 @@ impl ShellCompositionRuntime {
                 .keys()
                 .map(|name| {
                     asset_count += 1;
-                    (name.clone(), format!("composition.asset.{asset_count}"))
+                    (
+                        name.clone(),
+                        format!("composition.asset.{}.{asset_count}", host.id),
+                    )
                 })
                 .collect();
             host.packages.insert(
@@ -313,11 +397,141 @@ impl ShellCompositionRuntime {
                     data,
                     exports: export_keys,
                     assets,
+                    incarnation: NEXT_RUNTIME.fetch_add(1, Ordering::Relaxed),
+                    source_digest: package.source_digest(),
+                    manifest: package.manifest.clone(),
                 },
             );
             host.drain_effects(&owner, 0, 0, false)?;
         }
+        host.publish_contribution_catalog()?;
         Ok(host)
+    }
+
+    /// All live contexts, including independently installed contributors, once each.
+    pub fn participating_owners(&self) -> impl Iterator<Item = &PackageIdentity> {
+        self.resolution
+            .inheritance_chain
+            .iter()
+            .filter(|owner| self.packages.contains_key(*owner))
+            .chain(
+                self.packages
+                    .keys()
+                    .filter(|owner| !self.resolution.inheritance_chain.contains(owner)),
+            )
+    }
+
+    pub fn provider_context(&self, owner: &PackageIdentity) -> Result<ProviderContext, String> {
+        Ok(ProviderContext {
+            owner: owner.clone(),
+            package: self
+                .packages
+                .get(owner)
+                .ok_or("retired package owner")?
+                .clone(),
+        })
+    }
+
+    /// Reconcile already admitted native provider contexts. The active shell's
+    /// inheritance and replacement selections remain unchanged.
+    pub fn sync_contributors(
+        &mut self,
+        catalog: &BTreeMap<String, PluginPackage>,
+        contexts: &BTreeMap<PackageIdentity, ProviderContext>,
+    ) -> Result<bool, String> {
+        let mut source_bytes = 0usize;
+        for package in catalog
+            .values()
+            .filter(|package| package.manifest.composition.is_some())
+        {
+            source_bytes = source_bytes
+                .checked_add(package.source.len())
+                .ok_or("composition source size overflow")?;
+            for module in &package.modules {
+                source_bytes = source_bytes
+                    .checked_add(module.source.len())
+                    .ok_or("composition source size overflow")?;
+            }
+        }
+        if source_bytes > 16 * 1024 * 1024 {
+            return Err("composition source exceeds size limit".into());
+        }
+        let manifests = catalog
+            .iter()
+            .filter_map(|(id, p)| p.manifest.composition.clone().map(|c| (id.clone(), c)))
+            .collect();
+        let mut next = resolve_shell_package(&manifests, &self.resolution.active.id)
+            .map_err(|e| format!("composition failed: {e:?}"))?;
+        if next.exports != self.resolution.exports
+            || next.inheritance_chain != self.resolution.inheritance_chain
+        {
+            return Err("shell ancestry changed during contributor reconciliation".into());
+        }
+        extend_installed_contributions(&mut next, &manifests)?;
+        let owners = manifests
+            .values()
+            .map(|package| {
+                resolve_shell_package(&manifests, &package.id)
+                    .map(|resolution| resolution.active)
+                    .map_err(|e| format!("contributor composition failed: {e:?}"))
+            })
+            .collect::<Result<std::collections::BTreeSet<_>, String>>()?;
+        for owner in &owners {
+            if let Some(existing) = self.packages.get(owner) {
+                let package = &catalog[&owner.id];
+                if existing.source_digest != package.source_digest()
+                    || existing.manifest != package.manifest
+                {
+                    return Err("running contributor code or grants changed".into());
+                }
+            }
+            if !self.packages.contains_key(owner) && !contexts.contains_key(owner) {
+                return Err("admitted contributor context is unavailable".into());
+            }
+        }
+        let changed = next.contributions != self.resolution.contributions
+            || owners != self.packages.keys().cloned().collect();
+        for owner in self
+            .packages
+            .keys()
+            .filter(|owner| !owners.contains(*owner))
+            .cloned()
+            .collect::<Vec<_>>()
+        {
+            self.retire(&owner);
+        }
+        for owner in owners {
+            if !self.packages.contains_key(&owner) {
+                let context = &contexts[&owner];
+                if context.owner != owner
+                    || context.package.source_digest != catalog[&owner.id].source_digest()
+                    || context.package.manifest != catalog[&owner.id].manifest
+                {
+                    return Err("provider context identity mismatch".into());
+                }
+                self.packages.insert(owner, context.package.clone());
+            }
+        }
+        self.resolution = next;
+        self.publish_contribution_catalog()?;
+        Ok(changed)
+    }
+
+    fn contribution_catalog_script(&self) -> String {
+        let catalog=self.resolution.contributions.iter().map(|(collection,entries)|(collection.clone(),Value::Array(entries.iter().filter(|e|self.packages.contains_key(&e.contributed_by)).map(|entry|serde_json::json!({"id":entry.id,"provider":entry.contributed_by.id,"version":entry.contributed_by.version.to_string(),"key":self.contribution_key(entry)})).collect()))).collect::<serde_json::Map<_,_>>();
+        let script = format!(
+            "Object.keys(__nickelContributionCatalog).forEach(key=>delete __nickelContributionCatalog[key]); Object.assign(__nickelContributionCatalog, {});",
+            Value::Object(catalog)
+        );
+        script
+    }
+
+    fn publish_contribution_catalog(&self) -> Result<(), String> {
+        let script = self.contribution_catalog_script();
+        for package in self.packages.values() {
+            package.runtime.borrow_mut().eval(&script)?;
+        }
+        Ok(())
     }
 
     /// Trusted native adapters may share the owner context without creating a
@@ -346,13 +560,26 @@ impl ShellCompositionRuntime {
                 runtime: self.id,
                 owner: export.implemented_by.clone(),
                 implementation: export.implementation.clone(),
+                incarnation: self
+                    .packages
+                    .get(&export.implemented_by)
+                    .map_or(0, |p| p.incarnation),
             })
     }
 
-    fn contribution_key(entry: &nickel_core::package_composition::ResolvedContribution) -> String {
+    fn contribution_key(
+        &self,
+        entry: &nickel_core::package_composition::ResolvedContribution,
+    ) -> String {
         format!(
-            "{}/{}@{}/{}",
-            entry.collection, entry.contributed_by.id, entry.contributed_by.version, entry.id
+            "{}/{}@{}/{}/{}",
+            entry.collection,
+            entry.contributed_by.id,
+            entry.contributed_by.version,
+            entry.id,
+            self.packages
+                .get(&entry.contributed_by)
+                .map_or(0, |package| package.incarnation)
         )
     }
 
@@ -361,11 +588,15 @@ impl ShellCompositionRuntime {
             .contributions
             .values()
             .flatten()
-            .find(|entry| Self::contribution_key(entry) == key)
+            .find(|entry| {
+                self.contribution_key(entry) == key
+                    && self.packages.contains_key(&entry.contributed_by)
+            })
             .map(|entry| ComponentReference {
                 runtime: self.id,
                 owner: entry.contributed_by.clone(),
                 implementation: entry.implementation.clone(),
+                incarnation: self.packages[&entry.contributed_by].incarnation,
             })
     }
 
@@ -375,10 +606,12 @@ impl ShellCompositionRuntime {
             .get(collection)
             .into_iter()
             .flatten()
+            .filter(|entry| self.packages.contains_key(&entry.contributed_by))
             .map(|entry| ComponentReference {
                 runtime: self.id,
                 owner: entry.contributed_by.clone(),
                 implementation: entry.implementation.clone(),
+                incarnation: self.packages[&entry.contributed_by].incarnation,
             })
             .collect()
     }
@@ -396,20 +629,29 @@ impl ShellCompositionRuntime {
                 runtime: self.id,
                 owner: owner.clone(),
                 implementation: format!("@settings-page/{id}"),
+                incarnation: package.incarnation,
             })
     }
 
     pub fn mount(&mut self, reference: &ComponentReference) -> Result<ComponentMount, String> {
-        if reference.runtime != self.id || !self.packages.contains_key(&reference.owner) {
+        if reference.runtime != self.id
+            || self
+                .packages
+                .get(&reference.owner)
+                .is_none_or(|p| p.incarnation != reference.incarnation)
+        {
             return Err("foreign or retired component reference".into());
         }
         if self.mounts.len() >= MAX_MOUNTS {
             return Err("too many component mounts".into());
         }
-        let id = self
-            .next_mount
-            .checked_add(1)
-            .ok_or("component mount identity exhausted")?;
+        // Shared provider contexts can serve several native composition hosts;
+        // surface IDs must remain unique across them to keep hooks isolated.
+        let id = NEXT_SHARED_MOUNT
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
+                next.checked_add(1)
+            })
+            .map_err(|_| "component mount identity exhausted")?;
         self.next_mount = id;
         let package = self.packages.get_mut(&reference.owner).unwrap();
         let component = if let Some(id) = reference.implementation.strip_prefix("@settings-page/") {
@@ -1025,7 +1267,12 @@ impl ShellCompositionRuntime {
     /// Check this immediately before the host validates and executes the effect.
     /// Outstanding envelopes from a retired or different host are stale.
     pub fn validate_effect(&self, effect: &OwnedComponentEffect) -> Result<(), String> {
-        if effect.runtime != self.id || !self.packages.contains_key(&effect.owner) {
+        if effect.runtime != self.id
+            || self
+                .packages
+                .get(&effect.owner)
+                .is_none_or(|p| p.incarnation != effect.incarnation)
+        {
             return Err("foreign or retired component effect".into());
         }
         Ok(())
@@ -1059,8 +1306,20 @@ impl ShellCompositionRuntime {
     /// Retirement invalidates all references/events and drops the entire owner
     /// context (hooks, handlers, subscriptions and executable registrations).
     pub fn retire(&mut self, owner: &PackageIdentity) {
-        self.mounts
-            .retain(|_, mount| &mount.reference.owner != owner);
+        let mounts = self
+            .mounts
+            .iter()
+            .filter(|(_, mount)| &mount.reference.owner == owner)
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>();
+        for id in mounts {
+            if self.mounts.contains_key(&id) {
+                let _ = self.unmount(&ComponentMount {
+                    runtime: self.id,
+                    id,
+                });
+            }
+        }
         self.packages.remove(owner);
         self.callbacks.retain(|_, grant| {
             &grant.source.owner != owner && self.mounts.contains_key(&grant.receiver)
@@ -1071,6 +1330,10 @@ impl ShellCompositionRuntime {
         self.nested_mounts
             .retain(|_, mount| self.mounts.contains_key(&mount.id));
         self.effects.retain(|effect| &effect.owner != owner);
+        for entries in self.resolution.contributions.values_mut() {
+            entries.retain(|entry| &entry.contributed_by != owner);
+        }
+        let _ = self.publish_contribution_catalog();
     }
 
     pub fn take_effects(&mut self) -> Vec<OwnedComponentEffect> {
@@ -1105,6 +1368,7 @@ impl ShellCompositionRuntime {
         event: Option<Value>,
         validate: impl FnOnce(&Value) -> Result<(), String>,
     ) -> Result<RenderedComponent, String> {
+        let catalog_script = self.contribution_catalog_script();
         let state = &self.mounts[&id];
         let owner = state.reference.owner.clone();
         let previous_generation = state.generation;
@@ -1118,6 +1382,7 @@ impl ShellCompositionRuntime {
             .get_mut(&owner)
             .ok_or("retired component owner")?;
         let mut runtime = package.runtime.borrow_mut();
+        runtime.eval(&catalog_script)?;
         runtime.select_surface(&surface(id))?;
         let mut data = package.data.clone();
         let object = data
@@ -1284,6 +1549,7 @@ impl ShellCompositionRuntime {
                     self.effects.push(OwnedComponentEffect {
                         runtime: self.id,
                         owner: owner.clone(),
+                        incarnation: self.packages[owner].incarnation,
                         value,
                     });
                 }
@@ -1669,6 +1935,107 @@ mod tests {
         let effects = host.take_effects();
         assert_eq!(effects[0].owner().id, "child");
         assert_eq!(effects[0].value()["id"], "provider-window");
+    }
+
+    #[test]
+    fn independent_providers_share_context_and_retire_contributions_and_stale_authority() {
+        let mut base = package(
+            "base",
+            "export function Shell(){return h(Column,null,...nickel.contributions('taskbar.items').map(entry=>h(entry.component,{key:entry.key})),...nickel.contributions('settings.pages').map(entry=>h(entry.component,{key:entry.key})));}\nexport function Taskbar(){return h(Text,null,'base');}\nexport function QuickSettings(){}\nexport default Shell;",
+            None,
+        );
+        base.manifest
+            .composition
+            .as_mut()
+            .unwrap()
+            .exports
+            .insert("shell".into(), "./main.js#Shell".into());
+        let mut provider = package(
+            "provider",
+            "globalThis.starts=(globalThis.starts||0)+1;\nexport function Item(){const [count,setCount]=useState(0);return h(Button,{id:'item',onClick:()=>{setCount(count+1);nickel.windows.activate('provider-window');}},'provider'+count);}\nexport function Page(){return h(Text,null,'independent-page');}",
+            None,
+        );
+        let composition = provider.manifest.composition.as_mut().unwrap();
+        composition.exports.clear();
+        for (collection, id, implementation) in [
+            ("taskbar.items", "item", "Item"),
+            ("settings.pages", "page", "Page"),
+        ] {
+            composition.contributions.push(SemanticContribution {
+                collection: collection.into(),
+                id: id.into(),
+                implementation: format!("./main.js#{implementation}"),
+                priority: 10,
+            });
+        }
+        let provider_catalog = BTreeMap::from([("provider".into(), provider.clone())]);
+        let provider_host =
+            ShellCompositionRuntime::new(&provider_catalog, "provider", &BTreeMap::new()).unwrap();
+        let owner = provider_host.resolution().active.clone();
+        let context = provider_host.provider_context(&owner).unwrap();
+        let catalog = BTreeMap::from([
+            ("base".into(), base.clone()),
+            ("provider".into(), provider.clone()),
+        ]);
+        let mut host = ShellCompositionRuntime::new_with_contexts(
+            &catalog,
+            "base",
+            &BTreeMap::new(),
+            &BTreeMap::from([(owner.clone(), context)]),
+        )
+        .unwrap();
+        assert_eq!(host.resolution().inheritance_chain.len(), 1);
+        assert_eq!(host.participating_owners().count(), 2);
+        assert!(std::rc::Rc::ptr_eq(
+            &host.shared_owner_runtime(&owner).unwrap(),
+            &provider_host.shared_owner_runtime(&owner).unwrap()
+        ));
+        assert_eq!(
+            host.shared_owner_runtime(&owner)
+                .unwrap()
+                .borrow_mut()
+                .eval_json::<u32>("JSON.stringify(globalThis.starts)")
+                .unwrap(),
+            1
+        );
+        let stale_reference = host.contributions("taskbar.items")[0].clone();
+        let stale_guest_key =
+            host.contribution_key(&host.resolution.contributions["taskbar.items"][0]);
+        let root = host.mount(&host.component("shell").unwrap()).unwrap();
+        let tree = host
+            .render_expanded(&root, &serde_json::json!({}), |_| Ok(()))
+            .unwrap();
+        assert!(tree.node.to_string().contains("provider0"));
+        assert!(tree.node.to_string().contains("independent-page"));
+        let stale_event = tree.events[&0].clone();
+        assert_eq!(stale_event.owner().id, "provider");
+        let tree = host
+            .dispatch_expanded(&root, &stale_event, &Value::Null, |_| Ok(()))
+            .unwrap();
+        assert!(tree.node.to_string().contains("provider1"));
+        let stale_effect = host.take_effects().remove(0);
+        assert_eq!(stale_effect.owner().id, "provider");
+        host.retire(&owner);
+        assert!(host.contributions("taskbar.items").is_empty());
+        assert!(host.mount(&stale_reference).is_err());
+        assert!(host.dispatch(&stale_event, &Value::Null).is_err());
+        assert!(host.validate_effect(&stale_effect).is_err());
+        let tree = host
+            .render_expanded(&root, &serde_json::json!({}), |_| Ok(()))
+            .unwrap();
+        assert!(!tree.node.to_string().contains("provider"));
+        let restarted =
+            ShellCompositionRuntime::new(&provider_catalog, "provider", &BTreeMap::new()).unwrap();
+        let contexts =
+            BTreeMap::from([(owner.clone(), restarted.provider_context(&owner).unwrap())]);
+        assert!(host.sync_contributors(&catalog, &contexts).unwrap());
+        assert!(host.contribution(&stale_guest_key).is_none());
+        assert!(host.mount(&stale_reference).is_err());
+        assert!(host.validate_effect(&stale_effect).is_err());
+        let tree = host
+            .render_expanded(&root, &serde_json::json!({}), |_| Ok(()))
+            .unwrap();
+        assert!(tree.node.to_string().contains("provider0"));
     }
 
     #[test]

@@ -244,9 +244,14 @@ const __nickelCompositionClient = Object.freeze({...nickel, get data() { return 
             ));
         }
         output.push_str(&format!(
-            "const __nickelEntryModule = __nickelRequireModule({});\nvar App = __nickelEntryModule.default ?? __nickelEntryModule.App;\nif (typeof App !== 'function') throw Error('entry module must export a default component or named App');\n",
+            "const __nickelEntryModule = __nickelRequireModule({});\nvar App = __nickelEntryModule.default ?? __nickelEntryModule.App;\n",
             js_string(&self.entry)
         ));
+        // Composition providers can publish components and Settings without a
+        // native surface or an entry component. Ordinary surfaces still require App.
+        if !self.component_bridge {
+            output.push_str("if (typeof App !== 'function') throw Error('entry module must export a default component or named App');\n");
+        }
         Ok(output)
     }
 

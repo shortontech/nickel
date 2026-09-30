@@ -562,9 +562,7 @@ impl RetainedPackageRuntime {
             }
             Self::Composed(host) => {
                 let host = host.borrow();
-                host.resolution()
-                    .inheritance_chain
-                    .iter()
+                host.participating_owners()
                     .filter_map(|owner| {
                         host.shared_owner_runtime(owner)
                             .ok()
@@ -4684,6 +4682,17 @@ impl LiveShell {
                     Some(runtime),
                 )?
             }
+            RetainedPackageRuntime::Composed(host) if !self.is_shell_package(id) => {
+                let owner = host.borrow().resolution().active.clone();
+                let runtime = host.borrow().shared_owner_runtime(&owner)?;
+                crate::plugin_panel::PluginPanelApplication::from_package_surface_with_runtime(
+                    &package,
+                    &settings,
+                    &surface,
+                    crate::plugin_panel::package_images(&package)?,
+                    Some(runtime),
+                )?
+            }
             RetainedPackageRuntime::Composed(host) => {
                 let catalog = self.composition_catalog(id, &package)?;
                 let snapshots = self.composition_snapshots(&catalog, &surface);
@@ -4903,9 +4912,7 @@ impl LiveShell {
         {
             let mut host = host.borrow_mut();
             let owner = host
-                .resolution()
-                .inheritance_chain
-                .iter()
+                .participating_owners()
                 .find(|owner| owner.id == provider)
                 .cloned();
             if let Some(owner) = owner {
@@ -5105,9 +5112,7 @@ impl LiveShell {
                 };
                 let owner = host
                     .borrow()
-                    .resolution()
-                    .inheritance_chain
-                    .iter()
+                    .participating_owners()
                     .find(|owner| owner.id == id)
                     .cloned()?;
                 Some((host.clone(), owner))
@@ -5346,6 +5351,10 @@ impl LiveShell {
         tracing::warn!(plugin = id, %error, "installed plugin runtime failed");
         let _ = self.plugin_registry.mark_failed(id, error);
         self.package_runtimes.remove(id);
+        self.retire_installed_composition_owner(id);
+        if let Err(error) = self.reconcile_installed_contributors() {
+            tracing::warn!(%error,"failed contributor retirement refresh failed");
+        }
         self.application_search.retire(id);
         if self
             .plugin_slot_hosts
@@ -5528,7 +5537,101 @@ impl LiveShell {
                 .and_then(|composition| composition.extends.clone());
             catalog.insert(base, dependency);
         }
+        let approvals =
+            nickel_core::plugins::PluginActivationSettings::load_default().unwrap_or_default();
+        for entry in self.plugin_registry.entries() {
+            if !entry.desired_enabled
+                || entry.health != nickel_core::plugins::PluginHealth::Running
+                || catalog.contains_key(&entry.manifest.id)
+            {
+                continue;
+            }
+            let Some(descriptor) = self.external_plugin_packages.get(&entry.manifest.id) else {
+                continue;
+            };
+            if descriptor.manifest.composition.is_none() {
+                continue;
+            }
+            #[cfg(not(test))]
+            if !approvals.approval_current(&descriptor.manifest, &descriptor.source_digest) {
+                continue;
+            }
+            catalog.insert(entry.manifest.id.clone(), descriptor.load()?);
+        }
+        let _ = approvals;
         Ok(catalog)
+    }
+
+    fn retire_installed_composition_owner(&mut self, id: &str) {
+        // Providers can own a context without owning a native surface.
+        for retained in self.package_runtimes.values() {
+            if let RetainedPackageRuntime::Composed(host) = retained {
+                let owners = host
+                    .borrow()
+                    .participating_owners()
+                    .filter(|owner| owner.id == id)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                for owner in owners {
+                    host.borrow_mut().retire(&owner);
+                }
+            }
+        }
+        for (_, host) in self.plugin_surface_hosts.values_mut() {
+            host.application_mut().retire_composition_owner(id);
+        }
+    }
+
+    fn composition_contexts(
+        &self,
+    ) -> std::collections::BTreeMap<
+        nickel_core::package_composition::PackageIdentity,
+        nickel_plugin_runtime::composition_runtime::ProviderContext,
+    > {
+        let mut contexts = std::collections::BTreeMap::new();
+        for retained in self.package_runtimes.values() {
+            if let RetainedPackageRuntime::Composed(host) = retained {
+                let host = host.borrow();
+                for owner in host.participating_owners() {
+                    if let Ok(context) = host.provider_context(owner) {
+                        contexts.entry(owner.clone()).or_insert(context);
+                    }
+                }
+            }
+        }
+        contexts
+    }
+
+    fn reconcile_installed_contributors(&mut self) -> Result<(), String> {
+        let contexts = self.composition_contexts();
+        let hosts = self
+            .package_runtimes
+            .iter()
+            .filter_map(|(id, retained)| match retained {
+                RetainedPackageRuntime::Composed(host) => Some((id.clone(), host.clone())),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        for (active, host) in hosts {
+            let Some(descriptor) = self.external_plugin_packages.get(&active) else {
+                continue;
+            };
+            let package = descriptor.load()?;
+            let catalog = self.composition_catalog(&active, &package)?;
+            host.borrow_mut().sync_contributors(&catalog, &contexts)?;
+            for (key, (_, surface)) in &mut self.plugin_surface_hosts {
+                if key.plugin_id == active {
+                    surface
+                        .application_mut()
+                        .refresh_composition_catalog(&catalog)?;
+                    surface.step(HostBatch {
+                        application_changed: true,
+                        ..Default::default()
+                    });
+                }
+            }
+        }
+        Ok(())
     }
 
     fn composition_snapshots(
@@ -5610,7 +5713,20 @@ impl LiveShell {
             if let Some(descriptor) = self.external_plugin_packages.get(id) {
                 let surfaces = &descriptor.manifest.surfaces;
                 Some(
-                    if !surfaces.is_empty()
+                    if surfaces.is_empty() && descriptor.manifest.composition.is_some() {
+                        descriptor.load().and_then(|package| {
+                            crate::plugin_panel::PluginPanelApplication::validate_provider_resources(&package)?;
+                            let catalog=self.composition_catalog(id,&package)?;
+                            let snapshots=catalog.values().filter_map(|package| {
+                                let c=package.manifest.composition.as_ref()?;
+                                let owner=nickel_core::package_composition::PackageIdentity {id:c.id.clone(),version:c.version.parse().ok()?};
+                                let settings=self.plugin_settings.get(&c.id).cloned().unwrap_or_else(||package.manifest.settings.iter().map(|setting|(setting.id.clone(),setting.kind.default_value())).collect());
+                                Some((owner,serde_json::json!({"settings":settings})))
+                            }).collect();
+                            let host=nickel_plugin_runtime::composition_runtime::ShellCompositionRuntime::new_with_contexts(&catalog,id,&snapshots,&self.composition_contexts())?;
+                            Ok((RetainedPackageRuntime::Composed(std::rc::Rc::new(std::cell::RefCell::new(host))),Vec::new()))
+                        })
+                    } else if !surfaces.is_empty()
                         && surfaces.iter().all(|surface| {
                             matches!(
                                 surface.kind,
@@ -5634,7 +5750,7 @@ impl LiveShell {
                                 let catalog = self.composition_catalog(id, &package)?;
                                 let first = surfaces.iter().find(|surface| !matches!(surface.kind, nickel_core::plugins::PluginSurfaceKind::Dialog | nickel_core::plugins::PluginSurfaceKind::Overlay)).ok_or("composed package has no ordinary surface")?;
                                 let snapshots = self.composition_snapshots(&catalog, first);
-                                let shared = std::rc::Rc::new(std::cell::RefCell::new(nickel_plugin_runtime::composition_runtime::ShellCompositionRuntime::new(&catalog, id, &snapshots)?));
+                                let shared = std::rc::Rc::new(std::cell::RefCell::new(nickel_plugin_runtime::composition_runtime::ShellCompositionRuntime::new_with_contexts(&catalog, id, &snapshots, &self.composition_contexts())?));
                                 let mut applications = Vec::new();
                                 for surface in surfaces.iter().filter(|surface| surface.initially_open && (!self.is_shell_package(id) || self.shell_package_selected(id)) && !matches!(surface.kind,
                                     nickel_core::plugins::PluginSurfaceKind::Dialog | nickel_core::plugins::PluginSurfaceKind::Overlay)) {
@@ -5644,6 +5760,21 @@ impl LiveShell {
                                     applications.push((application, resolved));
                                 }
                                 return Ok((RetainedPackageRuntime::Composed(shared), applications));
+                            }
+                            if package.manifest.composition.is_some() {
+                                crate::plugin_panel::PluginPanelApplication::validate_provider_resources(&package)?;
+                                let catalog=self.composition_catalog(id,&package)?;
+                                let first=surfaces.iter().find(|surface|!matches!(surface.kind,nickel_core::plugins::PluginSurfaceKind::Dialog|nickel_core::plugins::PluginSurfaceKind::Overlay)).ok_or("provider has no ordinary surface")?;
+                                let snapshots=self.composition_snapshots(&catalog,first);
+                                let shared=std::rc::Rc::new(std::cell::RefCell::new(nickel_plugin_runtime::composition_runtime::ShellCompositionRuntime::new_with_contexts(&catalog,id,&snapshots,&self.composition_contexts())?));
+                                let owner=shared.borrow().resolution().active.clone();let runtime=shared.borrow().shared_owner_runtime(&owner)?;
+                                let settings=self.plugin_settings.get(id).cloned().map(Ok).unwrap_or_else(||external_plugin_settings(&package.manifest))?;
+                                let images=crate::plugin_panel::package_images(&package)?;
+                                let panels=surfaces.iter().filter(|surface|surface.initially_open&&!matches!(surface.kind,nickel_core::plugins::PluginSurfaceKind::Dialog|nickel_core::plugins::PluginSurfaceKind::Overlay)).map(|surface|{
+                                    let application=crate::plugin_panel::PluginPanelApplication::from_package_surface_with_runtime(&package,&settings,surface,images.clone(),Some(runtime.clone()))?;
+                                    let resolved=application.resolved_surface(surface)?;Ok((application,resolved))
+                                }).collect::<Result<Vec<_>,String>>()?;
+                                return Ok((RetainedPackageRuntime::Composed(shared),panels));
                             }
                             crate::plugin_panel::PluginPanelApplication::validate_package(
                                 &package,
@@ -5716,9 +5847,7 @@ impl LiveShell {
         }
         self.plugin_registry.set_enabled(id, enabled)?;
         if !enabled {
-            for (_, host) in self.plugin_surface_hosts.values_mut() {
-                host.application_mut().retire_composition_owner(id);
-            }
+            self.retire_installed_composition_owner(id);
         }
 
         self.plugin_activation_generation =
@@ -5750,6 +5879,9 @@ impl LiveShell {
             }
             if let Some((target, _)) = &extension_target {
                 self.refresh_plugin_slot_hosts(target);
+            }
+            if let Err(error) = self.reconcile_installed_contributors() {
+                tracing::warn!(%error,"contributor retirement refresh failed");
             }
             self.maybe_publish_plugin_status();
             return Ok(true);
@@ -5869,6 +6001,21 @@ impl LiveShell {
             }
         };
         if result.is_ok() {
+            if self.plugin_registry.get(id).is_some_and(|entry| {
+                entry.manifest.surfaces.is_empty() && entry.manifest.composition.is_some()
+            }) {
+                let _ = self.plugin_registry.record_memory(
+                    id,
+                    nickel_core::plugins::PluginMemory {
+                        native_ui_bytes: Some(0),
+                        texture_bytes: Some(0),
+                        ..Default::default()
+                    },
+                );
+            }
+            if let Err(error) = self.reconcile_installed_contributors() {
+                tracing::warn!(%error,"contributor admission refresh failed");
+            }
             if let Some((target, _)) = &extension_target {
                 self.refresh_plugin_slot_hosts(target);
             }

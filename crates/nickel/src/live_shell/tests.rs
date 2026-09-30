@@ -349,6 +349,111 @@ fn stock_shell_package_handles_semantic_taskbar_input_and_global_surface_intents
 }
 
 #[test]
+fn zero_surface_composition_provider_runs_once_and_rejoins_the_active_shell() {
+    with_package_runtime_stack(|| {
+        let root = tempfile::tempdir().unwrap();
+        let id = "org.example.independent-provider";
+        let directory = root.path().join(id);
+        std::fs::create_dir(&directory).unwrap();
+        std::fs::write(directory.join("plugin.json"),r#"{"api_version":1,"id":"org.example.independent-provider","version":"0.2.0","name":"Independent provider","entry":"main.js","capabilities":["settings-write","windows-focus"],"composition":{"api_version":1,"id":"org.example.independent-provider","version":"0.2.0","contributions":[{"collection":"taskbar.items","id":"item","implementation":"./main.js#Item"},{"collection":"settings.pages","id":"page","implementation":"./main.js#Page"}]}}"#).unwrap();
+        std::fs::write(directory.join("main.js"),"globalThis.starts=(globalThis.starts||0)+1; registerSetting({id:'enabled',group:'Example',label:'Enabled',type:'switch',defaultValue:false,value:()=>false});\nexport function Item(){return h(Button,{onClick:()=>nickel.windows.activate('native-window')},'Independent item');}\nexport function Page(){return h(Text,null,'Independent page');} registerSettingsPage({id:'page',group:'Example',label:'Independent',component:Page});").unwrap();
+        let mut catalog = nickel_core::plugins::PluginCatalog::discover(root.path()).unwrap();
+        let descriptor = catalog.packages.remove(id).unwrap();
+        let mut shell = LiveShell::new().unwrap();
+        shell
+            .plugin_registry
+            .register(descriptor.manifest.clone())
+            .unwrap();
+        shell
+            .external_plugin_packages
+            .insert(id.into(), descriptor.into());
+        shell.set_plugin_enabled(id, true).unwrap();
+        assert_eq!(
+            shell.plugin_registry.get(id).unwrap().health,
+            nickel_core::plugins::PluginHealth::Running
+        );
+        assert!(
+            !shell
+                .plugin_surface_hosts
+                .keys()
+                .any(|key| key.plugin_id == id)
+        );
+        let crate::live_shell::RetainedPackageRuntime::Composed(provider) =
+            shell.package_runtimes[id].clone()
+        else {
+            panic!("provider context was not retained")
+        };
+        let owner = provider.borrow().resolution().active.clone();
+        let runtime = provider.borrow().shared_owner_runtime(&owner).unwrap();
+        let crate::live_shell::RetainedPackageRuntime::Composed(active) =
+            shell.package_runtimes["nickel-default"].clone()
+        else {
+            panic!("active shell is not composed")
+        };
+        assert!(std::rc::Rc::ptr_eq(
+            &runtime,
+            &active.borrow().shared_owner_runtime(&owner).unwrap()
+        ));
+        let active_owner = active.borrow().resolution().active.clone();
+        assert!(std::rc::Rc::ptr_eq(
+            &active.borrow().shared_owner_runtime(&active_owner).unwrap(),
+            &provider
+                .borrow()
+                .shared_owner_runtime(&active_owner)
+                .unwrap()
+        ));
+        assert_eq!(
+            runtime
+                .borrow_mut()
+                .eval_json::<u32>("JSON.stringify(globalThis.starts)")
+                .unwrap(),
+            1
+        );
+        assert!(
+            shell
+                .package_settings_registry
+                .settings_pages_snapshot()
+                .pages
+                .iter()
+                .any(|page| page.provider_package == id)
+        );
+        let stale = active
+            .borrow()
+            .contributions("taskbar.items")
+            .into_iter()
+            .find(|reference| reference.owner().id == id)
+            .unwrap();
+        shell.set_plugin_enabled(id, false).unwrap();
+        assert!(active.borrow_mut().mount(&stale).is_err());
+        assert!(
+            active
+                .borrow()
+                .contributions("taskbar.items")
+                .iter()
+                .all(|reference| reference.owner().id != id)
+        );
+        shell.set_plugin_enabled(id, true).unwrap();
+        assert!(active.borrow_mut().mount(&stale).is_err());
+        assert!(
+            active
+                .borrow()
+                .contributions("settings.pages")
+                .iter()
+                .any(|reference| reference.owner().id == id)
+        );
+        let crate::live_shell::RetainedPackageRuntime::Composed(restarted) =
+            shell.package_runtimes[id].clone()
+        else {
+            panic!("provider context was not restarted")
+        };
+        assert!(!std::rc::Rc::ptr_eq(
+            &runtime,
+            &restarted.borrow().shared_owner_runtime(&owner).unwrap()
+        ));
+    });
+}
+
+#[test]
 fn installed_package_settings_follow_activation_and_retirement() {
     let root = tempfile::tempdir().unwrap();
     let id = "org.example.registered-settings";
