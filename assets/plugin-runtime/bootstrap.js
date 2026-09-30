@@ -200,6 +200,11 @@ function __readSettings(snapshot, page) {
 function readPluginSettings() { return __readSettings(__settingsSnapshot, false); }
 function readSettingsPages() { return __readSettings(__settingsPagesSnapshot, true); }
 function readPluginSettingsPages() { return readSettingsPages(); }
+function __nickelRegisteredPageComponent(id) {
+    const entry = __settingsPages.get(id);
+    if (!entry || typeof entry.component !== 'function') throw Error('Settings page is unavailable');
+    return entry.component;
+}
 function __nickelInvokeSetting(provider, id, value) {
     if (provider !== __settingsProvider || !__settingsSnapshot.settings.some(entry => entry.providerPackage === provider && entry.id === id))
         throw Error('Settings provider is disabled or unavailable');

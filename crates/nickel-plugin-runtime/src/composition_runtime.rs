@@ -383,6 +383,22 @@ impl ShellCompositionRuntime {
             .collect()
     }
 
+    fn registered_page(&self, provider: &str, id: &str) -> Option<ComponentReference> {
+        let (owner, package) = self
+            .packages
+            .iter()
+            .find(|(owner, _)| owner.id == provider)?;
+        package
+            .runtime
+            .borrow()
+            .has_registered_page(id)
+            .then(|| ComponentReference {
+                runtime: self.id,
+                owner: owner.clone(),
+                implementation: format!("@settings-page/{id}"),
+            })
+    }
+
     pub fn mount(&mut self, reference: &ComponentReference) -> Result<ComponentMount, String> {
         if reference.runtime != self.id || !self.packages.contains_key(&reference.owner) {
             return Err("foreign or retired component reference".into());
@@ -396,15 +412,26 @@ impl ShellCompositionRuntime {
             .ok_or("component mount identity exhausted")?;
         self.next_mount = id;
         let package = self.packages.get_mut(&reference.owner).unwrap();
-        let implementation = serde_json::to_string(
-            package
-                .exports
-                .get(&reference.implementation)
-                .ok_or("component implementation is not published by its owner")?,
-        )
-        .unwrap();
+        let component = if let Some(id) = reference.implementation.strip_prefix("@settings-page/") {
+            if !package.runtime.borrow().has_registered_page(id) {
+                return Err("Settings page is no longer published by its owner".into());
+            }
+            format!(
+                "__nickelRegisteredPageComponent({})",
+                serde_json::to_string(id).unwrap()
+            )
+        } else {
+            let implementation = serde_json::to_string(
+                package
+                    .exports
+                    .get(&reference.implementation)
+                    .ok_or("component implementation is not published by its owner")?,
+            )
+            .unwrap();
+            format!("nickel.component({implementation})")
+        };
         package.runtime.borrow_mut().register_surface_entry(&surface(id), &format!(
-            "function App() {{ const {{children, ...props}} = __nickelHydrateComponentProps(nickel.data.__componentProps); return h(nickel.component({implementation}), props, ...(children ?? [])); }}"))?;
+            "function App() {{ const {{children, ...props}} = __nickelHydrateComponentProps(nickel.data.__componentProps); return h({component}, props, ...(children ?? [])); }}"))?;
         self.mounts.insert(
             id,
             MountState {
@@ -731,6 +758,20 @@ impl ShellCompositionRuntime {
                         self.component(contract)
                             .ok_or("unknown public component contract")?,
                     )
+                } else if let Some(page) = node.get("settingPage") {
+                    let provider = page
+                        .get("provider")
+                        .and_then(Value::as_str)
+                        .ok_or("missing page provider")?;
+                    let id = page
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .ok_or("missing page identity")?;
+                    (
+                        format!("setting-page:{provider}/{id}"),
+                        self.registered_page(provider, id)
+                            .ok_or("unknown registered Settings page")?,
+                    )
                 } else {
                     let key = node
                         .get("contribution")
@@ -1044,6 +1085,16 @@ impl ShellCompositionRuntime {
     fn validate_mount(&self, mount: &ComponentMount) -> Result<(), String> {
         if mount.runtime != self.id || !self.mounts.contains_key(&mount.id) {
             return Err("foreign or retired component mount".into());
+        }
+        let reference = &self.mounts[&mount.id].reference;
+        if let Some(id) = reference.implementation.strip_prefix("@settings-page/") {
+            if self
+                .packages
+                .get(&reference.owner)
+                .is_none_or(|package| !package.runtime.borrow().has_registered_page(id))
+            {
+                return Err("Settings page is no longer published by its owner".into());
+            }
         }
         Ok(())
     }
@@ -1562,6 +1613,62 @@ mod tests {
             host.dispatch(&provisional.events[&0], &Value::Null)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn foreign_registered_page_expands_in_published_owner_context() {
+        let base = package(
+            "base",
+            "export function Taskbar(){ const page=readPluginSettingsPages().pages[0]; return h(page.component,null); }\nexport function QuickSettings(){return h(Text,null,'base');}\nexport default Taskbar;",
+            None,
+        );
+        let mut child = package(
+            "child",
+            "registerSettingsPage({id:'details',group:'Plugins',label:'Details',component:()=>h(Button,{onClick:()=>nickel.windows.activate('provider-window')},'provider-page')});\nexport function Taskbar(){return h(Text,null,'unused');}\nexport default Taskbar;",
+            Some("base"),
+        );
+        child
+            .manifest
+            .composition
+            .as_mut()
+            .unwrap()
+            .replaces
+            .clear();
+        let mut host = ShellCompositionRuntime::new(
+            &BTreeMap::from([("base".into(), base), ("child".into(), child)]),
+            "child",
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let mut registry = nickel_core::settings_registry::SettingsRegistry::default();
+        for (owner, package) in &host.packages {
+            package
+                .runtime
+                .borrow_mut()
+                .publish_settings(&mut registry, &owner.id)
+                .unwrap();
+        }
+        for package in host.packages.values() {
+            package
+                .runtime
+                .borrow_mut()
+                .set_settings_registry(&registry)
+                .unwrap();
+        }
+        let mount = host
+            .mount(&host.component("shell.taskbar").unwrap())
+            .unwrap();
+        let tree = host
+            .render_expanded(&mount, &serde_json::json!({}), |_| Ok(()))
+            .unwrap();
+        assert!(tree.node.to_string().contains("provider-page"));
+        let event = tree.events.values().next().unwrap();
+        assert_eq!(event.owner().id, "child");
+        host.dispatch_expanded(&mount, event, &serde_json::json!(null), |_| Ok(()))
+            .unwrap();
+        let effects = host.take_effects();
+        assert_eq!(effects[0].owner().id, "child");
+        assert_eq!(effects[0].value()["id"], "provider-window");
     }
 
     #[test]

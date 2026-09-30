@@ -97,7 +97,21 @@ impl JsxRuntime {
             .map_err(|error| error.to_string())?;
         self.eval(&format!(
             "__nickelSetSettingsRegistry({provider}, {settings}, {pages})"
-        ))
+        ))?;
+        self.settings_pages = registry
+            .settings_pages_snapshot()
+            .pages
+            .into_iter()
+            .filter(|entry| {
+                Some(entry.provider_package.as_str()) == self.settings_provider.as_deref()
+            })
+            .map(|entry| entry.registration.id)
+            .collect();
+        Ok(())
+    }
+
+    pub(crate) fn has_registered_page(&self, id: &str) -> bool {
+        self.settings_pages.contains(id)
     }
 
     /// Invokes the retained callback. Effects still require ordinary host validation.
@@ -127,6 +141,7 @@ impl JsxRuntime {
         if let Some(provider) = self.settings_provider.take() {
             registry.retire_provider(&provider);
         }
+        self.settings_pages.clear();
         self.eval("__nickelRetireSettings()")
     }
 }

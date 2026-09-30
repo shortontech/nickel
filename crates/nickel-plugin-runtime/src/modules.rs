@@ -201,6 +201,13 @@ function __nickelHydrateComponentProps(value) {
     }
     return value;
 }
+function __nickelCompositionSettingsPages() {
+    const result = readPluginSettingsPages();
+    for (const entry of result.pages) {
+        if (typeof entry.component !== 'function') entry.component = __nickelComponentProxy({settingPage:{provider:entry.providerPackage,id:entry.id}});
+    }
+    return result;
+}
 const __nickelCompositionClient = Object.freeze({...nickel, get data() { return nickel.data; },
     component(contract) {
         if (typeof contract !== 'string') throw TypeError('invalid component contract');
@@ -222,7 +229,7 @@ const __nickelCompositionClient = Object.freeze({...nickel, get data() { return 
                 "__nickelDefineModule({}, function(module, exports, require) {{\n{}\n}});\n",
                 js_string(&path),
                 if self.component_bridge {
-                    format!("const nickel = __nickelCompositionClient;\n{transformed}")
+                    format!("const nickel = __nickelCompositionClient; const readPluginSettingsPages = __nickelCompositionSettingsPages; const readSettingsPages = __nickelCompositionSettingsPages;\n{transformed}")
                 } else {
                     transformed
                 }

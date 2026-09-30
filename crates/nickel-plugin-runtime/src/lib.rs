@@ -23,6 +23,7 @@ const MAX_JS_LOOP_ITERATIONS: u64 = 100_000;
 pub struct JsxRuntime {
     context: Context,
     settings_provider: Option<String>,
+    settings_pages: std::collections::BTreeSet<String>,
     settings_revision: u64,
     settings_data: Option<String>,
     checkpoint: Option<(u64, Option<String>)>,
@@ -34,6 +35,7 @@ impl JsxRuntime {
         let mut runtime = Self {
             context: Context::default(),
             settings_provider: None,
+            settings_pages: Default::default(),
             settings_revision: 0,
             settings_data: None,
             checkpoint: None,
