@@ -55,6 +55,15 @@ impl JsxRuntime {
         id: &str,
         value: &Value,
     ) -> Result<(), String> {
+        let metadata: Registrations = self.eval_json("__nickelSettingsMetadata()")?;
+        let registration = metadata
+            .settings
+            .iter()
+            .find(|registration| registration.id == id)
+            .ok_or("unknown Settings registration")?;
+        if !registration.accepts_value(value) {
+            return Err("Settings value is outside its registered type or bounds".into());
+        }
         let provider = serde_json::to_string(provider).map_err(|error| error.to_string())?;
         let id = serde_json::to_string(id).map_err(|error| error.to_string())?;
         self.eval(&format!("__nickelInvokeSetting({provider}, {id}, {value})"))
@@ -83,6 +92,17 @@ mod tests {
         runtime
             .publish_settings(&mut registry, "org.nickel.vpn")
             .unwrap();
+        assert!(
+            runtime
+                .invoke_setting(
+                    "org.nickel.vpn",
+                    "vpn.autoConnect",
+                    &serde_json::json!("yes")
+                )
+                .unwrap_err()
+                .contains("bounds")
+        );
+        assert!(runtime.take_effects().unwrap().is_empty());
         assert_eq!(
             registry.settings_snapshot().settings[0].provider_package,
             "org.nickel.vpn"

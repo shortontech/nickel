@@ -38,6 +38,13 @@ pub struct SettingRegistration {
     pub control: SettingControl,
 }
 
+impl SettingRegistration {
+    /// Validate a requested value before entering package code.
+    pub fn accepts_value(&self, value: &Value) -> bool {
+        accepts_value(&self.control, value)
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(
     tag = "type",
