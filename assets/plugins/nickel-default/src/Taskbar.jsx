@@ -1,6 +1,7 @@
+import { taskItems, activateTask } from "./tasks.js";
 // @jsx h
 import "./styles/taskbar.css";
-// The host supplies grouped tasks and performs all window and launch actions.
+// The package groups public application/window snapshots and requests native actions.
 function Task(props) {
     const item = props.item;
     const label = (item.active ? "●" : "") + (item.name.charAt(0).toUpperCase() || "?");
@@ -28,7 +29,7 @@ function Task(props) {
             }
         }
     };
-    return <Button id={"taskbar-item-" + item.index}
+    return <Button id={"taskbar-item-" + item.id}
         className={item.active ? "task-button is-active" : "task-button"}
         accessibilityLabel={item.name}
         icon={item.icon ? "task:" + item.index : null}
@@ -39,7 +40,8 @@ function Task(props) {
                 suppressClick.current = false;
                 return;
             }
-            nickel.request({type: "taskbar-activate-item", index: item.index, id: item.id});
+            if (item.capabilityModel) activateTask(item, nickel);
+            else nickel.request({type: "taskbar-activate-item", index: item.index, id: item.id});
         }}>
         {label}
     </Button>;
@@ -56,7 +58,7 @@ function TrayItem(props) {
 
 export function Taskbar(props) {
     const data = {...{items:[],tray:[],slots:{},clock:'',codexAvailable:false,keyboardEnabled:false}, ...props?.data};
-    const items = data.items || [];
+    const items = props?.data?.items || taskItems(nickel.applications.list(), nickel.windows.list());
     const tray = data.tray || [];
     const badges = (data.slots && data.slots["task-badge"]) || [];
     return <FixedWindow id="taskbar" output="all" edge="bottom"
