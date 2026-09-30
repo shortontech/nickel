@@ -1,8 +1,8 @@
 // @jsx h
 import "./styles/quick-settings.css";
 // Nickel owns status snapshots and validates every requested system action.
-export function QuickSettings() {
-    const data = nickel.data;
+export function QuickSettings(props) {
+    const data = {...{scrollHeight:552,network:{available:false,enabled:false,networks:[]},bluetooth:{available:false,powered:false,discovering:false,devices:[]},audio:{muted:false,percent:0,devices:[]},workspaces:[],projectionModes:[],slots:{}}, ...props?.data};
     const sections = (data.slots && data.slots["control-section"]) || [];
     const [wifiOpen, setWifiOpen] = useState(false);
     const [bluetoothOpen, setBluetoothOpen] = useState(false);

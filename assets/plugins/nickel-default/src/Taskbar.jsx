@@ -54,8 +54,8 @@ function TrayItem(props) {
     </Button>;
 }
 
-export function Taskbar() {
-    const data = nickel.data;
+export function Taskbar(props) {
+    const data = {...{items:[],tray:[],slots:{},clock:'',codexAvailable:false,keyboardEnabled:false}, ...props?.data};
     const items = data.items || [];
     const tray = data.tray || [];
     const badges = (data.slots && data.slots["task-badge"]) || [];

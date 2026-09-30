@@ -1,8 +1,8 @@
 // @jsx h
 import "./styles/launcher.css";
 // The host owns search ranking and launches. This plugin owns the view.
-export function Launcher() {
-    const data = nickel.data;
+export function Launcher(props) {
+    const data = {...{query:'',results:[],dashboard:[],places:[],projects:[],dashboardVisible:false,view:'applications',resultPage:0,resultPageCount:1,dashboardPage:0,dashboardPageCount:1,accountName:'',logoutAvailable:false,codexAvailable:false}, ...props?.data};
     const [logoutOpen, setLogoutOpen] = useState(false);
     const [menuTarget, setMenuTarget] = useState(null);
     const openAppMenu = (item, kind, anchor) => {
