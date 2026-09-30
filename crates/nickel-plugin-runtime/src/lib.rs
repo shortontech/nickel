@@ -56,6 +56,16 @@ impl JsxRuntime {
         self.eval(&format!("__nickelSetData({serialized_json})"))
     }
 
+    pub fn select_surface(&mut self, id: &str) -> Result<(), String> {
+        let id = serde_json::to_string(id).map_err(|error| error.to_string())?;
+        self.eval(&format!("__nickelSelectSurface({id})"))
+    }
+
+    pub fn drop_surface(&mut self, id: &str) -> Result<(), String> {
+        let id = serde_json::to_string(id).map_err(|error| error.to_string())?;
+        self.eval(&format!("__nickelDropSurface({id})"))
+    }
+
     pub fn render<T>(
         &mut self,
         expression: &str,
@@ -109,6 +119,68 @@ mod tests {
             .render("__nickelRender()", |node| Ok(node.clone()))
             .unwrap();
         assert_eq!(initial, restored);
+    }
+
+    #[test]
+    fn sibling_surfaces_keep_independent_hooks_and_handlers_in_one_runtime() {
+        let source = "function App() { const [count, setCount] = useState(0); return h(Window, {}, h(Button, {onClick: () => setCount(count + 1)}, `${nickel.data.surface.id}:${count}`)); }";
+        let mut runtime = JsxRuntime::new(source, None).unwrap();
+        runtime.select_surface("first").unwrap();
+        runtime.set_data(r#"{"surface":{"id":"first"}}"#).unwrap();
+        let first = runtime
+            .render("__nickelRender()", |node| Ok(node.clone()))
+            .unwrap();
+        assert!(first.to_string().contains("first:0"));
+
+        runtime.select_surface("second").unwrap();
+        runtime.set_data(r#"{"surface":{"id":"second"}}"#).unwrap();
+        let second = runtime
+            .render("__nickelRender()", |node| Ok(node.clone()))
+            .unwrap();
+        assert!(second.to_string().contains("second:0"));
+        let changed = runtime
+            .render("__nickelDispatch(0)", |node| Ok(node.clone()))
+            .unwrap();
+        runtime.finish_event(true).unwrap();
+        assert!(changed.to_string().contains("second:1"));
+
+        runtime.select_surface("first").unwrap();
+        let first = runtime
+            .render("__nickelRender()", |node| Ok(node.clone()))
+            .unwrap();
+        assert!(first.to_string().contains("first:0"));
+        let changed = runtime
+            .render("__nickelDispatch(0)", |node| Ok(node.clone()))
+            .unwrap();
+        runtime.finish_event(true).unwrap();
+        assert!(changed.to_string().contains("first:1"));
+
+        runtime.select_surface("second").unwrap();
+        let second = runtime
+            .render("__nickelRender()", |node| Ok(node.clone()))
+            .unwrap();
+        assert!(second.to_string().contains("second:1"));
+        runtime.drop_surface("second").unwrap();
+        runtime.select_surface("second").unwrap();
+        runtime.set_data(r#"{"surface":{"id":"second"}}"#).unwrap();
+        let reopened = runtime
+            .render("__nickelRender()", |node| Ok(node.clone()))
+            .unwrap();
+        assert!(reopened.to_string().contains("second:0"));
+        runtime
+            .render("__nickelDispatch(0)", |node| Ok(node.clone()))
+            .unwrap();
+        runtime.finish_event(false).unwrap();
+        runtime.select_surface("first").unwrap();
+        let first = runtime
+            .render("__nickelRender()", |node| Ok(node.clone()))
+            .unwrap();
+        assert!(first.to_string().contains("first:1"));
+        runtime.select_surface("second").unwrap();
+        let second = runtime
+            .render("__nickelRender()", |node| Ok(node.clone()))
+            .unwrap();
+        assert!(second.to_string().contains("second:0"));
     }
 
     #[test]

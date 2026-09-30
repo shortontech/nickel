@@ -1045,7 +1045,7 @@ fn installed_windows_use_jsx_sizes_within_manifest_bounds() {
     .unwrap();
     std::fs::write(
         directory.join("main.js"),
-        "function App() { const first = nickel.data.surface.id === 'first'; return h(Window, {width: first ? 360 : 420, height: first ? 220 : 240}, h(Text, null, 'Bounded window')); }",
+        "function App() { const first = nickel.data.surface.id === 'first'; const [count, setCount] = useState(0); return h(Window, {width: first ? 360 : 420, height: first ? 220 : 240}, h(Button, {id: 'increment', onClick: () => setCount(count + 1)}, `${nickel.data.surface.id}:${count}`)); }",
     )
     .unwrap();
     let package = nickel_core::plugins::PluginPackage::load(&directory).unwrap();
@@ -1066,6 +1066,52 @@ fn installed_windows_use_jsx_sizes_within_manifest_bounds() {
     assert_eq!(surfaces.len(), 2);
     assert_eq!((surfaces[0].1.width, surfaces[0].1.height), (360, 220));
     assert_eq!((surfaces[1].1.width, surfaces[1].1.height), (420, 240));
+    let first = shell
+        .plugin_panel_host
+        .as_ref()
+        .unwrap()
+        .application()
+        .shared_runtime();
+    let second = shell
+        .plugin_panel_extra_hosts
+        .values()
+        .next()
+        .unwrap()
+        .1
+        .application()
+        .shared_runtime();
+    assert!(std::rc::Rc::ptr_eq(&first, &second));
+    let first_host = shell.plugin_panel_host.as_mut().unwrap();
+    let button = first_host
+        .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+            role: nickel_ui::SemanticRole::Button,
+            name: "first:0".into(),
+        })
+        .unwrap();
+    first_host.step(nickel_ui::HostBatch {
+        events: vec![nickel_ui::HostEvent::Ui(
+            nickel_ui::UiEvent::AccessibilityActivate(button.id),
+        )],
+        ..Default::default()
+    });
+    first_host
+        .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+            role: nickel_ui::SemanticRole::Button,
+            name: "first:1".into(),
+        })
+        .unwrap();
+    let second_host = &mut shell
+        .plugin_panel_extra_hosts
+        .values_mut()
+        .next()
+        .unwrap()
+        .1;
+    second_host
+        .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+            role: nickel_ui::SemanticRole::Button,
+            name: "second:0".into(),
+        })
+        .unwrap();
 }
 
 #[test]

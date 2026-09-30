@@ -3925,6 +3925,9 @@ impl LiveShell {
         }) {
             return self.set_plugin_enabled(&key.plugin_id, false);
         }
+        if let Some(host) = self.plugin_panel_host_for(key) {
+            host.application().retire_surface(&key.surface_id)?;
+        }
         if self.plugin_panel_owner == key.plugin_id
             && self.plugin_panel_surface.id == key.surface_id
         {
@@ -4065,9 +4068,26 @@ impl LiveShell {
             .cloned()
             .map(Ok)
             .unwrap_or_else(|| external_plugin_settings(&package.manifest))?;
-        let application = crate::plugin_panel::PluginPanelApplication::from_package_surface(
-            &package, &settings, &surface,
-        )?;
+        let runtime = self
+            .plugin_panel_host
+            .as_ref()
+            .filter(|_| self.plugin_panel_owner == id)
+            .map(|host| host.application().shared_runtime())
+            .or_else(|| {
+                self.plugin_panel_extra_hosts
+                    .iter()
+                    .find(|(key, _)| key.plugin_id == id)
+                    .map(|(_, (_, host))| host.application().shared_runtime())
+            })
+            .ok_or_else(|| format!("plugin {id:?} has no live sibling runtime"))?;
+        let application =
+            crate::plugin_panel::PluginPanelApplication::from_package_surface_with_runtime(
+                &package,
+                &settings,
+                &surface,
+                crate::plugin_panel::package_images(&package)?,
+                Some(runtime),
+            )?;
         let surface = application.resolved_surface(&surface)?;
         let host = nickel_ui::UiHost::new(application, surface.width, surface.height);
         if self.plugin_panel_host.is_none() {
@@ -4306,13 +4326,39 @@ impl LiveShell {
                         application.validate_contribution()?;
                         Ok::<_, String>(vec![(None, application)])
                     } else {
+                        let active_ids = self
+                            .plugin_panels()
+                            .into_iter()
+                            .filter(|(surface, _)| surface.plugin_id == id)
+                            .map(|(surface, _)| surface.surface_id)
+                            .collect::<std::collections::HashSet<_>>();
+                        let first_surface = package
+                            .manifest
+                            .surfaces
+                            .iter()
+                            .find(|surface| {
+                                active_ids.contains(&surface.id)
+                                    && !matches!(
+                                        surface.kind,
+                                        nickel_core::plugins::PluginSurfaceKind::Dialog
+                                            | nickel_core::plugins::PluginSurfaceKind::Overlay
+                                    )
+                            })
+                            .ok_or("installed plugin has no open ordinary surface")?;
+                        let runtime = crate::plugin_panel::PluginPanelApplication::shared_package_runtime(
+                            &package,
+                            &values,
+                            first_surface,
+                        )?;
+                        let images = crate::plugin_panel::package_images(&package)?;
                         package
                             .manifest
                             .surfaces
                             .iter()
+                            .filter(|surface| active_ids.contains(&surface.id))
                             .map(|surface| {
-                                crate::plugin_panel::PluginPanelApplication::from_package_surface(
-                                    &package, &values, surface,
+                                crate::plugin_panel::PluginPanelApplication::from_package_surface_with_runtime(
+                                    &package, &values, surface, images.clone(), Some(runtime.clone()),
                                 )
                                 .map(|application| (Some(surface.id.clone()), application))
                             })
@@ -4713,6 +4759,18 @@ impl LiveShell {
                                 .map(Ok)
                                 .unwrap_or_else(|| external_plugin_settings(&package.manifest))?;
                             let images = crate::plugin_panel::package_images(&package)?;
+                            let first_surface = surfaces.iter().find(|surface| {
+                                !matches!(
+                                    surface.kind,
+                                    nickel_core::plugins::PluginSurfaceKind::Dialog
+                                        | nickel_core::plugins::PluginSurfaceKind::Overlay
+                                )
+                            }).expect("validated package has an ordinary surface");
+                            let runtime = crate::plugin_panel::PluginPanelApplication::shared_package_runtime(
+                                &package,
+                                &settings,
+                                first_surface,
+                            )?;
                             surfaces
                                 .iter()
                                 .filter(|surface| {
@@ -4723,8 +4781,8 @@ impl LiveShell {
                                     )
                                 })
                                 .map(|surface| {
-                                    crate::plugin_panel::PluginPanelApplication::from_package_surface_with_images(
-                                        &package, &settings, surface, images.clone(),
+                                    crate::plugin_panel::PluginPanelApplication::from_package_surface_with_runtime(
+                                        &package, &settings, surface, images.clone(), Some(runtime.clone()),
                                     )
                                     .and_then(|application| {
                                         let resolved = application.resolved_surface(surface)?;

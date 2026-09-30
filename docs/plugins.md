@@ -269,8 +269,12 @@ A plugin cannot create an undeclared native window by changing JSX. `id` is opti
 supplies its surface identity. An explicit ID must match that identity.
 One plugin may declare several surfaces. Nickel renders the plugin for each
 surface with `nickel.data.surface.id` set to that host's ID, so the JSX can
-return the matching `Window` root. Each render currently has its own runtime;
-sharing one runtime across sibling windows is a later host change.
+return the matching `Window` root. Sibling windows share one JavaScript
+runtime while retaining separate hooks, handlers, and data for each surface.
+Closing a sibling retires its state; reopening it starts fresh.
+Module-level JavaScript values are shared by that runtime, so read
+`nickel.data.surface` inside a component or handler when behavior depends on
+the current surface.
 Controls do not need explicit IDs for ordinary rendering or event handling.
 Nickel derives stable control IDs from the tree path; list items rendered from
 arrays inside a `Window` must use unique `key` values, such as `key={item.id}`.

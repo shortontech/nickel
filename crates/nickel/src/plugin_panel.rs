@@ -339,7 +339,7 @@ pub fn enabled() -> bool {
 }
 
 pub struct PluginPanelApplication {
-    runtime: JsxRuntime,
+    runtime: std::rc::Rc<std::cell::RefCell<JsxRuntime>>,
     node: PanelNode,
     effects: Vec<PluginEffect>,
     pending_transient: Option<(OverlayId, UiId)>,
@@ -1174,13 +1174,21 @@ impl PluginPanelApplication {
         Self::from_package_surface_with_images(package, settings, surface, package_images(package)?)
     }
 
-    pub(crate) fn from_package_surface_with_images(
+    fn from_package_surface_with_images(
         package: &PluginPackage,
         settings: &std::collections::BTreeMap<String, serde_json::Value>,
         surface: &PluginSurface,
         images: PluginImages,
     ) -> Result<Self, String> {
-        let data = serde_json::json!({
+        Self::from_package_surface_with_runtime(package, settings, surface, images, None)
+    }
+
+    fn package_surface_data(
+        package: &PluginPackage,
+        settings: &std::collections::BTreeMap<String, serde_json::Value>,
+        surface: &PluginSurface,
+    ) -> String {
+        serde_json::json!({
             "settings": settings,
             "slots": {},
             "windows": [],
@@ -1193,12 +1201,43 @@ impl PluginPanelApplication {
                 "height": surface.height,
             },
         })
-        .to_string();
+        .to_string()
+    }
+
+    pub(crate) fn shared_package_runtime(
+        package: &PluginPackage,
+        settings: &std::collections::BTreeMap<String, serde_json::Value>,
+        first_surface: &PluginSurface,
+    ) -> Result<std::rc::Rc<std::cell::RefCell<JsxRuntime>>, String> {
+        let data = Self::package_surface_data(package, settings, first_surface);
+        Ok(std::rc::Rc::new(std::cell::RefCell::new(JsxRuntime::new(
+            &package.source,
+            Some(&data),
+        )?)))
+    }
+
+    pub(crate) fn shared_runtime(&self) -> std::rc::Rc<std::cell::RefCell<JsxRuntime>> {
+        self.runtime.clone()
+    }
+
+    pub(crate) fn retire_surface(&self, id: &str) -> Result<(), String> {
+        self.runtime.borrow_mut().drop_surface(id)
+    }
+
+    pub(crate) fn from_package_surface_with_runtime(
+        package: &PluginPackage,
+        settings: &std::collections::BTreeMap<String, serde_json::Value>,
+        surface: &PluginSurface,
+        images: PluginImages,
+        runtime: Option<std::rc::Rc<std::cell::RefCell<JsxRuntime>>>,
+    ) -> Result<Self, String> {
+        let data = Self::package_surface_data(package, settings, surface);
         let mut application = Self::new_with_manifest_for_surface(
             &package.source,
             &package.manifest,
             Some(data),
             Some(&surface.id),
+            runtime,
         )?;
         application.stylesheet = StyleSheet::compile(&package.stylesheet)?;
         application.resolved_surface(surface)?;
@@ -1250,6 +1289,7 @@ impl PluginPanelApplication {
                     &package.manifest,
                     Some(data.to_string()),
                     Some(&surface.id),
+                    None,
                 )
                 .map_err(|error| format!("surface {:?}: {error}", surface.id))?;
                 application.stylesheet = StyleSheet::compile(&package.stylesheet)?;
@@ -1435,13 +1475,17 @@ impl PluginPanelApplication {
         if self.projection_data.as_deref() == Some(serialized.as_str()) {
             return Ok(false);
         }
-        self.runtime.set_data(&serialized)?;
-        self.node = render_panel(
-            &mut self.runtime,
-            &self.manifest,
-            self.expected_surface_id.as_deref(),
-            "__nickelRender()",
-        )?;
+        self.node = {
+            let mut runtime = self.runtime.borrow_mut();
+            runtime.select_surface(self.expected_surface_id.as_deref().unwrap_or("default"))?;
+            runtime.set_data(&serialized)?;
+            render_panel(
+                &mut runtime,
+                &self.manifest,
+                self.expected_surface_id.as_deref(),
+                "__nickelRender()",
+            )?
+        };
         self.projection_data = Some(serialized);
         Ok(true)
     }
@@ -1468,7 +1512,7 @@ impl PluginPanelApplication {
         manifest: &PluginManifest,
         data: Option<String>,
     ) -> Result<Self, String> {
-        Self::new_with_manifest_for_surface(source, manifest, data, None)
+        Self::new_with_manifest_for_surface(source, manifest, data, None, None)
     }
 
     fn new_with_manifest_for_surface(
@@ -1476,14 +1520,29 @@ impl PluginPanelApplication {
         manifest: &PluginManifest,
         data: Option<String>,
         expected_surface_id: Option<&str>,
+        shared_runtime: Option<std::rc::Rc<std::cell::RefCell<JsxRuntime>>>,
     ) -> Result<Self, String> {
-        let mut runtime = JsxRuntime::new(source, data.as_deref())?;
-        let node = render_panel(
-            &mut runtime,
-            manifest,
-            expected_surface_id,
-            "__nickelRender()",
-        )?;
+        let runtime = if let Some(runtime) = shared_runtime {
+            runtime
+        } else {
+            std::rc::Rc::new(std::cell::RefCell::new(JsxRuntime::new(
+                source,
+                data.as_deref(),
+            )?))
+        };
+        let node = {
+            let mut runtime_ref = runtime.borrow_mut();
+            runtime_ref.select_surface(expected_surface_id.unwrap_or("default"))?;
+            if let Some(data) = data.as_deref() {
+                runtime_ref.set_data(data)?;
+            }
+            render_panel(
+                &mut runtime_ref,
+                manifest,
+                expected_surface_id,
+                "__nickelRender()",
+            )?
+        };
         Ok(Self {
             runtime,
             node,
@@ -1702,13 +1761,24 @@ impl nickel_ui::Application for PluginPanelApplication {
                 serde_json::Value::Array(events)
             )
         };
-        let rendered = render_panel(
-            &mut self.runtime,
-            &self.manifest,
-            self.expected_surface_id.as_deref(),
-            &expression,
-        );
-        let effects = self.runtime.take_effects();
+        let (rendered, effects) = {
+            let mut runtime = self.runtime.borrow_mut();
+            if let Err(error) =
+                runtime.select_surface(self.expected_surface_id.as_deref().unwrap_or("default"))
+            {
+                self.runtime_failure = Some(error.clone());
+                self.last_error = Some(error);
+                return;
+            }
+            let rendered = render_panel(
+                &mut runtime,
+                &self.manifest,
+                self.expected_surface_id.as_deref(),
+                &expression,
+            );
+            let effects = runtime.take_effects();
+            (rendered, effects)
+        };
         (|| match (rendered, effects) {
             (Ok(node), Ok(effects)) => {
                 let mut approved = Vec::new();
@@ -2751,7 +2821,11 @@ impl nickel_ui::Application for PluginPanelApplication {
                 self.last_error = Some(error);
             }
         })();
-        if let Err(error) = self.runtime.finish_event(self.last_error.is_none()) {
+        if let Err(error) = self
+            .runtime
+            .borrow_mut()
+            .finish_event(self.last_error.is_none())
+        {
             self.runtime_failure = Some(error.clone());
             self.last_error = Some(error);
         }

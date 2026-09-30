@@ -60,6 +60,8 @@ let __listKeyErrors = [];
 let __pendingRender = null;
 let __pendingEvent = null;
 let __nickelData = Object.freeze({query: '', results: []});
+let __activeSurface = 'default';
+const __surfaceStates = new Map();
 
 const nickel = Object.freeze({
     request(effect) { __effects.push(effect); },
@@ -69,6 +71,50 @@ const nickel = Object.freeze({
 });
 
 function __nickelSetData(data) { __nickelData = Object.freeze(data); }
+
+function __nickelSelectSurface(id) {
+    if (typeof id !== 'string' || !id.length) throw Error('invalid surface identity');
+    if (__pendingRender !== null || __pendingEvent !== null)
+        throw Error('cannot switch surfaces during a render or event');
+    if (id === __activeSurface) return;
+    __surfaceStates.set(__activeSurface, {
+        hooks: __componentHooks,
+        handlers: __handlers,
+        previousHandlers: __previousHandlers,
+        effects: __effects,
+        data: __nickelData
+    });
+    const state = __surfaceStates.get(id);
+    __componentHooks = state?.hooks ?? new Map();
+    __handlers = state?.handlers ?? [];
+    __previousHandlers = state?.previousHandlers ?? [];
+    __effects = state?.effects ?? [];
+    __nickelData = state?.data ?? Object.freeze({query: '', results: []});
+    __visitedComponents = new Set();
+    __componentChildren = new Map();
+    __currentComponent = null;
+    __hookIndex = 0;
+    __listKeyErrors = [];
+    __activeSurface = id;
+}
+
+function __nickelDropSurface(id) {
+    if (__pendingRender !== null || __pendingEvent !== null)
+        throw Error('cannot retire a surface during a render or event');
+    __surfaceStates.delete(id);
+    if (id !== __activeSurface) return;
+    __componentHooks = new Map();
+    __handlers = [];
+    __previousHandlers = [];
+    __effects = [];
+    __nickelData = Object.freeze({query: '', results: []});
+    __visitedComponents = new Set();
+    __componentChildren = new Map();
+    __currentComponent = null;
+    __hookIndex = 0;
+    __listKeyErrors = [];
+    __activeSurface = 'default';
+}
 
 function __nickelTakeEffects() {
     return JSON.stringify(__effects.splice(0));
