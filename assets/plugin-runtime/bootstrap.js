@@ -184,7 +184,11 @@ const nickel = Object.freeze({
     applications: Object.freeze({
         list() { return __nickelResource('applications', []); },
         launch(id) { __effects.push({type:'applications.launch',id:__nickelIdentity(id)}); },
-        togglePin(id) { __effects.push({type:'applications.togglePin',id:__nickelIdentity(id)}); }
+        togglePin(id) { __effects.push({type:'applications.togglePin',id:__nickelIdentity(id)}); },
+        movePin(id, direction) {
+            if (direction !== -1 && direction !== 1) throw TypeError('pin direction must be -1 or 1');
+            __effects.push({type:'applications.movePin',id:__nickelIdentity(id),direction});
+        }
     }),
     registerSetting, registerSettingsPage, readPluginSettings, readSettingsPages, readPluginSettingsPages,
     request(effect) { __effects.push(effect); },

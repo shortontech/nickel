@@ -3548,6 +3548,7 @@ impl LiveShell {
                         "id": application.id(),
                         "name": application.name().chars().take(120).collect::<String>(),
                         "pinned": self.launcher.is_pinned(application.id()),
+                        "pinOrder": self.launcher.preferences().favorites().iter().position(|id| application.matches_native_id(id)),
                     })
                 })
                 .collect(),
@@ -6487,6 +6488,15 @@ impl LiveShell {
                 crate::plugin_panel::PluginEffect::ContextTaskbarItem { index, id } => {
                     if crate::plugin_panel::taskbar_item_matches(&self.panel_groups(), index, &id) {
                         self.apply_panel_action(TaskbarAction::TaskContext(index));
+                        changed = true;
+                    }
+                }
+                crate::plugin_panel::PluginEffect::MoveApplicationPin { id, direction } => {
+                    if matches!(direction, -1 | 1)
+                        && self.launcher.is_pinned(&id)
+                        && self.launcher.move_pin(&id, isize::from(direction))
+                    {
+                        self.persist_launcher_preferences();
                         changed = true;
                     }
                 }

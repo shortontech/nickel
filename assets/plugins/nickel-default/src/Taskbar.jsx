@@ -27,6 +27,7 @@ function Task(props) {
             pendingDrag.current = 0;
             if (move) {
                 suppressClick.current = true;
+                if (item.capabilityModel) { nickel.applications.movePin(item.id, move < 0 ? -1 : 1); return; }
                 nickel.request({type: "taskbar-move-pin", index: item.index,
                     id: item.id, direction: move < 0 ? "left" : "right"});
             }

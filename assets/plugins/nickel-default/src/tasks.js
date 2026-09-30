@@ -1,7 +1,7 @@
 // Grouping belongs to the shell package; native capabilities retain stable IDs.
 export function taskItems(applications, windows) {
     const groups = new Map();
-    for (const application of applications) {
+    for (const application of applications.slice().sort((left,right) => (left.pinOrder ?? Number.MAX_SAFE_INTEGER) - (right.pinOrder ?? Number.MAX_SAFE_INTEGER))) {
         if (application.pinned) groups.set(application.id, {id:application.id, name:application.name, pinned:true, windows:[], active:false});
     }
     for (const window of windows) {

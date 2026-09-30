@@ -139,6 +139,15 @@ mod tests {
         assert_eq!(effects[1]["id"], "editor");
         assert_eq!(effects[2]["type"], "tray.activate");
         assert!(runtime.eval("nickel.windows.activate(42)").is_err());
+        assert!(
+            runtime
+                .eval("nickel.applications.movePin('editor', 0)")
+                .is_err()
+        );
+        runtime
+            .eval("nickel.applications.movePin('editor', -1)")
+            .unwrap();
+        assert_eq!(runtime.take_effects().unwrap()[0]["direction"], -1);
     }
 
     use super::*;

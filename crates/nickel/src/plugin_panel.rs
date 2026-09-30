@@ -394,6 +394,10 @@ pub(crate) fn package_images(package: &PluginPackage) -> Result<PluginImages, St
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum PluginEffect {
+    MoveApplicationPin {
+        id: String,
+        direction: i8,
+    },
     InvokeRegisteredSetting {
         caller: String,
         provider: String,
@@ -2051,6 +2055,39 @@ impl nickel_ui::Application for PluginPanelApplication {
                 let mut requested_dialog = None;
                 for effect in effects {
                     match effect.as_str() {
+                        _ if effect.get("type").and_then(Value::as_str)
+                            == Some("applications.movePin") =>
+                        {
+                            if !self
+                                .manifest
+                                .capabilities
+                                .contains(&PluginCapability::ApplicationsPin)
+                            {
+                                self.last_error =
+                                    Some("application pin grant is unavailable".into());
+                                return;
+                            }
+                            let Some(id) = effect
+                                .get("id")
+                                .and_then(Value::as_str)
+                                .filter(|id| !id.is_empty() && id.len() <= 256)
+                            else {
+                                self.last_error = Some("invalid application identity".into());
+                                return;
+                            };
+                            let Some(direction) = effect
+                                .get("direction")
+                                .and_then(Value::as_i64)
+                                .filter(|direction| matches!(direction, -1 | 1))
+                            else {
+                                self.last_error = Some("invalid pin direction".into());
+                                return;
+                            };
+                            approved.push(PluginEffect::MoveApplicationPin {
+                                id: id.into(),
+                                direction: direction as i8,
+                            });
+                        }
                         _ if effect.get("type").and_then(Value::as_str)
                             == Some("settings.invoke") =>
                         {
