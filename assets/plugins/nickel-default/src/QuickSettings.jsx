@@ -2,7 +2,7 @@
 import "./styles/quick-settings.css";
 // Nickel owns status snapshots and validates every requested system action.
 export function QuickSettings(props) {
-    const data = {...{scrollHeight:552,network:{available:false,enabled:false,networks:[]},bluetooth:{available:false,powered:false,discovering:false,devices:[]},audio:{muted:false,percent:0,devices:[]},workspaces:[],projectionModes:[],slots:{}}, ...props?.data, audio:props?.data?.audio || nickel.audio.get()};
+    const data = {...{scrollHeight:552,network:{available:false,enabled:false,networks:[]},bluetooth:{available:false,powered:false,discovering:false,devices:[]},audio:{muted:false,percent:0,devices:[]},workspaces:[],projectionModes:[],slots:{}}, ...props?.data, audio:props?.data?.audio || nickel.audio.get(), network:nickel.wifi.get(), bluetooth:nickel.bluetooth.get()};
     const sections = (data.slots && data.slots["control-section"]) || [];
     const [wifiOpen, setWifiOpen] = useState(false);
     const [bluetoothOpen, setBluetoothOpen] = useState(false);
@@ -22,23 +22,24 @@ export function QuickSettings(props) {
                 <Column className="control-sections">
                     <Row>
                         <Text>{"Wi-Fi: " + (data.network.available ? data.network.enabled ? "On" : "Off" : "Unavailable")}</Text>
-                        {data.network.available ? <Button id="wifi-power" onClick={() => request("wifi-power", !data.network.enabled)}>{data.network.enabled ? "Turn off" : "Turn on"}</Button> : null}
+                        {data.network.operations.setEnabled ? <Button id="wifi-power" onClick={() => nickel.wifi.setEnabled(!data.network.enabled)}>{data.network.enabled ? "Turn off" : "Turn on"}</Button> : null}
                         <Button id="wifi-section" onClick={() => setWifiOpen(!wifiOpen)}>{wifiOpen ? "Less" : "More"}</Button>
                     </Row>
                     {wifiOpen ? data.network.networks.map(network => <Button key={network.id}
-                        id={"wifi-" + network.id} onClick={() => request("wifi-activate", network.id)}>
+                        id={"wifi-" + network.id} disabled={!network.canConnect} onClick={() => nickel.wifi.connect(network.id)}>
                         {network.name + (network.connected ? " · Connected" : network.saved ? " · Saved" : "")}
                     </Button>) : null}
                     <Row>
                         <Text>{"Bluetooth: " + (data.bluetooth.available ? data.bluetooth.powered ? "On" : "Off" : "Unavailable")}</Text>
-                        {data.bluetooth.available ? <Button id="bluetooth-power" onClick={() => request("bluetooth-power", !data.bluetooth.powered)}>{data.bluetooth.powered ? "Turn off" : "Turn on"}</Button> : null}
+                        {data.bluetooth.operations.setPowered ? <Button id="bluetooth-power" onClick={() => nickel.bluetooth.setPowered(!data.bluetooth.powered)}>{data.bluetooth.powered ? "Turn off" : "Turn on"}</Button> : null}
                         <Button id="bluetooth-section" onClick={() => setBluetoothOpen(!bluetoothOpen)}>{bluetoothOpen ? "Less" : "More"}</Button>
                     </Row>
                     {bluetoothOpen ? <Column>
-                        {data.bluetooth.available && data.bluetooth.powered ? <Button id="bluetooth-scan"
-                            onClick={() => request("bluetooth-scan", !data.bluetooth.discovering)}>{data.bluetooth.discovering ? "Stop scan" : "Scan nearby"}</Button> : null}
+                        {data.bluetooth.operations.setDiscovery && data.bluetooth.powered ? <Button id="bluetooth-scan"
+                            onClick={() => nickel.bluetooth.setDiscovery(!data.bluetooth.discovering)}>{data.bluetooth.discovering ? "Stop scan" : "Scan nearby"}</Button> : null}
                         {data.bluetooth.devices.map(device => <Button key={device.id} id={"bluetooth-" + device.id}
-                            onClick={() => request("bluetooth-device", device.id)}>
+                            disabled={!data.bluetooth.powered || !(device.paired ? data.bluetooth.operations[device.connected ? "disconnect" : "connect"] : data.bluetooth.operations.pair)}
+                            onClick={() => device.paired ? device.connected ? nickel.bluetooth.disconnect(device.id) : nickel.bluetooth.connect(device.id) : nickel.bluetooth.pair(device.id)}>
                             {device.name + (device.connected ? " · Connected" : device.paired ? " · Paired" : "")}
                         </Button>)}
                     </Column> : null}
