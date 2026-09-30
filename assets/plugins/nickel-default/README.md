@@ -1,10 +1,10 @@
 # Nickel default shell package draft
 
-This directory is the reviewable package layout described by Spec 0263. It is
-intentionally not activated by the current plugin loader. `nickel.json` uses the
-planned package schema and points at one ES module graph rooted at
-`src/Shell.jsx`; adding a current `plugin.json` would incorrectly opt the draft
-into the one-script-per-surface loader.
+This directory contains the default shell module graph described by Spec 0263.
+`plugin.json` uses the current validated package schema, with composition metadata
+and bounded grants for every surface. JSX imports refer to emitted JavaScript
+paths so the developer compiler can stage the entire graph. It remains a draft:
+stock activation awaits capability snapshots and complete Settings controls.
 
 The taskbar, launcher, quick settings, notification JSX, and their CSS are
 source-preserving copies of the shipped first-party plugins. The modules add CSS imports, named component exports, and unique window IDs.
@@ -48,7 +48,7 @@ copied components still read today's bounded slot data until that API lands.
 4. The core Settings registry exists. JavaScript registration, reactive reads,
    live value/change bindings, and cross-provider component resolution remain
    unconnected to this package.
-5. Unified capability clients behind the dotted grants in `nickel.json`.
+5. Unified capability clients behind the grants in `plugin.json`.
 6. Migration of copied legacy requests and `nickel.data` snapshots to those
    clients without changing their public behavior.
 

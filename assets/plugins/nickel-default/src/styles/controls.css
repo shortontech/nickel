@@ -1,0 +1,34 @@
+/* Public native compound-control parts. Packages may replace every rule. */
+switch {
+    width: 44px; height: 44px;
+    align-items: center; justify-content: center;
+}
+switch-track {
+    width: 42px; height: 24px; padding: 3px;
+    border-radius: 12px; border: 1px solid var(--nickel-border);
+    background: var(--nickel-surface); color: var(--nickel-text);
+}
+switch-track.on, switch-track.mixed, switch-track.disabled-on {
+    background: var(--nickel-accent-soft); border-color: var(--nickel-accent);
+}
+switch-thumb {
+    width: 18px; height: 18px; border-radius: 9px;
+    background: var(--nickel-text);
+}
+color-swatch {
+    width: 42px; height: 42px; padding: 4px; border-radius: 21px;
+    border: 1px solid var(--nickel-muted);
+    align-items: center; justify-content: center;
+}
+color-swatch.selected { border: 2px solid var(--nickel-text); }
+color-swatch-fill { width: 32px; height: 32px; border-radius: 16px; }
+color-swatch-label { font-size: 24px; color: var(--nickel-muted); }
+progress { background: var(--nickel-border); border-radius: 3px; }
+progress-fill { background: var(--nickel-accent); border-radius: 3px; }
+slider { height: 24px; }
+slider-track { height: 6px; border-radius: 3px; background: var(--nickel-border); }
+slider-fill { background: var(--nickel-accent); }
+slider-thumb {
+    width: 20px; height: 20px; border-radius: 10px;
+    background: var(--nickel-text); border: 1px solid var(--nickel-accent);
+}

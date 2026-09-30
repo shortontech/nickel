@@ -1646,6 +1646,23 @@ mod tests {
     }
 
     #[test]
+    fn default_shell_manifest_declares_one_composed_package() {
+        let manifest = PluginManifest::from_json(include_str!(
+            "../../../assets/plugins/nickel-default/plugin.json"
+        ))
+        .unwrap();
+        assert_eq!(manifest.entry, "src/Shell.js");
+        assert_eq!(manifest.surfaces.len(), 5);
+        assert!(
+            manifest
+                .composition
+                .unwrap()
+                .exports
+                .contains_key("shell.settings")
+        );
+    }
+
+    #[test]
     fn composition_is_bound_to_package_identity_and_approval() {
         let mut manifest = PluginManifest::from_json(VALID).unwrap();
         manifest.version = Some("0.2.0".into());

@@ -1,9 +1,10 @@
+import "./styles/controls.css";
 // @jsx h
-import { Taskbar } from "./Taskbar.jsx";
-import { Launcher } from "./Launcher.jsx";
-import { QuickSettings } from "./QuickSettings.jsx";
-import { Notifications } from "./Notifications.jsx";
-import { Settings, SettingsNavigation, SettingControl } from "./Settings.jsx";
+import { Taskbar } from "./Taskbar.js";
+import { Launcher } from "./Launcher.js";
+import { QuickSettings } from "./QuickSettings.js";
+import { Notifications } from "./Notifications.js";
+import { Settings, SettingsNavigation, SettingControl } from "./Settings.js";
 
 export { Taskbar, Launcher, QuickSettings, Notifications, Settings };
 export { SettingsNavigation, SettingControl };

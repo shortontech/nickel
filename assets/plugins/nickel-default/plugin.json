@@ -1,0 +1,95 @@
+{
+  "api_version": 1,
+  "id": "nickel-default",
+  "name": "Nickel Default Shell",
+  "author": "Nickel",
+  "version": "0.2.0",
+  "entry": "src/Shell.js",
+  "composition": {
+    "api_version": 1,
+    "id": "nickel-default",
+    "version": "0.2.0",
+    "exports": {
+      "shell": "./src/Shell.js#Shell",
+      "shell.taskbar": "./src/Taskbar.js#Taskbar",
+      "shell.launcher": "./src/Launcher.js#Launcher",
+      "shell.quickSettings": "./src/QuickSettings.js#QuickSettings",
+      "shell.notifications": "./src/Notifications.js#Notifications",
+      "shell.settings": "./src/Settings.js#Settings",
+      "shell.settings.navigation": "./src/Settings.js#SettingsNavigation",
+      "shell.settings.controls": "./src/Settings.js#SettingControl"
+    }
+  },
+  "capabilities": [
+    "applications-launch",
+    "applications-pin",
+    "applications-read",
+    "audio-control",
+    "audio-read",
+    "bluetooth-control",
+    "bluetooth-read",
+    "control-center-show",
+    "desktop-control",
+    "display-control",
+    "launcher-show",
+    "network-control",
+    "network-read",
+    "notifications-act",
+    "notifications-read",
+    "on-screen-keyboard-show",
+    "projects-menu-show",
+    "projects-open",
+    "projects-read",
+    "session-control",
+    "session-logout-request",
+    "settings-read",
+    "settings-show",
+    "settings-write",
+    "tray-activate",
+    "tray-context",
+    "tray-read",
+    "windows-context",
+    "windows-focus",
+    "windows-read",
+    "workspaces-read",
+    "workspaces-switch"
+  ],
+  "surfaces": [
+    {
+      "id": "taskbar",
+      "kind": "panel",
+      "width": 1920,
+      "height": 56,
+      "output": "all",
+      "reserve_work_area": true
+    },
+    {
+      "id": "settings",
+      "kind": "window",
+      "width": 1100,
+      "height": 800
+    },
+    {
+      "id": "launcher",
+      "kind": "window",
+      "width": 620,
+      "height": 548
+    },
+    {
+      "id": "quick-settings",
+      "kind": "overlay",
+      "width": 420,
+      "height": 600,
+      "anchor": "top-right",
+      "passive": true
+    },
+    {
+      "id": "notifications",
+      "kind": "overlay",
+      "width": 420,
+      "height": 180,
+      "anchor": "top-right",
+      "passive": true
+    }
+  ]
+}

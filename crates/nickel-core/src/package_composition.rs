@@ -485,7 +485,7 @@ fn identity(package: &ShellPackageComposition) -> Result<PackageIdentity, Compos
     })
 }
 fn valid_contract(value: &str) -> bool {
-    value.contains('.') && valid_name(value, true)
+    valid_name(value, true)
 }
 fn valid_name(value: &str, uppercase: bool) -> bool {
     !value.is_empty()
