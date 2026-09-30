@@ -192,6 +192,40 @@ mod tests {
     use super::*;
 
     #[test]
+    fn slider_numeric_ranges_normalize_native_values_and_quantize_changes() {
+        let mut runtime = JsxRuntime::new("function App() { return h(Slider, {id:'volume', accessibilityLabel:'Volume', min:10, max:110, step:5, value:60, onChange:value=>nickel.request({type:'changed',value})}); }", None).unwrap();
+        let rendered = runtime
+            .render("__nickelRender()", |node| Ok(node.clone()))
+            .unwrap();
+        assert_eq!(rendered["value"], serde_json::json!(0.5));
+        let action = rendered["action"].as_u64().unwrap();
+        runtime
+            .render(&format!("__nickelDispatch({action},0.53)"), |node| {
+                Ok(node.clone())
+            })
+            .unwrap();
+        assert_eq!(
+            runtime.take_effects().unwrap(),
+            vec![serde_json::json!({"type":"changed","value":65})]
+        );
+        assert!(
+            runtime
+                .eval("h(Slider,{min:1,max:1,value:1,onChange:()=>{}})")
+                .is_err()
+        );
+        assert!(
+            runtime
+                .eval("h(Slider,{min:0,max:10,value:11,onChange:()=>{}})")
+                .is_err()
+        );
+        assert!(
+            runtime
+                .eval("h(Slider,{value:0.5,step:0,onChange:()=>{}})")
+                .is_err()
+        );
+    }
+
+    #[test]
     fn drop_handler_receives_serializable_event_data() {
         let source = "function App() { return h('div', {id: 'target', onDrop: event => nickel.request({type: 'dropped', ...event})}); }";
         let mut runtime = JsxRuntime::new(source, None).unwrap();

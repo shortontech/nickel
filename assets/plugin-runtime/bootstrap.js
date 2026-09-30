@@ -45,7 +45,20 @@ const Text = 'text';
 const Image = 'image';
 const ImageButton = 'image-button';
 const Progress = 'progress';
-const Slider = 'slider';
+// Native slider input is normalized; JSX accepts ordinary numeric ranges.
+function Slider(props) {
+    const {min = 0, max = 1, step, value, onChange, children, ...rest} = props;
+    if (!Number.isFinite(min) || !Number.isFinite(max) || max <= min
+        || !Number.isFinite(value) || value < min || value > max
+        || (step !== undefined && (!Number.isFinite(step) || step <= 0)))
+        throw RangeError('invalid slider range, value, or step');
+    if (typeof onChange !== 'function') throw TypeError('slider requires onChange');
+    return h('slider', {...rest, value:(value - min) / (max - min), onChange:fraction => {
+        let next = min + Math.max(0, Math.min(1, fraction)) * (max - min);
+        if (step !== undefined) next = min + Math.round((next - min) / step) * step;
+        onChange(Math.max(min, Math.min(max, next)));
+    }}, ...(children || []));
+}
 const Switch = 'switch';
 const ColorSwatch = 'color-swatch';
 const Select = 'select';

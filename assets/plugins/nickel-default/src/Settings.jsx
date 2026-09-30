@@ -55,7 +55,7 @@ export function SettingControl(props) {
             }} />;
     }
     if (setting.type === "action") {
-        return <Button id={controlId} onClick={() => change(true)}>{setting.actionLabel || setting.label}</Button>;
+        return <Button id={controlId} onClick={() => change(null)}>{setting.actionLabel || setting.label}</Button>;
     }
     return <Text>{value === undefined || value === null ? "" : String(value)}</Text>;
 }
