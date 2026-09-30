@@ -61,6 +61,13 @@ impl JsxRuntime {
         self.eval(&format!("__nickelSelectSurface({id})"))
     }
 
+    pub fn register_surface_entry(&mut self, id: &str, source: &str) -> Result<(), String> {
+        let id = serde_json::to_string(id).map_err(|error| error.to_string())?;
+        self.eval(&format!(
+            "__nickelRegisterSurfaceApp({id}, (function() {{\n{source}\nreturn App;\n}})())"
+        ))
+    }
+
     pub fn drop_surface(&mut self, id: &str) -> Result<(), String> {
         let id = serde_json::to_string(id).map_err(|error| error.to_string())?;
         self.eval(&format!("__nickelDropSurface({id})"))
@@ -181,6 +188,54 @@ mod tests {
             .render("__nickelRender()", |node| Ok(node.clone()))
             .unwrap();
         assert!(second.to_string().contains("second:0"));
+    }
+
+    #[test]
+    fn scoped_entry_does_not_replace_the_main_app() {
+        let mut runtime = JsxRuntime::new(
+            "function App() { const [count, setCount] = useState(0); return h(Window, {}, h(Button, {onClick: () => setCount(count + 1)}, `Main ${count}`)); }",
+            None,
+        )
+        .unwrap();
+        runtime
+            .render("__nickelRender()", |node| Ok(node.clone()))
+            .unwrap();
+        runtime
+            .render("__nickelDispatch(0)", |node| Ok(node.clone()))
+            .unwrap();
+        runtime.finish_event(true).unwrap();
+        runtime
+            .register_surface_entry(
+                "menu",
+                "function App() { const [count, setCount] = useState(0); return h(Window, {}, h(Button, {onClick: () => setCount(count + 1)}, `Menu ${count}`)); }",
+            )
+            .unwrap();
+        runtime.select_surface("menu").unwrap();
+        let menu = runtime
+            .render("__nickelRender()", |node| Ok(node.clone()))
+            .unwrap();
+        assert!(menu.to_string().contains("Menu 0"));
+        let menu = runtime
+            .render("__nickelDispatch(0)", |node| Ok(node.clone()))
+            .unwrap();
+        runtime.finish_event(true).unwrap();
+        assert!(menu.to_string().contains("Menu 1"));
+        runtime.select_surface("default").unwrap();
+        let main = runtime
+            .render("__nickelRender()", |node| Ok(node.clone()))
+            .unwrap();
+        assert!(main.to_string().contains("Main 1"));
+        runtime.drop_surface("menu").unwrap();
+        assert!(
+            !runtime
+                .eval_json::<bool>("__surfaceApps.has('menu')")
+                .unwrap()
+        );
+        runtime.select_surface("default").unwrap();
+        let main = runtime
+            .render("__nickelRender()", |node| Ok(node.clone()))
+            .unwrap();
+        assert!(main.to_string().contains("Main 1"));
     }
 
     #[test]

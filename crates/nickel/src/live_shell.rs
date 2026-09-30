@@ -4399,7 +4399,7 @@ impl LiveShell {
                     extension_bytes = Some(application.retained_contribution_bytes());
                     host.application = application;
                     if host.contract == nickel_core::plugins::PluginSlotContract::Action {
-                        self.application_menu_plugin_host = None;
+                        self.clear_application_menu_plugin_host();
                     }
                 }
             }
@@ -4465,7 +4465,7 @@ impl LiveShell {
             .remove(id)
             .is_some_and(|host| host.contract == nickel_core::plugins::PluginSlotContract::Action)
         {
-            self.application_menu_plugin_host = None;
+            self.clear_application_menu_plugin_host();
         }
         self.plugin_surface_hosts
             .retain(|key, _| key.plugin_id != id);
@@ -4497,8 +4497,20 @@ impl LiveShell {
         self.plugin_taskbar_menu_memory = 0;
         self.panel_pet_deadline = None;
         self.panel_deadline = None;
-        self.application_menu_plugin_host = None;
-        self.window_menu_plugin_host = None;
+        self.clear_application_menu_plugin_host();
+        self.clear_window_menu_plugin_host();
+    }
+
+    fn clear_application_menu_plugin_host(&mut self) {
+        if let Some(host) = self.application_menu_plugin_host.take() {
+            let _ = host.application().retire_surface();
+        }
+    }
+
+    fn clear_window_menu_plugin_host(&mut self) {
+        if let Some(host) = self.window_menu_plugin_host.take() {
+            let _ = host.application().retire_surface();
+        }
     }
 
     fn fail_taskbar_plugin_runtime(&mut self, error: String) {
@@ -4818,7 +4830,7 @@ impl LiveShell {
             if self.plugin_slot_hosts.remove(id).is_some_and(|host| {
                 host.contract == nickel_core::plugins::PluginSlotContract::Action
             }) {
-                self.application_menu_plugin_host = None;
+                self.clear_application_menu_plugin_host();
             }
             self.plugin_surface_hosts
                 .retain(|key, _| key.plugin_id != id);
@@ -4872,7 +4884,7 @@ impl LiveShell {
                 },
             );
             if contract == nickel_core::plugins::PluginSlotContract::Action {
-                self.application_menu_plugin_host = None;
+                self.clear_application_menu_plugin_host();
             }
             Ok(())
         } else if let Some(external_panel) = external_panel {
@@ -6972,7 +6984,7 @@ impl LiveShell {
                 self.close_window_preview();
                 self.window_menu_generation = self.window_menu_generation.saturating_add(1);
                 self.application_menu_target = Some(target);
-                self.application_menu_plugin_host = None;
+                self.clear_application_menu_plugin_host();
                 self.plugin_taskbar_menu_memory = 0;
                 let x = self
                     .plugin_taskbar_host
@@ -7719,7 +7731,7 @@ impl LiveShell {
                     })
                     .unwrap_or(self.panel_origin_x);
                 self.application_menu_target = None;
-                self.application_menu_plugin_host = None;
+                self.clear_application_menu_plugin_host();
                 self.plugin_taskbar_menu_memory = 0;
                 self.window_menu_generation = self.window_menu_generation.saturating_add(1);
                 self.window_menu = Some(window);
@@ -7728,7 +7740,7 @@ impl LiveShell {
                     .iter()
                     .find(|candidate| candidate.id == window)
                     .cloned();
-                self.window_menu_plugin_host = None;
+                self.clear_window_menu_plugin_host();
                 self.window_menu_anchor_x = Some(x);
                 self.window_menu_anchor_y = Some(self.panel_origin_y);
                 let _ = self.send_session_command(
@@ -8260,9 +8272,9 @@ impl LiveShell {
         self.window_menu_snapshot = None;
         self.window_menu_anchor_x = None;
         self.window_menu_anchor_y = None;
-        self.window_menu_plugin_host = None;
+        self.clear_window_menu_plugin_host();
         self.application_menu_target = None;
-        self.application_menu_plugin_host = None;
+        self.clear_application_menu_plugin_host();
         self.plugin_taskbar_menu_memory = 0;
     }
 
@@ -8334,9 +8346,9 @@ impl LiveShell {
         self.window_menu_snapshot = None;
         self.window_menu_anchor_x = None;
         self.window_menu_anchor_y = None;
-        self.window_menu_plugin_host = None;
+        self.clear_window_menu_plugin_host();
         self.application_menu_target = None;
-        self.application_menu_plugin_host = None;
+        self.clear_application_menu_plugin_host();
         self.plugin_taskbar_menu_memory = 0;
         if self.plugin_taskbar_host.is_some() {
             self.record_taskbar_memory();
@@ -9467,7 +9479,7 @@ impl LiveShell {
         self.window_menu_generation = self.window_menu_generation.saturating_add(1);
         self.window_menu = Some(snapshot.id);
         self.window_menu_snapshot = Some(snapshot);
-        self.window_menu_plugin_host = None;
+        self.clear_window_menu_plugin_host();
         self.window_menu_anchor_x = Some(x);
         self.window_menu_anchor_y = Some(y);
         let sent = self.send_session_command(
@@ -10620,7 +10632,7 @@ impl LiveShell {
             return self.application_menu_scene();
         }
         if self.window_menu.is_none() && self.window_menu_snapshot.is_none() {
-            self.window_menu_plugin_host = None;
+            self.clear_window_menu_plugin_host();
             return Vec::new();
         }
         let Some(snapshot) = self.window_menu_snapshot.clone().or_else(|| {
@@ -10644,10 +10656,18 @@ impl LiveShell {
                 + 48 * window_menu_max_rows(&snapshot, &self.workspaces, &outputs).min(32))
                 as u32;
             if self.window_menu_plugin_host.is_none() {
-                match crate::plugin_panel::PluginPanelApplication::bundled_with_data(
+                let runtime = self
+                    .plugin_taskbar_host
+                    .as_ref()
+                    .unwrap()
+                    .application()
+                    .shared_runtime();
+                match crate::plugin_panel::PluginPanelApplication::bundled_with_shared_entry_runtime(
                     crate::plugin_panel::taskbar_manifest(),
                     "window-menu.js",
                     projection.to_json(),
+                    "taskbar-window-menu",
+                    runtime,
                 ) {
                     Ok(application) => {
                         self.window_menu_plugin_host = Some(nickel_ui::UiHost::new(
@@ -10690,7 +10710,7 @@ impl LiveShell {
             return Vec::new();
         }
         let Some(target) = self.application_menu_target.clone() else {
-            self.application_menu_plugin_host = None;
+            self.clear_application_menu_plugin_host();
             self.plugin_taskbar_menu_memory = 0;
             return Vec::new();
         };
@@ -10717,10 +10737,18 @@ impl LiveShell {
             })
             .to_string();
             if self.application_menu_plugin_host.is_none() {
-                match crate::plugin_panel::PluginPanelApplication::bundled_with_data(
+                let runtime = self
+                    .plugin_taskbar_host
+                    .as_ref()
+                    .unwrap()
+                    .application()
+                    .shared_runtime();
+                match crate::plugin_panel::PluginPanelApplication::bundled_with_shared_entry_runtime(
                     crate::plugin_panel::taskbar_manifest(),
                     "menu.js",
                     data.clone(),
+                    "taskbar-application-menu",
+                    runtime,
                 ) {
                     Ok(application) => {
                         self.application_menu_plugin_host = Some(nickel_ui::UiHost::new(

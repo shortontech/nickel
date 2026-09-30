@@ -2435,6 +2435,20 @@
                 > taskbar_only
         );
         let menu = shell.application_menu_plugin_host.as_ref().unwrap();
+        let runtime = shell
+            .plugin_taskbar_host
+            .as_ref()
+            .unwrap()
+            .application()
+            .shared_runtime();
+        assert!(std::rc::Rc::ptr_eq(
+            &runtime,
+            &menu.application().shared_runtime()
+        ));
+        assert!(runtime
+            .borrow_mut()
+            .eval_json::<bool>("__surfaceApps.has('taskbar-application-menu')")
+            .unwrap());
         let pin = menu
             .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
                 role: nickel_ui::SemanticRole::Button,
@@ -2449,6 +2463,10 @@
         assert!(shell.launcher.is_pinned(application_id.as_str()));
         assert!(shell.application_menu_target.is_none());
         assert!(shell.application_menu_plugin_host.is_none());
+        assert!(!runtime
+            .borrow_mut()
+            .eval_json::<bool>("__surfaceApps.has('taskbar-application-menu')")
+            .unwrap());
         assert_eq!(
             shell
                 .plugin_registry
@@ -2535,6 +2553,16 @@
         let height = shell.window_context_menu_height() as u32;
         assert!(!shell.window_menu_scene().is_empty());
         let menu = shell.window_menu_plugin_host.as_ref().unwrap();
+        let runtime = shell
+            .plugin_taskbar_host
+            .as_ref()
+            .unwrap()
+            .application()
+            .shared_runtime();
+        assert!(std::rc::Rc::ptr_eq(
+            &runtime,
+            &menu.application().shared_runtime()
+        ));
         let target = shell
             .resolve_semantic_target(&ShellSemanticTarget::WindowMenu {
                 window: nickel_session_protocol::WindowId(71),
@@ -2561,6 +2589,10 @@
             }
         )));
         assert!(shell.window_menu_plugin_host.is_none());
+        assert!(!runtime
+            .borrow_mut()
+            .eval_json::<bool>("__surfaceApps.has('taskbar-window-menu')")
+            .unwrap());
     }
 
     #[test]

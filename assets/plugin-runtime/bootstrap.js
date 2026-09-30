@@ -62,6 +62,13 @@ let __pendingEvent = null;
 let __nickelData = Object.freeze({query: '', results: []});
 let __activeSurface = 'default';
 const __surfaceStates = new Map();
+const __surfaceApps = new Map();
+
+function __nickelRegisterSurfaceApp(id, component) {
+    if (typeof id !== 'string' || !id.length || typeof component !== 'function')
+        throw Error('invalid surface entry');
+    __surfaceApps.set(id, component);
+}
 
 const nickel = Object.freeze({
     request(effect) { __effects.push(effect); },
@@ -77,7 +84,7 @@ function __nickelSelectSurface(id) {
     if (__pendingRender !== null || __pendingEvent !== null)
         throw Error('cannot switch surfaces during a render or event');
     if (id === __activeSurface) return;
-    __surfaceStates.set(__activeSurface, {
+    if (__activeSurface) __surfaceStates.set(__activeSurface, {
         hooks: __componentHooks,
         handlers: __handlers,
         previousHandlers: __previousHandlers,
@@ -102,6 +109,7 @@ function __nickelDropSurface(id) {
     if (__pendingRender !== null || __pendingEvent !== null)
         throw Error('cannot retire a surface during a render or event');
     __surfaceStates.delete(id);
+    __surfaceApps.delete(id);
     if (id !== __activeSurface) return;
     __componentHooks = new Map();
     __handlers = [];
@@ -113,7 +121,7 @@ function __nickelDropSurface(id) {
     __currentComponent = null;
     __hookIndex = 0;
     __listKeyErrors = [];
-    __activeSurface = 'default';
+    __activeSurface = '';
 }
 
 function __nickelTakeEffects() {
@@ -279,7 +287,7 @@ function __nickelAcceptEvent() {
     __pendingEvent = null;
 }
 
-function __nickelRender(component = App) {
+function __nickelRender(component = __surfaceApps.get(__activeSurface) || App) {
     if (__pendingRender !== null) throw Error('previous render was not finalized');
     const previousHandlers = __handlers;
     const olderHandlers = __previousHandlers;

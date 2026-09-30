@@ -1078,23 +1078,40 @@ impl PluginPanelApplication {
         data: String,
         runtime: Option<std::rc::Rc<std::cell::RefCell<JsxRuntime>>>,
         runtime_surface_id: &str,
+        register_entry: bool,
     ) -> Result<Self, String> {
         let source = bundled_source(manifest, entry, source)?;
-        let mut application = Self::new_with_manifest_for_surface_and_scope(
-            source.as_ref(),
-            manifest,
-            Some(data),
-            None,
-            runtime,
-            runtime_surface_id,
-        )?;
-        if let Some(stylesheet) = stylesheet {
-            application.stylesheet = bundled_stylesheet(manifest, stylesheet)?;
+        if register_entry {
+            runtime
+                .as_ref()
+                .ok_or("a shared entry requires a runtime")?
+                .borrow_mut()
+                .register_surface_entry(runtime_surface_id, source.as_ref())?;
         }
-        if let [surface] = manifest.surfaces.as_slice() {
-            application.resolved_surface(surface)?;
+        let entry_runtime = register_entry.then(|| runtime.as_ref().unwrap().clone());
+        let result = (|| {
+            let mut application = Self::new_with_manifest_for_surface_and_scope(
+                source.as_ref(),
+                manifest,
+                Some(data),
+                None,
+                runtime,
+                runtime_surface_id,
+            )?;
+            if let Some(stylesheet) = stylesheet {
+                application.stylesheet = bundled_stylesheet(manifest, stylesheet)?;
+            }
+            if let [surface] = manifest.surfaces.as_slice() {
+                application.resolved_surface(surface)?;
+            }
+            Ok(application)
+        })();
+        if result.is_err() {
+            if let Some(runtime) = entry_runtime {
+                let _ = runtime.borrow_mut().drop_surface(runtime_surface_id);
+            }
         }
-        Ok(application)
+        result
     }
 
     /// Bundled source selection is packaging; rendering and data refresh use
@@ -1113,6 +1130,7 @@ impl PluginPanelApplication {
             data,
             None,
             "default",
+            false,
         )
     }
 
@@ -1132,6 +1150,27 @@ impl PluginPanelApplication {
             data,
             Some(runtime),
             runtime_surface_id,
+            false,
+        )
+    }
+
+    pub(crate) fn bundled_with_shared_entry_runtime(
+        manifest: &PluginManifest,
+        entry: &str,
+        data: String,
+        runtime_surface_id: &str,
+        runtime: std::rc::Rc<std::cell::RefCell<JsxRuntime>>,
+    ) -> Result<Self, String> {
+        let (source, stylesheet) = crate::bundled_plugin_assets::resolve(&manifest.id, entry)?;
+        Self::bundled_application(
+            manifest,
+            entry,
+            source,
+            Some(stylesheet),
+            data,
+            Some(runtime),
+            runtime_surface_id,
+            true,
         )
     }
 
