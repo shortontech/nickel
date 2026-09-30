@@ -4574,6 +4574,39 @@ mod tests {
     }
 
     #[test]
+    fn unstyled_window_root_does_not_paint_opaque_black() {
+        let source = "function App() { return h(Window, {placement: 'fixed', width: 440, height: 220}, h(Text, {}, 'Visible')); }";
+        let host = nickel_ui::UiHost::new(PluginPanelApplication::new(source).unwrap(), 440, 220);
+        assert!(!host.commands().iter().any(|command| matches!(
+            command,
+            nickel_ui::backend::PaintCommand::Fill {
+                color: 0xff000000,
+                ..
+            } | nickel_ui::backend::PaintCommand::RoundedFill {
+                color: 0xff000000,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn unstyled_box_does_not_paint_opaque_black() {
+        let source =
+            "function App() { return h(Panel, {}, h(Box, {x: 0, y: 0, width: 80, height: 40})); }";
+        let host = nickel_ui::UiHost::new(PluginPanelApplication::new(source).unwrap(), 440, 220);
+        assert!(!host.commands().iter().any(|command| matches!(
+            command,
+            nickel_ui::backend::PaintCommand::Fill {
+                color: 0xff000000,
+                ..
+            } | nickel_ui::backend::PaintCommand::RoundedFill {
+                color: 0xff000000,
+                ..
+            }
+        )));
+    }
+
+    #[test]
     fn shared_window_root_tracks_resize_and_keeps_css_content_inset() {
         let mut external_manifest = manifest().clone();
         external_manifest.id = "org.example.window-resize".into();

@@ -1990,9 +1990,13 @@ impl PanelNode {
                     })
                     .width(*width as f32)
                     .height(*height as f32)
-                    .background(*background)
                     .radius(*radius as f32)
                     .child(column);
+                let container = if *background == 0 {
+                    container.clear_background()
+                } else {
+                    container.background(*background)
+                };
                 with_margin(
                     AnyView::new(apply_container_style(container, &style)),
                     &style,
@@ -2020,8 +2024,12 @@ impl PanelNode {
                 let mut container = Container::new()
                     .width_length(*width)
                     .height_length(*height)
-                    .background(*background)
                     .child(layer);
+                container = if *background == 0 {
+                    container.clear_background()
+                } else {
+                    container.background(*background)
+                };
                 if let Some(id) = id {
                     container = container.id(id.clone());
                 }
