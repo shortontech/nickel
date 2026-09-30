@@ -3339,7 +3339,15 @@ impl LiveShell {
                         "title": window.title.chars().take(120).collect::<String>(),
                         "active": window.active,
                         "minimized": window.state.minimized,
-                        "workspace": window.state.workspace,
+                        "maximized": window.state.maximized,
+                        "fullscreen": window.state.fullscreen,
+                        "canMoveToWorkspace": window.state.capabilities.move_workspace,
+                        "canMoveToOutput": window.state.capabilities.move_display,
+                        "canMinimize": window.state.capabilities.minimize,
+                        "canMaximize": window.state.capabilities.maximize,
+                        "canFullscreen": cfg!(target_os = "linux") && window.state.capabilities.fullscreen,
+                        "canSnap": cfg!(target_os = "linux") && window.state.capabilities.maximize && !window.state.fullscreen,
+                        "workspace": window.state.workspace.map(|workspace| workspace.to_string()),
                         "output": window.state.output,
                         "canActivate": window.state.capabilities.activate,
                         "canClose": window.state.capabilities.close,
@@ -3347,6 +3355,20 @@ impl LiveShell {
                 })
                 .collect(),
         ))
+    }
+
+    fn plugin_window_destinations(&self, id: &str) -> Option<serde_json::Value> {
+        self.external_plugin_windows(id)?;
+        Some(
+            serde_json::json!({"workspaces": self.workspaces.iter().take(128).map(|workspace| serde_json::json!({"id": workspace.id.to_string(), "name": format!("Workspace {}", workspace.id)})).collect::<Vec<_>>(), "outputs": self.window_feed.outputs().into_iter().take(128).collect::<Vec<_>>()}),
+        )
+    }
+
+    fn plugin_window_menu(&self, id: &str) -> Option<serde_json::Value> {
+        self.external_plugin_windows(id)?;
+        Some(
+            serde_json::json!({"targetId": self.window_menu.map(|window| window.0.to_string()), "generation": self.window_menu_generation.to_string()}),
+        )
     }
 
     fn external_plugin_notifications(&self, plugin_id: &str) -> Option<serde_json::Value> {
@@ -3978,6 +4000,8 @@ impl LiveShell {
         [
             ("clock", Some(crate::clock_capabilities::snapshot())),
             ("windows", self.external_plugin_windows(id)),
+            ("windowMenu", self.plugin_window_menu(id)),
+            ("windowDestinations", self.plugin_window_destinations(id)),
             ("applications", self.external_plugin_applications(id)),
             ("applicationSearch", self.plugin_application_search(id)),
             ("notifications", self.external_plugin_notifications(id)),
@@ -4028,6 +4052,8 @@ impl LiveShell {
             None
         };
         let windows = self.external_plugin_windows(&key.plugin_id);
+        let window_menu = self.plugin_window_menu(&key.plugin_id);
+        let window_destinations = self.plugin_window_destinations(&key.plugin_id);
         let applications = self.external_plugin_applications(&key.plugin_id);
         let application_search = self.plugin_application_search(&key.plugin_id);
         let features = self.plugin_features(&key.plugin_id, false);
@@ -4076,6 +4102,8 @@ impl LiveShell {
                 let fields = [
                     ("clock", Some(&clock)),
                     ("windows", windows.as_ref()),
+                    ("windowMenu", window_menu.as_ref()),
+                    ("windowDestinations", window_destinations.as_ref()),
                     ("applications", applications.as_ref()),
                     ("applicationSearch", application_search.as_ref()),
                     ("features", features.as_ref()),
@@ -6587,6 +6615,20 @@ impl LiveShell {
                         changed |= self.try_send_window_action(window, WindowAction::Close);
                     }
                 }
+                crate::plugin_panel::PluginEffect::WindowOperation {
+                    plugin_id,
+                    operation,
+                    destination,
+                    window,
+                } => {
+                    if self.native_ui_service_granted(
+                        &plugin_id,
+                        nickel_core::plugins::PluginCapability::WindowsContext,
+                    ) {
+                        changed |=
+                            self.apply_public_window_operation(&operation, window, destination);
+                    }
+                }
                 crate::plugin_panel::PluginEffect::ToggleOnScreenKeyboard { plugin_id } => {
                     if self.native_ui_service_granted(
                         &plugin_id,
@@ -7848,6 +7890,104 @@ impl LiveShell {
         false
     }
 
+    fn apply_public_window_operation(
+        &mut self,
+        operation: &str,
+        window: Option<crate::model::WindowId>,
+        destination: Option<String>,
+    ) -> bool {
+        if self.locked {
+            return false;
+        }
+        if operation == "windows.dismissMenu" {
+            self.dismiss_window_menu();
+            return true;
+        }
+        let Some(window) = window else {
+            return false;
+        };
+        let Some(current) = self.windows.iter().find(|current| current.id == window) else {
+            return false;
+        };
+        if operation == "windows.showMenu" {
+            return self.open_window_menu_at(window.0, self.panel_origin_x, self.panel_origin_y);
+        }
+        let state = &current.state;
+        let action = match operation {
+            "windows.minimize" if state.capabilities.minimize && !state.minimized => {
+                Some(WindowAction::Minimize)
+            }
+            "windows.maximize" if state.capabilities.maximize && !state.maximized => {
+                Some(WindowAction::Maximize)
+            }
+            "windows.toggleMaximize" if state.capabilities.maximize => Some(WindowAction::Maximize),
+            "windows.restore" if state.minimized && state.capabilities.activate => {
+                Some(WindowAction::Activate)
+            }
+            "windows.restore"
+                if state.fullscreen
+                    && cfg!(target_os = "linux")
+                    && state.capabilities.fullscreen =>
+            {
+                Some(WindowAction::Fullscreen)
+            }
+            "windows.restore" if state.maximized && state.capabilities.maximize => {
+                Some(WindowAction::Maximize)
+            }
+            "windows.toggleFullscreen"
+                if cfg!(target_os = "linux") && state.capabilities.fullscreen =>
+            {
+                Some(WindowAction::Fullscreen)
+            }
+            "windows.snapLeading"
+                if cfg!(target_os = "linux")
+                    && state.capabilities.maximize
+                    && !state.fullscreen =>
+            {
+                Some(WindowAction::SnapLeading)
+            }
+            "windows.snapTrailing"
+                if cfg!(target_os = "linux")
+                    && state.capabilities.maximize
+                    && !state.fullscreen =>
+            {
+                Some(WindowAction::SnapTrailing)
+            }
+            _ => None,
+        };
+        if let Some(action) = action {
+            return self.try_send_window_action(window, action);
+        }
+        match (operation, destination) {
+            ("windows.moveToWorkspace", Some(destination)) if state.capabilities.move_workspace => {
+                let Ok(workspace) = destination.parse::<u64>() else {
+                    return false;
+                };
+                if !self
+                    .workspaces
+                    .iter()
+                    .any(|candidate| candidate.id == workspace)
+                {
+                    return false;
+                }
+                self.send_session_command(
+                    "move-window-to-workspace",
+                    ShellCommand::MoveWindowToWorkspace { window, workspace },
+                )
+            }
+            ("windows.moveToOutput", Some(output)) if state.capabilities.move_display => {
+                if !self.window_feed.outputs().contains(&output) {
+                    return false;
+                }
+                self.send_session_command(
+                    "move-window-to-display",
+                    ShellCommand::MoveWindowToDisplay { window, output },
+                )
+            }
+            _ => false,
+        }
+    }
+
     fn apply_window_menu_action(&mut self, action: MenuAction) {
         if !matches!(
             action,
@@ -8105,6 +8245,7 @@ impl LiveShell {
     }
 
     fn close_window_preview(&mut self) {
+        self.set_default_shell_surface_visible("window-menu", false);
         self.preview_group = None;
         self.preview_pending = None;
         self.preview_focus_requested = false;
@@ -8160,6 +8301,7 @@ impl LiveShell {
     }
 
     fn dismiss_window_menu(&mut self) {
+        self.set_default_shell_surface_visible("window-menu", false);
         let focused_menu = self.window_menu.is_some() || self.application_menu_target.is_some();
         self.close_window_preview();
         if focused_menu {
@@ -9180,6 +9322,9 @@ impl LiveShell {
     }
 
     pub(crate) fn open_window_menu_at(&mut self, id: u64, x: i32, y: i32) -> bool {
+        if self.locked || !self.active_shell_declares("window-menu") {
+            return false;
+        }
         let Some(snapshot) = self
             .windows
             .iter()
@@ -9188,24 +9333,26 @@ impl LiveShell {
         else {
             return false;
         };
+        if !self.set_default_shell_surface_visible("window-menu", true)
+            && !self.default_shell_surface_visible("window-menu")
+        {
+            return false;
+        }
         self.window_menu_generation = self.window_menu_generation.saturating_add(1);
         self.window_menu = Some(snapshot.id);
         self.window_menu_snapshot = Some(snapshot);
-
         self.window_menu_anchor_x = Some(x);
         self.window_menu_anchor_y = Some(y);
-        let sent = self.send_session_command(
-            "show-context-menu",
-            ShellCommand::ShowContextMenu {
-                x,
-                y,
-                width: MENU_WIDTH as i32,
-                height: self.window_context_menu_height(),
-            },
+        let owner = self.active_shell_package_id.clone();
+        let _ = self.set_plugin_window_placement(
+            &owner,
+            "window-menu",
+            nickel_core::plugins::PluginSurfaceAnchor::TopLeft,
+            x.clamp(-8192, 8192),
+            y.clamp(-8192, 8192),
         );
-        #[cfg(target_os = "linux")]
-        let _ = self.send_session_command("focus-context-menu", ShellCommand::FocusContextMenu);
-        sent
+        let _ = self.focus_plugin_window(&owner, "window-menu");
+        true
     }
 
     fn launch_application(&mut self, application: Application) {

@@ -342,7 +342,20 @@ const nickel = Object.freeze({
     windows: Object.freeze({
         list() { return __nickelResource('windows', []); },
         activate(id) { __effects.push({type:'windows.focus',id:__nickelIdentity(id)}); },
-        close(id) { __effects.push({type:'windows.close',id:__nickelIdentity(id)}); }
+        close(id) { __effects.push({type:'windows.close',id:__nickelIdentity(id)}); },
+        menu() { return __nickelResource('windowMenu', {targetId:null}); },
+        dismissMenu() { __effects.push({type:'windows.dismissMenu'}); },
+        showMenu(id) { __effects.push({type:'windows.showMenu',id:__nickelIdentity(id)}); },
+        minimize(id) { __effects.push({type:'windows.minimize',id:__nickelIdentity(id)}); },
+        maximize(id) { __effects.push({type:'windows.maximize',id:__nickelIdentity(id)}); },
+        restore(id) { __effects.push({type:'windows.restore',id:__nickelIdentity(id)}); },
+        toggleMaximize(id) { __effects.push({type:'windows.toggleMaximize',id:__nickelIdentity(id)}); },
+        toggleFullscreen(id) { __effects.push({type:'windows.toggleFullscreen',id:__nickelIdentity(id)}); },
+        snapLeading(id) { __effects.push({type:'windows.snapLeading',id:__nickelIdentity(id)}); },
+        snapTrailing(id) { __effects.push({type:'windows.snapTrailing',id:__nickelIdentity(id)}); },
+        destinations() { return __nickelResource('windowDestinations', {workspaces:[],outputs:[]}); },
+        moveToWorkspace(id, workspace) { __effects.push({type:'windows.moveToWorkspace',id:__nickelIdentity(id),destination:__nickelIdentity(workspace)}); },
+        moveToOutput(id, output) { __effects.push({type:'windows.moveToOutput',id:__nickelIdentity(id),destination:String(output)}); }
     }),
     applications: Object.freeze({
         list() { return __nickelResource('applications', []); },

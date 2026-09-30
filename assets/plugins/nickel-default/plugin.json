@@ -31,7 +31,8 @@
       "shell.settings.plugins": "./src/Plugins.js#Plugins",
       "shell.settings.optionalFeatures": "./src/OptionalFeatures.js#OptionalFeatures",
       "shell.settings.keyboardShortcuts": "./src/KeyboardShortcuts.js#KeyboardShortcuts",
-      "shell.settings.about": "./src/About.js#About"
+      "shell.settings.about": "./src/About.js#About",
+      "shell.windowMenu": "./src/WindowMenu.js#WindowMenu"
     }
   },
   "capabilities": [
@@ -120,6 +121,14 @@
       "height": 180,
       "anchor": "top-right",
       "passive": true,
+      "initially_open": false
+    },
+    {
+      "id": "window-menu",
+      "kind": "window",
+      "width": 320,
+      "height": 400,
+      "anchor": "top-left",
       "initially_open": false
     }
   ]

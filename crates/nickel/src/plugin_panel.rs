@@ -385,6 +385,12 @@ pub enum PluginEffect {
     ShowControlCenter,
     ActivateWindow(crate::model::WindowId),
     CloseWindow(crate::model::WindowId),
+    WindowOperation {
+        plugin_id: String,
+        operation: String,
+        destination: Option<String>,
+        window: Option<crate::model::WindowId>,
+    },
     ToggleOnScreenKeyboard {
         plugin_id: String,
     },
@@ -1307,6 +1313,8 @@ impl PluginPanelApplication {
                 *field,
                 "clock"
                     | "windows"
+                    | "windowMenu"
+                    | "windowDestinations"
                     | "applications"
                     | "applicationSearch"
                     | "features"
@@ -1353,7 +1361,9 @@ impl PluginPanelApplication {
         {
             return Err("tray data requires tray-read".into());
         }
-        if fields.iter().any(|(field, _)| *field == "windows")
+        if fields
+            .iter()
+            .any(|(field, _)| matches!(*field, "windows" | "windowMenu" | "windowDestinations"))
             && !manifest
                 .capabilities
                 .contains(&PluginCapability::WindowsRead)
@@ -2044,6 +2054,58 @@ impl PluginPanelApplication {
                                 return;
                             };
                             approved.push(requested);
+                        }
+                        _ if effect
+                            .get("type")
+                            .and_then(Value::as_str)
+                            .is_some_and(|kind| {
+                                matches!(
+                                    kind,
+                                    "windows.showMenu"
+                                        | "windows.dismissMenu"
+                                        | "windows.minimize"
+                                        | "windows.maximize"
+                                        | "windows.restore"
+                                        | "windows.toggleMaximize"
+                                        | "windows.toggleFullscreen"
+                                        | "windows.snapLeading"
+                                        | "windows.snapTrailing"
+                                        | "windows.moveToWorkspace"
+                                        | "windows.moveToOutput"
+                                )
+                            }) =>
+                        {
+                            let operation = effect["type"].as_str().unwrap();
+                            let destination = effect
+                                .get("destination")
+                                .and_then(Value::as_str)
+                                .filter(|value| !value.is_empty() && value.len() <= 256)
+                                .map(str::to_owned);
+                            let window = effect
+                                .get("id")
+                                .and_then(Value::as_str)
+                                .and_then(|id| id.parse::<u64>().ok())
+                                .filter(|id| *id != 0)
+                                .map(crate::model::WindowId);
+                            if !effect_manifest
+                                .capabilities
+                                .contains(&PluginCapability::WindowsContext)
+                                || (operation != "windows.dismissMenu" && window.is_none())
+                                || (matches!(
+                                    operation,
+                                    "windows.moveToWorkspace" | "windows.moveToOutput"
+                                ) && destination.is_none())
+                            {
+                                self.last_error =
+                                    Some("window operation is invalid or denied".into());
+                                return;
+                            }
+                            approved.push(PluginEffect::WindowOperation {
+                                plugin_id: effect_manifest.id.clone(),
+                                operation: operation.into(),
+                                destination,
+                                window,
+                            });
                         }
                         _ if effect.get("type").and_then(Value::as_str)
                             == Some("preview-action") =>
@@ -5572,6 +5634,31 @@ mod tests {
                 ..
             }]
         ));
+    }
+
+    #[test]
+    fn public_window_operations_require_context_grants_and_preserve_destination_identity() {
+        let mut manifest = manifest().clone();
+        manifest.capabilities.clear();
+        let source = "function App(){return h(Panel,{},h(Button,{id:'move',onClick:()=>nickel.windows.moveToWorkspace('71','18446744073709551615')},'Move'));}";
+        let mut denied =
+            PluginPanelApplication::new_with_manifest(source, &manifest, Some("{}".into()))
+                .unwrap();
+        assert!(
+            denied
+                .sync_host_data_field("windowMenu", &serde_json::json!({"targetId":"71"}))
+                .is_err()
+        );
+        denied.update(denied.button_message("move").unwrap());
+        assert!(denied.take_effects().is_empty());
+        manifest.capabilities.push(PluginCapability::WindowsContext);
+        let mut granted =
+            PluginPanelApplication::new_with_manifest(source, &manifest, Some("{}".into()))
+                .unwrap();
+        granted.update(granted.button_message("move").unwrap());
+        assert!(
+            matches!(granted.take_effects().as_slice(), [PluginEffect::WindowOperation { operation, window: Some(crate::model::WindowId(71)), destination: Some(destination), .. }] if operation == "windows.moveToWorkspace" && destination == "18446744073709551615")
+        );
     }
 
     #[test]

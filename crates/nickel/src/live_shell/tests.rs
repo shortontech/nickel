@@ -2389,3 +2389,116 @@ fn composed_shell_keeps_each_host_identity_when_launcher_opens_settings() {
         );
     });
 }
+
+#[test]
+fn window_menu_hotkey_uses_selected_package_and_native_window_policy() {
+    with_package_runtime_stack(|| {
+        let session = std::sync::Arc::new(crate::session_host::StagedSessionHost::new(
+            crate::session_host::default_session_host(),
+        ));
+        let mut shell = LiveShell::new_with_session_host(session.clone()).unwrap();
+        shell.windows = vec![crate::model::OpenWindow {
+            id: crate::model::WindowId(71),
+            application_id: None,
+            active: true,
+            title: "Editor".into(),
+            state: crate::model::WindowState::default(),
+        }];
+        session.take_commands();
+        assert!(shell.global_shortcut(crate::platform::GlobalShortcut::ShowWindowMenu));
+        let key = shell.active_shell_surface_key("window-menu");
+        assert!(shell.plugin_panel_scene(&key, 320, 400).is_some());
+        let button = shell
+            .plugin_panel_host_for(&key)
+            .unwrap()
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: nickel_ui::SemanticRole::Button,
+                name: "Minimize".into(),
+            })
+            .unwrap();
+        assert!(shell.plugin_panel_host_ui_for(
+            &key,
+            nickel_ui::UiEvent::AccessibilityActivate(button.id),
+            320,
+            400
+        ));
+        assert!(!shell.default_shell_surface_visible("window-menu"));
+        assert!(session.take_commands().iter().any(|command| matches!(
+            command,
+            crate::platform::ShellCommand::WindowAction {
+                window: crate::model::WindowId(71),
+                action: crate::platform::WindowAction::Minimize
+            }
+        )));
+        assert!(shell.global_shortcut(crate::platform::GlobalShortcut::ShowWindowMenu));
+        shell.plugin_panel_scene(&key, 320, 400).unwrap();
+        let stale = shell
+            .plugin_panel_host_for(&key)
+            .unwrap()
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: nickel_ui::SemanticRole::Button,
+                name: "Minimize".into(),
+            })
+            .unwrap();
+        session.take_commands();
+        shell.windows[0].state.capabilities.minimize = false;
+        assert!(shell.plugin_panel_host_ui_for(
+            &key,
+            nickel_ui::UiEvent::AccessibilityActivate(stale.id),
+            320,
+            400
+        ));
+        assert!(
+            !session.take_commands().iter().any(|command| matches!(
+                command,
+                crate::platform::ShellCommand::WindowAction { .. }
+            ))
+        );
+        assert!(!shell.apply_public_window_operation(
+            "windows.minimize",
+            Some(crate::model::WindowId(71)),
+            None
+        ));
+        assert!(session.take_commands().is_empty());
+        shell.windows[0].state.maximized = true;
+        assert!(!shell.apply_public_window_operation(
+            "windows.maximize",
+            Some(crate::model::WindowId(71)),
+            None
+        ));
+        assert!(session.take_commands().is_empty());
+        assert!(shell.apply_public_window_operation(
+            "windows.restore",
+            Some(crate::model::WindowId(71)),
+            None
+        ));
+        assert!(matches!(
+            session.take_commands().as_slice(),
+            [crate::platform::ShellCommand::WindowAction {
+                window: crate::model::WindowId(71),
+                action: crate::platform::WindowAction::Maximize
+            }]
+        ));
+        // A selected theme may omit this frontend; native hotkeys cannot summon a base fallback.
+        use nickel_core::plugins::{PluginPackage, PluginPackageSource};
+        let package = PluginPackage::from_embedded(&[
+            ("plugin.json", br#"{"api_version":1,"id":"window-menu-omitted-theme","name":"Theme","version":"1.0.0","entry":"main.js","composition":{"api_version":1,"id":"window-menu-omitted-theme","version":"1.0.0","extends":"nickel-default","requires":{"nickel-default":"^0.2.0"},"replaces":{"shell":"./main.js#Shell"}},"surfaces":[{"id":"taskbar","kind":"panel","width":800,"height":42}]}"#),
+            ("main.js", b"export function Shell(){return h(FixedWindow,{id:'taskbar',width:800,height:42},h(Text,{},'Theme'));}\nexport default Shell;")
+        ]).unwrap();
+        shell
+            .plugin_registry
+            .register(package.manifest.clone())
+            .unwrap();
+        shell.external_plugin_packages.insert(
+            "window-menu-omitted-theme".into(),
+            PluginPackageSource::embedded(package),
+        );
+        shell
+            .select_shell_package("window-menu-omitted-theme")
+            .unwrap();
+        session.take_commands();
+        assert!(!shell.global_shortcut(crate::platform::GlobalShortcut::ShowWindowMenu));
+        assert!(!shell.default_shell_surface_visible("window-menu"));
+        assert!(session.take_commands().is_empty());
+    });
+}

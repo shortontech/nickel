@@ -187,3 +187,21 @@ runtime and Settings registrations for dependency authority. Global launcher,
 Quick Settings, and Settings requests use the selected package's declared
 surfaces; an omitted surface is unavailable. Authorized surface actions from
 inherited shell components address the selected package's corresponding surface.
+
+## Window operations and menu intent
+
+`nickel.windows.showMenu(id)` and the native window-menu hotkey show the selected
+shell's optional `window-menu` surface. `shell.windowMenu` is an ordinary
+composition export. Omission makes the frontend unavailable. `windows.menu()`
+reports the current target identity; `dismissMenu()` dismisses and restores native
+application focus. These requests require `windows-context`; facts require
+`windows-read`.
+
+Public operations include `minimize`, `maximize`, `restore`, `toggleMaximize`,
+`toggleFullscreen`, `snapLeading`, `snapTrailing`, `moveToWorkspace`, and
+`moveToOutput`, alongside `activate` and
+`close`. Native code checks current window capabilities and state before issuing
+commands. Movement destinations come from `windows.destinations()` and are
+validated against the current native workspace/output inventory. `maximize` is idempotent; `restore` restores a minimized window first,
+then fullscreen or maximized state on subsequent requests. Arbitrary fullscreen
+and snapping are unavailable in the Windows adapter and are reported as such.
