@@ -243,6 +243,24 @@ fn exercise(
         Duration::from_secs(5),
     )?;
     verify_layout_snapshot(test_input, &environment, "nickel-default/settings")?;
+    click_plugin_control(
+        test_input,
+        &environment,
+        "nickel-default/settings",
+        "settings-navigation/destination/nickel-default/appearance",
+        (settings.1, settings.2),
+    )?;
+    for id in [
+        "appearance-hue",
+        "appearance-intensity",
+        "appearance-accent-custom",
+    ] {
+        let [_, _, width, height] =
+            plugin_control_geometry(test_input, &environment, "nickel-default/settings", id)?;
+        if width <= 0.0 || height <= 0.0 {
+            return Err(format!("required Appearance control {id} has no layout"));
+        }
+    }
     checked(
         test_input,
         &environment,
