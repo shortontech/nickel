@@ -85,17 +85,13 @@ fn run_command() -> Result<(), String> {
             for capability in &package.manifest.capabilities {
                 println!("access: {}", capability.as_str());
             }
-            for slot in &package.manifest.provides_slots {
-                println!("provides: {} ({})", slot.id, slot.contract.as_str());
-            }
-            for contribution in &package.manifest.contributes {
-                println!(
-                    "contributes: {} {}/{} ({})",
-                    contribution.mode.as_str(),
-                    contribution.target_plugin,
-                    contribution.target_slot,
-                    contribution.contract.as_str()
-                );
+            if let Some(composition) = &package.manifest.composition {
+                for contribution in &composition.contributions {
+                    println!(
+                        "contributes: {} to {}",
+                        contribution.id, contribution.collection
+                    );
+                }
             }
             Ok(())
         }

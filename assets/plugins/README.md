@@ -32,13 +32,14 @@ cargo run -p nickel --no-default-features --features backend-winit \
 
 Each immediate child directory must match its manifest ID. Discovery reports
 invalid packages without hiding valid siblings. Settings can enable installed
-packages with up to 16 panel, dock, window, dialog, or overlay surfaces, plus surface-free taskbar badge,
-taskbar action, widget slot, and Control Center section extensions. Use
+packages with up to 16 panel, dock, window, dialog, or overlay surfaces.
+Surface-free composition providers publish ordinary components to public collections
+such as `taskbar.items`, `system.controls`, and `settings.pages`. Use
 `nickel --safe-mode` to start with installed
 packages inactive while keeping bundled shell plugins available.
 
 The component vocabulary includes `Window`, `FixedWindow`, `Row`, `Column`, `Text`, `Image`,
-`ImageButton`, `Button`, `Badge`, `Action`, `Widget`, `Section`, `TextField`, `Progress`, `Dialog`, `Menu`, and `MenuItem`. The
+`ImageButton`, `Button`, `Badge`, `TextField`, `Progress`, `Dialog`, `Menu`, and `MenuItem`. The
 host owns image bytes and exposes them by asset name to JSX. The desktop,
 lock screen, screenshot tool, file manager, and Codex remain Rust UI.
 Plugin CSS scopes `color`, `font-size`, and `line-height` to a surface tree and
@@ -46,14 +47,6 @@ inherits them through layout elements into text, buttons, and text fields.
 Styles on a child override inherited values.
 Use `secure={true}` on a `TextField` for passwords or other private input. The
 host masks its paint and blocks remote semantic inspection of that surface.
-The [task badge example](example-task-badge/) shows a surface-free extension
-that contributes UI to the bundled taskbar's declared slot.
-The [widget host](example-widget-host/) declares a slot that another installed
-plugin can fill. Run it with the [widget contributor](example-widget-contributor/)
-using `nickel-plugin dev assets/plugins/example-widget-host assets/plugins/example-widget-contributor`.
-The [action contributor](example-action-contributor/) adds a callback button to
-that host's `commands` slot; run the three directories together to inspect both
-display and interactive composition.
 The [dialog example](example-dialog/) opens a component dialog and requests
 Settings through a declared capability.
 The [reserved panel example](example-reserved-panel/) spans each output and
@@ -61,9 +54,8 @@ stacks with the bundled taskbar while reserving desktop work area.
 The [separate dialog example](example-surface-dialog/) opens an owned native
 dialog surface. The [overlay example](example-overlay/) opens a translucent
 top-right surface from a component window and dismisses it independently.
-The [task action example](example-task-action/) adds a callback to the
-taskbar's JSX application menu.
-The [control section example](example-control-section/) adds a callback row
-to the bundled Control Center.
+The [control contribution example](example-control-section/) publishes an ordinary
+component to `system.controls`. The host expands public components in their owning
+package context and validates each effect using that package's capabilities.
 The bundled [on-screen keyboard](on-screen-keyboard/) shows a keyboard layout
 written in JSX with host-checked key effects and recipient leases.

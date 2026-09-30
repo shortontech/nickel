@@ -34,10 +34,8 @@ every `nickel.request` against the owning plugin's capabilities.
 ## Missing generic UI contracts
 
 - The shipped taskbar receives badge contributions through
-  `nickel.data.slots["task-badge"]` and maps them into JSX beside each task.
-  The separate taskbar context menu now reads `nickel.data.slots["task-action"]`.
-  It invokes extensions through the same item-scoped action slot path as other
-  plugin surfaces.
+  `nickel.contributions("taskbar.items")` and renders their ordinary public components.
+  Composition callbacks remain in the provider context and retain its capabilities.
 - `<Dialog>` and `<Menu>` should own child surfaces through the same generic
   surface lifecycle, with anchor IDs resolved from their parent tree. The
   launcher keeps its existing logout and app menu behavior in the draft.

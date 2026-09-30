@@ -12,10 +12,7 @@ use nickel_core::plugins::{
 };
 use nickel_plugin_presentation::components::parse_panel_for_manifest;
 use nickel_plugin_presentation::components::{PanelNode, render_panel, render_panel_validated};
-pub use nickel_plugin_presentation::components::{
-    PluginActionContribution, PluginImages, PluginMessage, PluginSectionContribution,
-    PluginWidgetContribution,
-};
+pub use nickel_plugin_presentation::components::{PluginImages, PluginMessage};
 use nickel_plugin_runtime::composition_runtime::{
     ComponentEventHandle, ComponentMount, ShellCompositionRuntime,
 };
@@ -431,19 +428,6 @@ pub enum PluginEffect {
         plugin_id: String,
         request: crate::session_capabilities::Request,
     },
-    InvokePluginSlotAction {
-        target_plugin: String,
-        slot_id: String,
-        plugin_id: String,
-        id: String,
-        item: Option<String>,
-    },
-    InvokePluginSlotSection {
-        target_plugin: String,
-        slot_id: String,
-        plugin_id: String,
-        id: String,
-    },
     ActivateTrayItem {
         id: String,
     },
@@ -660,8 +644,7 @@ impl PluginPanelApplication {
         package: &PluginPackage,
         settings: &std::collections::BTreeMap<String, serde_json::Value>,
     ) -> Result<Self, String> {
-        let data =
-            serde_json::json!({ "settings": settings, "slots": {}, "windows": [] }).to_string();
+        let data = serde_json::json!({ "settings": settings, "windows": [] }).to_string();
         let mut application = Self::new_with_manifest_for_surface(
             &package.source,
             &package.manifest,
@@ -704,7 +687,6 @@ impl PluginPanelApplication {
     ) -> String {
         serde_json::json!({
             "settings": settings,
-            "slots": {},
             "windows": [],
             "applications": [],
             "displays": {"available": false, "outputs": []},
@@ -998,15 +980,11 @@ impl PluginPanelApplication {
                 std::collections::BTreeMap::from([(package.manifest.id.clone(), package.clone())]);
             ShellCompositionRuntime::new(&catalog, &package.manifest.id, &Default::default())?;
         } else if package.manifest.surfaces.is_empty() {
-            let application = Self::from_package_with_settings(package, &settings)?;
-            if !package.manifest.contributes.is_empty() {
-                application.validate_contribution()?;
-            }
+            Self::from_package_with_settings(package, &settings)?;
         } else {
             for surface in &package.manifest.surfaces {
                 let mut data = serde_json::json!({
                     "settings": settings,
-                    "slots": {},
                     "windows": [],
                     "applications": [],
                     "notifications": initial_notifications_data(&package.manifest),
@@ -1045,108 +1023,6 @@ impl PluginPanelApplication {
             }
         }
         Ok(())
-    }
-
-    pub fn badge_contributions(&self) -> Result<Vec<(String, String, u16, u32)>, String> {
-        let mut badges = Vec::new();
-        self.node.collect_badges(&mut badges)?;
-        if badges.is_empty() {
-            return Err("badge extension did not return a badge".into());
-        }
-        Ok(badges)
-    }
-
-    pub fn widget_contributions(&self) -> Result<Vec<PluginWidgetContribution>, String> {
-        let mut widgets = Vec::new();
-        self.node.collect_widgets(&mut widgets)?;
-        if widgets.is_empty() {
-            return Err("widget extension did not return a widget".into());
-        }
-        Ok(widgets)
-    }
-
-    pub fn action_contributions(&self) -> Result<Vec<PluginActionContribution>, String> {
-        let mut actions = Vec::new();
-        self.node.collect_actions(&mut actions)?;
-        if actions.is_empty() {
-            return Err("action extension did not return an action".into());
-        }
-        Ok(actions)
-    }
-
-    pub fn retained_contribution_bytes(&self) -> u64 {
-        self.node.contribution_bytes() + self.stylesheet.estimated_retained_bytes()
-    }
-
-    pub fn section_contributions(&self) -> Result<Vec<PluginSectionContribution>, String> {
-        let mut sections = Vec::new();
-        self.node.collect_sections(&mut sections)?;
-        if sections.is_empty() {
-            return Err("section extension did not return a section".into());
-        }
-        Ok(sections)
-    }
-
-    pub fn activate_section(&mut self, id: &str) -> bool {
-        fn find(node: &PanelNode, id: &str) -> Option<usize> {
-            match node {
-                PanelNode::Section {
-                    id: section_id,
-                    action,
-                    ..
-                } if section_id == id => Some(*action),
-                _ => node
-                    .container_children()?
-                    .iter()
-                    .find_map(|child| find(child, id)),
-            }
-        }
-        let Some(action) = find(&self.node, id) else {
-            return false;
-        };
-        nickel_ui::Application::update(self, PluginMessage::Click(action));
-        self.last_error.is_none()
-    }
-
-    pub fn activate_action(&mut self, id: &str, item_id: &str) -> bool {
-        let Some(action) = self.find_action(id, item_id) else {
-            return false;
-        };
-        nickel_ui::Application::update(self, PluginMessage::Text(action, item_id.to_owned()));
-        self.last_error.is_none()
-    }
-
-    fn find_action(&self, id: &str, item_id: &str) -> Option<usize> {
-        fn find(node: &PanelNode, id: &str, item_id: &str) -> Option<usize> {
-            match node {
-                PanelNode::Action {
-                    id: action_id,
-                    item,
-                    action,
-                    ..
-                } if action_id == id && item.as_deref().is_none_or(|item| item == item_id) => {
-                    Some(*action)
-                }
-                _ => node
-                    .container_children()?
-                    .iter()
-                    .find_map(|child| find(child, id, item_id)),
-            }
-        }
-        find(&self.node, id, item_id)
-    }
-
-    pub fn validate_contribution(&self) -> Result<(), String> {
-        use nickel_core::plugins::PluginSlotContract;
-        let [contribution] = self.manifest.contributes.as_slice() else {
-            return Err("extension needs exactly one contribution".into());
-        };
-        match contribution.contract {
-            PluginSlotContract::Badge => self.badge_contributions().map(|_| ()),
-            PluginSlotContract::Widget => self.widget_contributions().map(|_| ()),
-            PluginSlotContract::Action => self.action_contributions().map(|_| ()),
-            PluginSlotContract::Section => self.section_contributions().map(|_| ()),
-        }
     }
 
     #[cfg(test)]
@@ -1392,10 +1268,6 @@ impl PluginPanelApplication {
             .map(|(_, image)| (Arc::as_ptr(image) as usize, image.as_raw().len() as u64))
     }
 
-    pub(crate) fn sync_external_slots(&mut self, slots: &Value) -> Result<bool, String> {
-        self.sync_host_data_field("slots", slots)
-    }
-
     pub(crate) fn sync_host_data_field(
         &mut self,
         field: &str,
@@ -1433,8 +1305,7 @@ impl PluginPanelApplication {
         if fields.iter().any(|(field, _)| {
             !matches!(
                 *field,
-                "slots"
-                    | "clock"
+                "clock"
                     | "windows"
                     | "applications"
                     | "applicationSearch"
@@ -2175,6 +2046,25 @@ impl PluginPanelApplication {
                             approved.push(requested);
                         }
                         _ if effect.get("type").and_then(Value::as_str)
+                            == Some("preview-action") =>
+                        {
+                            match preview_request(&effect) {
+                                Ok((action, capability))
+                                    if effect_manifest.capabilities.contains(&capability) =>
+                                {
+                                    approved.push(PluginEffect::Preview(action));
+                                }
+                                Ok(_) => {
+                                    self.last_error = Some("preview action is not granted".into());
+                                    return;
+                                }
+                                Err(error) => {
+                                    self.last_error = Some(error);
+                                    return;
+                                }
+                            }
+                        }
+                        _ if effect.get("type").and_then(Value::as_str)
                             == Some("keyboard.toggle")
                             && effect_manifest
                                 .capabilities
@@ -2235,128 +2125,6 @@ impl PluginPanelApplication {
                             approved.push(PluginEffect::ContextTrayItem { id: id.to_owned() });
                         }
 
-                        _ if effect.get("type").and_then(Value::as_str)
-                            == Some("invoke-plugin-slot-action") =>
-                        {
-                            let slot_id = effect.get("slot").and_then(Value::as_str);
-                            let plugin_id = effect.get("pluginId").and_then(Value::as_str);
-                            let id = effect.get("id").and_then(Value::as_str);
-                            let item = effect.get("item").and_then(Value::as_str);
-                            let valid = slot_id.is_some_and(|value| {
-                                effect_manifest.provides_slots.iter().any(|slot| {
-                                    slot.id == value
-                                        && slot.contract
-                                            == nickel_core::plugins::PluginSlotContract::Action
-                                })
-                            }) && plugin_id
-                                .is_some_and(|value| !value.is_empty() && value.len() <= 128)
-                                && id.is_some_and(|value| !value.is_empty() && value.len() <= 64);
-                            if !valid
-                                || effect
-                                    .get("item")
-                                    .is_some_and(|value| !value.is_null() && !value.is_string())
-                                || !item.is_none_or(|value| !value.is_empty() && value.len() <= 256)
-                            {
-                                self.last_error = Some("plugin slot action is invalid".into());
-                                return;
-                            }
-                            let projected = self
-                                .projection_data
-                                .as_deref()
-                                .and_then(|data| serde_json::from_str::<Value>(data).ok())
-                                .and_then(|data| {
-                                    if data
-                                        .get("slotContext")
-                                        .and_then(|context| context.get("item"))
-                                        .is_some_and(|context| context.as_str() != item)
-                                    {
-                                        return None;
-                                    }
-                                    data.get("slots")?.get(slot_id?)?.as_array().cloned()
-                                })
-                                .is_some_and(|actions| {
-                                    actions.iter().any(|action| {
-                                        action.get("pluginId").and_then(Value::as_str) == plugin_id
-                                            && action.get("id").and_then(Value::as_str) == id
-                                            && action["item"]
-                                                .as_str()
-                                                .is_none_or(|target| Some(target) == item)
-                                    })
-                                });
-                            if !projected {
-                                self.last_error = Some("plugin slot action is stale".into());
-                                return;
-                            }
-                            approved.push(PluginEffect::InvokePluginSlotAction {
-                                target_plugin: effect_manifest.id.clone(),
-                                slot_id: slot_id.unwrap().to_owned(),
-                                plugin_id: plugin_id.unwrap().to_owned(),
-                                id: id.unwrap().to_owned(),
-                                item: item.map(str::to_owned),
-                            });
-                        }
-                        _ if effect.get("type").and_then(Value::as_str)
-                            == Some("preview-action") =>
-                        {
-                            match preview_request(&effect) {
-                                Ok((action, capability))
-                                    if effect_manifest.capabilities.contains(&capability) =>
-                                {
-                                    approved.push(PluginEffect::Preview(action));
-                                }
-                                Ok(_) => {
-                                    self.last_error = Some("preview action is not granted".into());
-                                    return;
-                                }
-                                Err(error) => {
-                                    self.last_error = Some(error);
-                                    return;
-                                }
-                            }
-                        }
-                        _ if effect.get("type").and_then(Value::as_str)
-                            == Some("invoke-plugin-slot-section") =>
-                        {
-                            let slot_id = effect.get("slot").and_then(Value::as_str);
-                            let plugin_id = effect.get("pluginId").and_then(Value::as_str);
-                            let id = effect.get("id").and_then(Value::as_str);
-                            if !slot_id.is_some_and(|value| {
-                                effect_manifest.provides_slots.iter().any(|slot| {
-                                    slot.id == value
-                                        && slot.contract
-                                            == nickel_core::plugins::PluginSlotContract::Section
-                                })
-                            }) || !plugin_id
-                                .is_some_and(|value| !value.is_empty() && value.len() <= 128)
-                                || !id.is_some_and(|value| !value.is_empty() && value.len() <= 64)
-                            {
-                                self.last_error = Some("plugin slot section is invalid".into());
-                                return;
-                            }
-                            let projected = self
-                                .projection_data
-                                .as_deref()
-                                .and_then(|data| serde_json::from_str::<Value>(data).ok())
-                                .and_then(|data| {
-                                    data.get("slots")?.get(slot_id?)?.as_array().cloned()
-                                })
-                                .is_some_and(|sections| {
-                                    sections.iter().any(|section| {
-                                        section.get("pluginId").and_then(Value::as_str) == plugin_id
-                                            && section.get("id").and_then(Value::as_str) == id
-                                    })
-                                });
-                            if !projected {
-                                self.last_error = Some("plugin slot section is stale".into());
-                                return;
-                            }
-                            approved.push(PluginEffect::InvokePluginSlotSection {
-                                target_plugin: effect_manifest.id.clone(),
-                                slot_id: slot_id.unwrap().to_owned(),
-                                plugin_id: plugin_id.unwrap().to_owned(),
-                                id: id.unwrap().to_owned(),
-                            });
-                        }
                         _ if effect["type"] == "preferences.set" => {
                             let request =
                                 crate::preferences_capabilities::PreferencesEffect::parse(&effect)
@@ -4204,177 +3972,6 @@ mod tests {
             );
             assert!(PluginPanelApplication::new(&source).is_err());
         }
-    }
-
-    #[test]
-    fn taskbar_action_contribution_dispatches_its_own_granted_callback() {
-        let package = PluginPackage::load(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../assets/plugins/example-task-action"
-        ))
-        .unwrap();
-        PluginPanelApplication::validate_package(&package).unwrap();
-        let mut application = PluginPanelApplication::from_package(&package).unwrap();
-        assert_eq!(
-            application.action_contributions().unwrap()[0].id,
-            "find-apps"
-        );
-        assert!(application.activate_action("find-apps", "org.nickel.mail"));
-        assert_eq!(application.take_effects(), vec![PluginEffect::ShowLauncher]);
-        assert!(!application.activate_action("missing", "org.nickel.mail"));
-        assert!(application.take_effects().is_empty());
-    }
-
-    #[test]
-    fn contribution_callbacks_work_inside_generic_component_containers() {
-        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/plugins");
-        let mut action = PluginPackage::load(format!("{root}/example-task-action")).unwrap();
-        let plain_bytes = PluginPanelApplication::from_package(&action)
-            .unwrap()
-            .retained_contribution_bytes();
-        action.source = r#"
-            function App() {
-                return h(Div, {className: 'contribution'},
-                    h(Box, {x: 0, y: 0, width: 80, height: 32},
-                        h(Action, {id: 'find-apps', label: 'Find apps',
-                            onClick: () => nickel.request('show-launcher')})));
-            }
-        "#
-        .into();
-        let mut application = PluginPanelApplication::from_package(&action).unwrap();
-        assert!(application.retained_contribution_bytes() > plain_bytes);
-        assert_eq!(
-            application.action_contributions().unwrap()[0].id,
-            "find-apps"
-        );
-        assert!(application.activate_action("find-apps", "org.nickel.mail"));
-        assert_eq!(application.take_effects(), vec![PluginEffect::ShowLauncher]);
-    }
-
-    #[test]
-    fn installed_action_slot_dispatches_only_a_projected_contributors_action() {
-        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/plugins");
-        let provider = PluginPackage::load(format!("{root}/example-widget-host")).unwrap();
-        let contributor =
-            PluginPackage::load(format!("{root}/example-action-contributor")).unwrap();
-        PluginPanelApplication::validate_package(&provider).unwrap();
-        PluginPanelApplication::validate_package(&contributor).unwrap();
-        let mut scoped = contributor.clone();
-        scoped.source = scoped.source.replace(
-            "label: \"Open launcher\"",
-            "item: \"mail\", label: \"Open launcher\"",
-        );
-        let scoped = PluginPanelApplication::from_package(&scoped).unwrap();
-        scoped.validate_contribution().unwrap();
-        assert_eq!(
-            scoped.action_contributions().unwrap()[0].item.as_deref(),
-            Some("mail")
-        );
-        let mut contributor = PluginPanelApplication::from_package(&contributor).unwrap();
-        assert_eq!(
-            contributor.action_contributions().unwrap()[0].id,
-            "open-launcher"
-        );
-        assert!(contributor.activate_action("open-launcher", ""));
-        assert_eq!(contributor.take_effects(), vec![PluginEffect::ShowLauncher]);
-
-        let surface = &provider.manifest.surfaces[0];
-        let mut app = PluginPanelApplication::from_package_surface(
-            &provider,
-            &std::collections::BTreeMap::new(),
-            surface,
-        )
-        .unwrap();
-        let projected = serde_json::json!({
-            "metrics": [],
-            "commands": [{"pluginId":"org.example.action-contributor", "id":"open-launcher", "label":"Open launcher"}]
-        });
-        assert!(app.sync_external_slots(&projected).unwrap());
-        let stale_click = app.button_message("slot-action-open-launcher").unwrap();
-        let mut host = nickel_ui::UiHost::new(app, surface.width, surface.height);
-        let button = host
-            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
-                role: nickel_ui::SemanticRole::Button,
-                name: "Open launcher".into(),
-            })
-            .unwrap();
-        assert!(button.bounds.size.width > 0.0);
-        assert!(button.bounds.size.height > 0.0);
-        let app = host.application_mut();
-        app.update(stale_click.clone());
-        assert_eq!(
-            app.take_effects(),
-            vec![PluginEffect::InvokePluginSlotAction {
-                target_plugin: provider.manifest.id.clone(),
-                slot_id: "commands".into(),
-                plugin_id: "org.example.action-contributor".into(),
-                id: "open-launcher".into(),
-                item: None,
-            }]
-        );
-        assert!(
-            app.sync_external_slots(&serde_json::json!({"metrics":[], "commands":[]}))
-                .unwrap()
-        );
-        app.update(stale_click);
-        assert!(app.take_effects().is_empty());
-    }
-
-    #[test]
-    fn item_scoped_slot_action_requires_the_projected_item() {
-        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/plugins");
-        let provider = PluginPackage::load(format!("{root}/example-widget-host")).unwrap();
-        let source = r#"
-            function App() {
-                return h(Window, {width: 420, height: 280},
-                    h(Button, {id: 'invoke', onClick: () => nickel.request({
-                        type: 'invoke-plugin-slot-action', slot: 'commands',
-                        pluginId: 'org.example.action-contributor', id: 'open-launcher',
-                        item: 'mail'
-                    })}, 'Invoke'));
-            }
-        "#;
-        let projection = serde_json::json!({
-            "slotContext": {"item": "mail"},
-            "slots": {"commands": [{
-                "pluginId": "org.example.action-contributor",
-                "id": "open-launcher", "label": "Open launcher", "item": "mail"
-            }]}
-        });
-        let mut app = PluginPanelApplication::new_with_manifest(
-            source,
-            &provider.manifest,
-            Some(projection.to_string()),
-        )
-        .unwrap();
-        app.update(app.button_message("invoke").unwrap());
-        assert_eq!(
-            app.take_effects(),
-            vec![PluginEffect::InvokePluginSlotAction {
-                target_plugin: provider.manifest.id.clone(),
-                slot_id: "commands".into(),
-                plugin_id: "org.example.action-contributor".into(),
-                id: "open-launcher".into(),
-                item: Some("mail".into()),
-            }]
-        );
-        let mut forged = PluginPanelApplication::new_with_manifest(
-            &source.replace("item: 'mail'", "item: 'other'"),
-            &provider.manifest,
-            Some(projection.to_string()),
-        )
-        .unwrap();
-        forged.update(forged.button_message("invoke").unwrap());
-        assert!(forged.take_effects().is_empty());
-        assert_eq!(forged.last_error(), Some("plugin slot action is stale"));
-        app.sync_external_slots(&serde_json::json!({"commands": [{
-            "pluginId": "org.example.action-contributor",
-            "id": "open-launcher", "label": "Open launcher", "item": "other"
-        }]}))
-        .unwrap();
-        app.update(app.button_message("invoke").unwrap());
-        assert!(app.take_effects().is_empty());
-        assert_eq!(app.last_error(), Some("plugin slot action is stale"));
     }
 
     #[test]

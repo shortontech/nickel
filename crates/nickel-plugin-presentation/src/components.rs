@@ -19,28 +19,6 @@ use crate::css::{ControlStyle, Display, FlexDirection, InteractionState, StyleSh
 pub type PluginImages = BTreeMap<String, (u16, Arc<image::RgbaImage>)>;
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct PluginWidgetContribution {
-    pub label: String,
-    pub value: String,
-    pub percent: u8,
-    pub color: u32,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PluginActionContribution {
-    pub id: String,
-    pub item: Option<String>,
-    pub label: String,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PluginSectionContribution {
-    pub id: String,
-    pub label: String,
-    pub value: String,
-}
-
-#[derive(Clone, Debug, PartialEq)]
 pub enum PluginMessage {
     Click(usize),
     Button { click: usize, drag: usize },
@@ -235,24 +213,6 @@ pub enum PanelNode {
         count: u16,
         color: u32,
         class_name: Option<String>,
-    },
-    Widget {
-        label: String,
-        value: String,
-        percent: u8,
-        color: u32,
-    },
-    Action {
-        id: String,
-        item: Option<String>,
-        label: String,
-        action: usize,
-    },
-    Section {
-        id: String,
-        label: String,
-        value: String,
-        action: usize,
     },
     Box {
         children: Vec<Self>,
@@ -782,12 +742,12 @@ impl PanelNode {
         Ok(Some(surface))
     }
 
-    pub fn contribution_bytes(&self) -> u64 {
+    pub fn retained_bytes(&self) -> u64 {
         let own = std::mem::size_of::<Self>() as u64;
         let capacity = |value: &String| value.capacity() as u64;
         let descendants = self.container_children().map_or(0, |children| {
             ((children.capacity() - children.len()) * std::mem::size_of::<Self>()) as u64
-                + children.iter().map(Self::contribution_bytes).sum::<u64>()
+                + children.iter().map(Self::retained_bytes).sum::<u64>()
         });
         own + descendants
             + match self {
@@ -801,13 +761,6 @@ impl PanelNode {
                         + capacity(label)
                         + class_name.as_ref().map_or(0, capacity)
                 }
-                Self::Widget { label, value, .. } => capacity(label) + capacity(value),
-                Self::Action {
-                    id, item, label, ..
-                } => capacity(id) + item.as_ref().map_or(0, capacity) + capacity(label),
-                Self::Section {
-                    id, label, value, ..
-                } => capacity(id) + capacity(label) + capacity(value),
                 Self::Slot { id, class_name } => {
                     capacity(id) + class_name.as_ref().map_or(0, capacity)
                 }
@@ -862,7 +815,7 @@ impl PanelNode {
                         + capacity(label)
                         + disabled_reason.as_ref().map_or(0, capacity)
                         + shortcut.as_ref().map_or(0, capacity)
-                        + children.iter().map(Self::contribution_bytes).sum::<u64>()
+                        + children.iter().map(Self::retained_bytes).sum::<u64>()
                 }
                 Self::Progress { class_name, .. } => class_name.as_ref().map_or(0, capacity),
                 Self::Select {
@@ -936,7 +889,7 @@ impl PanelNode {
                     capacity(id)
                         + capacity(anchor)
                         + class_name.as_ref().map_or(0, capacity)
-                        + items.iter().map(Self::contribution_bytes).sum::<u64>()
+                        + items.iter().map(Self::retained_bytes).sum::<u64>()
                 }
                 _ => 0,
             }
@@ -1014,86 +967,6 @@ impl PanelNode {
                 Ok(Self::Slot {
                     id: id.to_owned(),
                     class_name,
-                })
-            }
-            "section" => {
-                if !children.is_empty() {
-                    return Err("section cannot have children".into());
-                }
-                let bounded = |name: &str, max: usize| {
-                    value
-                        .get(name)
-                        .and_then(Value::as_str)
-                        .filter(|text| !text.is_empty() && text.len() <= max)
-                        .map(str::to_owned)
-                        .ok_or_else(|| format!("section {name} must be 1 to {max} bytes"))
-                };
-                Ok(Self::Section {
-                    id: bounded("id", 64)?,
-                    label: bounded("label", 120)?,
-                    value: bounded("value", 120)?,
-                    action: value
-                        .get("action")
-                        .and_then(Value::as_u64)
-                        .and_then(|action| usize::try_from(action).ok())
-                        .ok_or("section needs an onClick handler")?,
-                })
-            }
-            "action" => {
-                if !children.is_empty() {
-                    return Err("action cannot have children".into());
-                }
-                let bounded = |name: &str, max: usize| {
-                    value
-                        .get(name)
-                        .and_then(Value::as_str)
-                        .filter(|text| !text.is_empty() && text.len() <= max)
-                        .map(str::to_owned)
-                        .ok_or_else(|| format!("action {name} must be 1 to {max} bytes"))
-                };
-                Ok(Self::Action {
-                    id: bounded("id", 64)?,
-                    item: match value.get("item") {
-                        None | Some(Value::Null) => None,
-                        Some(Value::String(item)) if !item.is_empty() && item.len() <= 256 => {
-                            Some(item.clone())
-                        }
-                        _ => return Err("action item must be 1 to 256 bytes".into()),
-                    },
-                    label: bounded("label", 120)?,
-                    action: value
-                        .get("action")
-                        .and_then(Value::as_u64)
-                        .and_then(|action| usize::try_from(action).ok())
-                        .ok_or("action needs an onClick handler")?,
-                })
-            }
-            "widget" => {
-                if !children.is_empty() {
-                    return Err("widget cannot have children".into());
-                }
-                let bounded = |name: &str| {
-                    value
-                        .get(name)
-                        .and_then(Value::as_str)
-                        .filter(|text| !text.is_empty() && text.len() <= 64)
-                        .map(str::to_owned)
-                        .ok_or_else(|| format!("widget {name} must be 1 to 64 bytes"))
-                };
-                Ok(Self::Widget {
-                    label: bounded("label")?,
-                    value: bounded("value")?,
-                    percent: value
-                        .get("percent")
-                        .and_then(Value::as_u64)
-                        .filter(|percent| *percent <= 100)
-                        .ok_or("widget percent must be 0 to 100")?
-                        as u8,
-                    color: value
-                        .get("color")
-                        .and_then(Value::as_u64)
-                        .filter(|color| *color <= u32::MAX as u64)
-                        .map_or(0xffd0d7e2, |color| color as u32),
                 })
             }
             "badge" => {
@@ -2319,8 +2192,6 @@ impl PanelNode {
                 };
                 with_margin(AnyView::new(container), &style)
             }
-            Self::Widget { .. } => AnyView::new(Spacer::fixed(0.0)),
-            Self::Action { .. } | Self::Section { .. } => AnyView::new(Spacer::fixed(0.0)),
             Self::Div {
                 id,
                 class_name,
@@ -3691,144 +3562,6 @@ impl PanelNode {
             _ => None,
         }
     }
-
-    pub fn collect_badges(
-        &self,
-        badges: &mut Vec<(String, String, u16, u32)>,
-    ) -> Result<(), String> {
-        match self {
-            Self::Badge {
-                item: Some(item),
-                label,
-                count,
-                color,
-                ..
-            } => {
-                if badges.len() >= 32 {
-                    return Err("extension has too many badges".into());
-                }
-                badges.push((item.clone(), label.clone(), *count, *color));
-                Ok(())
-            }
-            _ => {
-                let Some(children) = self.container_children() else {
-                    return Err(
-                        "badge extension must return badges in a supported container".into(),
-                    );
-                };
-                for child in children {
-                    child.collect_badges(badges)?;
-                }
-                Ok(())
-            }
-        }
-    }
-
-    pub fn collect_widgets(
-        &self,
-        widgets: &mut Vec<PluginWidgetContribution>,
-    ) -> Result<(), String> {
-        match self {
-            Self::Widget {
-                label,
-                value,
-                percent,
-                color,
-            } => {
-                if widgets.len() >= 8 {
-                    return Err("extension has too many widgets".into());
-                }
-                widgets.push(PluginWidgetContribution {
-                    label: label.clone(),
-                    value: value.clone(),
-                    percent: *percent,
-                    color: *color,
-                });
-                Ok(())
-            }
-            _ => {
-                let Some(children) = self.container_children() else {
-                    return Err(
-                        "widget extension must return widgets in a supported container".into(),
-                    );
-                };
-                for child in children {
-                    child.collect_widgets(widgets)?;
-                }
-                Ok(())
-            }
-        }
-    }
-
-    pub fn collect_actions(
-        &self,
-        actions: &mut Vec<PluginActionContribution>,
-    ) -> Result<(), String> {
-        match self {
-            Self::Action {
-                id, item, label, ..
-            } => {
-                if actions.len() >= 8 {
-                    return Err("extension has too many actions".into());
-                }
-                if actions.iter().any(|action| action.id == *id) {
-                    return Err("extension action IDs must be unique".into());
-                }
-                actions.push(PluginActionContribution {
-                    id: id.clone(),
-                    item: item.clone(),
-                    label: label.clone(),
-                });
-                Ok(())
-            }
-            _ => {
-                let Some(children) = self.container_children() else {
-                    return Err(
-                        "action extension must return actions in a supported container".into(),
-                    );
-                };
-                for child in children {
-                    child.collect_actions(actions)?;
-                }
-                Ok(())
-            }
-        }
-    }
-
-    pub fn collect_sections(
-        &self,
-        sections: &mut Vec<PluginSectionContribution>,
-    ) -> Result<(), String> {
-        match self {
-            Self::Section {
-                id, label, value, ..
-            } => {
-                if sections.len() >= 8 {
-                    return Err("extension has too many sections".into());
-                }
-                if sections.iter().any(|section| section.id == *id) {
-                    return Err("extension section IDs must be unique".into());
-                }
-                sections.push(PluginSectionContribution {
-                    id: id.clone(),
-                    label: label.clone(),
-                    value: value.clone(),
-                });
-                Ok(())
-            }
-            _ => {
-                let Some(children) = self.container_children() else {
-                    return Err(
-                        "section extension must return sections in a supported container".into(),
-                    );
-                };
-                for child in children {
-                    child.collect_sections(sections)?;
-                }
-                Ok(())
-            }
-        }
-    }
 }
 
 pub fn parse_panel_for_manifest(
@@ -4014,6 +3747,13 @@ pub fn render_panel_validated(
 mod class_lookup_tests {
     use super::PanelNode;
     use serde_json::json;
+
+    #[test]
+    fn retired_projection_nodes_are_not_native_components() {
+        for kind in ["action", "widget", "section"] {
+            assert!(PanelNode::parse(&serde_json::json!({"kind":kind,"children":[]})).is_err());
+        }
+    }
 
     #[test]
     fn direct_class_lookup_uses_whitespace_tokens_and_rejects_duplicates() {

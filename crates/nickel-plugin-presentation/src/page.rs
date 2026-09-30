@@ -67,7 +67,7 @@ impl JsxPage {
             + self
                 .node
                 .as_ref()
-                .map_or(0, |node| node.contribution_bytes() as usize)
+                .map_or(0, |node| node.retained_bytes() as usize)
     }
 
     pub fn node(&self) -> Option<&PanelNode> {

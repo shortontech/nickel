@@ -1,4 +1,4 @@
-//! Isolated edit loop for an external panel or executable extension package.
+//! Isolated edit loop for an external surface or composition package.
 
 use std::{
     path::{Path, PathBuf},
@@ -171,8 +171,8 @@ mod platform {
     use super::tsc_executable;
     use super::{compile_jsx, jsx_source, load_package};
     use nickel_core::plugins::{
-        MAX_PLUGIN_ENTRY_BYTES, PluginActivationSettings, PluginContributionMode, PluginManifest,
-        PluginPackage, PluginSlotContract, PluginSurfaceKind,
+        MAX_PLUGIN_ENTRY_BYTES, PluginActivationSettings, PluginManifest, PluginPackage,
+        PluginSurfaceKind,
     };
     use nickel_shell::plugin_panel::{
         PluginPanelApplication, codex_projects_manifest, manifest, on_screen_keyboard_manifest,
@@ -229,25 +229,11 @@ mod platform {
                     surface.kind,
                     PluginSurfaceKind::Dialog | PluginSurfaceKind::Overlay
                 )
-            })
-            && package.manifest.contributes.is_empty();
-        let extension = package.manifest.surfaces.is_empty()
-            && matches!(package.manifest.contributes.as_slice(), [contribution]
-                if matches!((contribution.target_plugin.as_str(), contribution.target_slot.as_str(), contribution.contract),
-                    (_, _, PluginSlotContract::Section)
-                    | (_, _, PluginSlotContract::Badge)
-                    | (_, _, PluginSlotContract::Widget)
-                    | (_, _, PluginSlotContract::Action))
-                    && matches!(contribution.mode, PluginContributionMode::Add | PluginContributionMode::Replace));
-        let composition_extension = package.manifest.surfaces.is_empty()
-            && package
-                .manifest
-                .composition
-                .as_ref()
-                .is_some_and(|composition| !composition.contributions.is_empty());
-        if !bundled && !panel && !extension && !composition_extension {
+            });
+        let composition = package.manifest.composition.is_some();
+        if !bundled && !panel && !composition {
             return Err(
-                "dev needs an unchanged bundled manifest, a panel, dock, or window that may declare dialogs, or one supported surface-free contribution"
+                "dev needs an unchanged bundled manifest, a panel, dock, or window that may declare dialogs, or a public composition package"
                     .into(),
             );
         }
@@ -529,18 +515,6 @@ mod platform {
             .collect::<HashSet<_>>();
         if ids.len() != packages.len() {
             return Err("dev package IDs must be distinct".into());
-        }
-        for package in &packages {
-            for contribution in &package.manifest.contributes {
-                if bundled_manifest(&contribution.target_plugin).is_none()
-                    && !ids.contains(contribution.target_plugin.as_str())
-                {
-                    return Err(format!(
-                        "dev needs the target package directory for {}",
-                        contribution.target_plugin
-                    ));
-                }
-            }
         }
         Ok(packages)
     }
@@ -1018,28 +992,6 @@ mod platform {
         }
 
         #[test]
-        fn accepts_each_executable_surface_free_extension() {
-            let root = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/plugins"));
-            for name in [
-                "example-task-badge",
-                "example-task-action",
-                "example-control-section",
-            ] {
-                let package = load_dev_package(&root.join(name)).unwrap();
-                assert!(package.manifest.surfaces.is_empty());
-                if name == "example-control-section" {
-                    assert!(package.manifest.contributes.is_empty());
-                    assert_eq!(
-                        package.manifest.composition.as_ref().unwrap().contributions[0].collection,
-                        "system.controls"
-                    );
-                } else {
-                    assert_eq!(package.manifest.contributes.len(), 1);
-                }
-            }
-        }
-
-        #[test]
         fn codex_project_menu_uses_the_bundled_dev_path() {
             let root = Path::new(concat!(
                 env!("CARGO_MANIFEST_DIR"),
@@ -1059,42 +1011,6 @@ mod platform {
             let package = load_dev_package(root).unwrap();
             assert_eq!(package.manifest.id, "org.nickel.on-screen-keyboard");
             assert_eq!(package.manifest.surfaces.len(), 1);
-        }
-
-        #[test]
-        fn stages_a_provider_and_multiple_contributors_together() {
-            let root = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/plugins"));
-            let host = root.join("example-widget-host");
-            let contributor = root.join("example-widget-contributor");
-            let action = root.join("example-action-contributor");
-            assert!(
-                load_dev_packages(&[contributor.clone()])
-                    .unwrap_err()
-                    .contains("target package directory")
-            );
-            assert!(
-                load_dev_packages(&[action.clone()])
-                    .unwrap_err()
-                    .contains("target package directory")
-            );
-            let directories = vec![host, contributor, action];
-            let packages = load_dev_packages(&directories).unwrap();
-            let profile = tempfile::tempdir().unwrap();
-            stage_all(&packages, &directories, profile.path()).unwrap();
-            for package in packages {
-                let staged = PluginPackage::load(
-                    staged_config_directory(profile.path())
-                        .join("plugins")
-                        .join(&package.manifest.id),
-                )
-                .unwrap();
-                let activation = PluginActivationSettings::load(
-                    staged_config_directory(profile.path()).join("plugin-activation.json"),
-                )
-                .unwrap();
-                assert!(activation.approval_current(&staged.manifest, &staged.source_digest()));
-                assert!(activation.desired_enabled(&staged.manifest.id, false));
-            }
         }
 
         #[test]
