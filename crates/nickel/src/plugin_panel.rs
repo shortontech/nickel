@@ -10,11 +10,11 @@ use std::{
 use nickel_core::plugins::{
     PluginCapability, PluginManifest, PluginPackage, PluginSurface, PluginSurfaceKind,
 };
-pub use nickel_plugin_presentation::components::{
-    DesktopPluginWidget, PluginImages, PluginMessage, PluginSectionContribution,
-    TaskbarPluginAction,
-};
 use nickel_plugin_presentation::components::{PanelNode, render_panel};
+pub use nickel_plugin_presentation::components::{
+    PluginActionContribution, PluginImages, PluginMessage, PluginSectionContribution,
+    PluginWidgetContribution,
+};
 use nickel_plugin_runtime::JsxRuntime;
 use nickel_ui::{
     AnyView, Column, DragPhase, FrameOverlay, OverlayAnchor, OverlayId, OverlayMenu, OverlayStyle,
@@ -1251,20 +1251,20 @@ impl PluginPanelApplication {
         Ok(badges)
     }
 
-    pub fn desktop_widgets(&self) -> Result<Vec<DesktopPluginWidget>, String> {
+    pub fn widget_contributions(&self) -> Result<Vec<PluginWidgetContribution>, String> {
         let mut widgets = Vec::new();
-        self.node.collect_desktop_widgets(&mut widgets)?;
+        self.node.collect_widgets(&mut widgets)?;
         if widgets.is_empty() {
-            return Err("desktop widget extension did not return a widget".into());
+            return Err("widget extension did not return a widget".into());
         }
         Ok(widgets)
     }
 
-    pub fn taskbar_actions(&self) -> Result<Vec<TaskbarPluginAction>, String> {
+    pub fn action_contributions(&self) -> Result<Vec<PluginActionContribution>, String> {
         let mut actions = Vec::new();
-        self.node.collect_taskbar_actions(&mut actions)?;
+        self.node.collect_actions(&mut actions)?;
         if actions.is_empty() {
-            return Err("taskbar action extension did not return an action".into());
+            return Err("action extension did not return an action".into());
         }
         Ok(actions)
     }
@@ -1303,37 +1303,32 @@ impl PluginPanelApplication {
         self.last_error.is_none()
     }
 
-    pub fn activate_taskbar_action(&mut self, id: &str, application_id: &str) -> bool {
-        let Some(action) = self.find_taskbar_action(id, application_id) else {
+    pub fn activate_action(&mut self, id: &str, item_id: &str) -> bool {
+        let Some(action) = self.find_action(id, item_id) else {
             return false;
         };
-        nickel_ui::Application::update(
-            self,
-            PluginMessage::Text(action, application_id.to_owned()),
-        );
+        nickel_ui::Application::update(self, PluginMessage::Text(action, item_id.to_owned()));
         self.last_error.is_none()
     }
 
-    fn find_taskbar_action(&self, id: &str, application_id: &str) -> Option<usize> {
-        fn find(node: &PanelNode, id: &str, application_id: &str) -> Option<usize> {
+    fn find_action(&self, id: &str, item_id: &str) -> Option<usize> {
+        fn find(node: &PanelNode, id: &str, item_id: &str) -> Option<usize> {
             match node {
                 PanelNode::Action {
                     id: action_id,
                     item,
                     action,
                     ..
-                } if action_id == id
-                    && item.as_deref().is_none_or(|item| item == application_id) =>
-                {
+                } if action_id == id && item.as_deref().is_none_or(|item| item == item_id) => {
                     Some(*action)
                 }
                 _ => node
                     .container_children()?
                     .iter()
-                    .find_map(|child| find(child, id, application_id)),
+                    .find_map(|child| find(child, id, item_id)),
             }
         }
-        find(&self.node, id, application_id)
+        find(&self.node, id, item_id)
     }
 
     pub fn validate_contribution(&self) -> Result<(), String> {
@@ -1343,8 +1338,8 @@ impl PluginPanelApplication {
         };
         match contribution.contract {
             PluginSlotContract::Badge => self.badge_contributions().map(|_| ()),
-            PluginSlotContract::Widget => self.desktop_widgets().map(|_| ()),
-            PluginSlotContract::Action => self.taskbar_actions().map(|_| ()),
+            PluginSlotContract::Widget => self.widget_contributions().map(|_| ()),
+            PluginSlotContract::Action => self.action_contributions().map(|_| ()),
             PluginSlotContract::Section => self.section_contributions().map(|_| ()),
         }
     }
@@ -3298,10 +3293,13 @@ mod tests {
         .unwrap();
         PluginPanelApplication::validate_package(&package).unwrap();
         let mut application = PluginPanelApplication::from_package(&package).unwrap();
-        assert_eq!(application.taskbar_actions().unwrap()[0].id, "find-apps");
-        assert!(application.activate_taskbar_action("find-apps", "org.nickel.mail"));
+        assert_eq!(
+            application.action_contributions().unwrap()[0].id,
+            "find-apps"
+        );
+        assert!(application.activate_action("find-apps", "org.nickel.mail"));
         assert_eq!(application.take_effects(), vec![PluginEffect::ShowLauncher]);
-        assert!(!application.activate_taskbar_action("missing", "org.nickel.mail"));
+        assert!(!application.activate_action("missing", "org.nickel.mail"));
         assert!(application.take_effects().is_empty());
     }
 
@@ -3342,8 +3340,11 @@ mod tests {
         .into();
         let mut application = PluginPanelApplication::from_package(&action).unwrap();
         assert!(application.retained_contribution_bytes() > plain_bytes);
-        assert_eq!(application.taskbar_actions().unwrap()[0].id, "find-apps");
-        assert!(application.activate_taskbar_action("find-apps", "org.nickel.mail"));
+        assert_eq!(
+            application.action_contributions().unwrap()[0].id,
+            "find-apps"
+        );
+        assert!(application.activate_action("find-apps", "org.nickel.mail"));
         assert_eq!(application.take_effects(), vec![PluginEffect::ShowLauncher]);
 
         let mut section = PluginPackage::load(format!("{root}/example-control-section")).unwrap();
@@ -3384,7 +3385,7 @@ mod tests {
         .into();
         let application = PluginPanelApplication::from_package(&widget).unwrap();
         assert_eq!(
-            application.desktop_widgets().unwrap()[0].label,
+            application.widget_contributions().unwrap()[0].label,
             "Unread mail"
         );
     }
@@ -3405,15 +3406,15 @@ mod tests {
         let scoped = PluginPanelApplication::from_package(&scoped).unwrap();
         scoped.validate_contribution().unwrap();
         assert_eq!(
-            scoped.taskbar_actions().unwrap()[0].item.as_deref(),
+            scoped.action_contributions().unwrap()[0].item.as_deref(),
             Some("mail")
         );
         let mut contributor = PluginPanelApplication::from_package(&contributor).unwrap();
         assert_eq!(
-            contributor.taskbar_actions().unwrap()[0].id,
+            contributor.action_contributions().unwrap()[0].id,
             "open-launcher"
         );
-        assert!(contributor.activate_taskbar_action("open-launcher", ""));
+        assert!(contributor.activate_action("open-launcher", ""));
         assert_eq!(contributor.take_effects(), vec![PluginEffect::ShowLauncher]);
 
         let surface = &provider.manifest.surfaces[0];

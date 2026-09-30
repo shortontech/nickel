@@ -19,7 +19,7 @@ use crate::css::{ControlStyle, Display, FlexDirection, InteractionState, StyleSh
 pub type PluginImages = BTreeMap<String, (u16, Arc<image::RgbaImage>)>;
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct DesktopPluginWidget {
+pub struct PluginWidgetContribution {
     pub label: String,
     pub value: String,
     pub percent: u8,
@@ -27,7 +27,7 @@ pub struct DesktopPluginWidget {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TaskbarPluginAction {
+pub struct PluginActionContribution {
     pub id: String,
     pub item: Option<String>,
     pub label: String,
@@ -2764,9 +2764,9 @@ impl PanelNode {
         }
     }
 
-    pub fn collect_desktop_widgets(
+    pub fn collect_widgets(
         &self,
-        widgets: &mut Vec<DesktopPluginWidget>,
+        widgets: &mut Vec<PluginWidgetContribution>,
     ) -> Result<(), String> {
         match self {
             Self::Widget {
@@ -2778,7 +2778,7 @@ impl PanelNode {
                 if widgets.len() >= 8 {
                     return Err("extension has too many widgets".into());
                 }
-                widgets.push(DesktopPluginWidget {
+                widgets.push(PluginWidgetContribution {
                     label: label.clone(),
                     value: value.clone(),
                     percent: *percent,
@@ -2789,21 +2789,20 @@ impl PanelNode {
             _ => {
                 let Some(children) = self.container_children() else {
                     return Err(
-                        "desktop widget extension must return widgets in a supported container"
-                            .into(),
+                        "widget extension must return widgets in a supported container".into(),
                     );
                 };
                 for child in children {
-                    child.collect_desktop_widgets(widgets)?;
+                    child.collect_widgets(widgets)?;
                 }
                 Ok(())
             }
         }
     }
 
-    pub fn collect_taskbar_actions(
+    pub fn collect_actions(
         &self,
-        actions: &mut Vec<TaskbarPluginAction>,
+        actions: &mut Vec<PluginActionContribution>,
     ) -> Result<(), String> {
         match self {
             Self::Action {
@@ -2815,7 +2814,7 @@ impl PanelNode {
                 if actions.iter().any(|action| action.id == *id) {
                     return Err("extension action IDs must be unique".into());
                 }
-                actions.push(TaskbarPluginAction {
+                actions.push(PluginActionContribution {
                     id: id.clone(),
                     item: item.clone(),
                     label: label.clone(),
@@ -2825,12 +2824,11 @@ impl PanelNode {
             _ => {
                 let Some(children) = self.container_children() else {
                     return Err(
-                        "taskbar action extension must return actions in a supported container"
-                            .into(),
+                        "action extension must return actions in a supported container".into(),
                     );
                 };
                 for child in children {
-                    child.collect_taskbar_actions(actions)?;
+                    child.collect_actions(actions)?;
                 }
                 Ok(())
             }

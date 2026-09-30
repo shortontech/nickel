@@ -3655,7 +3655,7 @@ impl LiveShell {
                         }
                     }
                     PluginSlotContract::Widget => {
-                        if let Ok(widgets) = application.desktop_widgets() {
+                        if let Ok(widgets) = application.widget_contributions() {
                             for widget in widgets.into_iter().take(limit - items.len()) {
                                 items.push(serde_json::json!({
                                     "pluginId": id,
@@ -3668,7 +3668,7 @@ impl LiveShell {
                         }
                     }
                     PluginSlotContract::Action => {
-                        if let Ok(actions) = application.taskbar_actions() {
+                        if let Ok(actions) = application.action_contributions() {
                             for action in actions
                                 .into_iter()
                                 .filter(|action| {
@@ -6188,8 +6188,7 @@ impl LiveShell {
                     if target != &target_plugin || slot != &slot_id {
                         continue;
                     }
-                    let handled =
-                        extension.activate_taskbar_action(&id, item.as_deref().unwrap_or(""));
+                    let handled = extension.activate_action(&id, item.as_deref().unwrap_or(""));
                     let extension_effects = extension.take_effects();
                     let retained_bytes = extension.retained_contribution_bytes();
                     if handled {
