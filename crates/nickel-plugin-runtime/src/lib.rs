@@ -212,6 +212,44 @@ mod tests {
     }
 
     #[test]
+    fn preferences_clients_copy_snapshots_and_emit_only_requested_patch_fields() {
+        let data = serde_json::json!({"preferences":{"available":true,"writable":true,"revision":"0123456789abcdef","configured":{"barOnAllDisplays":true,"desktopCount":4}}}).to_string();
+        let mut runtime = super::JsxRuntime::new("", Some(&data)).unwrap();
+        runtime.eval("nickel.preferences.get().configured.desktopCount=9; nickel.preferences.set({desktopCount:6});").unwrap();
+        assert_eq!(
+            runtime
+                .eval_json::<u8>("JSON.stringify(nickel.preferences.get().configured.desktopCount)")
+                .unwrap(),
+            4
+        );
+        let effects = runtime.take_effects().unwrap();
+        assert_eq!(effects[0]["type"], "preferences.set");
+        assert_eq!(effects[0]["transaction"]["revision"], "0123456789abcdef");
+        assert_eq!(
+            effects[0]["transaction"]["changedFields"],
+            serde_json::json!(["desktopCount"])
+        );
+        assert_eq!(effects[0]["transaction"]["prior"]["desktopCount"], 4);
+        assert_eq!(effects[0]["transaction"]["requested"]["desktopCount"], 6);
+        assert_eq!(
+            effects[0]["transaction"]["requested"]["barOnAllDisplays"],
+            true
+        );
+        assert!(
+            runtime
+                .eval("nickel.preferences.set({theme:'dark'})")
+                .is_err()
+        );
+        assert!(runtime.eval("nickel.preferences.set({})").is_err());
+        let mut denied = super::JsxRuntime::new("", None).unwrap();
+        assert!(
+            denied
+                .eval("nickel.preferences.set({desktopCount:5})")
+                .is_err()
+        );
+    }
+
+    #[test]
     fn associations_clients_copy_snapshots_and_emit_expected_revision_and_handler() {
         let mut runtime = super::JsxRuntime::new("", Some(r#"{"associations":{"available":true,"revision":"9007199254740993","targets":[{"id":"mime:text/plain","capability":"nativeConsent","canSetDefault":true,"protected":false,"effectiveHandlerId":"old.desktop","handlers":[{"id":"new.desktop","name":"New","protected":false},{"id":"protected.desktop","protected":true}]}]}}"#)).unwrap();
         runtime.eval("nickel.associations.getHandlers('mime:text/plain').handlers[0].name = 'mutated'; nickel.associations.setDefault('mime:text/plain','new.desktop','9007199254740993'); nickel.associations.openSystemSettings();").unwrap();

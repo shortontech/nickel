@@ -7179,6 +7179,43 @@ impl NickelSession {
     /// topology, scale or application replacement). Local service/input updates
     /// carry identities; visibility and placement are reconciled independently.
     fn sync_internal_shell_changes(&mut self, changed: Option<&[nickel_ui::InternalSurfaceId]>) {
+        let committed = self
+            .internal_shell
+            .as_mut()
+            .and_then(|shell| shell.shell_mut().take_preferences_commit());
+        if let Some(settings) = committed {
+            if let Ok(transitions) = self
+                .workspaces
+                .set_count(usize::from(settings.desktop_count))
+            {
+                for transition in transitions {
+                    self.apply_workspace_transition(transition);
+                }
+                self.notify_workspace_state();
+            }
+            let policy = nickel_core::idle::IdlePolicy::from_seconds(
+                settings.idle_dim_seconds,
+                settings.idle_lock_seconds,
+                settings.idle_suspend_seconds,
+            );
+            if self.idle_controller.policy() != policy
+                && self
+                    .idle_controller
+                    .replace_policy(policy, self.start_time.elapsed())
+                    == Some(nickel_core::idle::IdleEffect::Undim)
+            {
+                self.dimmed = false;
+                self.request_output_redraw();
+            }
+            let bar_changed = self
+                .internal_shell
+                .as_mut()
+                .is_some_and(|shell| shell.set_bar_on_all_displays(settings.bar_on_all_displays));
+            self.notify_shell_settings_changed();
+            if bar_changed {
+                self.reconcile_internal_shell_outputs();
+            }
+        }
         self.update_internal_shell_scenes(changed, true);
     }
 

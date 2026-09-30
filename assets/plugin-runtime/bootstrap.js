@@ -295,6 +295,16 @@ const nickel = Object.freeze({
         if (!component) throw Error(`unknown public component ${contract}`);
         return component;
     },
+    preferences: Object.freeze({
+        get() { return __nickelResource('preferences', {available:false,writable:false,reason:'Preferences read capability is unavailable'}); },
+        set(patch) {
+            const snapshot = this.get();
+            if (!snapshot.available || !snapshot.writable) throw Error('preferences write capability is unavailable');
+            if (!patch || typeof patch !== 'object' || Array.isArray(patch) || !Object.keys(patch).length || Object.keys(patch).some(key => !Object.prototype.hasOwnProperty.call(snapshot.configured, key))) throw TypeError('unknown preference fields');
+            const requested = Object.assign({}, snapshot.configured, JSON.parse(JSON.stringify(patch)));
+            __effects.push({type:'preferences.set',transaction:{revision:snapshot.revision,prior:snapshot.configured,requested,changedFields:Object.keys(patch)}});
+        }
+    }),
     associations: Object.freeze({
         get() { return __nickelResource('associations', {available:false,reason:'Associations read capability is unavailable',targets:[],operations:{},lastResult:null}); },
         list() { return this.get().targets; },

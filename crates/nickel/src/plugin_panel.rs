@@ -398,6 +398,10 @@ pub enum PluginEffect {
         id: String,
         direction: i8,
     },
+    Preferences {
+        plugin_id: String,
+        effect: crate::preferences_capabilities::PreferencesEffect,
+    },
     Associations {
         plugin_id: String,
         effect: crate::associations_capabilities::AssociationsEffect,
@@ -1877,6 +1881,7 @@ impl PluginPanelApplication {
                     | "wifi"
                     | "bluetooth"
                     | "associations"
+                    | "preferences"
                     | "appearance"
                     | "wallpaper"
             )
@@ -1937,6 +1942,7 @@ impl PluginPanelApplication {
             ("wifi", PluginCapability::NetworkRead),
             ("bluetooth", PluginCapability::BluetoothRead),
             ("associations", PluginCapability::AssociationsRead),
+            ("preferences", PluginCapability::PreferencesRead),
         ] {
             if fields.iter().any(|(name, _)| *name == field)
                 && !self.manifest.capabilities.contains(&capability)
@@ -2884,6 +2890,43 @@ impl nickel_ui::Application for PluginPanelApplication {
                                 plugin_id: plugin_id.unwrap().to_owned(),
                                 id: id.unwrap().to_owned(),
                             });
+                        }
+                        _ if effect["type"] == "preferences.set" => {
+                            let request =
+                                crate::preferences_capabilities::PreferencesEffect::parse(&effect)
+                                    .and_then(|request| {
+                                        if !self
+                                            .manifest
+                                            .capabilities
+                                            .contains(&request.capability())
+                                            || !self
+                                                .manifest
+                                                .capabilities
+                                                .contains(&PluginCapability::PreferencesRead)
+                                        {
+                                            return Err(
+                                                "preferences read and control are not granted"
+                                                    .into(),
+                                            );
+                                        }
+                                        let data: Value = self
+                                            .projection_data
+                                            .as_deref()
+                                            .and_then(|data| serde_json::from_str(data).ok())
+                                            .ok_or("preferences snapshot is unavailable")?;
+                                        request.validate(&data["preferences"])?;
+                                        Ok(request)
+                                    });
+                            match request {
+                                Ok(effect) => approved.push(PluginEffect::Preferences {
+                                    plugin_id: self.manifest.id.clone(),
+                                    effect,
+                                }),
+                                Err(error) => {
+                                    self.last_error = Some(error);
+                                    return;
+                                }
+                            }
                         }
                         _ if effect
                             .get("type")
@@ -5968,6 +6011,59 @@ mod tests {
             app.update(app.button_message("apply").unwrap());
             assert!(app.take_effects().is_empty());
         }
+    }
+
+    #[test]
+    fn preferences_clients_enforce_read_control_grants_and_typed_fields() {
+        let mut manifest = PluginPackage::load(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/plugins/example-window"
+        ))
+        .unwrap()
+        .manifest;
+        manifest.capabilities.clear();
+        let snapshot = serde_json::json!({"available":true,"writable":true,"revision":"0123456789abcdef","configured":{"barOnAllDisplays":true,"allWindowsOnEveryBar":true,"desktopCount":4,"preferredTerminal":null,"preferredFileManager":null,"fileIconProvider":"nickel","fileIconTheme":null,"idleDimSeconds":300,"idleLockSeconds":900,"idleSuspendSeconds":null}});
+        let source = "function App() { return h(Window, {id:'main',width:520,height:340}, h(Button, {id:'change',onClick:()=>nickel.preferences.set({desktopCount:6})}, 'Change')); }";
+        let data = serde_json::json!({"preferences":snapshot}).to_string();
+        let mut denied =
+            PluginPanelApplication::new_with_manifest(source, &manifest, Some(data.clone()))
+                .unwrap();
+        assert!(
+            denied
+                .sync_host_data_field("preferences", &snapshot)
+                .is_err()
+        );
+        denied.update(denied.button_message("change").unwrap());
+        assert!(denied.take_effects().is_empty());
+        manifest
+            .capabilities
+            .push(PluginCapability::PreferencesRead);
+        let mut readonly =
+            PluginPanelApplication::new_with_manifest(source, &manifest, Some(data.clone()))
+                .unwrap();
+        assert!(
+            readonly
+                .sync_host_data_field("preferences", &snapshot)
+                .is_ok()
+        );
+        readonly.update(readonly.button_message("change").unwrap());
+        assert!(readonly.take_effects().is_empty());
+        manifest
+            .capabilities
+            .push(PluginCapability::PreferencesControl);
+        let mut granted =
+            PluginPanelApplication::new_with_manifest(source, &manifest, Some(data.clone()))
+                .unwrap();
+        granted.update(granted.button_message("change").unwrap());
+        assert!(matches!(
+            granted.take_effects().as_slice(),
+            [PluginEffect::Preferences { .. }]
+        ));
+        let invalid = source.replace("desktopCount:6", "desktopCount:99");
+        let mut invalid =
+            PluginPanelApplication::new_with_manifest(&invalid, &manifest, Some(data)).unwrap();
+        invalid.update(invalid.button_message("change").unwrap());
+        assert!(invalid.take_effects().is_empty());
     }
 
     #[test]

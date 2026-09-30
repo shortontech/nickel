@@ -542,6 +542,8 @@ fn validate_plugin_display_layout(
 
 pub struct LiveShell {
     appearance_capabilities: crate::appearance_capabilities::AppearanceCapabilities,
+    preferences_capabilities: crate::preferences_capabilities::PreferencesCapabilities,
+    preferences_commit_pending: Option<ShellSettings>,
     session_host: Arc<dyn SessionHost>,
     screenshot_capture_pending: bool,
     pub(crate) screenshot_output: Option<String>,
@@ -1653,6 +1655,8 @@ impl LiveShell {
         let launcher_icon_revision = launcher_icons.revision();
         let mut shell = Self {
             appearance_capabilities: Default::default(),
+            preferences_capabilities: Default::default(),
+            preferences_commit_pending: None,
             session_host: session_host.clone(),
             screenshot_capture_pending: false,
             screenshot_output: None,
@@ -2267,6 +2271,11 @@ impl LiveShell {
         #[cfg(not(target_os = "linux"))]
         let mut changed = false;
         changed |= self.appearance_capabilities.refresh_observed();
+        if let Ok(catalog) = self.preferences_catalog() {
+            let previous = self.preferences_capabilities.snapshot(&catalog);
+            let next = self.preferences_capabilities.refresh(&catalog);
+            changed |= previous != next;
+        }
         let shell_settings = ShellSettings::load_default();
         let wallpaper_settings = WallpaperSettings::load_default();
         if self.refresh_configured_wallpaper(wallpaper_settings.image) {
@@ -3564,6 +3573,53 @@ impl LiveShell {
         ))
     }
 
+    fn preferences_catalog(&self) -> Result<crate::preferences_capabilities::Catalog, String> {
+        crate::preferences_capabilities::Catalog::new(
+            self.launcher
+                .discovered_applications()
+                .filter_map(|application| {
+                    Some((
+                        application.id().to_owned(),
+                        application.launch_command()?.first()?.clone(),
+                    ))
+                }),
+            nickel_platform::installed_icon_themes(),
+        )
+    }
+
+    pub(crate) fn take_preferences_commit(&mut self) -> Option<ShellSettings> {
+        self.preferences_commit_pending.take()
+    }
+
+    fn plugin_preferences(&mut self, plugin_id: &str) -> Option<serde_json::Value> {
+        use nickel_core::plugins::PluginCapability;
+        let manifest = self
+            .external_plugin_packages
+            .get(plugin_id)
+            .map(|package| &package.manifest)
+            .or_else(|| {
+                self.plugin_registry
+                    .get(plugin_id)
+                    .map(|entry| &entry.manifest)
+            })?;
+        if !manifest
+            .capabilities
+            .contains(&PluginCapability::PreferencesRead)
+        {
+            return None;
+        }
+        let writable = !self.locked
+            && manifest
+                .capabilities
+                .contains(&PluginCapability::PreferencesControl);
+        let mut snapshot = match self.preferences_catalog() {
+            Ok(catalog) => self.preferences_capabilities.snapshot(&catalog),
+            Err(reason) => serde_json::json!({"available":false,"reason":reason}),
+        };
+        snapshot["writable"] = writable.into();
+        Some(snapshot)
+    }
+
     fn plugin_appearance(&mut self, plugin_id: &str, wallpaper: bool) -> Option<serde_json::Value> {
         use nickel_core::plugins::PluginCapability;
         let manifest = self
@@ -3948,6 +4004,7 @@ impl LiveShell {
             .map(|_| serde_json::Value::Array(self.tray.iter().take(128).map(|item| serde_json::json!({"id":item.id,"title":item.title,"icon":false})).collect()));
         let audio = self.plugin_audio(&key.plugin_id);
         let associations = self.plugin_associations(&key.plugin_id);
+        let preferences = self.plugin_preferences(&key.plugin_id);
         let appearance = self.plugin_appearance(&key.plugin_id, false);
         let wallpaper = self.plugin_appearance(&key.plugin_id, true);
         let wifi = self.plugin_connectivity(&key.plugin_id, true);
@@ -3988,6 +4045,7 @@ impl LiveShell {
                     ("audio", audio.as_ref()),
                     ("tray", tray.as_ref()),
                     ("associations", associations.as_ref()),
+                    ("preferences", preferences.as_ref()),
                     ("appearance", appearance.as_ref()),
                     ("wallpaper", wallpaper.as_ref()),
                     ("wifi", wifi.as_ref()),
@@ -7013,6 +7071,47 @@ impl LiveShell {
                         let result = effect.execute_native().unwrap_or_else(|error| serde_json::json!({"status":"rejected","detail":error.chars().take(512).collect::<String>()}));
                         self.associations_results.insert(plugin_id, result);
                         changed = true;
+                    }
+                }
+                crate::plugin_panel::PluginEffect::Preferences { plugin_id, effect } => {
+                    use nickel_core::plugins::PluginCapability;
+                    let granted = !self.locked
+                        && self
+                            .external_plugin_packages
+                            .get(&plugin_id)
+                            .map(|package| &package.manifest)
+                            .or_else(|| {
+                                self.plugin_registry
+                                    .get(&plugin_id)
+                                    .map(|entry| &entry.manifest)
+                            })
+                            .is_some_and(|manifest| {
+                                manifest
+                                    .capabilities
+                                    .contains(&PluginCapability::PreferencesRead)
+                                    && manifest.capabilities.contains(&effect.capability())
+                            });
+                    if granted {
+                        let result = self.preferences_catalog().and_then(|catalog| {
+                            self.preferences_capabilities
+                                .execute(&effect, &catalog, || {
+                                    if granted {
+                                        Ok(())
+                                    } else {
+                                        Err("preferences grant was retired".into())
+                                    }
+                                })
+                        });
+                        match result {
+                            Ok(settings) => {
+                                self.preferences_commit_pending = Some(settings.clone());
+                                self.launcher_icons.begin_visual_generation();
+                                self.launcher_icons.invalidate_application_inventory();
+                                self.apply_shell_settings(settings);
+                                changed = true;
+                            }
+                            Err(error) => tracing::warn!(%error, "preferences capability rejected"),
+                        }
                     }
                 }
                 crate::plugin_panel::PluginEffect::Appearance { plugin_id, effect } => {
@@ -11513,6 +11612,9 @@ impl LiveShell {
             )
             .unwrap_or_else(|| serde_json::json!({}));
         if let Some(key) = self.taskbar_surface_key() {
+            if let Some(snapshot) = self.plugin_preferences(&key.plugin_id) {
+                data["preferences"] = snapshot;
+            }
             if let Some(snapshot) = self.plugin_appearance(&key.plugin_id, false) {
                 data["appearance"] = snapshot;
             }

@@ -146,6 +146,7 @@ mod places;
 #[allow(dead_code, unused_imports)]
 mod platform;
 pub mod plugin_panel;
+pub mod preferences_capabilities;
 mod screenshot;
 mod session_host;
 mod softbuffer_presenter;
@@ -3333,7 +3334,10 @@ pub fn run() -> Result<(), String> {
             let _ = codex
                 .runtime_snapshot(feature_settings.codex_generation)
                 .save_default();
-            let system_changed = state.refresh_system();
+            let mut system_changed = state.refresh_system();
+            if let Some(settings) = state.take_preferences_commit() {
+                system_changed |= shell.set_bar_on_all_displays(settings.bar_on_all_displays)?;
+            }
             let codex_theme_changed = codex.set_theme(state.semantic_theme());
             let primary_output_changed =
                 shell.set_primary_output_name(state.primary_output_name())?;
