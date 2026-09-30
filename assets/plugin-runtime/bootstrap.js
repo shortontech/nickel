@@ -171,6 +171,11 @@ function __nickelIdentity(id) {
     return id;
 }
 const nickel = Object.freeze({
+    tray: Object.freeze({
+        list() { return __nickelResource('tray', []); },
+        activate(id) { __effects.push({type:'tray.activate',id:__nickelIdentity(id)}); },
+        contextMenu(id) { __effects.push({type:'tray.contextMenu',id:__nickelIdentity(id)}); }
+    }),
     windows: Object.freeze({
         list() { return __nickelResource('windows', []); },
         activate(id) { __effects.push({type:'windows.focus',id:__nickelIdentity(id)}); },

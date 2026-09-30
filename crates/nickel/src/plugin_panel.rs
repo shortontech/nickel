@@ -1832,7 +1832,13 @@ impl PluginPanelApplication {
         if fields.iter().any(|(field, _)| {
             !matches!(
                 *field,
-                "slots" | "windows" | "applications" | "notifications" | "audio" | "displays"
+                "slots"
+                    | "windows"
+                    | "applications"
+                    | "notifications"
+                    | "audio"
+                    | "displays"
+                    | "tray"
             )
         }) {
             return Err("unknown host data field".into());
@@ -1844,6 +1850,14 @@ impl PluginPanelApplication {
                 .contains(&PluginCapability::NotificationsRead)
         {
             return Err("notification data requires notifications.read".into());
+        }
+        if fields.iter().any(|(field, _)| *field == "tray")
+            && !self
+                .manifest
+                .capabilities
+                .contains(&PluginCapability::TrayRead)
+        {
+            return Err("tray data requires tray-read".into());
         }
         if fields.iter().any(|(field, _)| *field == "windows")
             && !self
@@ -2584,8 +2598,12 @@ impl nickel_ui::Application for PluginPanelApplication {
                                 direction,
                             });
                         }
-                        _ if effect.get("type").and_then(Value::as_str)
-                            == Some("taskbar-activate-tray")
+                        _ if effect
+                            .get("type")
+                            .and_then(Value::as_str)
+                            .is_some_and(|kind| {
+                                matches!(kind, "taskbar-activate-tray" | "tray.activate")
+                            })
                             && self
                                 .manifest
                                 .capabilities
@@ -2601,8 +2619,12 @@ impl nickel_ui::Application for PluginPanelApplication {
                             }
                             approved.push(PluginEffect::ActivateTrayItem { id: id.to_owned() });
                         }
-                        _ if effect.get("type").and_then(Value::as_str)
-                            == Some("taskbar-context-tray")
+                        _ if effect
+                            .get("type")
+                            .and_then(Value::as_str)
+                            .is_some_and(|kind| {
+                                matches!(kind, "taskbar-context-tray" | "tray.contextMenu")
+                            })
                             && self
                                 .manifest
                                 .capabilities

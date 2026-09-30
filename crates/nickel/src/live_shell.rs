@@ -3845,6 +3845,9 @@ impl LiveShell {
         let windows = self.external_plugin_windows(&key.plugin_id);
         let applications = self.external_plugin_applications(&key.plugin_id);
         let notifications = self.external_plugin_notifications(&key.plugin_id);
+        let tray = self.plugin_registry.get(&key.plugin_id)
+            .filter(|entry| entry.manifest.capabilities.contains(&nickel_core::plugins::PluginCapability::TrayRead))
+            .map(|_| serde_json::Value::Array(self.tray.iter().take(128).map(|item| serde_json::json!({"id":item.id,"title":item.title,"icon":false})).collect()));
         let audio = self.plugin_audio(&key.plugin_id);
         let displays = self.plugin_displays(&key.plugin_id);
         let keyboard_data = (*key == crate::plugin_panel::on_screen_keyboard_surface_key())
@@ -3880,6 +3883,7 @@ impl LiveShell {
                     ("applications", applications.as_ref()),
                     ("notifications", notifications.as_ref()),
                     ("audio", audio.as_ref()),
+                    ("tray", tray.as_ref()),
                     ("displays", displays.as_ref()),
                 ]
                 .into_iter()
@@ -6660,13 +6664,13 @@ impl LiveShell {
                     }
                 }
                 crate::plugin_panel::PluginEffect::ActivateTrayItem { id } => {
-                    if self.tray.iter().rev().take(4).any(|item| item.id == id) {
+                    if self.tray.iter().take(128).any(|item| item.id == id) {
                         self.apply_panel_action(TaskbarAction::Tray(id));
                         changed = true;
                     }
                 }
                 crate::plugin_panel::PluginEffect::ContextTrayItem { id } => {
-                    if self.tray.iter().rev().take(4).any(|item| item.id == id) {
+                    if self.tray.iter().take(128).any(|item| item.id == id) {
                         self.apply_panel_action(TaskbarAction::TrayContext(id));
                         changed = true;
                     }

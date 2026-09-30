@@ -127,7 +127,7 @@ mod tests {
             Some(r#"{"windows":[{"id":"42","title":"Editor"}],"applications":[{"id":"editor"}]}"#),
         )
         .unwrap();
-        runtime.eval("nickel.windows.list()[0].title = 'changed'; nickel.windows.activate('42'); nickel.applications.launch('editor');").unwrap();
+        runtime.eval("nickel.windows.list()[0].title = 'changed'; nickel.windows.activate('42'); nickel.applications.launch('editor'); nickel.tray.activate('mail');").unwrap();
         assert_eq!(
             runtime
                 .eval_json::<String>("JSON.stringify(nickel.windows.list()[0].title)")
@@ -137,6 +137,7 @@ mod tests {
         let effects = runtime.take_effects().unwrap();
         assert_eq!(effects[0]["type"], "windows.focus");
         assert_eq!(effects[1]["id"], "editor");
+        assert_eq!(effects[2]["type"], "tray.activate");
         assert!(runtime.eval("nickel.windows.activate(42)").is_err());
     }
 

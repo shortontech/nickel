@@ -70,8 +70,8 @@ function TrayItem(props) {
     const item = props.item;
     return <Button id={"taskbar-tray-" + item.id} className="tray-button" accessibilityLabel={item.title}
         icon={item.icon ? "tray:" + item.id : null}
-        onContextMenu={() => nickel.request({type: "taskbar-context-tray", id: item.id})}
-        onClick={() => nickel.request({type: "taskbar-activate-tray", id: item.id})}>
+        onContextMenu={() => nickel.tray.contextMenu(item.id)}
+        onClick={() => nickel.tray.activate(item.id)}>
         {item.title.charAt(0).toUpperCase() || "?"}
     </Button>;
 }
@@ -79,7 +79,7 @@ function TrayItem(props) {
 export function Taskbar(props) {
     const data = {...{items:[],tray:[],slots:{},clock:'',codexAvailable:false,keyboardEnabled:false}, ...props?.data};
     const items = props?.data?.items || taskItems(nickel.applications.list(), nickel.windows.list());
-    const tray = data.tray || [];
+    const tray = props?.data?.tray || nickel.tray.list();
     const badges = (data.slots && data.slots["task-badge"]) || [];
     return <FixedWindow id="taskbar" output="all" edge="bottom"
         reserveWorkArea={true} className="taskbar">
