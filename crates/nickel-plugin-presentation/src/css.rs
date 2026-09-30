@@ -50,6 +50,7 @@ pub struct ControlStyle {
     pub color: Option<u32>,
     pub grow: Option<f32>,
     pub gap: Option<f32>,
+    pub bottom: Option<f32>,
 }
 
 #[derive(Clone, Debug)]
@@ -160,6 +161,7 @@ enum Declaration {
     Color(u32),
     Grow(f32),
     Gap(f32),
+    Bottom(f32),
     Border(f32, u32),
 }
 
@@ -195,6 +197,7 @@ impl Declaration {
             Self::Color(value) => style.color = Some(*value),
             Self::Grow(value) => style.grow = Some(*value),
             Self::Gap(value) => style.gap = Some(*value),
+            Self::Bottom(value) => style.bottom = Some(*value),
             Self::Border(width, color) => {
                 style.border_width = Some(*width);
                 style.border_color = Some(*color);
@@ -475,6 +478,7 @@ fn declaration(name: &str, value: &str) -> Result<Declaration, String> {
             Declaration::Grow(n)
         }
         "gap" => Declaration::Gap(px(value, 512.0)?),
+        "bottom" => Declaration::Bottom(px(value, 8192.0)?),
         _ => return Err(format!("unsupported plugin CSS property {name:?}")),
     })
 }
@@ -549,6 +553,17 @@ impl<'i> QualifiedRuleParser<'i> for CssRuleParser {
                     "plugin CSS state selectors require a nontransparent background",
                 ));
             }
+        }
+        if declarations
+            .iter()
+            .any(|declaration| matches!(declaration, Declaration::Bottom(_)))
+            && selectors
+                .iter()
+                .any(|selector| selector.kind.as_deref() != Some("window"))
+        {
+            return Err(ParseError::custom(
+                "bottom is supported only on window selectors",
+            ));
         }
         Ok(Rule {
             selectors,
@@ -955,6 +970,23 @@ mod tests {
             ".x { grid-template-columns: repeat(32, repeat(32, 1fr)); }",
             ".x { flex-direction: diagonal; }",
             ".x { grid-template-columns: minmax(1fr, 40px; }",
+        ] {
+            assert!(StyleSheet::compile(css).is_err(), "{css}");
+        }
+    }
+
+    #[test]
+    fn bottom_is_bounded_and_requires_window_selector() {
+        let stylesheet = StyleSheet::compile("window.dock { bottom: 20px; }").unwrap();
+        assert_eq!(
+            stylesheet.resolve("window", None, Some("dock")).bottom,
+            Some(20.0)
+        );
+        for css in [
+            ".dock { bottom: 20px; }",
+            "button { bottom: 20px; }",
+            "window.dock { bottom: -1px; }",
+            "window.dock { bottom: 9000px; }",
         ] {
             assert!(StyleSheet::compile(css).is_err(), "{css}");
         }

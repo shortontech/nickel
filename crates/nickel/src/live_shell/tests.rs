@@ -483,15 +483,16 @@ fn installed_dock_uses_jsx_distance_and_output_within_its_grant() {
     std::fs::write(
         directory.join("plugin.json"),
         r#"{"api_version":1,"id":"org.example.placed-dock","name":"Placed dock",
-            "entry":"main.js","surfaces":[{"id":"main","kind":"dock","width":480,
+            "entry":"main.js","stylesheet":"ui.css","surfaces":[{"id":"main","kind":"dock","width":480,
             "height":80,"bottom_offset":48,"output":"all"}]}"#,
     )
     .unwrap();
     std::fs::write(
         directory.join("main.js"),
-        "function App() { return h(FixedWindow, {width: 400, height: 64, output: 'primary', edge: 'bottom', bottomOffset: 20}, h(Text, {}, 'Dock')); }",
+        "function App() { return h(FixedWindow, {width: 400, height: 64, output: 'primary', edge: 'bottom', className: 'dock'}, h(Text, {}, 'Dock')); }",
     )
     .unwrap();
+    std::fs::write(directory.join("ui.css"), "window.dock { bottom: 20px; }").unwrap();
     let mut catalog = nickel_core::plugins::PluginCatalog::discover(root.path()).unwrap();
     let descriptor = catalog.packages.remove("org.example.placed-dock").unwrap();
     let mut shell = LiveShell::new().unwrap();

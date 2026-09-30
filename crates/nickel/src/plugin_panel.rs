@@ -1065,10 +1065,10 @@ fn initial_notifications_data(manifest: &PluginManifest) -> Value {
 }
 
 impl PluginPanelApplication {
-    pub fn resolved_surface(&self, grant: &PluginSurface) -> PluginSurface {
+    pub fn resolved_surface(&self, grant: &PluginSurface) -> Result<PluginSurface, String> {
         self.node
-            .requested_surface(grant)
-            .unwrap_or_else(|| grant.clone())
+            .requested_surface(grant, &self.stylesheet)
+            .map(|surface| surface.unwrap_or_else(|| grant.clone()))
     }
 
     fn bundled_application(
@@ -1082,6 +1082,9 @@ impl PluginPanelApplication {
         let mut application = Self::new_with_manifest(source.as_ref(), manifest, Some(data))?;
         if let Some(stylesheet) = stylesheet {
             application.stylesheet = bundled_stylesheet(manifest, stylesheet)?;
+        }
+        if let [surface] = manifest.surfaces.as_slice() {
+            application.resolved_surface(surface)?;
         }
         Ok(application)
     }
@@ -1126,12 +1129,16 @@ impl PluginPanelApplication {
             manifest(),
             include_str!("../../../assets/plugins/hello-panel/ui.css"),
         )?;
+        application.resolved_surface(surface())?;
         Ok(application)
     }
 
     pub fn from_package(package: &PluginPackage) -> Result<Self, String> {
         let mut application = Self::new_with_manifest(&package.source, &package.manifest, None)?;
         application.stylesheet = StyleSheet::compile(&package.stylesheet)?;
+        if let [surface] = package.manifest.surfaces.as_slice() {
+            application.resolved_surface(surface)?;
+        }
         application.sync_images(package_images(package)?);
         Ok(application)
     }
@@ -1145,6 +1152,9 @@ impl PluginPanelApplication {
         let mut application =
             Self::new_with_manifest(&package.source, &package.manifest, Some(data))?;
         application.stylesheet = StyleSheet::compile(&package.stylesheet)?;
+        if let [surface] = package.manifest.surfaces.as_slice() {
+            application.resolved_surface(surface)?;
+        }
         application.sync_images(package_images(package)?);
         Ok(application)
     }
@@ -1184,6 +1194,7 @@ impl PluginPanelApplication {
             Some(&surface.id),
         )?;
         application.stylesheet = StyleSheet::compile(&package.stylesheet)?;
+        application.resolved_surface(surface)?;
         application.sync_images(images);
         Ok(application)
     }
@@ -1227,13 +1238,17 @@ impl PluginPanelApplication {
                                 .clone(),
                         );
                 }
-                Self::new_with_manifest_for_surface(
+                let mut application = Self::new_with_manifest_for_surface(
                     &package.source,
                     &package.manifest,
                     Some(data.to_string()),
                     Some(&surface.id),
                 )
                 .map_err(|error| format!("surface {:?}: {error}", surface.id))?;
+                application.stylesheet = StyleSheet::compile(&package.stylesheet)?;
+                application
+                    .resolved_surface(surface)
+                    .map_err(|error| format!("surface {:?}: {error}", surface.id))?;
             }
         }
         Ok(())
@@ -4126,12 +4141,15 @@ mod tests {
         let app = PluginPanelApplication::from_package(&package).unwrap();
         assert!(
             !app.resolved_surface(&package.manifest.surfaces[0])
+                .unwrap()
                 .reserve_work_area
         );
         package.source = source.replace("output: 'all'", "output: 'primary'");
         let app = PluginPanelApplication::from_package(&package).unwrap();
         assert_eq!(
-            app.resolved_surface(&package.manifest.surfaces[0]).output,
+            app.resolved_surface(&package.manifest.surfaces[0])
+                .unwrap()
+                .output,
             nickel_core::plugins::PluginOutputScope::Primary
         );
 
@@ -4217,6 +4235,7 @@ mod tests {
         assert_eq!(
             application
                 .resolved_surface(&package.manifest.surfaces[0])
+                .unwrap()
                 .bottom_offset,
             12
         );
@@ -4225,6 +4244,32 @@ mod tests {
             .source
             .replace("bottomOffset: 12", "bottomOffset: 25");
         assert!(PluginPanelApplication::from_package(&package).is_err());
+
+        package.source = package.source.replace("bottomOffset: 25, ", "");
+        package
+            .stylesheet
+            .push_str("\nwindow.hello-panel { bottom: 12px; }");
+        let application = PluginPanelApplication::from_package(&package).unwrap();
+        assert_eq!(
+            application
+                .resolved_surface(&package.manifest.surfaces[0])
+                .unwrap()
+                .bottom_offset,
+            12
+        );
+        package.stylesheet = package.stylesheet.replace("bottom: 12px", "bottom: 25px");
+        assert!(PluginPanelApplication::from_package(&package).is_err());
+        package.source = package
+            .source
+            .replace("edge: \"bottom\", ", "edge: \"bottom\", bottomOffset: 24, ");
+        let application = PluginPanelApplication::from_package(&package).unwrap();
+        assert_eq!(
+            application
+                .resolved_surface(&package.manifest.surfaces[0])
+                .unwrap()
+                .bottom_offset,
+            24
+        );
     }
 
     #[test]
@@ -4868,7 +4913,7 @@ mod tests {
         let application =
             PluginPanelApplication::from_package_surface(&package, &Default::default(), &home)
                 .unwrap();
-        let resolved = application.resolved_surface(&home);
+        let resolved = application.resolved_surface(&home).unwrap();
         assert_eq!((resolved.width, resolved.height), (360, 220));
         assert_eq!((home.width, home.height), (400, 240));
 

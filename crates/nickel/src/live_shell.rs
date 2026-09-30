@@ -4013,7 +4013,7 @@ impl LiveShell {
         let application = crate::plugin_panel::PluginPanelApplication::from_package_surface(
             &package, &settings, &surface,
         )?;
-        let surface = application.resolved_surface(&surface);
+        let surface = application.resolved_surface(&surface)?;
         let host = nickel_ui::UiHost::new(application, surface.width, surface.height);
         if self.plugin_panel_host.is_none() {
             self.plugin_panel_host = Some(host);
@@ -4285,7 +4285,7 @@ impl LiveShell {
                         .iter()
                         .find(|surface| surface.id == surface_id)
                         .expect("replacement surface belongs to the validated manifest");
-                    let resolved = application.resolved_surface(grant);
+                    let resolved = application.resolved_surface(grant)?;
                     if self.plugin_panel_owner == id
                         && self.plugin_panel_surface.id == surface_id
                         && self.plugin_panel_host.is_some()
@@ -4671,9 +4671,9 @@ impl LiveShell {
                                     crate::plugin_panel::PluginPanelApplication::from_package_surface_with_images(
                                         &package, &settings, surface, images.clone(),
                                     )
-                                    .map(|application| {
-                                        let resolved = application.resolved_surface(surface);
-                                        (application, resolved)
+                                    .and_then(|application| {
+                                        let resolved = application.resolved_surface(surface)?;
+                                        Ok((application, resolved))
                                     })
                                 })
                                 .collect::<Result<Vec<_>, _>>()

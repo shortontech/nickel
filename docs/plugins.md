@@ -254,6 +254,9 @@ output; a work-area reservation grant permits JSX to omit the reservation;
 and `bottom_offset` is the maximum dock distance JSX may request. These resolved
 values reach native placement. The manifest still determines the surface kind
 and anchor until the full authority envelope replaces its duplicated geometry.
+`window.dock { bottom: 20px; }` also sets the bottom distance for a `Window`
+root with `className="dock"`; CSS `bottom` requires a `window` selector and
+cannot exceed the manifest bound. An explicit JSX `bottomOffset` wins over CSS.
 A plugin cannot create an undeclared native window by changing JSX. `id` is optional: the host
 supplies its surface identity. An explicit ID must match that identity.
 One plugin may declare several surfaces. Nickel renders the plugin for each

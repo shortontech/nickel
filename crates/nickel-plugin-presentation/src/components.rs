@@ -522,18 +522,33 @@ impl PanelNode {
         matches.next().is_none().then_some(first)
     }
 
-    pub fn requested_surface(&self, grant: &PluginSurface) -> Option<PluginSurface> {
+    pub fn requested_surface(
+        &self,
+        grant: &PluginSurface,
+        stylesheet: &StyleSheet,
+    ) -> Result<Option<PluginSurface>, String> {
         let Self::Surface {
-            window_request: Some(request),
+            window_request,
+            id,
+            class_name,
             width,
             height,
             ..
         } = self
         else {
-            return None;
+            return Ok(None);
+        };
+        let css_bottom = stylesheet
+            .resolve("window", id.as_deref(), class_name.as_deref())
+            .bottom;
+        let Some(request) = window_request else {
+            if css_bottom.is_some() {
+                return Err("CSS bottom needs a Window root".into());
+            }
+            return Ok(None);
         };
         if request.id != grant.id {
-            return None;
+            return Ok(None);
         }
         let dimension = |length, bound| match length {
             Length::Px(value) => value as u32,
@@ -551,8 +566,16 @@ impl PanelNode {
         }
         if let Some(offset) = request.bottom_offset {
             surface.bottom_offset = offset;
+        } else if let Some(offset) = css_bottom {
+            if offset > grant.bottom_offset as f32 {
+                return Err(format!(
+                    "window {:?} CSS bottom exceeds its grant",
+                    request.id
+                ));
+            }
+            surface.bottom_offset = offset.round() as u32;
         }
-        Some(surface)
+        Ok(Some(surface))
     }
 
     pub fn contribution_bytes(&self) -> u64 {
