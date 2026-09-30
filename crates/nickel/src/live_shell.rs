@@ -6886,10 +6886,6 @@ impl LiveShell {
                 let _ =
                     self.send_session_command("focus-context-menu", ShellCommand::FocusContextMenu);
             }
-            TaskbarAction::ToggleTaskPin(id) => {
-                self.launcher.toggle_pin(&id);
-                self.persist_launcher_preferences();
-            }
             TaskbarAction::MoveTaskPinLeft(id) => {
                 if self.launcher.move_pin(&id, -1) {
                     self.persist_launcher_preferences();
@@ -7633,7 +7629,6 @@ impl LiveShell {
                 let _ =
                     self.send_session_command("focus-context-menu", ShellCommand::FocusContextMenu);
             }
-            PreviewAction::Dismiss => self.close_window_preview(),
         }
     }
 
@@ -7728,10 +7723,7 @@ impl LiveShell {
     fn apply_window_menu_action(&mut self, action: MenuAction) {
         if !matches!(
             action,
-            MenuAction::Dismiss
-                | MenuAction::ShowWorkspaces
-                | MenuAction::ShowDisplays
-                | MenuAction::Back
+            MenuAction::ShowWorkspaces | MenuAction::ShowDisplays | MenuAction::Back
         ) {
             let Some(captured) = self.window_menu_snapshot.as_ref() else {
                 return;
@@ -7744,10 +7736,6 @@ impl LiveShell {
             }
         }
         let dispatched = match action {
-            MenuAction::Dismiss => {
-                self.dismiss_window_menu();
-                return;
-            }
             MenuAction::ShowWorkspaces | MenuAction::ShowDisplays | MenuAction::Back => return,
             MenuAction::Activate(window) => {
                 self.try_send_window_action(window, WindowAction::Activate)
@@ -7784,7 +7772,6 @@ impl LiveShell {
 
     fn apply_application_menu_action(&mut self, action: ApplicationMenuAction) {
         match action {
-            ApplicationMenuAction::Dismiss => self.dismiss_window_menu(),
             ApplicationMenuAction::TogglePin(application) => {
                 let Some(target) = self.application_menu_target.as_ref() else {
                     return;
@@ -10225,10 +10212,7 @@ impl LiveShell {
             return false;
         }
         let (PreviewAction::Activate(id) | PreviewAction::Close(id) | PreviewAction::OpenMenu(id)) =
-            action
-        else {
-            return action == PreviewAction::Dismiss;
-        };
+            action;
         let Some(group) = self.preview_plugin_group() else {
             return false;
         };
@@ -10255,7 +10239,6 @@ impl LiveShell {
             PreviewAction::Activate(_) => current.state.capabilities.activate,
             PreviewAction::Close(_) => current.state.capabilities.close,
             PreviewAction::OpenMenu(_) => self.plugin_taskbar_host.is_some(),
-            PreviewAction::Dismiss => true,
         }
     }
 
@@ -10265,7 +10248,6 @@ impl LiveShell {
                 format!("preview-window-{}", window.0)
             }
             PreviewAction::Close(window) => format!("preview-close-{}", window.0),
-            PreviewAction::Dismiss => return None,
         };
         let host = self.preview_plugin_host_ref()?;
         let message = host.application().button_message(&id)?;

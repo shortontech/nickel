@@ -915,10 +915,6 @@ impl NickelSession {
                 use super::remote_launcher_favorites::SemanticFavoriteAction;
                 let favorite = match &effect {
                     crate::live_shell::remote_semantics::RemoteShellEffect::Panel(
-                        crate::live_shell::TaskbarAction::ToggleTaskPin(application),
-                        _,
-                    ) => Some(SemanticFavoriteAction::Toggle(application.clone())),
-                    crate::live_shell::remote_semantics::RemoteShellEffect::Panel(
                         crate::live_shell::TaskbarAction::MoveTaskPinLeft(application),
                         _,
                     ) => Some(SemanticFavoriteAction::MoveLeft(application.clone())),

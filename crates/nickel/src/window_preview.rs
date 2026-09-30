@@ -37,12 +37,10 @@ pub enum PreviewAction {
     Activate(WindowId),
     Close(WindowId),
     OpenMenu(WindowId),
-    Dismiss,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MenuAction {
-    Dismiss,
     ShowWorkspaces,
     ShowDisplays,
     Back,
@@ -72,10 +70,7 @@ pub(crate) fn window_menu_action_is_current(
     let id = current.id;
     let capabilities = current.state.capabilities;
     match action {
-        MenuAction::Dismiss
-        | MenuAction::ShowWorkspaces
-        | MenuAction::ShowDisplays
-        | MenuAction::Back => true,
+        MenuAction::ShowWorkspaces | MenuAction::ShowDisplays | MenuAction::Back => true,
         MenuAction::Activate(target) => *target == id && capabilities.activate,
         MenuAction::Close(target) => *target == id && capabilities.close,
         MenuAction::MaximizeRestore(target) => *target == id && capabilities.maximize,
@@ -135,7 +130,6 @@ impl ApplicationMenuTarget {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ApplicationMenuAction {
-    Dismiss,
     TogglePin(ApplicationId),
     CloseAll,
 }

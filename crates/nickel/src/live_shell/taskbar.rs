@@ -57,10 +57,8 @@ pub(super) fn panel_status_layout(
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum TaskbarHover {
-    OnScreenKeyboard,
     Launcher,
     Task(usize),
-    Codex,
     Tray(usize),
     Control,
 }
@@ -71,7 +69,6 @@ pub enum TaskbarAction {
     Launcher,
     Task(usize),
     TaskContext(usize),
-    ToggleTaskPin(String),
     MoveTaskPinLeft(String),
     MoveTaskPinRight(String),
     Codex,

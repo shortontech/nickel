@@ -6,7 +6,7 @@ use nickel_core::launcher_preferences::{
 };
 use nickel_remote_control::{
     DesktopPermit,
-    launcher_favorites::{self as api, Change, Snapshot, Transaction},
+    launcher_favorites::{Change, Snapshot, Transaction},
 };
 use nickel_storage::{RegularFileRevision, regular_file_revision};
 use std::{path::PathBuf, sync::Arc};
@@ -90,7 +90,6 @@ pub(super) struct PreparedChange {
 }
 
 pub(super) enum SemanticFavoriteAction {
-    Toggle(String),
     MoveLeft(String),
     MoveRight(String),
 }
@@ -105,18 +104,6 @@ impl PreparedSemanticFavorite {
         let prior = PreparedRead::prepare()?;
         let (visible, _) = projection(&prior.preferences, &prior.catalog);
         let change = match action {
-            SemanticFavoriteAction::Toggle(application_id) => {
-                let app = prior
-                    .catalog
-                    .iter()
-                    .find(|app| app.id() == application_id)
-                    .ok_or("installed application is unavailable")?;
-                if visible.iter().any(|id| id == app.id()) {
-                    Change::Remove { application_id }
-                } else {
-                    Change::Add { application_id }
-                }
-            }
             SemanticFavoriteAction::MoveLeft(application_id) => Change::Reorder {
                 application_ids: moved_favorite(visible, &application_id, -1)?,
             },
