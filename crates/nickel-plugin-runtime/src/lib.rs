@@ -139,6 +139,9 @@ mod tests {
         assert_eq!(effects[1]["id"], "editor");
         assert_eq!(effects[2]["type"], "tray.activate");
         assert!(runtime.eval("nickel.windows.activate(42)").is_err());
+        assert!(runtime.eval("nickel.audio.setVolume(101)").is_err());
+        runtime.eval("nickel.audio.setVolume(25)").unwrap();
+        assert_eq!(runtime.take_effects().unwrap()[0]["value"], 25);
         assert!(
             runtime
                 .eval("nickel.applications.movePin('editor', 0)")

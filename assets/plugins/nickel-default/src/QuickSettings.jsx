@@ -2,7 +2,7 @@
 import "./styles/quick-settings.css";
 // Nickel owns status snapshots and validates every requested system action.
 export function QuickSettings(props) {
-    const data = {...{scrollHeight:552,network:{available:false,enabled:false,networks:[]},bluetooth:{available:false,powered:false,discovering:false,devices:[]},audio:{muted:false,percent:0,devices:[]},workspaces:[],projectionModes:[],slots:{}}, ...props?.data};
+    const data = {...{scrollHeight:552,network:{available:false,enabled:false,networks:[]},bluetooth:{available:false,powered:false,discovering:false,devices:[]},audio:{muted:false,percent:0,devices:[]},workspaces:[],projectionModes:[],slots:{}}, ...props?.data, audio:props?.data?.audio || nickel.audio.get()};
     const sections = (data.slots && data.slots["control-section"]) || [];
     const [wifiOpen, setWifiOpen] = useState(false);
     const [bluetoothOpen, setBluetoothOpen] = useState(false);
@@ -44,16 +44,16 @@ export function QuickSettings(props) {
                     </Column> : null}
                     <Row>
                         <Text>{"Audio: " + (data.audio.muted ? "Muted" : data.audio.percent + "%")}</Text>
-                        <Button id="audio-mute" onClick={() => request("audio-mute", !data.audio.muted)}>{data.audio.muted ? "Unmute" : "Mute"}</Button>
+                        <Button id="audio-mute" onClick={() => nickel.audio.setMuted(!data.audio.muted)}>{data.audio.muted ? "Unmute" : "Mute"}</Button>
                         <Button id="audio-section" onClick={() => setAudioOpen(!audioOpen)}>{audioOpen ? "Less" : "More"}</Button>
                     </Row>
                     <Row>
-                        <Button id="audio-down" onClick={() => request("audio-volume", Math.max(0, data.audio.percent - 10))}>−</Button>
+                        <Button id="audio-down" onClick={() => nickel.audio.setVolume(Math.max(0, data.audio.percent - 10))}>−</Button>
                         <Progress className="audio-progress" percent={data.audio.percent} width={220} height={8} />
-                        <Button id="audio-up" onClick={() => request("audio-volume", Math.min(100, data.audio.percent + 10))}>+</Button>
+                        <Button id="audio-up" onClick={() => nickel.audio.setVolume(Math.min(100, data.audio.percent + 10))}>+</Button>
                     </Row>
                     {audioOpen ? data.audio.devices.map(device => <Button key={device.id} id={"audio-" + device.id}
-                        onClick={() => request("audio-device", device.id)}>{device.name + (device.isDefault ? " · Default" : "")}</Button>) : null}
+                        onClick={() => nickel.audio.selectOutput(device.id)}>{device.name + (device.isDefault ? " · Default" : "")}</Button>) : null}
                     <Text className="control-section-title">Workspaces</Text>
                     <Row>
                         {data.workspaces.map((workspace, index) => <Button key={workspace.id} id={"workspace-" + workspace.id}

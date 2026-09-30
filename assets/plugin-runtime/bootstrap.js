@@ -171,6 +171,22 @@ function __nickelIdentity(id) {
     return id;
 }
 const nickel = Object.freeze({
+    audio: Object.freeze({
+        get() { return __nickelResource('audio', {available:false,muted:false,percent:0,devices:[]}); },
+        outputs() { return this.get().devices; },
+        setVolume(percent) {
+            if (!Number.isInteger(percent) || percent < 0 || percent > 100) throw TypeError('volume must be an integer from 0 to 100');
+            __effects.push({type:'control-action',action:'audio-volume',value:percent});
+        },
+        setMuted(muted) {
+            if (typeof muted !== 'boolean') throw TypeError('muted must be boolean');
+            __effects.push({type:'control-action',action:'audio-mute',value:muted});
+        },
+        selectOutput(id) { __effects.push({type:'control-action',action:'audio-device',value:__nickelIdentity(id)}); }
+    }),
+    notifications: Object.freeze({
+        get() { return __nickelResource('notifications', {notification:null,history:[],historyVisible:false}); }
+    }),
     tray: Object.freeze({
         list() { return __nickelResource('tray', []); },
         activate(id) { __effects.push({type:'tray.activate',id:__nickelIdentity(id)}); },

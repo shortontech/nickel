@@ -2,7 +2,7 @@
 import "./styles/notifications.css";
 // Nickel supplies a bounded snapshot and checks every action against its live feed.
 export function Notifications(props) {
-    const data = {...{notification:null,history:[],historyVisible:false}, ...props?.data};
+    const data = {...{notification:null,history:[],historyVisible:false}, ...nickel.notifications.get(), ...props?.data};
     const current = data.notification;
     let content;
     if (data.historyVisible) {
