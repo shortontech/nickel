@@ -1203,8 +1203,8 @@ impl SettingsApp {
         if self.page != SettingsPage::Network {
             return AnyView::new(Container::new());
         }
-        let data = crate::network_plugin::projection(self);
         let plugin_view = if self.settings_jsx_enabled {
+            let data = crate::network_plugin::projection(self);
             self.network_page
                 .borrow_mut()
                 .get_or_insert_with(|| {
@@ -1217,148 +1217,16 @@ impl SettingsApp {
         } else {
             Err("Settings plugin is disabled".into())
         };
-        if let Ok(view) = plugin_view {
-            return view;
-        }
-        let palette = self.palette();
-        let theme = self.ui_theme();
-        let wifi_cards = self
-            .wifi_networks
-            .iter()
-            .enumerate()
-            .map(|(index, network)| {
-                let detail = if network.connected {
-                    self.localizer.number(
-                        "settings-network-connected-signal",
-                        "signal",
-                        i64::from(network.signal),
-                    )
-                } else if !network.saved {
-                    self.localizer.number(
-                        if network.secure {
-                            "settings-network-secured-signal"
-                        } else {
-                            "settings-network-open-signal"
-                        },
-                        "signal",
-                        i64::from(network.signal),
-                    )
-                } else {
-                    self.localizer.number(
-                        "settings-network-connect-action",
-                        "signal",
-                        i64::from(network.signal),
-                    )
-                };
-                ui! {
-                    <Container id={format!("wifi-network-{index}")} height={44.0}
-                        background={palette.surface}
-                        hover_background={palette.surface_hover}
-                        pressed_background={palette.surface_hover}
-                        border={(if network.connected { palette.accent } else { palette.muted },
-                            if network.connected { 2.0 } else { 1.0 })}
-                        padding={Insets { top: 12.0, right: 14.0, bottom: 8.0, left: 14.0 }}
-                        on_press={SettingsMessage::WifiNetwork(index)}
-                        enabled={self.pending_wifi_profile.is_none()}
-                        semantic_role={SemanticRole::Button}
-                        accessibility_label={format!("{}, {}", network.profile, detail)}
-                        accessibility_state={if network.connected { "connected" } else { "not connected" }}>
-                        <Row>
-                            <Text color={palette.text} width={316.0}>{&network.profile}</Text>
-                            <Text scale={1.0} color={if network.connected { palette.complement } else { palette.muted }}>
-                                {detail}
-                            </Text>
-                        </Row>
-                    </Container>
-                }
-            });
-        let adapter_cards = self.network_adapters.iter().map(|adapter| {
-            let status = if adapter.connected {
-                if adapter.speed > 0 {
-                    self.localizer.number(
-                        "settings-network-connected-speed",
-                        "speed",
-                        (adapter.speed / 1_000_000) as i64,
-                    )
-                } else {
-                    self.localizer.text("settings-network-connected")
-                }
-            } else {
-                self.localizer.text("settings-network-disconnected")
-            };
-            ui! {
-                <Container height={72.0} background={palette.surface} border={(palette.muted, 1.0)}
-                    padding={Insets { top: 11.0, right: 14.0, bottom: 8.0, left: 14.0 }}>
-                    <Column gap={7.0}>
-                        <Text color={palette.text}>{&adapter.name}</Text>
-                        <Row>
-                            <Text color={if adapter.connected { palette.complement } else { palette.muted }}>{status}</Text>
-                            <Text scale={1.0} color={palette.muted}>{&adapter.description}</Text>
-                        </Row>
-                    </Column>
-                </Container>
-            }
-        });
-        let wifi_list = if self.wifi_networks.is_empty() {
-            ui! { <Column><Text scale={1.0} color={palette.muted}>{&self.wifi_status}</Text></Column> }
-        } else {
-            ui! { <Column gap={8.0} children={wifi_cards} /> }
-        };
-        let adapter_list = if self.network_adapters.is_empty() {
-            ui! {
-                <Column><Text scale={1.0} color={palette.muted}>
-                    {self.localizer.text("settings-network-no-adapters")}
-                </Text></Column>
-            }
-        } else {
-            ui! { <Column gap={12.0} children={adapter_cards} /> }
-        };
-        let wifi_power_available =
-            self.network_available && cfg!(any(target_os = "linux", target_os = "windows"));
-        let wifi_switch_state = if !wifi_power_available && self.wifi_enabled {
-            SwitchState::DisabledOn
-        } else if !wifi_power_available {
-            SwitchState::DisabledOff
-        } else if self.wifi_power_rx.is_some() && self.wifi_enabled {
-            SwitchState::DisabledOn
-        } else if self.wifi_power_rx.is_some() {
-            SwitchState::DisabledOff
-        } else if self.wifi_enabled {
-            SwitchState::On
-        } else {
-            SwitchState::Off
-        };
-        let wifi_label = self.localizer.text("settings-network-wifi");
-        let wifi_power = SettingsRow::new(theme, wifi_label.clone(), self.wifi_status.clone())
-            .trailing(
-                Switch::with_state(
-                    wifi_switch_state,
-                    (wifi_power_available && self.wifi_power_rx.is_none())
-                        .then_some(wifi_power_message as fn(bool) -> SettingsMessage),
-                    theme,
-                )
-                .id("network-wifi-power")
-                .accessibility_label(wifi_label),
-            );
-        let content = ui! {
-            <Column gap={12.0}>
-                {wifi_power}
-                <Row height={26.0}>
-                    <Text color={palette.text} width={308.0}>{self.localizer.text("settings-network-visible-wifi")}</Text>
-                </Row>
-                {wifi_list}
-                <Text color={palette.text} height={18.0}>{self.localizer.text("settings-network-adapters")}</Text>
-                {adapter_list}
-            </Column>
-        };
-
-        AnyView::new(ui! {
-            <Column grow={1.0} padding={Insets {
-                top: 20.0, right: 40.0, bottom: 20.0, left: 20.0,
-            }}>
-                <VerticalScroll id={"network-list"} on_scroll={SettingsMessage::NetworkScroll}
-                    offset={0.0} theme={theme}>{content}</VerticalScroll>
-            </Column>
+        plugin_view.unwrap_or_else(|error| {
+            AnyView::new(
+                SettingsCard::titled(self.ui_theme(), "Network settings are unavailable", error)
+                    .child(Button::semantic(
+                        self.ui_theme(),
+                        SettingsMessage::Navigate(SettingsPage::Plugins),
+                        "Manage plugins",
+                        ButtonPresentation::Primary,
+                    )),
+            )
         })
     }
 

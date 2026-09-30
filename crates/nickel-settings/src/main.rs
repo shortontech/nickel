@@ -689,10 +689,6 @@ fn reduce_transparency_message(value: bool) -> SettingsMessage {
     SettingsMessage::SetReduceTransparency(value)
 }
 
-fn wifi_power_message(value: bool) -> SettingsMessage {
-    SettingsMessage::SetWifiPower(value)
-}
-
 fn bluetooth_power_message(value: bool) -> SettingsMessage {
     SettingsMessage::SetBluetoothPower(value)
 }
@@ -3839,17 +3835,26 @@ mod tests {
     }
 
     #[test]
-    fn failed_network_jsx_keeps_native_wifi_switch_available() {
+    fn failed_network_jsx_offers_plugin_recovery_without_native_controls() {
         let mut app = SettingsApp::with_initial_page(SettingsPage::Network);
         app.network_available = true;
         app.wifi_enabled = false;
         *app.network_page.borrow_mut() = Some(Err("JSX failed".into()));
-        let host = UiHost::new(app, 850, 580);
-        assert_eq!(
+        let mut host = UiHost::new(app, 850, 580);
+        assert!(
             host.semantic_targets_for_message(&SettingsMessage::SetWifiPower(true))
-                .len(),
-            1
+                .is_empty()
         );
+        let recovery = host
+            .semantic_targets_for_message(&SettingsMessage::Navigate(SettingsPage::Plugins))
+            .into_iter()
+            .next()
+            .expect("Network recovery opens plugin management");
+        host.perform_semantic_action(
+            recovery.id,
+            nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
+        );
+        assert_eq!(host.application().page, SettingsPage::Plugins);
     }
 
     #[test]
@@ -5452,13 +5457,11 @@ mod tests {
             .lines()
             .filter(|line| line.contains("on_press={"))
             .collect::<Vec<_>>();
-        assert_eq!(click_targets.len(), 2, "{click_targets:#?}");
-        for required in ["SelectDisplay", "WifiNetwork"] {
-            assert!(
-                click_targets.iter().any(|line| line.contains(required)),
-                "missing documented custom composite for {required}: {click_targets:#?}"
-            );
-        }
+        assert_eq!(click_targets.len(), 1, "{click_targets:#?}");
+        assert!(
+            click_targets[0].contains("SelectDisplay"),
+            "missing display arrangement composite: {click_targets:#?}"
+        );
     }
 
     #[test]

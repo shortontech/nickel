@@ -194,6 +194,66 @@ mod tests {
     use super::*;
 
     #[test]
+    fn shared_network_page_renders_with_connections_and_adapters() {
+        fn save(host: &nickel_ui::UiHost<SettingsApp>, name: &str) {
+            const WIDTH: u32 = 850;
+            const HEIGHT: u32 = 580;
+            let mut renderer = nickel_ui::SoftwareRenderer::new_pixel_buffer(WIDTH, HEIGHT, 1.0);
+            host.render_software(&mut renderer);
+            let image =
+                image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_fn(WIDTH, HEIGHT, |x, y| {
+                    let pixel = renderer.pixels()[(y * WIDTH + x) as usize];
+                    image::Rgba([pixel.r, pixel.g, pixel.b, pixel.a])
+                });
+            let output = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../target/nickel-ui-snapshots")
+                .join(name);
+            std::fs::create_dir_all(output.parent().unwrap()).unwrap();
+            image.save(output).unwrap();
+        }
+
+        fn fixture() -> SettingsApp {
+            let mut app = SettingsApp::with_initial_page(SettingsPage::Network);
+            app.network_available = true;
+            app.wifi_enabled = true;
+            app.wifi_status = "Wi-Fi is on".into();
+            app.wifi_networks = vec![
+                crate::WifiNetwork {
+                    #[cfg(target_os = "linux")]
+                    id: "connected".into(),
+                    profile: "Nickel Home".into(),
+                    signal: 91,
+                    connected: true,
+                    saved: true,
+                    secure: true,
+                    #[cfg(target_os = "windows")]
+                    interface: 0,
+                },
+                crate::WifiNetwork {
+                    #[cfg(target_os = "linux")]
+                    id: "available".into(),
+                    profile: "Studio Guest".into(),
+                    signal: 68,
+                    connected: false,
+                    saved: false,
+                    secure: false,
+                    #[cfg(target_os = "windows")]
+                    interface: 0,
+                },
+            ];
+            app.network_adapters.push(crate::NetworkAdapter {
+                name: "Ethernet".into(),
+                description: "Wired connection".into(),
+                connected: true,
+                speed: 1_000_000_000,
+            });
+            app
+        }
+        let jsx = nickel_ui::UiHost::new(fixture(), 850, 580);
+        save(&jsx, "settings-network-shared.png");
+    }
+
+    #[test]
     fn wifi_power_request_uses_the_confirmed_state_and_current_availability() {
         let mut app = SettingsApp::with_initial_page(SettingsPage::Network);
         app.network_available = true;
