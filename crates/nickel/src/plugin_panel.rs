@@ -394,6 +394,12 @@ pub(crate) fn package_images(package: &PluginPackage) -> Result<PluginImages, St
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum PluginEffect {
+    InvokeRegisteredSetting {
+        caller: String,
+        provider: String,
+        id: String,
+        value: Value,
+    },
     SetDisplayLayout {
         plugin_id: String,
         layout: nickel_session_protocol::OutputLayout,
@@ -1117,6 +1123,26 @@ fn package_stylesheet(package: &PluginPackage) -> Result<StyleSheet, String> {
 }
 
 impl PluginPanelApplication {
+    pub(crate) fn invoke_registered_setting(
+        &mut self,
+        id: &str,
+        value: &Value,
+    ) -> Result<Vec<PluginEffect>, String> {
+        let provider =
+            serde_json::to_string(&self.manifest.id).map_err(|error| error.to_string())?;
+        let id = serde_json::to_string(id).map_err(|error| error.to_string())?;
+        let action: usize = {
+            let mut runtime = self.runtime.borrow_mut();
+            runtime.select_surface(&self.runtime_surface_id)?;
+            runtime.eval_json(&format!("JSON.stringify(__handlers.push(() => __nickelInvokeSetting({provider}, {id}, {value})) - 1)"))?
+        };
+        nickel_ui::Application::update(self, PluginMessage::Click(action));
+        if let Some(error) = &self.last_error {
+            return Err(error.clone());
+        }
+        Ok(self.take_effects())
+    }
+
     pub fn resolved_surface(&self, grant: &PluginSurface) -> Result<PluginSurface, String> {
         self.node
             .requested_surface(grant, &self.stylesheet)
@@ -2003,6 +2029,47 @@ impl nickel_ui::Application for PluginPanelApplication {
                 let mut requested_dialog = None;
                 for effect in effects {
                     match effect.as_str() {
+                        _ if effect.get("type").and_then(Value::as_str)
+                            == Some("settings.invoke") =>
+                        {
+                            if !self
+                                .manifest
+                                .capabilities
+                                .contains(&PluginCapability::SettingsWrite)
+                            {
+                                self.last_error = Some("Settings write is not granted".into());
+                                return;
+                            }
+                            let Some(provider) = effect
+                                .get("provider")
+                                .and_then(Value::as_str)
+                                .filter(|id| !id.is_empty() && id.len() <= 128)
+                            else {
+                                self.last_error = Some("invalid Settings provider".into());
+                                return;
+                            };
+                            let Some(id) = effect
+                                .get("id")
+                                .and_then(Value::as_str)
+                                .filter(|id| !id.is_empty() && id.len() <= 128)
+                            else {
+                                self.last_error = Some("invalid Settings id".into());
+                                return;
+                            };
+                            let Some(value) = effect
+                                .get("value")
+                                .filter(|value| value.to_string().len() <= 65536)
+                            else {
+                                self.last_error = Some("invalid Settings value".into());
+                                return;
+                            };
+                            approved.push(PluginEffect::InvokeRegisteredSetting {
+                                caller: self.manifest.id.clone(),
+                                provider: provider.into(),
+                                id: id.into(),
+                                value: value.clone(),
+                            });
+                        }
                         _ if effect.get("type").and_then(Value::as_str)
                             == Some("displays.setLayout") =>
                         {

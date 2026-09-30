@@ -4,8 +4,8 @@ fn installed_package_settings_follow_activation_and_retirement() {
     let id = "org.example.registered-settings";
     let directory = root.path().join(id);
     std::fs::create_dir(&directory).unwrap();
-    std::fs::write(directory.join("plugin.json"), r#"{"api_version":1,"id":"org.example.registered-settings","name":"Settings provider","entry":"main.js","surfaces":[{"id":"main","kind":"window","width":400,"height":240}]}"#).unwrap();
-    std::fs::write(directory.join("main.js"), "registerSetting({id:'enabled',group:'Example',label:'Enabled',type:'switch',defaultValue:false,onChange:value=>{}}); function App() { return h(Window,{id:'main',width:400,height:240},h(Text,{},'Provider')); }").unwrap();
+    std::fs::write(directory.join("plugin.json"), r#"{"api_version":1,"id":"org.example.registered-settings","name":"Settings provider","entry":"main.js","capabilities":["settings-write","launcher-show"],"surfaces":[{"id":"main","kind":"window","width":400,"height":240}]}"#).unwrap();
+    std::fs::write(directory.join("main.js"), "registerSetting({id:'enabled',group:'Example',label:'Enabled',type:'switch',defaultValue:false,onChange:value=>nickel.request('show-launcher')}); function App() { return h(Window,{id:'main',width:400,height:240},h(Text,{},'Provider')); }").unwrap();
     let mut catalog = nickel_core::plugins::PluginCatalog::discover(root.path()).unwrap();
     let descriptor = catalog.packages.remove(id).unwrap();
     let mut shell = LiveShell::new().unwrap();
@@ -30,6 +30,16 @@ fn installed_package_settings_follow_activation_and_retirement() {
             .generation,
         snapshot.generation
     );
+    let invoke = |value| crate::plugin_panel::PluginEffect::InvokeRegisteredSetting {
+        caller: id.into(),
+        provider: id.into(),
+        id: "enabled".into(),
+        value,
+    };
+    shell.apply_plugin_effects(vec![invoke(serde_json::json!("bad"))]);
+    assert!(!shell.launcher_visible);
+    shell.apply_plugin_effects(vec![invoke(serde_json::json!(true))]);
+    assert!(shell.launcher_visible);
     shell.set_plugin_enabled(id, false).unwrap();
     assert!(
         !shell

@@ -128,7 +128,13 @@ function __readSettings(snapshot, page) {
     const result = JSON.parse(JSON.stringify(snapshot));
     const entries = page ? result.pages : result.settings;
     for (const entry of entries) {
-        if (entry.providerPackage !== __settingsProvider) continue;
+        if (entry.providerPackage !== __settingsProvider) {
+            if (!page) {
+                entry.value = () => entry.defaultValue;
+                entry.onChange = value => nickel.request({type:'settings.invoke',provider:entry.providerPackage,id:entry.id,value});
+            }
+            continue;
+        }
         const live = (page ? __settingsPages : __settings).get(entry.id);
         if (!live) continue;
         if (page) entry.component = live.component;

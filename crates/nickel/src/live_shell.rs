@@ -645,6 +645,7 @@ pub struct LiveShell {
         std::rc::Rc<std::cell::RefCell<nickel_plugin_runtime::JsxRuntime>>,
     >,
     package_settings_generation: u64,
+    package_settings_invoking: bool,
     plugin_settings:
         std::collections::BTreeMap<String, std::collections::BTreeMap<String, serde_json::Value>>,
     external_plugin_packages:
@@ -1724,6 +1725,7 @@ impl LiveShell {
             package_settings_registry: Default::default(),
             package_settings_runtimes: Default::default(),
             package_settings_generation: 0,
+            package_settings_invoking: false,
             plugin_settings,
             external_plugin_packages,
             primary_panel_key: crate::plugin_panel::surface_key(),
@@ -6309,6 +6311,51 @@ impl LiveShell {
                         tracing::warn!(plugin = plugin_id, surface = surface_id, %error, "plugin window placement request failed");
                     }
                 },
+                crate::plugin_panel::PluginEffect::InvokeRegisteredSetting {
+                    caller,
+                    provider,
+                    id,
+                    value,
+                } => {
+                    let granted = self.plugin_registry.get(&caller).is_some_and(|entry| {
+                        entry.desired_enabled
+                            && entry
+                                .manifest
+                                .capabilities
+                                .contains(&nickel_core::plugins::PluginCapability::SettingsWrite)
+                    });
+                    let valid = self
+                        .package_settings_registry
+                        .settings_snapshot()
+                        .settings
+                        .iter()
+                        .any(|setting| {
+                            setting.provider_package == provider
+                                && setting.registration.id == id
+                                && setting.registration.accepts_value(&value)
+                        });
+                    if !granted || !valid || self.package_settings_invoking {
+                        continue;
+                    }
+                    let result = self
+                        .plugin_surface_hosts
+                        .iter_mut()
+                        .find(|(key, _)| key.plugin_id == provider)
+                        .map(|(_, (_, host))| {
+                            host.application_mut()
+                                .invoke_registered_setting(&id, &value)
+                        })
+                        .or_else(|| {
+                            self.plugin_slot_hosts
+                                .get_mut(&provider)
+                                .map(|host| host.application.invoke_registered_setting(&id, &value))
+                        });
+                    if let Some(Ok(effects)) = result {
+                        self.package_settings_invoking = true;
+                        changed |= self.apply_plugin_effects(effects);
+                        self.package_settings_invoking = false;
+                    }
+                }
                 crate::plugin_panel::PluginEffect::SetPluginSetting {
                     plugin_id,
                     key,
