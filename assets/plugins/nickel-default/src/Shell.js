@@ -17,8 +17,7 @@ import { Notifications } from "./Notifications.js";
 import { Settings, SettingsNavigation, SettingControl } from "./Settings.js";
 export { Taskbar, Launcher, QuickSettings, Notifications, Settings };
 export { SettingsNavigation, SettingControl };
-// The package host supplies visibility as surface state. Keeping it in props
-// makes this draft independent of today's one-host-per-package show/hide path.
+// The shared package host supplies surface visibility; callers may provide snapshots.
 export function Shell(props) {
     const Taskbar = nickel.component('shell.taskbar');
     const Launcher = nickel.component('shell.launcher');
