@@ -450,10 +450,9 @@ impl SettingsApp {
                     }),
                 };
                 let picker_id = format!("default-app-picker-{row_index}");
-                let plugin_picker = if self.settings_jsx_enabled
-                    && self.default_app_picker_row.get() == Some(row_index)
-                    && context.open_overlay.as_ref() == Some(&OverlayId::new(picker_id.as_str()))
-                {
+                let active = self.default_app_picker_row.get() == Some(row_index)
+                    && context.open_overlay.as_ref() == Some(&OverlayId::new(picker_id.as_str()));
+                let plugin_picker = if active && self.settings_jsx_enabled {
                     let data = crate::default_app_picker_plugin::projection(
                         self,
                         row_index,
@@ -467,118 +466,77 @@ impl SettingsApp {
                         .as_mut()
                         .map_err(|error| error.clone())
                         .and_then(|page| page.render(&data, theme))
-                        .ok()
+                        .map(Some)
+                } else if active {
+                    Err("Settings plugin is disabled".into())
                 } else {
-                    None
+                    Ok(None)
                 };
-                let (plugin_header, plugin_nodes, plugin_stylesheet) = plugin_picker.map_or_else(
-                    || {
-                        (
-                            None,
-                            std::collections::BTreeMap::new(),
-                            nickel_plugin_presentation::css::StyleSheet::default(),
-                        )
-                    },
-                    |rendered| {
-                        (
-                            Some(rendered.header),
-                            rendered.candidates,
-                            rendered.stylesheet,
-                        )
-                    },
-                );
-                let current = effective_id.clone();
-                let collection = Collection::try_new(
-                    state,
-                    |handler: &nickel_platform::ApplicationHandler| handler.id.clone(),
-                    move |handler: nickel_platform::ApplicationHandler| {
-                        if let Some(node) = plugin_nodes.get(&handler.id) {
-                            return node.view_as_scoped::<SettingsMessage>(
-                                &nickel_plugin_presentation::components::PluginImages::new(),
-                                &plugin_stylesheet,
-                                Some("default-app-picker"),
-                            );
-                        }
-                        let is_current = current.as_ref() == Some(&handler.id);
-                        AnyView::new(
-                            SettingsRow::new(
-                                theme,
-                                handler.name.clone(),
-                                if is_current {
-                                    format!("Current • {}", handler.id)
-                                } else {
-                                    handler.id.clone()
-                                },
-                            )
-                            .trailing(
-                                Button::semantic(
-                                    theme,
-                                    SettingsMessage::SetDefaultApp {
-                                        row: row_index,
-                                        handler_id: handler.id,
-                                    },
-                                    if is_current { "Current" } else { "Choose" },
-                                    if is_current || !can_change {
-                                        ButtonPresentation::Disabled
-                                    } else {
-                                        ButtonPresentation::Quiet
-                                    },
+                let content: AnyView<SettingsMessage> = match plugin_picker {
+                    Ok(Some(rendered)) => {
+                        let plugin_nodes = rendered.candidates;
+                        let plugin_stylesheet = rendered.stylesheet;
+                        let collection = Collection::try_new(
+                            state,
+                            |handler: &nickel_platform::ApplicationHandler| handler.id.clone(),
+                            move |handler: nickel_platform::ApplicationHandler| {
+                                if let Some(node) = plugin_nodes.get(&handler.id) {
+                                    return node.view_as_scoped::<SettingsMessage>(
+                                        &nickel_plugin_presentation::components::PluginImages::new(),
+                                        &plugin_stylesheet,
+                                        Some("default-app-picker"),
+                                    );
+                                }
+                                AnyView::new(
+                                    Text::new(format!("{} is unavailable", handler.name))
+                                        .color(theme.text.secondary),
                                 )
-                                .width(88.0)
-                                .enabled(can_change && !is_current),
-                            ),
+                            },
                         )
-                    },
-                )
-                .expect("application handler identities are unique")
-                .id(format!("default-app-handler-list-{row_index}"))
-                .accessibility_label(format!("Applications for {}", row.label))
-                .item_label(|handler| handler.name.clone())
-                .empty_label("No installed applications match")
-                .loading_label("Loading installed applications")
-                .error_prefix("Applications could not be loaded: ")
-                .gap(2.0)
-                .navigation_scope(NavigationScope::group())
-                .reveal_on_focus(&context)
-                .presentation(CollectionPresentation::VirtualList {
-                    item_height: 58.0,
-                    offset: self.default_app_handler_scroll_offset,
-                    viewport_height: 320.0,
-                    overscan: 116.0,
-                });
-                let results = nickel_ui::VerticalScroll::new(
-                    SettingsMessage::DefaultAppHandlerScroll(
-                        self.default_app_handler_scroll_offset.to_bits(),
+                        .expect("application handler identities are unique")
+                        .id(format!("default-app-handler-list-{row_index}"))
+                        .accessibility_label(format!("Applications for {}", row.label))
+                        .item_label(|handler| handler.name.clone())
+                        .empty_label("No installed applications match")
+                        .loading_label("Loading installed applications")
+                        .error_prefix("Applications could not be loaded: ")
+                        .gap(2.0)
+                        .navigation_scope(NavigationScope::group())
+                        .reveal_on_focus(&context)
+                        .presentation(CollectionPresentation::VirtualList {
+                            item_height: 58.0,
+                            offset: self.default_app_handler_scroll_offset,
+                            viewport_height: 320.0,
+                            overscan: 116.0,
+                        });
+                        let results = nickel_ui::VerticalScroll::new(
+                            SettingsMessage::DefaultAppHandlerScroll(
+                                self.default_app_handler_scroll_offset.to_bits(),
+                            ),
+                            self.default_app_handler_scroll_offset,
+                        )
+                        .on_scroll(default_app_handler_scroll_message)
+                        .controlled(true)
+                        .height(320.0)
+                        .id(format!("default-app-handler-scroll-{row_index}"))
+                        .navigation_scope(NavigationScope::group())
+                        .theme(theme)
+                        .child(collection);
+                        AnyView::new(
+                            Column::new()
+                                .gap(8.0)
+                                .padding(Insets::all(10.0))
+                                .background(palette.surface)
+                                .child(rendered.header)
+                                .child(results),
+                        )
+                    }
+                    Ok(None) => AnyView::new(Container::new()),
+                    Err(error) => self.settings_plugin_recovery(
+                        "Default application picker is unavailable",
+                        error,
+                        None,
                     ),
-                    self.default_app_handler_scroll_offset,
-                )
-                .on_scroll(default_app_handler_scroll_message)
-                .controlled(true)
-                .height(320.0)
-                .id(format!("default-app-handler-scroll-{row_index}"))
-                .navigation_scope(NavigationScope::group())
-                .theme(theme)
-                .child(collection);
-                let base = Column::new()
-                    .gap(8.0)
-                    .padding(Insets::all(10.0))
-                    .background(palette.surface);
-                let content = if let Some(header) = plugin_header {
-                    base.child(header).child(results)
-                } else {
-                    let base = if let Some(status) = discovery_status {
-                        base.child(Text::new(status).color(palette.muted))
-                    } else {
-                        base
-                    };
-                    base.child(SettingsSearchField::new(
-                        theme,
-                        format!("default-app-handler-search-{row_index}"),
-                        &self.default_app_handler_query,
-                        "Search installed applications",
-                        default_app_handler_search_message,
-                    ))
-                    .child(results)
                 };
                 Popover::new(
                     picker_id,

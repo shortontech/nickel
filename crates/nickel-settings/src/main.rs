@@ -683,10 +683,6 @@ fn sidebar_search_message(value: String) -> SettingsMessage {
     SettingsMessage::SidebarSearchChanged(value)
 }
 
-fn default_app_handler_search_message(value: String) -> SettingsMessage {
-    SettingsMessage::DefaultAppHandlerSearchChanged(value)
-}
-
 fn default_app_handler_scroll_message(value: f32) -> SettingsMessage {
     SettingsMessage::DefaultAppHandlerScroll(value.max(0.0).to_bits())
 }
@@ -4958,7 +4954,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_jsx_picker_restores_native_candidate_actions() {
+    fn failed_jsx_picker_shows_recovery_without_native_candidate_actions() {
         let mut app = SettingsApp::with_initial_page(SettingsPage::DefaultApps);
         app.default_apps[0].snapshot = Some(nickel_platform::AssociationSnapshot {
             target: app.default_apps[0].target.clone(),
@@ -5002,13 +4998,22 @@ mod tests {
         });
         assert!(host.inspect().open_overlay.is_some());
         assert!(
-            !host
-                .semantic_targets_for_message(&SettingsMessage::SetDefaultApp {
-                    row: 0,
-                    handler_id: "fixture.desktop".into(),
-                })
-                .is_empty()
+            host.semantic_targets_for_message(&SettingsMessage::SetDefaultApp {
+                row: 0,
+                handler_id: "fixture.desktop".into(),
+            })
+            .is_empty()
         );
+        let recovery = host
+            .semantic_targets_for_message(&SettingsMessage::Navigate(SettingsPage::Plugins))
+            .into_iter()
+            .next()
+            .expect("failed picker offers plugin recovery");
+        host.perform_semantic_action(
+            recovery.id,
+            nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
+        );
+        assert_eq!(host.application().page, SettingsPage::Plugins);
     }
 
     #[test]
