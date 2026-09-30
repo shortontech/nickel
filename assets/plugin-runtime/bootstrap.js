@@ -60,6 +60,13 @@ function Slider(props) {
     }}, ...(children || []));
 }
 const Switch = 'switch';
+function Checkbox(props) {
+    const {checked = false, indeterminate = false, disabled = false, onChange, onClick, children, ...rest} = props;
+    if (typeof checked !== 'boolean' || typeof indeterminate !== 'boolean' || typeof disabled !== 'boolean') throw TypeError('checkbox flags must be booleans');
+    const state = disabled ? (indeterminate ? 'mixed-unavailable' : checked ? 'disabled-on' : 'disabled-off') : indeterminate ? 'mixed' : checked ? 'on' : 'off';
+    const handler = disabled ? undefined : typeof onChange === 'function' ? () => onChange(!checked) : onClick;
+    return h('checkbox', {...rest, accessibilityLabel:rest.accessibilityLabel ?? rest['aria-label'] ?? rest.label, state, onClick:handler}, ...(children || []));
+}
 const ColorSwatch = 'color-swatch';
 const Select = 'select';
 const Option = 'option';
@@ -617,7 +624,7 @@ function h(kind, props, ...children) {
         showLabel: props?.showLabel, contextAction, dragAction, dropAction, focusAction, blurAction,
         selectAction, moveAction, fileAction, closeAction,
         escapeAction, submitAction,
-        value: props?.value, placeholder: props?.placeholder, secure: props?.secure,
+        value: props?.value, placeholder: props?.placeholder, secure: props?.secure, autoFocus: props?.autoFocus,
         wrap: props?.wrap,
         maxLines: props?.maxLines,
         percent: props?.percent,

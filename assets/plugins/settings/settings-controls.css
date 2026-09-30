@@ -31,7 +31,7 @@ progress { background: var(--nickel-border); border-radius: 3px; }
 progress-fill { background: var(--nickel-accent); border-radius: 3px; }
 slider { height: 24px; }
 slider-track { height: 6px; border-radius: 3px; background: var(--nickel-border); }
-slider-fill { background: var(--nickel-accent); }
+slider-fill { border-radius: 3px; background: var(--nickel-accent); }
 slider-thumb {
     width: 20px; height: 20px; border-radius: 10px;
     background: var(--nickel-text); border: 1px solid var(--nickel-accent);
@@ -49,21 +49,39 @@ option {
     font-size: var(--nickel-font-size); line-height: var(--nickel-line-height);
 }
 select-indicator { width: 32px; padding: 5px 6px 4px 6px; color: var(--nickel-text); font-size: 7px; }
-menu {
+menu, text-field-menu {
     width: 200px; padding: 2px; border-radius: 6px;
     background: var(--nickel-surface-raised); color: var(--nickel-text);
     border: 1px solid var(--nickel-border);
 }
-menu-item {
+menu-item, text-field-menu-item {
     height: 28px; padding: 8px; border-radius: 4px;
     color: var(--nickel-text); font-size: 8px;
 }
-menu-item:hover { background: var(--nickel-surface-hover); }
-menu-item:active { background: var(--nickel-selected); }
-menu-item:focus { background: var(--nickel-selected); }
+menu-item:hover, text-field-menu-item:hover { background: var(--nickel-surface-hover); }
+menu-item:active, text-field-menu-item:active { background: var(--nickel-selected); }
+menu-item:focus, text-field-menu-item:focus { background: var(--nickel-selected); }
 select-header:hover { background: var(--nickel-surface-hover); }
 select-header:active { background: var(--nickel-selected); }
 select-header:focus { background: var(--nickel-selected); }
 option:hover { background: var(--nickel-selected); }
 option:active { background: var(--nickel-accent-soft); }
 option:focus { background: var(--nickel-selected); }
+text-field {
+    width: 100%; height: 40px; padding: 8px 12px;
+    background: var(--nickel-control); color: var(--nickel-text);
+    border: 1px solid var(--nickel-border); border-radius: var(--nickel-radius-control);
+    font-size: var(--nickel-font-size); line-height: var(--nickel-line-height);
+}
+text-field-caret { width: 1.5px; background: var(--nickel-text); }
+text-field-selection { background: var(--nickel-selected); }
+text-field:focus { background: var(--nickel-surface-hover); }
+checkbox { width: 32px; height: 32px; align-items: center; justify-content: center; }
+checkbox-box { width: 22px; height: 22px; border-radius: 4px; border: 1px solid var(--nickel-border); background: var(--nickel-control); }
+checkbox-box.on, checkbox-box.mixed { background: var(--nickel-accent-soft); border-color: var(--nickel-accent); }
+checkbox-mark { color: var(--nickel-text); font-size: 18px; line-height: 22px; }
+
+menu-item.disabled, text-field-menu-item.disabled { color: var(--nickel-muted); }
+menu-shortcut, text-field-menu-shortcut { width: 100px; padding: 8px; font-size: 8px; color: var(--nickel-muted); }
+menu-indicator, text-field-menu-indicator { width: 20px; padding: 8px 4px; font-size: 8px; color: var(--nickel-text); }
+switch:focus, checkbox:focus { background: var(--nickel-selected); }

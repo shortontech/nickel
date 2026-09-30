@@ -283,6 +283,8 @@ pub struct OverlayMenuItem<Message> {
     pub separator_before: bool,
     /// Child commands presented as a real adjacent submenu. Empty for leaves.
     pub children: Vec<OverlayMenuItem<Message>>,
+    /// Item frame, shortcut and submenu indicator supplied by a compiler.
+    pub presentation: Option<Box<[crate::DropdownPartStyle; 3]>>,
 }
 
 impl<Message> OverlayMenuItem<Message> {
@@ -298,6 +300,7 @@ impl<Message> OverlayMenuItem<Message> {
             tone: TransientTone::Ordinary,
             separator_before: false,
             children: Vec::new(),
+            presentation: None,
         }
     }
     pub fn disabled(id: impl Into<UiId>, label: impl Into<String>) -> Self {
@@ -312,6 +315,7 @@ impl<Message> OverlayMenuItem<Message> {
             tone: TransientTone::Ordinary,
             separator_before: false,
             children: Vec::new(),
+            presentation: None,
         }
     }
 
@@ -375,6 +379,15 @@ impl<Message> OverlayMenuItem<Message> {
     }
 }
 
+/// Compiler-owned menu frame and item parts, including native disabled entries.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct OverlayMenuPresentation {
+    pub frame: crate::DropdownPartStyle,
+    pub item: [crate::DropdownPartStyle; 3],
+    pub disabled_item: [crate::DropdownPartStyle; 3],
+    pub row_gap: f32,
+}
+
 #[derive(Clone, Debug)]
 pub struct OverlayMenu<Message> {
     pub kind: TransientKind,
@@ -412,6 +425,49 @@ pub struct OverlayMenu<Message> {
 }
 
 impl<Message> OverlayMenu<Message> {
+    pub fn presentation(mut self, style: OverlayMenuPresentation) -> Self {
+        let frame = style.frame;
+        self.width = frame.width;
+        self.fit_content = false;
+        self.padding = frame.padding;
+        self.radius = frame.radius;
+        self.background = frame.background.unwrap_or(0);
+        self.border = frame.border_color.unwrap_or(0);
+        self.border_width = frame.border_width;
+        self.row_gap = if style.row_gap.is_finite() {
+            style.row_gap.clamp(0.0, 4096.0)
+        } else {
+            0.0
+        };
+        fn apply<Message>(items: &mut [OverlayMenuItem<Message>], style: &OverlayMenuPresentation) {
+            for item in items {
+                let disabled = item.action.is_none()
+                    && item.text_command.is_none()
+                    && item.children.is_empty();
+                item.presentation = Some(Box::new(if disabled {
+                    style.disabled_item
+                } else {
+                    style.item
+                }));
+                apply(&mut item.children, style);
+            }
+        }
+        apply(&mut self.items, &style);
+        self
+    }
+
+    pub(crate) fn items_height(&self, items: &[OverlayMenuItem<Message>]) -> f32 {
+        items
+            .iter()
+            .map(|item| {
+                item.presentation.as_ref().map_or(self.row_height, |parts| {
+                    parts[0].height + parts[0].margin.top + parts[0].margin.bottom
+                })
+            })
+            .sum::<f32>()
+            + self.row_gap * items.len().saturating_sub(1) as f32
+    }
+
     /// Size a compact menu to its widest label and shortcut, capped by the
     /// available presentation width. Rows retain their full hit regions.
     pub fn fit_width_to_content(mut self, max_width: f32) -> Self {

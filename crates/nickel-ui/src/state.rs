@@ -115,6 +115,7 @@ struct DurableNodeState {
     entries: HashMap<UiId, StateEntry>,
     frame: u64,
     retention_frames: u64,
+    initial_focus_claimed: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -293,6 +294,7 @@ impl UiStateStore {
                 entries: HashMap::new(),
                 frame: 0,
                 retention_frames,
+                initial_focus_claimed: false,
             },
             pointer: PointerModalityState {
                 hovered: None,
@@ -412,6 +414,12 @@ impl UiStateStore {
 
     pub fn take_focus_return(&mut self) -> Option<FocusReturn> {
         self.overlays.last_focus_return.take()
+    }
+
+    pub(crate) fn claim_initial_focus(&mut self) -> bool {
+        let first = !self.durable.initial_focus_claimed;
+        self.durable.initial_focus_claimed = true;
+        first
     }
 
     pub fn begin_frame(&mut self) {

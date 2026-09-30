@@ -47,8 +47,8 @@ pub use nickel_core::resource_owner::{
 };
 pub use overlay::{
     CollisionPolicy, DismissPolicy, DismissReason, FocusReturn, OverlayAnchor, OverlayFocusPolicy,
-    OverlayId, OverlayMenu, OverlayMenuItem, OverlayPlacement, OverlayStyle, TransientKind,
-    TransientSurface, TransientTone, place_transient,
+    OverlayId, OverlayMenu, OverlayMenuItem, OverlayMenuPresentation, OverlayPlacement,
+    OverlayStyle, TransientKind, TransientSurface, TransientTone, place_transient,
 };
 pub use primitives::{
     ActionRegion, ArtworkPresentation, ItemPresentation, StatusRegion, SurfaceScaffold, ToolRegion,
@@ -294,10 +294,10 @@ pub mod prelude {
         MenuBar, MenuItem, MotionPreference, MotionScale, NavigationDirection, NavigationEntry,
         NavigationExit, NavigationItem, NavigationNeighbors, NavigationScope,
         NavigationSectionLabel, NavigationTraversal, Overflow, OverlayAnchor, OverlayFocusPolicy,
-        OverlayId, OverlayMenu, OverlayMenuItem, OverlayPlacement, OverlayStyle, PageHeader,
-        PlatformThemePreferences, PointerIcon, Popover, PreviewState, PreviewTile,
-        ProjectStatusRow, RESPONSIVE_NAVIGATION_BREAKPOINT, RadioButton, RadioGroup, RadioOption,
-        RadiusScale, ReadingDirection, ResolvedAppearance, ResolvedThemePreferences,
+        OverlayId, OverlayMenu, OverlayMenuItem, OverlayMenuPresentation, OverlayPlacement,
+        OverlayStyle, PageHeader, PlatformThemePreferences, PointerIcon, Popover, PreviewState,
+        PreviewTile, ProjectStatusRow, RESPONSIVE_NAVIGATION_BREAKPOINT, RadioButton, RadioGroup,
+        RadioOption, RadiusScale, ReadingDirection, ResolvedAppearance, ResolvedThemePreferences,
         ResponsiveNavigation, ResponsiveNavigationDestination, ResponsiveNavigationError,
         ResponsiveNavigationPresentation, Row, SETTINGS_SHELL_NARROW_BREAKPOINT,
         START_MENU_SINGLE_PANE_BREAKPOINT, SectionHeader, SelectField, SelectionIndicator,

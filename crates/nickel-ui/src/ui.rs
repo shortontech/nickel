@@ -948,6 +948,11 @@ pub struct Style {
     /// Semantic hue/lightness cue applied to the child background for keyboard
     /// or accessibility focus.
     pub focus_background_tint: Option<Color>,
+    /// Presentation compilers may supply complete focus cues explicitly.
+    pub automatic_focus_tint: bool,
+    pub auto_focus: bool,
+    pub editing_parts: Option<Box<[DropdownPartStyle; 2]>>,
+    pub editing_menu: Option<Box<crate::OverlayMenuPresentation>>,
     /// Semantic hue/lightness cue applied to the current controller target.
     pub controller_focus_background_tint: Option<Color>,
     /// Shared semantic scrollbar chrome for this element's viewport.
@@ -1016,6 +1021,10 @@ impl Default for Style {
             pressed_background: None,
             focus_background: None,
             focus_background_tint: None,
+            automatic_focus_tint: true,
+            auto_focus: false,
+            editing_parts: None,
+            editing_menu: None,
             controller_focus_background_tint: None,
             scrollbar_palette: crate::theme::FALLBACK_SCROLLBAR_PALETTE,
             controller_scope_background: None,
@@ -1112,6 +1121,7 @@ enum Kind {
         thumb: Color,
         thumb_border: Color,
         geometry: [f32; 6],
+        presentation: Option<Box<[DropdownPartStyle; 3]>>,
     },
     Dropdown {
         selected: String,

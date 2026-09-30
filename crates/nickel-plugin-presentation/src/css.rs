@@ -600,18 +600,26 @@ impl<'i> QualifiedRuleParser<'i> for CssRuleParser {
             if selectors.iter().any(|selector| {
                 !matches!(
                     selector.kind.as_deref(),
-                    Some("button" | "text-field" | "select-header" | "option" | "menu-item")
-                ) || selector.state != Some(InteractionState::Focus)
-                    && selector.kind.as_deref() == Some("text-field")
+                    Some(
+                        "button"
+                            | "text-field"
+                            | "select-header"
+                            | "option"
+                            | "menu-item"
+                            | "switch"
+                            | "checkbox"
+                            | "text-field-menu-item"
+                    )
+                )
             }) {
                 return Err(ParseError::custom(
-                    "plugin CSS state selectors require an interactive part or text-field:focus",
+                    "plugin CSS state selectors require an interactive control part",
                 ));
             }
             let transparent_part = selectors.iter().all(|selector| {
                 matches!(
                     selector.kind.as_deref(),
-                    Some("select-header" | "option" | "menu-item")
+                    Some("select-header" | "option" | "menu-item" | "text-field-menu-item")
                 )
             });
             if declarations.iter().any(|declaration| {
@@ -1076,7 +1084,11 @@ impl StyleSheet {
                         && matches!(name.as_str(), "background" | "background-color")
                         && let Ok(value) = resolve_value(value, properties, &mut HashSet::new())
                         && let Ok(Declaration::Background(color)) = declaration(name, &value)
-                        && (color != 0 || matches!(kind, "select-header" | "option" | "menu-item"))
+                        && (color != 0
+                            || matches!(
+                                kind,
+                                "select-header" | "option" | "menu-item" | "text-field-menu-item"
+                            ))
                     {
                         background = Some(color);
                     }
@@ -1295,7 +1307,6 @@ mod tests {
             "button { padding: 10000px }",
             "@import 'remote.css';",
             "button:hover { color: #fff }",
-            "text-field:hover { background: #fff }",
             "button:hover { background: transparent }",
             "div:hover { background: #fff }",
         ] {

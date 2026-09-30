@@ -1634,6 +1634,81 @@ impl<Message> TextField<Message> {
         field
     }
 
+    /// Apply typed compiler-owned editor frame, caret and selection styles.
+    pub fn presentation(
+        mut self,
+        frame: DropdownPartStyle,
+        caret: DropdownPartStyle,
+        selection: DropdownPartStyle,
+    ) -> Self {
+        let frame = frame.bounded();
+        self.text.0.style.background = frame
+            .background
+            .filter(|color| *color != 0)
+            .map(Background::Solid);
+        self.text.0.style.foreground = Some(frame.foreground.unwrap_or(0));
+        self.text.0.style.border = frame.border_color.filter(|color| *color != 0);
+        self.text.0.style.border_width = frame.border_width;
+        self.text.0.style.corner_radius = frame.radius;
+        self.text.0.style.padding = frame.padding;
+        self.text.0.style.hover_background =
+            frame.interaction_backgrounds[0].map(Background::Solid);
+        self.text.0.style.pressed_background =
+            frame.interaction_backgrounds[1].map(Background::Solid);
+        self.text.0.style.focus_background =
+            frame.interaction_backgrounds[2].map(Background::Solid);
+        self.text.0.style.automatic_focus_tint = false;
+        self.text.0.style.editing_parts = Some(Box::new([caret.bounded(), selection.bounded()]));
+        self.text.0.style.overflow_x = Overflow::Clip;
+        self.text.0.style.overflow_y = Overflow::Clip;
+        if frame.font_size > 0.0 {
+            self.text = self.text.font_size(frame.font_size);
+        }
+        if frame.line_height > 0.0 {
+            self.text = self.text.line_height(frame.line_height);
+        }
+        self
+    }
+
+    pub fn context_menu_presentation(mut self, menu: crate::OverlayMenuPresentation) -> Self {
+        self.text.0.style.editing_menu = Some(Box::new(menu));
+        self
+    }
+
+    pub fn auto_focus(mut self, auto_focus: bool) -> Self {
+        self.text.0.style.auto_focus = auto_focus;
+        self
+    }
+
+    pub fn width_length(mut self, width: Length) -> Self {
+        self.text.0.style.width = width;
+        self
+    }
+    pub fn height_length(mut self, height: Length) -> Self {
+        self.text.0.style.height = height;
+        self
+    }
+    pub fn min_width(mut self, width: f32) -> Self {
+        self.text.0.style.min_width = width;
+        self
+    }
+    pub fn max_width(mut self, width: f32) -> Self {
+        self.text.0.style.max_width = width;
+        self
+    }
+    pub fn min_height(mut self, height: f32) -> Self {
+        self.text.0.style.min_height = height;
+        self
+    }
+    pub fn max_height(mut self, height: f32) -> Self {
+        self.text.0.style.max_height = height;
+        self
+    }
+    pub fn shrink(mut self, shrink: f32) -> Self {
+        self.text.0.style.shrink = shrink;
+        self
+    }
+
     pub fn display_text(&self) -> &str {
         &self.displayed
     }
@@ -1746,6 +1821,11 @@ impl<Message> Component<Message> for Header<Message> {
 pub struct Container<Message = String>(Element<Message>);
 
 impl<Message> Container<Message> {
+    pub fn automatic_focus_tint(mut self, enabled: bool) -> Self {
+        self.0.style.automatic_focus_tint = enabled;
+        self
+    }
+
     pub fn new() -> Self {
         Self(Element::flex(Axis::Vertical))
     }
@@ -3035,6 +3115,7 @@ impl<Message> Slider<Message> {
                 thumb: 0xf4f7ff,
                 thumb_border: 0x8868b8ff,
                 geometry: [6.0, 3.0, 20.0, 20.0, 10.0, 1.0],
+                presentation: None,
             },
             style: Style::default(),
             message: Some(message),
@@ -3069,6 +3150,19 @@ impl<Message> Slider<Message> {
         let mut slider = Self::new(seed, value);
         slider.0.seeded_value_mapper = Some(map);
         slider
+    }
+
+    pub fn parts(
+        mut self,
+        track: DropdownPartStyle,
+        fill: DropdownPartStyle,
+        thumb: DropdownPartStyle,
+    ) -> Self {
+        if let Kind::Slider { presentation, .. } = &mut self.0.kind {
+            *presentation = Some(Box::new([track.bounded(), fill.bounded(), thumb.bounded()]));
+        }
+        self.0.style.automatic_focus_tint = false;
+        self
     }
 
     pub fn colors(mut self, track: Color, fill: Color, thumb: Color) -> Self {
@@ -3132,6 +3226,15 @@ impl<Message> Slider<Message> {
         self
     }
 
+    pub fn automatic_focus_tint(mut self, enabled: bool) -> Self {
+        self.0.style.automatic_focus_tint = enabled;
+        self
+    }
+    pub fn width_length(mut self, width: Length) -> Self {
+        self.0.style.width = width;
+        self
+    }
+
     pub fn width(mut self, width: f32) -> Self {
         self.0 = self.0.width(width);
         self
@@ -3176,6 +3279,7 @@ pub struct DropdownPartStyle {
     pub width: f32,
     pub height: f32,
     pub padding: Insets,
+    pub margin: Insets,
     pub background: Option<Color>,
     /// Hover, pressed and focused backgrounds supplied by CSS.
     pub interaction_backgrounds: [Option<Color>; 3],
@@ -3203,6 +3307,12 @@ impl DropdownPartStyle {
             right: bound(self.padding.right),
             bottom: bound(self.padding.bottom),
             left: bound(self.padding.left),
+        };
+        self.margin = Insets {
+            top: bound(self.margin.top),
+            right: bound(self.margin.right),
+            bottom: bound(self.margin.bottom),
+            left: bound(self.margin.left),
         };
         self.border_width = bound(self.border_width);
         self.radius = bound(self.radius);
@@ -3272,7 +3382,7 @@ impl<Message> Dropdown<Message> {
         indicator: DropdownPartStyle,
     ) -> Self {
         let parts = [header.bounded(), option.bounded(), indicator.bounded()];
-        self.0.style.height = Length::Px(parts[0].height);
+        self.0.style.height = Length::Px(parts[0].height + parts[0].margin.height());
         if let Kind::Dropdown { presentation, .. } = &mut self.0.kind {
             *presentation = Some(Box::new(parts));
         }

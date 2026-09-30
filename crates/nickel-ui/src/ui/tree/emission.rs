@@ -1,31 +1,48 @@
 use super::*;
 
-fn paint_dropdown_part(
+pub(super) fn paint_dropdown_part(
     commands: &mut Vec<PaintCommand>,
     rect: Rect,
     style: &DropdownPartStyle,
     text: &str,
     align: TextAlign,
 ) {
-    if let Some(color) = style.background.filter(|color| *color != 0) {
-        commands.push(if style.radius > 0.0 {
-            PaintCommand::RoundedFill {
+    let background = style.background.filter(|color| *color != 0);
+    let border = style.border_color.filter(|color| *color != 0);
+    let rounded_border =
+        style.radius > 0.0 && style.border_width > 0.0 && background.is_some() && border.is_some();
+    if rounded_border {
+        commands.push(PaintCommand::RoundedFill {
+            rect,
+            color: border.unwrap(),
+            radius: style.radius,
+        });
+        commands.push(PaintCommand::RoundedFill {
+            rect: rect.inset(Insets::all(style.border_width)),
+            color: background.unwrap(),
+            radius: (style.radius - style.border_width).max(0.0),
+        });
+    } else {
+        if let Some(color) = background {
+            commands.push(if style.radius > 0.0 {
+                PaintCommand::RoundedFill {
+                    rect,
+                    color,
+                    radius: style.radius,
+                }
+            } else {
+                PaintCommand::Fill { rect, color }
+            });
+        }
+        if let Some(color) = border
+            && style.border_width > 0.0
+        {
+            commands.push(PaintCommand::Stroke {
                 rect,
                 color,
-                radius: style.radius,
-            }
-        } else {
-            PaintCommand::Fill { rect, color }
-        });
-    }
-    if let Some(color) = style.border_color.filter(|color| *color != 0)
-        && style.border_width > 0.0
-    {
-        commands.push(PaintCommand::Stroke {
-            rect,
-            color,
-            width: style.border_width,
-        });
+                width: style.border_width,
+            });
+        }
     }
     if let Some(color) = style.foreground.filter(|color| *color != 0)
         && style.font_size > 0.0
@@ -300,13 +317,14 @@ pub(super) fn emit_element<Message: Clone>(
         };
         tree.text_inputs.push(TextInputRegion {
             id: node.id.clone(),
-            rect,
+            content: node.content,
             scale,
             bold,
             line_height,
             initial: input_value.clone().unwrap_or_else(|| value.clone()),
             map: map.clone(),
             secure,
+            context_menu_presentation: element.style.editing_menu.clone(),
             context_menu_style: crate::OverlayStyle {
                 background: match element.style.background {
                     Some(Background::Solid(color)) => color,
@@ -359,37 +377,87 @@ pub(super) fn emit_element<Message: Clone>(
                 color: 0x315a8f,
             }));
     }
+    let text_rect = if element.text_mapper.is_some() {
+        node.content
+    } else {
+        rect
+    };
     if let Kind::Text {
         scale,
+        line_height,
         selection_x: Some((start, end)),
         ..
     } = &element.kind
     {
-        tree.commands.push(PaintCommand::Fill {
-            rect: Rect::new(
-                rect.origin.x + *start,
-                rect.origin.y,
+        let color = element
+            .style
+            .editing_parts
+            .as_ref()
+            .map_or(Some(0x315a8f), |parts| parts[1].background);
+        if let Some(color) = color.filter(|color| *color != 0) {
+            let radius = element
+                .style
+                .editing_parts
+                .as_ref()
+                .map_or(0.0, |parts| parts[1].radius);
+            let selection_rect = Rect::new(
+                text_rect.origin.x + *start,
+                text_rect.origin.y,
                 (*end - *start).max(1.0),
-                text_font_size(*scale) * 1.3,
-            ),
-            color: 0x315a8f,
-        });
+                line_height.unwrap_or_else(|| text_font_size(*scale) * 1.3),
+            );
+            tree.commands.push(if radius > 0.0 {
+                PaintCommand::RoundedFill {
+                    rect: selection_rect,
+                    color,
+                    radius,
+                }
+            } else {
+                PaintCommand::Fill {
+                    rect: selection_rect,
+                    color,
+                }
+            });
+        }
     }
     if let Kind::Text {
         scale,
+        line_height,
         caret_position: Some(caret_position),
         ..
     } = &element.kind
     {
-        tree.commands.push(PaintCommand::Fill {
-            rect: Rect::new(
-                rect.origin.x + caret_position.x,
-                rect.origin.y + caret_position.y,
-                1.5,
-                text_font_size(*scale) * 1.3,
-            ),
-            color: foreground.unwrap_or(0x00ff_ffff),
-        });
+        let parts = element.style.editing_parts.as_ref();
+        let color = parts.map_or_else(
+            || Some(foreground.unwrap_or(0x00ff_ffff)),
+            |parts| parts[0].background,
+        );
+        if let Some(color) = color.filter(|color| *color != 0) {
+            let width = parts.map_or(1.5, |parts| parts[0].width);
+            let radius = parts.map_or(0.0, |parts| parts[0].radius);
+            let height = parts.filter(|parts| parts[0].height > 0.0).map_or_else(
+                || line_height.unwrap_or_else(|| text_font_size(*scale) * 1.3),
+                |parts| parts[0].height,
+            );
+            let caret_rect = Rect::new(
+                text_rect.origin.x + caret_position.x,
+                text_rect.origin.y + caret_position.y,
+                width,
+                height,
+            );
+            tree.commands.push(if radius > 0.0 {
+                PaintCommand::RoundedFill {
+                    rect: caret_rect,
+                    color,
+                    radius,
+                }
+            } else {
+                PaintCommand::Fill {
+                    rect: caret_rect,
+                    color,
+                }
+            });
+        }
     }
     match &element.kind {
         Kind::CustomPaint { paint } => {
@@ -420,7 +488,7 @@ pub(super) fn emit_element<Message: Clone>(
             outline,
             ..
         } => {
-            let text = text_for_bounds(value, *scale, *bold, *ellipsis, rect.size.width);
+            let text = text_for_bounds(value, *scale, *bold, *ellipsis, text_rect.size.width);
             if let Some((color, width)) = outline {
                 for (x, y) in [
                     (-1.0, -1.0),
@@ -434,10 +502,10 @@ pub(super) fn emit_element<Message: Clone>(
                 ] {
                     tree.commands.push(PaintCommand::Text {
                         bounds: Rect::new(
-                            rect.origin.x + x * *width,
-                            rect.origin.y + y * *width,
-                            rect.size.width,
-                            rect.size.height,
+                            text_rect.origin.x + x * *width,
+                            text_rect.origin.y + y * *width,
+                            text_rect.size.width,
+                            text_rect.size.height,
                         ),
                         text: text.clone(),
                         scale: *scale,
@@ -449,7 +517,7 @@ pub(super) fn emit_element<Message: Clone>(
                 }
             }
             tree.commands.push(PaintCommand::Text {
-                bounds: rect,
+                bounds: text_rect,
                 text,
                 scale: *scale,
                 color: foreground.unwrap_or(0x00ff_ffff),
@@ -568,69 +636,135 @@ pub(super) fn emit_element<Message: Clone>(
             thumb,
             thumb_border,
             geometry,
+            presentation,
         } => {
-            let [
-                track_height,
-                track_radius,
-                thumb_width,
-                thumb_height,
-                thumb_radius,
-                border_width,
-            ] = *geometry;
-            let thumb_width = thumb_width.min(rect.size.width);
-            let thumb_height = thumb_height.min(rect.size.height);
-            let border_width = border_width.min(thumb_width.min(thumb_height) / 2.0);
-            let track_rect = Rect::new(
-                rect.origin.x,
-                rect.origin.y + rect.size.height / 2.0 - track_height / 2.0,
-                rect.size.width,
-                track_height,
-            );
-            let fill_width = track_rect.size.width * value.clamp(0.0, 1.0);
-            if *track != 0 {
-                tree.commands.push(PaintCommand::RoundedFill {
-                    rect: track_rect,
-                    color: *track,
-                    radius: track_radius,
-                });
-            }
-            if *fill != 0 {
-                tree.commands.push(PaintCommand::RoundedFill {
-                    rect: Rect::new(
-                        track_rect.origin.x,
-                        track_rect.origin.y,
-                        fill_width,
-                        track_rect.size.height,
-                    ),
-                    color: *fill,
-                    radius: track_radius,
-                });
-            }
-            let thumb_rect = Rect::new(
-                (track_rect.origin.x + fill_width - thumb_width / 2.0)
-                    .clamp(rect.origin.x, rect.origin.x + rect.size.width - thumb_width),
-                rect.origin.y + rect.size.height / 2.0 - thumb_height / 2.0,
-                thumb_width,
-                thumb_height,
-            );
-            if *thumb_border != 0 {
-                tree.commands.push(PaintCommand::RoundedFill {
-                    rect: thumb_rect,
-                    color: *thumb_border,
-                    radius: thumb_radius,
-                });
-            }
-            if *thumb != 0 {
-                tree.commands.push(PaintCommand::RoundedFill {
-                    rect: Rect::new(
-                        thumb_rect.origin.x + border_width,
-                        thumb_rect.origin.y + border_width,
-                        thumb_rect.size.width - 2.0 * border_width,
-                        thumb_rect.size.height - 2.0 * border_width,
-                    ),
-                    color: *thumb,
-                    radius: (thumb_radius - border_width).max(0.0),
-                });
+            if let Some(parts) = presentation {
+                let track_style = &parts[0];
+                let available = rect.inset(track_style.margin);
+                let track_rect = Rect::new(
+                    available.origin.x,
+                    available.origin.y + (available.size.height - track_style.height) / 2.0,
+                    if track_style.width > 0.0 {
+                        track_style.width.min(available.size.width)
+                    } else {
+                        available.size.width
+                    },
+                    track_style.height,
+                );
+                paint_dropdown_part(
+                    &mut tree.commands,
+                    track_rect,
+                    track_style,
+                    "",
+                    TextAlign::Start,
+                );
+                let content = track_rect.inset(track_style.padding);
+                let fill_style = &parts[1];
+                let fill_available = content.inset(fill_style.margin);
+                let fill_rect = Rect::new(
+                    fill_available.origin.x,
+                    fill_available.origin.y,
+                    fill_available.size.width * value.clamp(0.0, 1.0),
+                    if fill_style.height > 0.0 {
+                        fill_style.height
+                    } else {
+                        fill_available.size.height
+                    },
+                );
+                paint_dropdown_part(
+                    &mut tree.commands,
+                    fill_rect,
+                    fill_style,
+                    "",
+                    TextAlign::Start,
+                );
+                let thumb_style = &parts[2];
+                let thumb_available = rect.inset(thumb_style.margin);
+                let width = thumb_style.width.min(thumb_available.size.width);
+                let height = thumb_style.height.min(thumb_available.size.height);
+                let x = (content.origin.x + content.size.width * value.clamp(0.0, 1.0)
+                    - width / 2.0)
+                    .clamp(
+                        thumb_available.origin.x,
+                        thumb_available.origin.x + thumb_available.size.width - width,
+                    );
+                let thumb_rect = Rect::new(
+                    x,
+                    thumb_available.origin.y + (thumb_available.size.height - height) / 2.0,
+                    width,
+                    height,
+                );
+                paint_dropdown_part(
+                    &mut tree.commands,
+                    thumb_rect,
+                    thumb_style,
+                    "",
+                    TextAlign::Start,
+                );
+            } else {
+                let [
+                    track_height,
+                    track_radius,
+                    thumb_width,
+                    thumb_height,
+                    thumb_radius,
+                    border_width,
+                ] = *geometry;
+                let thumb_width = thumb_width.min(rect.size.width);
+                let thumb_height = thumb_height.min(rect.size.height);
+                let border_width = border_width.min(thumb_width.min(thumb_height) / 2.0);
+                let track_rect = Rect::new(
+                    rect.origin.x,
+                    rect.origin.y + rect.size.height / 2.0 - track_height / 2.0,
+                    rect.size.width,
+                    track_height,
+                );
+                let fill_width = track_rect.size.width * value.clamp(0.0, 1.0);
+                if *track != 0 {
+                    tree.commands.push(PaintCommand::RoundedFill {
+                        rect: track_rect,
+                        color: *track,
+                        radius: track_radius,
+                    });
+                }
+                if *fill != 0 {
+                    tree.commands.push(PaintCommand::RoundedFill {
+                        rect: Rect::new(
+                            track_rect.origin.x,
+                            track_rect.origin.y,
+                            fill_width,
+                            track_rect.size.height,
+                        ),
+                        color: *fill,
+                        radius: track_radius,
+                    });
+                }
+                let thumb_rect = Rect::new(
+                    (track_rect.origin.x + fill_width - thumb_width / 2.0)
+                        .clamp(rect.origin.x, rect.origin.x + rect.size.width - thumb_width),
+                    rect.origin.y + rect.size.height / 2.0 - thumb_height / 2.0,
+                    thumb_width,
+                    thumb_height,
+                );
+                if *thumb_border != 0 {
+                    tree.commands.push(PaintCommand::RoundedFill {
+                        rect: thumb_rect,
+                        color: *thumb_border,
+                        radius: thumb_radius,
+                    });
+                }
+                if *thumb != 0 {
+                    tree.commands.push(PaintCommand::RoundedFill {
+                        rect: Rect::new(
+                            thumb_rect.origin.x + border_width,
+                            thumb_rect.origin.y + border_width,
+                            thumb_rect.size.width - 2.0 * border_width,
+                            thumb_rect.size.height - 2.0 * border_width,
+                        ),
+                        color: *thumb,
+                        radius: (thumb_radius - border_width).max(0.0),
+                    });
+                }
             }
         }
         Kind::Dropdown {
@@ -647,10 +781,14 @@ pub(super) fn emit_element<Message: Clone>(
         } => {
             let header_height = presentation
                 .as_ref()
-                .map_or(if *overlay { 30.0 } else { 42.0 }, |parts| parts[0].height);
+                .map_or(if *overlay { 30.0 } else { 42.0 }, |parts| {
+                    parts[0].height + parts[0].margin.height()
+                });
             let option_height = presentation
                 .as_ref()
-                .map_or(if *overlay { 34.0 } else { 36.0 }, |parts| parts[1].height);
+                .map_or(if *overlay { 34.0 } else { 36.0 }, |parts| {
+                    parts[1].height + parts[1].margin.height()
+                });
             let options_height = option_height * options.len() as f32;
             let options_origin_y = if *overlay
                 && rect.origin.y + header_height + options_height
@@ -662,6 +800,9 @@ pub(super) fn emit_element<Message: Clone>(
                 rect.origin.y + header_height
             };
             let header = Rect::new(rect.origin.x, rect.origin.y, rect.size.width, header_height);
+            let header = presentation
+                .as_ref()
+                .map_or(header, |parts| header.inset(parts[0].margin));
             if let Some(parts) = presentation {
                 paint_dropdown_part(
                     &mut tree.commands,
@@ -671,11 +812,19 @@ pub(super) fn emit_element<Message: Clone>(
                     TextAlign::Start,
                 );
                 let indicator = &parts[2];
+                let indicator_available = header.inset(indicator.margin);
+                let indicator_width = indicator.width.min(indicator_available.size.width);
+                let indicator_height = if indicator.height > 0.0 {
+                    indicator.height.min(indicator_available.size.height)
+                } else {
+                    indicator_available.size.height
+                };
                 let indicator_rect = Rect::new(
-                    header.origin.x + header.size.width - indicator.width,
-                    header.origin.y,
-                    indicator.width,
-                    header.size.height,
+                    indicator_available.origin.x + indicator_available.size.width - indicator_width,
+                    indicator_available.origin.y
+                        + (indicator_available.size.height - indicator_height) / 2.0,
+                    indicator_width,
+                    indicator_height,
                 );
                 paint_dropdown_part(
                     &mut tree.commands,
@@ -749,6 +898,9 @@ pub(super) fn emit_element<Message: Clone>(
                         rect.size.width,
                         option_height,
                     );
+                    let option_rect = presentation
+                        .as_ref()
+                        .map_or(option_rect, |parts| option_rect.inset(parts[1].margin));
                     let commands = if *overlay {
                         &mut tree.overlay_commands
                     } else {
@@ -807,6 +959,7 @@ pub(super) fn emit_element<Message: Clone>(
                         grid_tracks: Vec::new(),
                         hit_stack: None,
                         interaction: InteractionState::default(),
+                        auto_focus: false,
                         navigation_scope: None,
                         adjustment_step: 0.05,
                         controller_value: None,

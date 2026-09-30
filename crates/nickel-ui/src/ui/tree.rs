@@ -83,7 +83,7 @@ struct OverlayMenuLevel<'a, Message> {
 #[derive(Clone, Debug)]
 struct TextInputRegion<Message> {
     id: UiId,
-    rect: Rect,
+    content: Rect,
     scale: f32,
     bold: bool,
     line_height: f32,
@@ -91,6 +91,7 @@ struct TextInputRegion<Message> {
     map: TextMessageMapper<Message>,
     secure: bool,
     context_menu_style: crate::OverlayStyle,
+    context_menu_presentation: Option<Box<crate::OverlayMenuPresentation>>,
 }
 
 #[derive(Clone, Debug)]
@@ -101,7 +102,7 @@ struct TextCommandRegion {
 }
 
 fn text_offset_at<Message>(input: &TextInputRegion<Message>, point: Point) -> usize {
-    let target_line = ((point.y - input.rect.origin.y) / input.line_height)
+    let target_line = ((point.y - input.content.origin.y) / input.line_height)
         .floor()
         .max(0.0) as usize;
     let mut line_start = 0;
@@ -116,10 +117,10 @@ fn text_offset_at<Message>(input: &TextInputRegion<Message>, point: Point) -> us
     if target_line >= input.initial.lines().count().max(1) {
         return input.initial.len();
     }
-    if point.x <= input.rect.origin.x {
+    if point.x <= input.content.origin.x {
         return line_start;
     }
-    let target = (point.x - input.rect.origin.x).max(0.0);
+    let target = (point.x - input.content.origin.x).max(0.0);
     let mut previous = (0, 0.0);
     for (index, _) in line.grapheme_indices(true) {
         let width = measure_text(
@@ -220,6 +221,7 @@ pub struct ResolvedNode {
     pub grid_tracks: Vec<f32>,
     pub hit_stack: Option<usize>,
     pub interaction: InteractionState,
+    pub auto_focus: bool,
     pub navigation_scope: Option<crate::NavigationScope>,
     pub adjustment_step: f32,
     pub controller_value: Option<f32>,
@@ -656,6 +658,7 @@ impl<Message: Clone> UiFrame<Message> {
             grid_tracks: Vec::new(),
             hit_stack: None,
             interaction: InteractionState::default(),
+            auto_focus: false,
             navigation_scope: Some(crate::NavigationScope::group()),
             adjustment_step: 0.05,
             controller_value: None,
@@ -805,13 +808,27 @@ impl<Message: Clone> UiFrame<Message> {
         });
 
         let mut submenu = None;
+        let mut item_y = rect.origin.y + menu.padding.top;
         for (index, item) in items.iter().enumerate() {
+            let part = item.presentation.as_ref().map(|parts| &parts[0]);
+            let margin = part.map_or(Insets::default(), |part| part.margin);
+            let height = part.map_or(menu.row_height, |part| part.height);
+            let available_width = (rect.size.width
+                - menu.padding.left
+                - menu.padding.right
+                - margin.left
+                - margin.right)
+                .max(0.0);
+            let width = part
+                .filter(|part| part.width > 0.0)
+                .map_or(available_width, |part| part.width.min(available_width));
             let item_rect = Rect::new(
-                rect.origin.x + menu.padding.left,
-                rect.origin.y + menu.padding.top + index as f32 * (menu.row_height + menu.row_gap),
-                rect.size.width - menu.padding.left - menu.padding.right,
-                menu.row_height,
+                rect.origin.x + menu.padding.left + margin.left,
+                item_y + margin.top,
+                width,
+                height,
             );
+            item_y += margin.top + height + margin.bottom + menu.row_gap;
             let id = menu_id.scoped(item.id.as_str());
             let enabled =
                 item.action.is_some() || item.text_command.is_some() || !item.children.is_empty();
@@ -823,76 +840,147 @@ impl<Message: Clone> UiFrame<Message> {
                 controller_selected: state.navigation().controller_selected() == Some(&id),
                 ..InteractionState::default()
             };
-            let interaction_color = if interaction.pressed {
-                menu.item_pressed
-            } else if interaction.hovered {
-                menu.item_hover
-            } else if interaction.focused || interaction.controller_selected {
-                menu.item_selected
-            } else {
-                None
-            };
-            if let Some(color) = interaction_color
-                .or(menu.item_background)
-                .filter(|color| *color != 0)
-            {
-                self.commands.push(PaintCommand::RoundedFill {
-                    rect: item_rect,
-                    color,
-                    radius: menu.item_radius,
-                });
-            }
-            if let Some(color) = menu.item_border.filter(|color| *color != 0)
-                && menu.item_border_width > 0.0
-            {
-                self.commands.push(PaintCommand::Stroke {
-                    rect: item_rect,
-                    color,
-                    width: menu.item_border_width,
-                });
-            }
-            let mut text_bounds = item_rect.inset(menu.item_padding);
-            if menu.item_line_height > 0.0 {
-                text_bounds.size.height = menu.item_line_height.min(text_bounds.size.height);
-            }
-            if menu.foreground != 0 && menu.text_scale > 0.0 {
-                self.commands.push(PaintCommand::Text {
-                    bounds: text_bounds,
-                    text: item.label.clone(),
-                    scale: menu.text_scale,
-                    color: menu.foreground,
-                    align: menu.text_align,
-                    bold: false,
-                    wrap: false,
-                });
-                if let Some(shortcut) = item.shortcut.as_ref() {
-                    self.commands.push(PaintCommand::Text {
-                        bounds: text_bounds,
-                        text: shortcut.clone(),
-                        scale: menu.text_scale * menu.shortcut_scale,
-                        color: menu.foreground,
-                        align: TextAlign::End,
-                        bold: false,
-                        wrap: false,
-                    });
+            let mut text_bounds =
+                item_rect.inset(part.map_or(menu.item_padding, |part| part.padding));
+            if let Some(parts) = &item.presentation {
+                let mut style = parts[0];
+                let active = if interaction.pressed {
+                    style.interaction_backgrounds[1]
+                } else if interaction.hovered {
+                    style.interaction_backgrounds[0]
+                } else if interaction.focused || interaction.controller_selected {
+                    style.interaction_backgrounds[2]
+                } else {
+                    None
+                };
+                style.background = active.or(style.background);
+                emission::paint_dropdown_part(
+                    &mut self.commands,
+                    item_rect,
+                    &style,
+                    &item.label,
+                    menu.text_align,
+                );
+                let trailing = |part: &crate::DropdownPartStyle| {
+                    let available = item_rect.inset(part.margin);
+                    let width = if part.width > 0.0 {
+                        part.width.min(available.size.width)
+                    } else {
+                        available.size.width
+                    };
+                    let height = if part.height > 0.0 {
+                        part.height.min(available.size.height)
+                    } else {
+                        available.size.height
+                    };
+                    Rect::new(
+                        if menu.direction == crate::ReadingDirection::RightToLeft {
+                            available.origin.x
+                        } else {
+                            available.origin.x + available.size.width - width
+                        },
+                        available.origin.y + (available.size.height - height) / 2.0,
+                        width,
+                        height,
+                    )
+                };
+                if let Some(shortcut) = &item.shortcut {
+                    emission::paint_dropdown_part(
+                        &mut self.commands,
+                        trailing(&parts[1]),
+                        &parts[1],
+                        shortcut,
+                        TextAlign::End,
+                    );
                 }
                 if !item.children.is_empty() {
+                    emission::paint_dropdown_part(
+                        &mut self.commands,
+                        trailing(&parts[2]),
+                        &parts[2],
+                        if menu.direction == crate::ReadingDirection::RightToLeft {
+                            "‹"
+                        } else {
+                            "›"
+                        },
+                        TextAlign::End,
+                    );
+                }
+                if style.line_height > 0.0 {
+                    text_bounds.size.height = style.line_height.min(text_bounds.size.height);
+                }
+            } else {
+                let interaction_color = if interaction.pressed {
+                    menu.item_pressed
+                } else if interaction.hovered {
+                    menu.item_hover
+                } else if interaction.focused || interaction.controller_selected {
+                    menu.item_selected
+                } else {
+                    None
+                };
+                if let Some(color) = interaction_color
+                    .or(menu.item_background)
+                    .filter(|color| *color != 0)
+                {
+                    self.commands.push(PaintCommand::RoundedFill {
+                        rect: item_rect,
+                        color,
+                        radius: menu.item_radius,
+                    });
+                }
+                if let Some(color) = menu.item_border.filter(|color| *color != 0)
+                    && menu.item_border_width > 0.0
+                {
+                    self.commands.push(PaintCommand::Stroke {
+                        rect: item_rect,
+                        color,
+                        width: menu.item_border_width,
+                    });
+                }
+                text_bounds = item_rect.inset(menu.item_padding);
+                if menu.item_line_height > 0.0 {
+                    text_bounds.size.height = menu.item_line_height.min(text_bounds.size.height);
+                }
+                if menu.foreground != 0 && menu.text_scale > 0.0 {
                     self.commands.push(PaintCommand::Text {
                         bounds: text_bounds,
-                        text: match menu.direction {
-                            crate::ReadingDirection::LeftToRight => "›",
-                            crate::ReadingDirection::RightToLeft => "‹",
-                        }
-                        .into(),
+                        text: item.label.clone(),
                         scale: menu.text_scale,
                         color: menu.foreground,
-                        align: match menu.direction {
-                            crate::ReadingDirection::LeftToRight => TextAlign::End,
-                            crate::ReadingDirection::RightToLeft => TextAlign::Start,
-                        },
+                        align: menu.text_align,
                         bold: false,
                         wrap: false,
                     });
+                    if let Some(shortcut) = item.shortcut.as_ref() {
+                        self.commands.push(PaintCommand::Text {
+                            bounds: text_bounds,
+                            text: shortcut.clone(),
+                            scale: menu.text_scale * menu.shortcut_scale,
+                            color: menu.foreground,
+                            align: TextAlign::End,
+                            bold: false,
+                            wrap: false,
+                        });
+                    }
+                    if !item.children.is_empty() {
+                        self.commands.push(PaintCommand::Text {
+                            bounds: text_bounds,
+                            text: match menu.direction {
+                                crate::ReadingDirection::LeftToRight => "›",
+                                crate::ReadingDirection::RightToLeft => "‹",
+                            }
+                            .into(),
+                            scale: menu.text_scale,
+                            color: menu.foreground,
+                            align: match menu.direction {
+                                crate::ReadingDirection::LeftToRight => TextAlign::End,
+                                crate::ReadingDirection::RightToLeft => TextAlign::Start,
+                            },
+                            bold: false,
+                            wrap: false,
+                        });
+                    }
                 }
             }
             let item_index = self.resolved.nodes.len();
@@ -914,6 +1002,7 @@ impl<Message: Clone> UiFrame<Message> {
                 grid_tracks: Vec::new(),
                 hit_stack: Some(self.hits.len()),
                 interaction,
+                auto_focus: false,
                 navigation_scope: (!item.children.is_empty()).then(|| {
                     crate::NavigationScope::group().traversal(crate::NavigationTraversal::Vertical)
                 }),
@@ -991,10 +1080,7 @@ impl<Message: Clone> UiFrame<Message> {
 
         let (parent_id, parent_index, anchor, children) = submenu?;
         let submenu_id = parent_id.scoped("submenu");
-        let height = menu.padding.top
-            + menu.row_height * children.len() as f32
-            + menu.row_gap * children.len().saturating_sub(1) as f32
-            + menu.padding.bottom;
+        let height = menu.padding.top + menu.items_height(children) + menu.padding.bottom;
         let submenu_rect = crate::place_transient(
             anchor,
             Size {
@@ -1040,6 +1126,7 @@ impl<Message: Clone> UiFrame<Message> {
             grid_tracks: Vec::new(),
             hit_stack: None,
             interaction: InteractionState::default(),
+            auto_focus: false,
             navigation_scope: Some(
                 crate::NavigationScope::group().traversal(crate::NavigationTraversal::Vertical),
             ),
@@ -1153,8 +1240,7 @@ impl<Message: Clone> UiFrame<Message> {
                 .set_controller_selected(Some(menu.id.item_id(item)));
         }
         let item_count = menu.items.len();
-        let content_height = menu.row_height * item_count as f32
-            + menu.row_gap * item_count.saturating_sub(1) as f32;
+        let content_height = menu.items_height(&menu.items);
         let rect = crate::place_transient(
             anchor,
             Size {
@@ -1200,6 +1286,7 @@ impl<Message: Clone> UiFrame<Message> {
             grid_tracks: Vec::new(),
             hit_stack: None,
             interaction: InteractionState::default(),
+            auto_focus: false,
             navigation_scope: Some(crate::NavigationScope::group()),
             adjustment_step: 0.05,
             controller_value: None,
@@ -1434,6 +1521,31 @@ impl<Message: Clone> UiFrame<Message> {
             ..Self::default()
         };
         layout_element(&root, &root_id, bounds, None, None, &mut tree);
+        let initial = tree
+            .resolved
+            .nodes
+            .iter()
+            .find(|node| {
+                node.auto_focus
+                    && !node.accessibility_hidden
+                    && !tree.resolved.nodes.iter().any(|parent| {
+                        parent.accessibility_hidden
+                            && tree.is_descendant_or_self(&parent.id, &node.id)
+                    })
+                    && node.semantic_role == Some(SemanticRole::TextField)
+                    && node.allocated.size.width > 0.0
+                    && node.allocated.size.height > 0.0
+            })
+            .map(|node| node.id.clone());
+        if let Some(initial) = initial
+            && state.window_focused()
+            && state.claim_initial_focus()
+            && state.focused().is_none()
+            && state.navigation().controller_selected().is_none()
+        {
+            state.set_focus(Some(initial));
+            apply_transient_state(&mut root, &root_id, state);
+        }
         tree.selection_regions = collect_selection_regions(&root, &tree.resolved);
         for region in &tree.selection_regions {
             state.touch(region.id.clone());
@@ -1568,6 +1680,11 @@ impl<Message: Clone> UiFrame<Message> {
             policy,
         )
         .semantic_style(input.context_menu_style);
+        let menu = if let Some(presentation) = &input.context_menu_presentation {
+            menu.presentation(**presentation)
+        } else {
+            menu
+        };
         let _ = self.present_menu(state, menu);
     }
 
@@ -4214,7 +4331,14 @@ impl<Message: Clone> UiFrame<Message> {
         let entry = scope
             .and_then(|scope| self.scope_policy(scope))
             .map(|policy| &policy.entry);
-        let target = match entry {
+        let requested_initial = ids.iter().copied().find(|id| {
+            self.resolved
+                .nodes
+                .iter()
+                .any(|node| &node.id == *id && node.auto_focus)
+        });
+        let requested_initial = requested_initial.filter(|_| state.claim_initial_focus());
+        let target = requested_initial.or_else(|| match entry {
             Some(crate::NavigationEntry::Last) => ids.last().copied(),
             Some(crate::NavigationEntry::Target(target)) => ids
                 .iter()
@@ -4222,7 +4346,7 @@ impl<Message: Clone> UiFrame<Message> {
                 .find(|id| *id == target)
                 .or_else(|| ids.first().copied()),
             _ => ids.first().copied(),
-        };
+        });
         target.map_or(Invalidation::None, |target| {
             state
                 .set_focus(Some(target.clone()))

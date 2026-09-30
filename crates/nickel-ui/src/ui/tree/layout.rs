@@ -48,6 +48,7 @@ pub(super) fn layout_element<Message: Clone>(
         grid_tracks: Vec::new(),
         hit_stack: None,
         interaction,
+        auto_focus: element.style.auto_focus,
         navigation_scope: element.navigation_scope.clone(),
         adjustment_step: element.adjustment_step,
         controller_value: match &element.kind {
@@ -789,30 +790,33 @@ pub(super) fn apply_transient_state<Message>(
                 ..
             }
         );
-        let active_focus_tint =
-            if scope_background_active || exact_focus_background.is_some() || css_dropdown {
-                None
+        let active_focus_tint = if scope_background_active
+            || exact_focus_background.is_some()
+            || css_dropdown
+            || !element.style.automatic_focus_tint
+        {
+            None
+        } else {
+            if state.window_focused() && state.navigation().controller_selected() == Some(id) {
+                element
+                    .style
+                    .controller_focus_background_tint
+                    .or(element.style.focus_background_tint)
+                    .or(Some(crate::theme::FALLBACK_CONTROLLER_FOCUS_CUE))
+            } else if state.window_focused()
+                && state.focused() == Some(id)
+                && matches!(
+                    state.input_modality(),
+                    InputModality::Keyboard | InputModality::Accessibility
+                )
+            {
+                element.style.focus_background_tint.or_else(|| {
+                    (!transparent_editor).then_some(crate::theme::FALLBACK_KEYBOARD_FOCUS_CUE)
+                })
             } else {
-                if state.window_focused() && state.navigation().controller_selected() == Some(id) {
-                    element
-                        .style
-                        .controller_focus_background_tint
-                        .or(element.style.focus_background_tint)
-                        .or(Some(crate::theme::FALLBACK_CONTROLLER_FOCUS_CUE))
-                } else if state.window_focused()
-                    && state.focused() == Some(id)
-                    && matches!(
-                        state.input_modality(),
-                        InputModality::Keyboard | InputModality::Accessibility
-                    )
-                {
-                    element.style.focus_background_tint.or_else(|| {
-                        (!transparent_editor).then_some(crate::theme::FALLBACK_KEYBOARD_FOCUS_CUE)
-                    })
-                } else {
-                    None
-                }
-            };
+                None
+            }
+        };
         if let Some(tint) = active_focus_tint {
             let transform = |color| {
                 focus_foreground.map_or_else(
@@ -894,8 +898,9 @@ pub(super) fn apply_transient_state<Message>(
                 }
                 let height = presentation.as_ref().map(|parts| {
                     parts[0].height
+                        + parts[0].margin.height()
                         + if *expanded && !*overlay {
-                            options.len() as f32 * parts[1].height
+                            options.len() as f32 * (parts[1].height + parts[1].margin.height())
                         } else {
                             0.0
                         }

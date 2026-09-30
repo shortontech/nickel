@@ -344,6 +344,13 @@ pub enum PanelNode {
         label: String,
         action: Option<usize>,
     },
+    Checkbox {
+        id: String,
+        class_name: Option<String>,
+        state: String,
+        label: String,
+        action: Option<usize>,
+    },
     ColorSwatch {
         id: String,
         class_name: Option<String>,
@@ -374,6 +381,7 @@ pub enum PanelNode {
         value: String,
         placeholder: String,
         secure: bool,
+        auto_focus: bool,
         action: usize,
         focus_action: Option<usize>,
         blur_action: Option<usize>,
@@ -415,6 +423,7 @@ pub enum PanelNode {
     },
     MenuItem {
         id: String,
+        class_name: Option<String>,
         label: String,
         action: Option<usize>,
         children: Vec<Self>,
@@ -433,6 +442,7 @@ fn dropdown_part(style: &ControlStyle) -> DropdownPartStyle {
         width: pixels(style.width),
         height: pixels(style.height),
         padding: style.padding.unwrap_or_default(),
+        margin: style.margin.unwrap_or_default(),
         background: style.background.filter(|color| *color != 0),
         interaction_backgrounds: [None; 3],
         foreground: style.color.filter(|color| *color != 0),
@@ -442,6 +452,37 @@ fn dropdown_part(style: &ControlStyle) -> DropdownPartStyle {
         font_size: style.font_size.unwrap_or(0.0),
         line_height: style.line_height.unwrap_or(0.0),
     }
+}
+
+fn apply_control_interactions<Message>(
+    mut control: Container<Message>,
+    style: &ControlStyle,
+    stylesheet: &StyleSheet,
+    kind: &str,
+    id: &str,
+    class_name: Option<&str>,
+) -> Container<Message> {
+    for state in [
+        InteractionState::Hover,
+        InteractionState::Active,
+        InteractionState::Focus,
+    ] {
+        if let Some(background) = stylesheet.resolve_interaction_background_with_properties(
+            kind,
+            Some(id),
+            class_name,
+            state,
+            &style.custom_properties,
+            &style.ancestors[..style.ancestors.len().saturating_sub(1)],
+        ) {
+            control = match state {
+                InteractionState::Hover => control.hover_background(background),
+                InteractionState::Active => control.pressed_background(background),
+                InteractionState::Focus => control.focus_background(background),
+            };
+        }
+    }
+    control
 }
 
 fn apply_container_style<Message>(
@@ -638,6 +679,7 @@ impl PanelNode {
                 | Self::Progress { class_name, .. }
                 | Self::Slider { class_name, .. }
                 | Self::Switch { class_name, .. }
+                | Self::Checkbox { class_name, .. }
                 | Self::ColorSwatch { class_name, .. }
                 | Self::Select { class_name, .. }
                 | Self::Spacer { class_name, .. }
@@ -789,6 +831,41 @@ impl PanelNode {
                         + capacity(asset)
                         + accessibility_label.as_ref().map_or(0, capacity)
                 }
+                Self::Switch {
+                    id,
+                    class_name,
+                    state,
+                    label,
+                    ..
+                }
+                | Self::Checkbox {
+                    id,
+                    class_name,
+                    state,
+                    label,
+                    ..
+                } => {
+                    capacity(id)
+                        + capacity(state)
+                        + capacity(label)
+                        + class_name.as_ref().map_or(0, capacity)
+                }
+                Self::MenuItem {
+                    id,
+                    class_name,
+                    label,
+                    children,
+                    disabled_reason,
+                    shortcut,
+                    ..
+                } => {
+                    capacity(id)
+                        + class_name.as_ref().map_or(0, capacity)
+                        + capacity(label)
+                        + disabled_reason.as_ref().map_or(0, capacity)
+                        + shortcut.as_ref().map_or(0, capacity)
+                        + children.iter().map(Self::contribution_bytes).sum::<u64>()
+                }
                 Self::Progress { class_name, .. } => class_name.as_ref().map_or(0, capacity),
                 Self::Select {
                     id,
@@ -910,9 +987,11 @@ impl PanelNode {
                     | "text-field"
                     | "slider"
                     | "switch"
+                    | "checkbox"
                     | "color-swatch"
                     | "select"
                     | "menu"
+                    | "menu-item"
                     | "button"
                     | "image"
                     | "image-button"
@@ -1472,7 +1551,7 @@ impl PanelNode {
                         .ok_or("slider needs an onChange handler")?,
                 })
             }
-            "switch" => {
+            "switch" | "checkbox" => {
                 if !children.is_empty() {
                     return Err("switch cannot have children".into());
                 }
@@ -1498,23 +1577,43 @@ impl PanelNode {
                 if !matches!(state, "off" | "on" | "mixed") && action.is_some() {
                     return Err("disabled switch cannot have an onClick handler".into());
                 }
-                Ok(Self::Switch {
-                    id: value
-                        .get("id")
-                        .and_then(Value::as_str)
-                        .filter(|id| !id.is_empty() && id.len() <= 128)
-                        .ok_or("switch needs a bounded id")?
-                        .to_owned(),
-                    class_name,
-                    state: state.to_owned(),
-                    label: value
-                        .get("accessibilityLabel")
-                        .and_then(Value::as_str)
-                        .filter(|label| !label.is_empty() && label.len() <= 256)
-                        .ok_or("switch needs an accessibility label")?
-                        .to_owned(),
-                    action,
-                })
+                if kind == "checkbox" {
+                    Ok(Self::Checkbox {
+                        id: value
+                            .get("id")
+                            .and_then(Value::as_str)
+                            .filter(|id| !id.is_empty() && id.len() <= 128)
+                            .ok_or("switch needs a bounded id")?
+                            .to_owned(),
+                        class_name,
+                        state: state.to_owned(),
+                        label: value
+                            .get("accessibilityLabel")
+                            .and_then(Value::as_str)
+                            .filter(|label| !label.is_empty() && label.len() <= 256)
+                            .ok_or("switch needs an accessibility label")?
+                            .to_owned(),
+                        action,
+                    })
+                } else {
+                    Ok(Self::Switch {
+                        id: value
+                            .get("id")
+                            .and_then(Value::as_str)
+                            .filter(|id| !id.is_empty() && id.len() <= 128)
+                            .ok_or("switch needs a bounded id")?
+                            .to_owned(),
+                        class_name,
+                        state: state.to_owned(),
+                        label: value
+                            .get("accessibilityLabel")
+                            .and_then(Value::as_str)
+                            .filter(|label| !label.is_empty() && label.len() <= 256)
+                            .ok_or("switch needs an accessibility label")?
+                            .to_owned(),
+                        action,
+                    })
+                }
             }
             "select" => {
                 if children.is_empty() || children.len() > 64 {
@@ -1630,6 +1729,11 @@ impl PanelNode {
                     .and_then(Value::as_str)
                     .unwrap_or("")
                     .to_owned(),
+                auto_focus: match value.get("autoFocus") {
+                    None => false,
+                    Some(Value::Bool(value)) => *value,
+                    _ => return Err("autoFocus must be a boolean".into()),
+                },
                 secure: match value.get("secure") {
                     None => false,
                     Some(Value::Bool(secure)) => *secure,
@@ -1882,6 +1986,7 @@ impl PanelNode {
                 }
                 Ok(Self::MenuItem {
                     id: id.to_owned(),
+                    class_name,
                     label,
                     action,
                     children: items,
@@ -2005,7 +2110,72 @@ impl PanelNode {
         menu.item_pressed = interaction(crate::css::InteractionState::Active);
         menu.item_selected = interaction(crate::css::InteractionState::Focus);
         menu.direction = stylesheet.reading_direction();
+        if let Self::Menu { items, .. } = self {
+            for (source, target) in items.iter().zip(&mut menu.items) {
+                source.style_menu_item(target, stylesheet, &inherited, class_name.as_deref());
+            }
+        }
         menu
+    }
+
+    fn style_menu_item<Message>(
+        &self,
+        item: &mut OverlayMenuItem<Message>,
+        stylesheet: &StyleSheet,
+        inherited: &InheritedTextStyle,
+        owner_class: Option<&str>,
+    ) {
+        let Self::MenuItem {
+            id,
+            class_name,
+            action,
+            children,
+            ..
+        } = self
+        else {
+            return;
+        };
+        let classes = format!(
+            "{} {} {}",
+            owner_class.unwrap_or(""),
+            class_name.as_deref().unwrap_or(""),
+            if action.is_none() && children.is_empty() {
+                "disabled"
+            } else {
+                "enabled"
+            }
+        );
+        let style =
+            inherited.apply(inherited.resolve(stylesheet, "menu-item", Some(id), Some(&classes)));
+        let nested = inherited.extend(&style);
+        let shortcut =
+            nested.apply(nested.resolve(stylesheet, "menu-shortcut", Some(id), Some(&classes)));
+        let indicator =
+            nested.apply(nested.resolve(stylesheet, "menu-indicator", Some(id), Some(&classes)));
+        let mut frame = dropdown_part(&style);
+        frame.interaction_backgrounds = [
+            InteractionState::Hover,
+            InteractionState::Active,
+            InteractionState::Focus,
+        ]
+        .map(|state| {
+            stylesheet.resolve_interaction_background_with_properties(
+                "menu-item",
+                Some(id),
+                Some(&classes),
+                state,
+                &style.custom_properties,
+                &inherited.ancestors,
+            )
+        });
+        item.presentation = Some(Box::new([
+            frame,
+            dropdown_part(&shortcut),
+            dropdown_part(&indicator),
+        ]));
+        for (source, target) in children.iter().zip(&mut item.children) {
+            source.style_menu_item(target, stylesheet, &nested, Some(&classes));
+        }
     }
 
     pub fn overlay_menu_item(&self) -> Option<OverlayMenuItem<PluginMessage>> {
@@ -2017,6 +2187,7 @@ impl PanelNode {
             disabled_reason,
             shortcut,
             separator_before,
+            ..
         } = self
         else {
             return None;
@@ -2667,47 +2838,27 @@ impl PanelNode {
                     parts.resolve(stylesheet, "slider-fill", Some(id), class_name.as_deref());
                 let thumb_style =
                     parts.resolve(stylesheet, "slider-thumb", Some(id), class_name.as_deref());
-                let pixels = |length: Option<Length>| match length {
-                    Some(Length::Px(value)) => value,
-                    _ => 0.0,
-                };
                 let slider = Slider::on_change_with(
                     Message::from_plugin_scoped(PluginMessage::Value(*action, *value), scope),
                     Message::value,
                     *value,
                 )
                 .id(id.clone())
-                .height_length(style.height.unwrap_or(Length::Px(0.0)))
-                .geometry(
-                    pixels(track_style.height),
-                    track_style.radius.unwrap_or(0.0),
-                    pixels(thumb_style.width),
-                    pixels(thumb_style.height),
-                    thumb_style.radius.unwrap_or(0.0),
-                    thumb_style.border_width.unwrap_or(0.0),
-                )
-                .colors(
-                    track_style.background.unwrap_or(0),
-                    fill_style.background.unwrap_or(0),
-                    thumb_style.background.unwrap_or(0),
-                )
-                .thumb_border(thumb_style.border_color.unwrap_or(0));
-                let slider = match style.width {
-                    Some(Length::Px(width)) => slider.width(width),
-                    Some(Length::Percent(1.0)) => slider.grow(1.0),
-                    _ => slider,
-                }
-                .accessibility_label(label.clone());
-                let mut wrapper_style = style.clone();
-                wrapper_style.background = None;
-                wrapper_style.color = None;
-                wrapper_style.border_color = None;
+                .height_length(Length::Percent(1.0))
+                .width_length(Length::Percent(1.0))
+                .automatic_focus_tint(false)
+                .parts(
+                    dropdown_part(&track_style),
+                    dropdown_part(&fill_style),
+                    dropdown_part(&thumb_style),
+                );
+                let slider = slider.accessibility_label(label.clone());
                 with_margin(
                     AnyView::new(apply_container_style(
                         Container::new().child(slider),
-                        &wrapper_style,
+                        &style,
                     )),
-                    &wrapper_style,
+                    &style,
                 )
             }
             Self::Switch {
@@ -2716,11 +2867,19 @@ impl PanelNode {
                 state,
                 label,
                 action,
+            }
+            | Self::Checkbox {
+                id,
+                class_name,
+                state,
+                label,
+                action,
             } => {
+                let checkbox = matches!(self, Self::Checkbox { .. });
+                let kind = if checkbox { "checkbox" } else { "switch" };
                 let state_classes = format!("{} {state}", class_name.as_deref().unwrap_or(""));
                 let class_name = Some(state_classes);
-                let style =
-                    inherited.resolve(stylesheet, "switch", Some(id), class_name.as_deref());
+                let style = inherited.resolve(stylesheet, kind, Some(id), class_name.as_deref());
                 let on = matches!(state.as_str(), "on" | "mixed" | "disabled-on");
                 let mixed = matches!(state.as_str(), "mixed" | "mixed-unavailable");
                 let parts = inherited.extend(&style);
@@ -2728,34 +2887,92 @@ impl PanelNode {
                     parts.resolve(stylesheet, "switch-track", Some(id), class_name.as_deref());
                 let thumb_style =
                     parts.resolve(stylesheet, "switch-thumb", Some(id), class_name.as_deref());
-                let track = apply_container_style(Container::new(), &track_style).child(
-                    Row::new()
-                        .fill_width()
-                        .justify_content(if mixed {
-                            nickel_ui::Justify::Center
-                        } else if on {
-                            nickel_ui::Justify::End
+                let track = if checkbox {
+                    let box_style =
+                        parts.resolve(stylesheet, "checkbox-box", Some(id), class_name.as_deref());
+                    let mark_style = parts.apply(parts.resolve(
+                        stylesheet,
+                        "checkbox-mark",
+                        Some(id),
+                        class_name.as_deref(),
+                    ));
+                    with_margin(
+                        AnyView::new(
+                            apply_container_style(Container::new(), &box_style).child(with_margin(
+                                AnyView::new(
+                                    apply_container_style(Container::new(), &mark_style).child(
+                                        styled_text(
+                                            Text::new(if mixed {
+                                                "−"
+                                            } else if on {
+                                                "✓"
+                                            } else {
+                                                ""
+                                            })
+                                            .color(0),
+                                            &mark_style,
+                                        ),
+                                    ),
+                                ),
+                                &mark_style,
+                            )),
+                        ),
+                        &box_style,
+                    )
+                } else {
+                    with_margin(
+                        AnyView::new(
+                            apply_container_style(Container::new(), &track_style).child(
+                                Row::new()
+                                    .fill_width()
+                                    .justify_content(if mixed {
+                                        nickel_ui::Justify::Center
+                                    } else if on {
+                                        nickel_ui::Justify::End
+                                    } else {
+                                        nickel_ui::Justify::Start
+                                    })
+                                    .child(with_margin(
+                                        AnyView::new(apply_container_style(
+                                            Container::new(),
+                                            &thumb_style,
+                                        )),
+                                        &thumb_style,
+                                    )),
+                            ),
+                        ),
+                        &track_style,
+                    )
+                };
+                let mut control =
+                    apply_container_style(Container::new().automatic_focus_tint(false), &style)
+                        .id(id.clone())
+                        .semantic_role(if checkbox {
+                            SemanticRole::Checkbox
                         } else {
-                            nickel_ui::Justify::Start
+                            SemanticRole::Switch
                         })
-                        .child(apply_container_style(Container::new(), &thumb_style)),
-                );
-                let mut control = apply_container_style(Container::new(), &style)
-                    .id(id.clone())
-                    .semantic_role(SemanticRole::Switch)
-                    .accessibility_label(label.clone())
-                    .accessibility_state(match state.as_str() {
-                        "disabled-off" => "off disabled",
-                        "disabled-on" => "on disabled",
-                        "mixed-unavailable" => "mixed unavailable",
-                        other => other,
-                    })
-                    .child(track);
+                        .accessibility_label(label.clone())
+                        .accessibility_state(match state.as_str() {
+                            "disabled-off" => "off disabled",
+                            "disabled-on" => "on disabled",
+                            "mixed-unavailable" => "mixed unavailable",
+                            other => other,
+                        })
+                        .child(track);
                 if let Some(action) = action {
                     control = control.message(Message::from_plugin_scoped(
                         PluginMessage::Click(*action),
                         scope,
                     ));
+                    control = apply_control_interactions(
+                        control,
+                        &style,
+                        stylesheet,
+                        kind,
+                        id,
+                        class_name.as_deref(),
+                    );
                 }
                 with_margin(AnyView::new(control), &style)
             }
@@ -2899,6 +3116,7 @@ impl PanelNode {
                 value,
                 placeholder,
                 secure,
+                auto_focus,
                 action,
                 focus_action,
                 blur_action,
@@ -2938,6 +3156,7 @@ impl PanelNode {
                     })
                 };
                 let mut field = field
+                    .auto_focus(*auto_focus)
                     .id(id.clone())
                     .accessibility_label(placeholder)
                     .grow(1.0)
@@ -2957,20 +3176,113 @@ impl PanelNode {
                 if let Some(color) = text_style.color {
                     field = field.color(color);
                 }
-                if let Some(background) = stylesheet.resolve_interaction_background_with_properties(
-                    "text-field",
+                let mut frame_style = dropdown_part(&text_style);
+                frame_style.interaction_backgrounds = [
+                    InteractionState::Hover,
+                    InteractionState::Active,
+                    InteractionState::Focus,
+                ]
+                .map(|state| {
+                    stylesheet.resolve_interaction_background_with_properties(
+                        "text-field",
+                        Some(id),
+                        class_name.as_deref(),
+                        state,
+                        &style.custom_properties,
+                        &style.ancestors[..style.ancestors.len().saturating_sub(1)],
+                    )
+                });
+                let parts = inherited.extend(&style);
+                let caret = dropdown_part(&parts.resolve(
+                    stylesheet,
+                    "text-field-caret",
                     Some(id),
                     class_name.as_deref(),
-                    InteractionState::Focus,
-                    &style.custom_properties,
-                    &style.ancestors[..style.ancestors.len().saturating_sub(1)],
-                ) {
-                    field = field.focus_background(background);
+                ));
+                let selection = dropdown_part(&parts.resolve(
+                    stylesheet,
+                    "text-field-selection",
+                    Some(id),
+                    class_name.as_deref(),
+                ));
+                let menu_style = parts.resolve(
+                    stylesheet,
+                    "text-field-menu",
+                    Some(id),
+                    class_name.as_deref(),
+                );
+                let menu_inherited = parts.extend(&menu_style);
+                let menu_parts = |disabled: bool| {
+                    let classes = format!(
+                        "{} {}",
+                        class_name.as_deref().unwrap_or(""),
+                        if disabled { "disabled" } else { "enabled" }
+                    );
+                    let item = menu_inherited.apply(menu_inherited.resolve(
+                        stylesheet,
+                        "text-field-menu-item",
+                        Some(id),
+                        Some(&classes),
+                    ));
+                    let child = menu_inherited.extend(&item);
+                    let shortcut = child.apply(child.resolve(
+                        stylesheet,
+                        "text-field-menu-shortcut",
+                        Some(id),
+                        Some(&classes),
+                    ));
+                    let indicator = child.apply(child.resolve(
+                        stylesheet,
+                        "text-field-menu-indicator",
+                        Some(id),
+                        Some(&classes),
+                    ));
+                    let mut frame = dropdown_part(&item);
+                    frame.interaction_backgrounds = [
+                        InteractionState::Hover,
+                        InteractionState::Active,
+                        InteractionState::Focus,
+                    ]
+                    .map(|state| {
+                        stylesheet.resolve_interaction_background_with_properties(
+                            "text-field-menu-item",
+                            Some(id),
+                            Some(&classes),
+                            state,
+                            &item.custom_properties,
+                            &menu_inherited.ancestors,
+                        )
+                    });
+                    [frame, dropdown_part(&shortcut), dropdown_part(&indicator)]
+                };
+                let menu = nickel_ui::OverlayMenuPresentation {
+                    frame: dropdown_part(&menu_style),
+                    item: menu_parts(false),
+                    disabled_item: menu_parts(true),
+                    row_gap: menu_style.gap.unwrap_or(0.0),
+                };
+                field = field
+                    .context_menu_presentation(menu)
+                    .presentation(frame_style, caret, selection)
+                    .width_length(style.width.unwrap_or(Length::Auto))
+                    .height_length(style.height.unwrap_or(Length::Auto))
+                    .grow(style.grow.unwrap_or(0.0));
+                if let Some(value) = style.min_width {
+                    field = field.min_width(value);
                 }
-                with_margin(
-                    AnyView::new(apply_container_style(Container::new().child(field), &style)),
-                    &style,
-                )
+                if let Some(value) = style.max_width {
+                    field = field.max_width(value);
+                }
+                if let Some(value) = style.min_height {
+                    field = field.min_height(value);
+                }
+                if let Some(value) = style.max_height {
+                    field = field.max_height(value);
+                }
+                if let Some(value) = style.shrink {
+                    field = field.shrink(value);
+                }
+                with_margin(AnyView::new(field), &style)
             }
             Self::Button {
                 id,
@@ -3221,6 +3533,11 @@ impl PanelNode {
                 ..
             } if id == requested_id => Some(*action),
             Self::Switch {
+                id,
+                action: Some(action),
+                ..
+            }
+            | Self::Checkbox {
                 id,
                 action: Some(action),
                 ..
@@ -3478,7 +3795,7 @@ pub fn parse_panel_for_manifest(
         let kind = node.get("kind").and_then(Value::as_str).unwrap_or("");
         if matches!(
             kind,
-            "text-field" | "image-button" | "slider" | "color-swatch"
+            "text-field" | "image-button" | "slider" | "color-swatch" | "switch" | "checkbox"
         ) && !node.contains_key("id")
         {
             let mut hash = 0xcbf29ce484222325_u64;
@@ -3701,6 +4018,287 @@ mod compound_css_tests {
     use nickel_ui::{Rect, UiFrame, backend::PaintCommand};
 
     #[test]
+    fn text_field_css_frame_caret_and_selection_share_native_content_geometry() {
+        let node = PanelNode::parse(&serde_json::json!({"kind":"text-field","id":"entry","value":"abc","placeholder":"Entry","action":4,"autoFocus":true,"children":[]})).unwrap();
+        let sheet = StyleSheet::compile("text-field { width: 180px; height: 50px; padding: 7px 11px; margin: 3px; background: #123456; border: 2px solid #fedcba; border-radius: 8px; font-size: 21px; line-height: 30px; }
+            text-field-caret { width: 3px; background: #abcdef; }
+            text-field-selection { background: #aabbcc; }").unwrap();
+        let root = || {
+            Column::new()
+                .align_items(nickel_ui::Align::Start)
+                .child(node.view(&PluginImages::new(), &sheet))
+        };
+        let mut state = nickel_ui::UiStateStore::default();
+        let frame =
+            UiFrame::layout_with_state(root(), Rect::new(0.0, 0.0, 400.0, 200.0), &mut state);
+        let field = frame
+            .resolved_layout()
+            .nodes()
+            .iter()
+            .find(|node| node.semantic_role == Some(SemanticRole::TextField))
+            .unwrap();
+        assert_eq!(field.allocated.size, nickel_ui::Size::new(180.0, 50.0));
+        assert_eq!(field.content.origin.x - field.allocated.origin.x, 11.0);
+        assert_eq!(field.content.origin.y - field.allocated.origin.y, 7.0);
+        assert_eq!(state.focused(), Some(&field.id));
+        assert!(frame.commands().iter().any(|command| matches!(command, PaintCommand::Text { bounds, scale, text, .. } if text == "abc" && bounds.origin == field.content.origin && *scale == -21.0)));
+        assert!(frame.commands().iter().any(|command| matches!(command, PaintCommand::Fill { rect, color } if *color == 0xffabcdef && rect.size.width == 3.0 && rect.size.height == 30.0 && rect.origin.y == field.content.origin.y)));
+        frame.handle_event(&mut state, nickel_ui::UiEvent::TextSelectAll);
+        let frame =
+            UiFrame::layout_with_state(root(), Rect::new(0.0, 0.0, 400.0, 200.0), &mut state);
+        assert!(frame.commands().iter().any(|command| matches!(command, PaintCommand::Fill { rect, color } if *color == 0xffaabbcc && rect.size.height == 30.0)));
+    }
+
+    #[test]
+    fn auto_focus_accepts_native_text_and_does_not_steal_focus_after_updates() {
+        let field = |id: &str, action: usize| {
+            PanelNode::parse(&serde_json::json!({"kind":"text-field","id":id,"value":"abc","placeholder":id,"action":action,"autoFocus":true,"children":[]})).unwrap()
+        };
+        let node = PanelNode::Column {
+            class_name: None,
+            children: vec![field("first", 4), field("second", 5)],
+        };
+        let sheet = StyleSheet::compile(
+            "text-field { width: 180px; height: 40px; font-size: 14px; line-height: 20px; }",
+        )
+        .unwrap();
+        let root = || node.view(&PluginImages::new(), &sheet);
+        let mut state = nickel_ui::UiStateStore::default();
+        let frame =
+            UiFrame::layout_with_state(root(), Rect::new(0.0, 0.0, 400.0, 200.0), &mut state);
+        let first = frame
+            .resolved_layout()
+            .nodes()
+            .iter()
+            .find(|node| node.accessibility_label.as_deref() == Some("first"))
+            .unwrap()
+            .id
+            .clone();
+        let second = frame
+            .resolved_layout()
+            .nodes()
+            .iter()
+            .find(|node| node.accessibility_label.as_deref() == Some("second"))
+            .unwrap()
+            .id
+            .clone();
+        assert_eq!(state.focused(), Some(&first));
+        assert!(
+            frame
+                .handle_event(&mut state, nickel_ui::UiEvent::TextInput("x".into()))
+                .messages
+                .contains(&PluginMessage::Text(4, "abcx".into()))
+        );
+        frame.handle_event(
+            &mut state,
+            nickel_ui::UiEvent::AccessibilityFocus(second.clone()),
+        );
+        assert_eq!(state.focused(), Some(&second));
+        let _ = UiFrame::layout_with_state(root(), Rect::new(0.0, 0.0, 400.0, 200.0), &mut state);
+        assert_eq!(state.focused(), Some(&second));
+    }
+
+    #[test]
+    fn ordinary_editor_and_checkbox_have_no_visible_native_stock_paint() {
+        let editor = PanelNode::parse(&serde_json::json!({"kind":"text-field","id":"entry","value":"abc","action":4,"autoFocus":true,"children":[]})).unwrap();
+        let check = PanelNode::parse(&serde_json::json!({"kind":"checkbox","id":"check","state":"on","accessibilityLabel":"Checked","action":5,"children":[]})).unwrap();
+        let sheet = StyleSheet::default();
+        let mut state = nickel_ui::UiStateStore::default();
+        let frame = UiFrame::layout_with_state(
+            Column::new()
+                .child(editor.view(&PluginImages::new(), &sheet))
+                .child(check.view(&PluginImages::new(), &sheet)),
+            Rect::new(0.0, 0.0, 300.0, 200.0),
+            &mut state,
+        );
+        assert!(!frame.commands().iter().any(|command| matches!(command, PaintCommand::Fill { color, .. } | PaintCommand::RoundedFill { color, .. } | PaintCommand::Stroke { color, .. } | PaintCommand::Text { color, .. } if *color != 0)));
+    }
+
+    #[test]
+    fn native_editor_context_menu_uses_public_css_parts() {
+        let node = PanelNode::parse(&serde_json::json!({"kind":"text-field","id":"entry","value":"abc","action":4,"autoFocus":true,"children":[]})).unwrap();
+        let sheet = StyleSheet::compile("text-field { width: 180px; height: 40px; font-size: 14px; } text-field-menu { width: 230px; padding: 3px; background: #123456; } text-field-menu-item { height: 37px; color: #abcdef; font-size: 14px; padding: 4px; } text-field-menu-item.disabled { color: #fedcba; } text-field-menu-shortcut { width: 70px; color: #aabbcc; font-size: 7px; }").unwrap();
+        let mut state = nickel_ui::UiStateStore::default();
+        let build = |state: &mut nickel_ui::UiStateStore| {
+            UiFrame::layout_with_state(
+                node.view(&PluginImages::new(), &sheet),
+                Rect::new(0.0, 0.0, 500.0, 400.0),
+                state,
+            )
+        };
+        let first = build(&mut state);
+        first.handle_event(&mut state, nickel_ui::UiEvent::KeyboardContextMenu);
+        let frame = build(&mut state);
+        assert!(
+            frame
+                .resolved_layout()
+                .nodes()
+                .iter()
+                .any(|node| node.semantic_role == Some(SemanticRole::MenuItem)
+                    && node.allocated.size.height == 37.0)
+        );
+        assert!(frame.commands().iter().any(|command| matches!(command, PaintCommand::RoundedFill { color, .. } | PaintCommand::Fill { color, .. } if *color == 0xff123456)));
+        assert!(frame.commands().iter().any(
+            |command| matches!(command, PaintCommand::Text { color, .. } if *color == 0xfffedcba)
+        ));
+    }
+
+    #[test]
+    fn checkbox_css_preserves_native_checked_semantics_and_activation() {
+        let node = PanelNode::parse(&serde_json::json!({"kind":"checkbox","id":"check","state":"on","className":"custom","accessibilityLabel":"Enabled","action":6,"children":[]})).unwrap();
+        let sheet = StyleSheet::compile(
+            "checkbox { width: 40px; height: 30px; padding: 2px; }
+            checkbox-box { width: 24px; height: 24px; background: #123456; border-radius: 3px; }
+            checkbox-mark { color: #abcdef; font-size: 21px; line-height: 24px; }",
+        )
+        .unwrap();
+        let mut state = nickel_ui::UiStateStore::default();
+        let frame = UiFrame::layout_with_state(
+            Column::new()
+                .align_items(nickel_ui::Align::Start)
+                .child(node.view(&PluginImages::new(), &sheet)),
+            Rect::new(0.0, 0.0, 200.0, 100.0),
+            &mut state,
+        );
+        let check = frame
+            .resolved_layout()
+            .nodes()
+            .iter()
+            .find(|node| node.semantic_role == Some(SemanticRole::Checkbox))
+            .unwrap();
+        assert_eq!(check.accessibility_state.as_deref(), Some("on"));
+        assert_eq!(
+            frame.message_for_id(&check.id),
+            Some(&PluginMessage::Click(6))
+        );
+        assert!(frame.commands().iter().any(|command| matches!(command, PaintCommand::Text { text, color, scale, .. } if text == "✓" && *color == 0xffabcdef && *scale == -21.0)));
+    }
+
+    #[test]
+    fn menu_items_and_shortcuts_have_independent_css_and_hit_metrics() {
+        let node = PanelNode::parse(&serde_json::json!({"kind":"menu","id":"actions","anchor":"anchor","children":[
+            {"kind":"menu-item","id":"small","label":"Small","shortcut":"Ctrl+S","className":"small","action":2,"children":[]},
+            {"kind":"menu-item","id":"large","label":"Large","className":"large","action":3,"children":[]}
+        ]})).unwrap();
+        let sheet = StyleSheet::compile(
+            "menu { width: 220px; padding: 2px; }
+            menu-item { height: 24px; padding: 4px; color: #abcdef; font-size: 14px; }
+            menu-item.large { height: 40px; margin: 3px; background: #123456; }
+            menu-shortcut.small { width: 80px; padding: 1px; color: #fedcba; font-size: 7px; }",
+        )
+        .unwrap();
+        let mut state = nickel_ui::UiStateStore::default();
+        let mut frame = UiFrame::layout_with_state(
+            nickel_ui::Button::new(PluginMessage::Click(1), "Anchor").id("anchor"),
+            Rect::new(0.0, 0.0, 400.0, 200.0),
+            &mut state,
+        );
+        let anchor = frame
+            .resolved_layout()
+            .nodes()
+            .iter()
+            .find(|node| node.semantic_role == Some(SemanticRole::Button))
+            .unwrap()
+            .id
+            .clone();
+        let PanelNode::Menu { items, .. } = &node else {
+            unreachable!()
+        };
+        let menu = nickel_ui::OverlayMenu::new("actions", nickel_ui::OverlayAnchor::Node(anchor))
+            .item(items[0].overlay_menu_item().unwrap())
+            .item(items[1].overlay_menu_item().unwrap());
+        frame
+            .present_open_menu(&mut state, node.style_overlay_menu(menu, &sheet))
+            .unwrap();
+        let large = frame
+            .resolved_layout()
+            .nodes()
+            .iter()
+            .find(|node| node.accessibility_label.as_deref() == Some("Large"))
+            .unwrap();
+        assert_eq!(large.allocated.size.height, 40.0);
+        assert_eq!(large.allocated.size.width, 210.0);
+        assert_eq!(
+            frame.message_at(Point {
+                x: large.allocated.origin.x + large.allocated.size.width / 2.0,
+                y: large.allocated.origin.y + large.allocated.size.height / 2.0
+            }),
+            Some(&PluginMessage::Click(3))
+        );
+        assert!(frame.commands().iter().any(|command| matches!(command, PaintCommand::Text { text,color,scale,bounds,.. } if text == "Ctrl+S" && *color == 0xfffedcba && *scale == 1.0 && bounds.size.width == 78.0)));
+    }
+
+    #[test]
+    fn auto_focus_waits_for_native_surface_focus_and_prefers_declared_editor() {
+        let editor = PanelNode::parse(&serde_json::json!({"kind":"text-field","id":"search","value":"","placeholder":"Search","action":4,"autoFocus":true,"children":[]})).unwrap();
+        let sheet =
+            StyleSheet::compile("text-field { width: 180px; height: 40px; font-size: 14px; }")
+                .unwrap();
+        let mut state = nickel_ui::UiStateStore::default();
+        let closed = UiFrame::layout(
+            nickel_ui::Button::new(PluginMessage::Click(1), "Open"),
+            Rect::new(0.0, 0.0, 400.0, 200.0),
+        );
+        closed.handle_event(&mut state, nickel_ui::UiEvent::FocusLost);
+        let frame = UiFrame::layout_with_state(
+            Column::new()
+                .child(nickel_ui::Button::new(PluginMessage::Click(1), "Earlier"))
+                .child(editor.view(&PluginImages::new(), &sheet)),
+            Rect::new(0.0, 0.0, 400.0, 200.0),
+            &mut state,
+        );
+        assert!(state.focused().is_none());
+        let target = frame
+            .resolved_layout()
+            .nodes()
+            .iter()
+            .find(|node| node.semantic_role == Some(SemanticRole::TextField))
+            .unwrap()
+            .id
+            .clone();
+        frame.handle_event(&mut state, nickel_ui::UiEvent::FocusGained);
+        assert_eq!(state.focused(), Some(&target));
+        assert!(
+            frame
+                .handle_event(&mut state, nickel_ui::UiEvent::TextInput("query".into()))
+                .messages
+                .contains(&PluginMessage::Text(4, "query".into()))
+        );
+    }
+
+    #[test]
+    fn checkbox_public_jsx_normalizes_flags_and_routes_boolean_changes() {
+        let mut runtime = JsxRuntime::new("function App() { return h(Checkbox,{id:'check',checked:true,'aria-label':'Enabled',onChange:checked=>nickel.request({type:'changed',checked})}); }",None).unwrap();
+        let value = runtime
+            .render("__nickelRender()", |value| Ok(value.clone()))
+            .unwrap();
+        assert_eq!(value["kind"], serde_json::json!("checkbox"));
+        assert_eq!(value["state"], serde_json::json!("on"));
+        assert!(matches!(
+            PanelNode::parse(&value).unwrap(),
+            PanelNode::Checkbox { .. }
+        ));
+        let action = value["action"].as_u64().unwrap();
+        runtime
+            .render(&format!("__nickelDispatch({action})"), |value| {
+                Ok(value.clone())
+            })
+            .unwrap();
+        assert_eq!(
+            runtime.take_effects().unwrap(),
+            vec![serde_json::json!({"type":"changed","checked":false})]
+        );
+        let mut runtime = JsxRuntime::new("function App(){return h(Checkbox,{id:'disabled',checked:true,disabled:true,accessibilityLabel:'Disabled',onChange:()=>nickel.request({type:'forbidden'})});}",None).unwrap();
+        let value = runtime
+            .render("__nickelRender()", |value| Ok(value.clone()))
+            .unwrap();
+        assert!(matches!(
+            PanelNode::parse(&value).unwrap(),
+            PanelNode::Checkbox { action: None, .. }
+        ));
+    }
+
+    #[test]
     fn select_has_no_stock_paint_without_stylesheet() {
         let node = PanelNode::Select {
             id: "choice".into(),
@@ -3899,7 +4497,7 @@ mod compound_css_tests {
         assert!(frame.commands().iter().any(|command| matches!(command,
             PaintCommand::RoundedFill { rect, color, radius } if *color == 0xfffedcba && rect.size.width == 16.0 && rect.size.height == 24.0 && *radius == 4.0)));
         assert!(frame.commands().iter().any(|command| matches!(command,
-            PaintCommand::RoundedFill { rect, color, .. } if *color == 0xffabcdef && rect.size.width == 100.0 && rect.size.height == 8.0)));
+            PaintCommand::Fill { rect, color } if *color == 0xffabcdef && rect.size.width == 100.0 && rect.size.height == 8.0)));
     }
 
     #[test]
