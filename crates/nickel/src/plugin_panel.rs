@@ -2068,6 +2068,25 @@ impl PluginPanelApplication {
         if fields.is_empty() {
             return Ok(false);
         }
+        Self::validate_host_fields(&self.manifest, fields)?;
+        let Some(data) = self.projection_data.as_deref() else {
+            return Err("plugin has no external projection".into());
+        };
+        let mut data: Value = serde_json::from_str(data)
+            .map_err(|error| format!("invalid external plugin projection: {error}"))?;
+        let object = data
+            .as_object_mut()
+            .ok_or("external plugin projection must be an object")?;
+        for (field, value) in fields {
+            object.insert((*field).into(), (*value).clone());
+        }
+        self.sync_data(&data)
+    }
+
+    fn validate_host_fields(
+        manifest: &PluginManifest,
+        fields: &[(&str, &Value)],
+    ) -> Result<(), String> {
         if fields.iter().any(|(field, _)| {
             !matches!(
                 *field,
@@ -2092,7 +2111,7 @@ impl PluginPanelApplication {
             return Err("unknown host data field".into());
         }
         if fields.iter().any(|(field, _)| *field == "session")
-            && !self.manifest.capabilities.iter().any(|grant| {
+            && !manifest.capabilities.iter().any(|grant| {
                 matches!(
                     grant,
                     PluginCapability::SessionControl | PluginCapability::SessionLogoutRequest
@@ -2102,24 +2121,19 @@ impl PluginPanelApplication {
             return Err("session data requires a session capability".into());
         }
         if fields.iter().any(|(field, _)| *field == "notifications")
-            && !self
-                .manifest
+            && !manifest
                 .capabilities
                 .contains(&PluginCapability::NotificationsRead)
         {
             return Err("notification data requires notifications.read".into());
         }
         if fields.iter().any(|(field, _)| *field == "tray")
-            && !self
-                .manifest
-                .capabilities
-                .contains(&PluginCapability::TrayRead)
+            && !manifest.capabilities.contains(&PluginCapability::TrayRead)
         {
             return Err("tray data requires tray-read".into());
         }
         if fields.iter().any(|(field, _)| *field == "windows")
-            && !self
-                .manifest
+            && !manifest
                 .capabilities
                 .contains(&PluginCapability::WindowsRead)
         {
@@ -2128,24 +2142,19 @@ impl PluginPanelApplication {
         if fields
             .iter()
             .any(|(field, _)| matches!(*field, "applications" | "applicationSearch"))
-            && !self
-                .manifest
+            && !manifest
                 .capabilities
                 .contains(&PluginCapability::ApplicationsRead)
         {
             return Err("application data requires applications-read".into());
         }
         if fields.iter().any(|(field, _)| *field == "audio")
-            && !self
-                .manifest
-                .capabilities
-                .contains(&PluginCapability::AudioRead)
+            && !manifest.capabilities.contains(&PluginCapability::AudioRead)
         {
             return Err("audio data requires audio-read".into());
         }
         if fields.iter().any(|(field, _)| *field == "displays")
-            && !self
-                .manifest
+            && !manifest
                 .capabilities
                 .contains(&PluginCapability::DisplayControl)
         {
@@ -2161,23 +2170,65 @@ impl PluginPanelApplication {
             ("preferences", PluginCapability::PreferencesRead),
         ] {
             if fields.iter().any(|(name, _)| *name == field)
-                && !self.manifest.capabilities.contains(&capability)
+                && !manifest.capabilities.contains(&capability)
             {
                 return Err(format!("{field} data requires a read grant"));
             }
         }
-        let Some(data) = self.projection_data.as_deref() else {
-            return Err("plugin has no external projection".into());
+        Ok(())
+    }
+
+    pub(crate) fn composition_dependency_ids(&self) -> Vec<String> {
+        self.composition
+            .as_ref()
+            .map(|state| {
+                state
+                    .manifests
+                    .keys()
+                    .filter(|owner| owner.id != self.manifest.id)
+                    .map(|owner| owner.id.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn sync_composition_dependency_fields(
+        &mut self,
+        providers: &std::collections::BTreeMap<String, Vec<(&str, Value)>>,
+    ) -> Result<bool, String> {
+        let Some(state) = &self.composition else {
+            return Ok(false);
         };
-        let mut data: Value = serde_json::from_str(data)
-            .map_err(|error| format!("invalid external plugin projection: {error}"))?;
-        let object = data
-            .as_object_mut()
-            .ok_or("external plugin projection must be an object")?;
-        for (field, value) in fields {
-            object.insert((*field).into(), (*value).clone());
+        let mut host = state.host.borrow_mut();
+        let mut changed = false;
+        for (id, fields) in providers {
+            let (owner, manifest) = state
+                .manifests
+                .iter()
+                .find(|(owner, _)| owner.id == *id)
+                .ok_or("unknown composition snapshot provider")?;
+            let references = fields
+                .iter()
+                .map(|(name, value)| (*name, value))
+                .collect::<Vec<_>>();
+            Self::validate_host_fields(manifest, &references)?;
+            let mut data = host.snapshot(owner)?.clone();
+            let object = data
+                .as_object_mut()
+                .ok_or("package snapshot must be an object")?;
+            for (name, value) in fields {
+                object.insert((*name).into(), value.clone());
+            }
+            if host.snapshot(owner)? != &data {
+                host.update_snapshot(owner, &data)?;
+                changed = true;
+            }
         }
-        self.sync_data(&data)
+        drop(host);
+        if changed {
+            self.refresh_composition_snapshots()?;
+        }
+        Ok(changed)
     }
 
     pub fn set_overlay_open(&mut self, open: bool) {
@@ -4236,7 +4287,10 @@ mod tests {
                 "base-shell",
                 "globalThis.origin = 'base';\nexport function Shell() { return h(Window, {id:'main',placement:'fixed',width:440,height:220,edge:'bottom',bottomOffset:24,output:'all'}, h(nickel.component('shell.taskbar'), null)); }\nexport function Taskbar() { return h(Button, {id:'base',onClick:()=>nickel.request('show-launcher')}, origin); }\nexport default Shell;",
                 None,
-                vec![PluginCapability::LauncherShow],
+                vec![
+                    PluginCapability::LauncherShow,
+                    PluginCapability::WindowsRead,
+                ],
             );
             let child = package(
                 "derived-shell",
@@ -4261,6 +4315,41 @@ mod tests {
                 None,
             )
             .unwrap();
+            let windows = serde_json::json!([{"id":"observed"}]);
+            assert!(
+                application
+                    .sync_host_data_fields(&[("windows", &windows)])
+                    .is_err()
+            );
+            assert!(
+                application
+                    .sync_composition_dependency_fields(&std::collections::BTreeMap::from([(
+                        "base-shell".into(),
+                        vec![("windows", windows.clone())]
+                    )]))
+                    .unwrap()
+            );
+            let shared = application.shared_composition_runtime().unwrap();
+            let base_owner = shared
+                .borrow()
+                .resolution()
+                .inheritance_chain
+                .iter()
+                .find(|owner| owner.id == "base-shell")
+                .unwrap()
+                .clone();
+            assert_eq!(
+                shared.borrow().snapshot(&base_owner).unwrap()["windows"],
+                windows
+            );
+            assert!(
+                application
+                    .sync_composition_dependency_fields(&std::collections::BTreeMap::from([(
+                        "base-shell".into(),
+                        vec![("preferences", serde_json::json!({}))]
+                    )]))
+                    .is_err()
+            );
             assert!(application.button_message("base").is_none());
             let event = application.button_message("replacement").unwrap();
             application.update(event);

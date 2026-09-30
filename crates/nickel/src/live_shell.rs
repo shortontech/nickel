@@ -4020,12 +4020,60 @@ impl LiveShell {
         }
     }
 
+    fn plugin_owner_resource_fields(&mut self, id: &str) -> Vec<(&'static str, serde_json::Value)> {
+        let tray = self
+            .plugin_registry
+            .get(id)
+            .filter(|entry| {
+                entry
+                    .manifest
+                    .capabilities
+                    .contains(&nickel_core::plugins::PluginCapability::TrayRead)
+            })
+            .map(|_| {
+                serde_json::Value::Array(self.tray.iter().take(128).map(|item|
+                serde_json::json!({"id":item.id,"title":item.title,"icon":false})).collect())
+            });
+        [
+            ("slots", self.plugin_slot_projection(id)),
+            ("windows", self.external_plugin_windows(id)),
+            ("applications", self.external_plugin_applications(id)),
+            ("applicationSearch", self.plugin_application_search(id)),
+            ("notifications", self.external_plugin_notifications(id)),
+            ("audio", self.plugin_audio(id)),
+            ("tray", tray),
+            ("associations", self.plugin_associations(id)),
+            ("plugins", self.plugin_management(id)),
+            ("preferences", self.plugin_preferences(id)),
+            ("appearance", self.plugin_appearance(id, false)),
+            ("wallpaper", self.plugin_appearance(id, true)),
+            ("session", self.plugin_session(id)),
+            ("wifi", self.plugin_connectivity(id, true)),
+            ("bluetooth", self.plugin_connectivity(id, false)),
+            ("displays", self.plugin_displays(id)),
+        ]
+        .into_iter()
+        .filter_map(|(name, value)| value.map(|value| (name, value)))
+        .collect()
+    }
+
     pub(crate) fn plugin_panel_scene(
         &mut self,
         key: &nickel_core::plugins::PluginSurfaceKey,
         width: u32,
         height: u32,
     ) -> Option<Vec<PaintCommand>> {
+        let dependency_ids = self
+            .plugin_panel_host_for(key)?
+            .application()
+            .composition_dependency_ids();
+        let dependency_fields = dependency_ids
+            .into_iter()
+            .map(|id| {
+                let fields = self.plugin_owner_resource_fields(&id);
+                (id, fields)
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
         let notification_data = (*key == crate::plugin_panel::notification_surface_key())
             .then(|| self.notification_plugin_projection().to_json());
         let preview_projection = if *key == crate::plugin_panel::window_preview_surface_key() {
@@ -4098,6 +4146,9 @@ impl LiveShell {
                 .filter_map(|(field, value)| value.map(|value| (field, value)))
                 .collect::<Vec<_>>();
                 let resource_changed = host.application_mut().sync_host_data_fields(&fields)?;
+                let dependency_changed = host
+                    .application_mut()
+                    .sync_composition_dependency_fields(&dependency_fields)?;
                 let application_images_changed = if applications.is_some() {
                     host.application_mut()
                         .sync_application_images(application_images)
@@ -4108,6 +4159,7 @@ impl LiveShell {
                     || notification_changed
                     || keyboard_changed
                     || resource_changed
+                    || dependency_changed
                     || application_images_changed)
             })();
             let projected = match projected {
@@ -4810,6 +4862,54 @@ impl LiveShell {
         }
     }
 
+    fn propagate_composed_settings(
+        &mut self,
+        id: &str,
+        values: &std::collections::BTreeMap<String, serde_json::Value>,
+    ) -> Result<(), String> {
+        let composed = self
+            .package_runtimes
+            .values()
+            .filter_map(|runtime| {
+                let RetainedPackageRuntime::Composed(host) = runtime else {
+                    return None;
+                };
+                let owner = host
+                    .borrow()
+                    .resolution()
+                    .inheritance_chain
+                    .iter()
+                    .find(|owner| owner.id == id)
+                    .cloned()?;
+                Some((host.clone(), owner))
+            })
+            .collect::<Vec<_>>();
+        for (host, owner) in &composed {
+            let mut host = host.borrow_mut();
+            let mut data = host.snapshot(owner)?.clone();
+            data["settings"] = serde_json::to_value(&values).map_err(|error| error.to_string())?;
+            host.update_snapshot(owner, &data)?;
+        }
+        for (_, host) in self.plugin_surface_hosts.values_mut() {
+            if host
+                .application()
+                .shared_composition_runtime()
+                .is_some_and(|runtime| {
+                    composed
+                        .iter()
+                        .any(|(candidate, _)| std::rc::Rc::ptr_eq(candidate, &runtime))
+                })
+            {
+                let changed = host.application_mut().refresh_composition_snapshots()?;
+                host.step(HostBatch {
+                    application_changed: changed,
+                    ..HostBatch::default()
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// Applies a declared preference and refreshes an active installed plugin.
     pub fn set_plugin_setting(
         &mut self,
@@ -4841,23 +4941,6 @@ impl LiveShell {
             return Ok(false);
         }
         values.insert(key.to_owned(), value.clone());
-        let composed = self
-            .package_runtimes
-            .values()
-            .filter_map(|runtime| {
-                let RetainedPackageRuntime::Composed(host) = runtime else {
-                    return None;
-                };
-                let owner = host
-                    .borrow()
-                    .resolution()
-                    .inheritance_chain
-                    .iter()
-                    .find(|owner| owner.id == id)
-                    .cloned()?;
-                Some((host.clone(), owner))
-            })
-            .collect::<Vec<_>>();
         if matches!(
             self.package_runtimes.get(id),
             Some(RetainedPackageRuntime::Composed(_))
@@ -4865,31 +4948,8 @@ impl LiveShell {
             #[cfg(not(test))]
             nickel_core::plugins::PluginPreferences::update_default(&manifest, key, value)
                 .map_err(|error| format!("could not save plugin setting: {error}"))?;
-            for (host, owner) in &composed {
-                let mut host = host.borrow_mut();
-                let mut data = host.snapshot(owner)?.clone();
-                data["settings"] =
-                    serde_json::to_value(&values).map_err(|error| error.to_string())?;
-                host.update_snapshot(owner, &data)?;
-            }
-            self.plugin_settings.insert(id.to_owned(), values);
-            for (_, host) in self.plugin_surface_hosts.values_mut() {
-                if host
-                    .application()
-                    .shared_composition_runtime()
-                    .is_some_and(|runtime| {
-                        composed
-                            .iter()
-                            .any(|(candidate, _)| std::rc::Rc::ptr_eq(candidate, &runtime))
-                    })
-                {
-                    let changed = host.application_mut().refresh_composition_snapshots()?;
-                    host.step(HostBatch {
-                        application_changed: changed,
-                        ..HostBatch::default()
-                    });
-                }
-            }
+            self.plugin_settings.insert(id.to_owned(), values.clone());
+            self.propagate_composed_settings(id, &values)?;
             self.plugin_activation_generation =
                 self.plugin_activation_generation.wrapping_add(1).max(1);
             self.maybe_publish_plugin_status();
@@ -4956,7 +5016,8 @@ impl LiveShell {
         #[cfg(not(test))]
         nickel_core::plugins::PluginPreferences::update_default(&manifest, key, value)
             .map_err(|error| format!("could not save plugin setting: {error}"))?;
-        self.plugin_settings.insert(id.to_owned(), values);
+        self.plugin_settings.insert(id.to_owned(), values.clone());
+        self.propagate_composed_settings(id, &values)?;
         if let Some(runtime) = replacement_runtime {
             self.package_runtimes
                 .insert(id.to_owned(), RetainedPackageRuntime::Ordinary(runtime));
