@@ -23,7 +23,11 @@
       "shell.settings.defaultApps": "./src/DefaultApps.js#DefaultApps",
       "shell.settings.displays": "./src/Displays.js#Displays",
       "shell.settings.wifi": "./src/Wifi.js#Wifi",
-      "shell.settings.bluetooth": "./src/Bluetooth.js#Bluetooth"
+      "shell.settings.bluetooth": "./src/Bluetooth.js#Bluetooth",
+      "shell.settings.preferences": "./src/Preferences.js#Preferences",
+      "shell.settings.idle": "./src/Preferences.js#IdlePreferences",
+      "shell.settings.preferredApplications": "./src/Preferences.js#PreferredApplications",
+      "shell.settings.fileArtwork": "./src/Preferences.js#FileArtwork"
     }
   },
   "capabilities": [
@@ -47,6 +51,8 @@
     "notifications-act",
     "notifications-read",
     "on-screen-keyboard-show",
+    "preferences-control",
+    "preferences-read",
     "projects-menu-show",
     "projects-open",
     "projects-read",

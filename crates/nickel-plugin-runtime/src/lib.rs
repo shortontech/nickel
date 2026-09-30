@@ -667,3 +667,6 @@ mod tests {
         assert_eq!(initial, restored);
     }
 }
+
+#[cfg(test)]
+mod preferences_page_tests;
