@@ -99,29 +99,6 @@ pub fn on_screen_keyboard_surface_key() -> nickel_core::plugins::PluginSurfaceKe
     }
 }
 
-pub fn run_manifest() -> &'static PluginManifest {
-    static MANIFEST: OnceLock<PluginManifest> = OnceLock::new();
-    MANIFEST.get_or_init(|| {
-        PluginManifest::from_json(include_str!("../../../assets/plugins/run/plugin.json"))
-            .expect("bundled run plugin manifest must be valid")
-    })
-}
-
-pub fn run_surface() -> &'static PluginSurface {
-    run_manifest()
-        .surfaces
-        .first()
-        .expect("bundled Run dialog needs a surface")
-}
-
-pub fn run_surface_key() -> nickel_core::plugins::PluginSurfaceKey {
-    let manifest = run_manifest();
-    nickel_core::plugins::PluginSurfaceKey {
-        plugin_id: manifest.id.clone(),
-        surface_id: run_surface().id.clone(),
-    }
-}
-
 fn bundled_source(
     manifest: &PluginManifest,
     entry: &str,
@@ -173,10 +150,6 @@ fn bundled_stylesheet(
         Cow::Borrowed(fallback)
     };
     StyleSheet::compile(&source)
-}
-
-pub fn run_enabled() -> bool {
-    true
 }
 
 pub fn bottom_offset() -> u32 {
@@ -331,8 +304,10 @@ pub enum PluginEffect {
         key: String,
         value: serde_json::Value,
     },
-    RunSubmit(String),
-    RunDismiss,
+    RunExecute {
+        plugin_id: String,
+        execute: crate::run_capabilities::Execute,
+    },
     ToggleLauncher,
     ShowControlCenter,
     ActivateWindow(crate::model::WindowId),
@@ -1089,15 +1064,6 @@ impl PluginPanelApplication {
         Ok(true)
     }
 
-    #[cfg(test)]
-    pub(crate) fn run_with_test_source(source: &str) -> Result<Self, String> {
-        Self::new_with_manifest(
-            source,
-            run_manifest(),
-            Some(serde_json::json!({ "status": null }).to_string()),
-        )
-    }
-
     fn new_with_manifest(
         source: &str,
         manifest: &PluginManifest,
@@ -1255,6 +1221,7 @@ impl PluginPanelApplication {
             !matches!(
                 *field,
                 "clock"
+                    | "run"
                     | "windows"
                     | "windowMenu"
                     | "windowDestinations"
@@ -1282,6 +1249,13 @@ impl PluginPanelApplication {
             )
         }) {
             return Err("unknown host data field".into());
+        }
+        if fields.iter().any(|(field, _)| *field == "run")
+            && !manifest
+                .capabilities
+                .contains(&PluginCapability::RunCommand)
+        {
+            return Err("Run data requires run-command".into());
         }
         if fields.iter().any(|(field, _)| *field == "session")
             && !manifest.capabilities.iter().any(|grant| {
@@ -1913,29 +1887,22 @@ impl PluginPanelApplication {
                                 value: value.clone(),
                             });
                         }
-                        _ if effect.get("type").and_then(Value::as_str) == Some("run-submit")
+                        _ if effect.get("type").and_then(Value::as_str) == Some("run.execute")
                             && effect_manifest
                                 .capabilities
                                 .contains(&PluginCapability::RunCommand) =>
                         {
-                            let Some(command) = effect.get("command").and_then(Value::as_str)
-                            else {
-                                self.last_error = Some("Run command is missing".into());
-                                return;
+                            let execute = match crate::run_capabilities::Execute::parse(&effect) {
+                                Ok(execute) => execute,
+                                Err(error) => {
+                                    self.last_error = Some(error.into());
+                                    return;
+                                }
                             };
-                            let command = command.trim();
-                            if command.is_empty() || command.chars().count() > 4096 {
-                                self.last_error = Some("Run command is invalid".into());
-                                return;
-                            }
-                            approved.push(PluginEffect::RunSubmit(command.to_owned()));
-                        }
-                        _ if effect.get("type").and_then(Value::as_str) == Some("run-dismiss")
-                            && effect_manifest
-                                .capabilities
-                                .contains(&PluginCapability::RunCommand) =>
-                        {
-                            approved.push(PluginEffect::RunDismiss);
+                            approved.push(PluginEffect::RunExecute {
+                                plugin_id: effect_manifest.id.clone(),
+                                execute,
+                            });
                         }
                         _ if effect.get("type").and_then(Value::as_str)
                             == Some("toggle-launcher")
@@ -5778,7 +5745,7 @@ mod tests {
     }
 
     #[test]
-    fn external_run_command_uses_capability_instead_of_plugin_identity() {
+    fn public_run_client_requires_grant_and_keeps_effect_owner() {
         let mut manifest = PluginPackage::load(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../assets/plugins/example-window"
@@ -5786,39 +5753,29 @@ mod tests {
         .unwrap()
         .manifest;
         manifest.capabilities.clear();
-        let source = r#"
-            function App() {
-                return h(Window, {width: 320, height: 180},
-                    h(Button, {id: 'run', onClick: () => nickel.request({type: 'run-submit', command: 'nickel-test'})}, 'Run'));
-            }
-        "#;
+        let source = "function App(){return h(Window,{width:320,height:180},h(Button,{id:'execute',onClick:()=>nickel.run.execute('editor')},'Run'));}";
+        let data = serde_json::json!({"run":{"available":true,"revision":"owner:1","status":null}})
+            .to_string();
         let mut denied =
-            PluginPanelApplication::new_with_manifest(source, &manifest, None).unwrap();
-        denied.update(denied.button_message("run").unwrap());
+            PluginPanelApplication::new_with_manifest(source, &manifest, Some(data.clone()))
+                .unwrap();
+        denied.update(denied.button_message("execute").unwrap());
         assert!(denied.take_effects().is_empty());
         assert!(denied.last_error().is_some());
-
         manifest.capabilities.push(PluginCapability::RunCommand);
         let mut granted =
-            PluginPanelApplication::new_with_manifest(source, &manifest, None).unwrap();
-        granted.update(granted.button_message("run").unwrap());
+            PluginPanelApplication::new_with_manifest(source, &manifest, Some(data)).unwrap();
+        granted.update(granted.button_message("execute").unwrap());
         assert_eq!(
             granted.take_effects(),
-            vec![PluginEffect::RunSubmit("nickel-test".into())]
+            vec![PluginEffect::RunExecute {
+                plugin_id: manifest.id,
+                execute: crate::run_capabilities::Execute {
+                    command: "editor".into(),
+                    revision: "owner:1".into()
+                }
+            }]
         );
-
-        let dismiss_source = "function App() { return h(Window, {width: 320, height: 180, onEscape: () => nickel.request({type: 'run-dismiss'})}); }";
-        manifest.capabilities.clear();
-        let mut denied =
-            PluginPanelApplication::new_with_manifest(dismiss_source, &manifest, None).unwrap();
-        denied.shortcut_outcome(Shortcut::Escape);
-        assert!(denied.take_effects().is_empty());
-        assert!(denied.last_error().is_some());
-        manifest.capabilities.push(PluginCapability::RunCommand);
-        let mut granted =
-            PluginPanelApplication::new_with_manifest(dismiss_source, &manifest, None).unwrap();
-        granted.shortcut_outcome(Shortcut::Escape);
-        assert_eq!(granted.take_effects(), vec![PluginEffect::RunDismiss]);
     }
 
     #[test]
@@ -6737,60 +6694,6 @@ mod tests {
     }
 
     #[test]
-    fn run_plugin_submits_bounded_command_and_shows_host_error() {
-        let mut panel = PluginPanelApplication::bundled_with_data(
-            crate::plugin_panel::run_manifest(),
-            "main.js",
-            serde_json::json!({ "status": null }).to_string(),
-        )
-        .unwrap();
-        assert!(matches!(
-            &panel.node,
-            PanelNode::Surface {
-                window_request: Some(_),
-                ..
-            }
-        ));
-        panel.update(PluginMessage::Text(0, "  nickel-test  ".into()));
-        let submit = panel.node.button_action("run-submit").unwrap();
-        panel.update(PluginMessage::Click(submit));
-        assert_eq!(
-            panel.take_effects(),
-            vec![PluginEffect::RunSubmit("nickel-test".into())]
-        );
-        assert!(
-            panel
-                .sync_data(&serde_json::json!({ "status": "Could not run command: missing" }))
-                .unwrap()
-        );
-        assert!(format!("{:?}", panel.node).contains("Could not run command: missing"));
-        panel.update(PluginMessage::Text(0, "x".repeat(5000)));
-        let submit = panel.node.button_action("run-submit").unwrap();
-        panel.update(PluginMessage::Click(submit));
-        assert_eq!(
-            panel.take_effects(),
-            vec![PluginEffect::RunSubmit("x".repeat(4096))]
-        );
-        assert_eq!(panel.manifest.id, run_manifest().id);
-        assert!(panel.last_error().is_none());
-    }
-
-    #[test]
-    fn run_plugin_escape_requests_dismissal() {
-        let mut panel = PluginPanelApplication::bundled_with_data(
-            crate::plugin_panel::run_manifest(),
-            "main.js",
-            serde_json::json!({ "status": null }).to_string(),
-        )
-        .unwrap();
-        assert_eq!(
-            panel.shortcut_outcome(Shortcut::Escape).disposition,
-            nickel_ui::EventDisposition::Handled
-        );
-        assert_eq!(panel.take_effects(), vec![PluginEffect::RunDismiss]);
-    }
-
-    #[test]
     fn external_window_shortcuts_dispatch_jsx_handlers() {
         let mut external_manifest = manifest().clone();
         external_manifest.id = "org.example.window-shortcuts".into();
@@ -6876,47 +6779,6 @@ mod tests {
             granted.shortcut_outcome(Shortcut::Escape);
             assert_eq!(granted.take_effects(), vec![expected]);
         }
-    }
-
-    #[test]
-    fn run_plugin_host_accepts_text_and_submit_from_focused_field() {
-        let mut host = nickel_ui::UiHost::new(
-            PluginPanelApplication::bundled_with_data(
-                crate::plugin_panel::run_manifest(),
-                "main.js",
-                serde_json::json!({ "status": null }).to_string(),
-            )
-            .unwrap(),
-            620,
-            180,
-        );
-        host.step(nickel_ui::HostBatch {
-            window_focused: Some(true),
-            ..nickel_ui::HostBatch::default()
-        });
-        let field = host
-            .query_unique(&nickel_ui::SemanticSelector::Role(SemanticRole::TextField))
-            .unwrap();
-        let field_id = field.id;
-        host.request_focus(field_id.clone());
-        assert_eq!(host.inspect().keyboard_focus, Some(field_id));
-        host.handle_event(nickel_ui::UiEvent::TextInput("nickel-test".into()));
-        host.step(nickel_ui::HostBatch {
-            events: vec![nickel_ui::HostEvent::Shortcut(Shortcut::Submit)],
-            ..nickel_ui::HostBatch::default()
-        });
-        assert_eq!(
-            host.application_mut().take_effects(),
-            vec![PluginEffect::RunSubmit("nickel-test".into())]
-        );
-        host.step(nickel_ui::HostBatch {
-            events: vec![nickel_ui::HostEvent::Shortcut(Shortcut::Escape)],
-            ..nickel_ui::HostBatch::default()
-        });
-        assert_eq!(
-            host.application_mut().take_effects(),
-            vec![PluginEffect::RunDismiss]
-        );
     }
 
     #[test]

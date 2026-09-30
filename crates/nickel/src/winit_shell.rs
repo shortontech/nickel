@@ -233,7 +233,10 @@ fn fixed_plugin_surface_key(
 fn launcher_plugin_surface_available(
     active: &HashSet<nickel_core::plugins::PluginSurfaceKey>,
 ) -> bool {
-    active.contains(&crate::plugin_panel::run_surface_key())
+    {
+        let _ = active;
+        false
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -668,7 +671,6 @@ impl WinitShell {
             primary_output_name: None,
             active_output_name: None,
             active_fixed_plugins: [
-                crate::plugin_panel::run_surface_key(),
             ]
             .into_iter()
             .collect(),
@@ -1522,12 +1524,9 @@ impl WinitShell {
     pub fn launcher_maximum_size(&self) -> Option<(u32, u32)> {
         let index = self.active_output_index()?;
         let geometry = self.displays.get(index)?.0;
-        let surface = crate::plugin_panel::run_surface();
         Some((
-            surface.width.min(geometry.width),
-            surface
-                .height
-                .min(geometry.height.saturating_sub(PANEL_HEIGHT + 8)),
+            620_u32.min(geometry.width),
+            180_u32.min(geometry.height.saturating_sub(PANEL_HEIGHT + 8)),
         ))
     }
 
@@ -3190,10 +3189,7 @@ fn surface_geometry(
             true,
         ),
         SurfaceRole::Launcher => {
-            let surface = crate::plugin_panel::run_surface();
-            let height = surface
-                .height
-                .min(geometry.height.saturating_sub(PANEL_HEIGHT + 8));
+            let height = 180_u32.min(geometry.height.saturating_sub(PANEL_HEIGHT + 8));
             (
                 LAUNCHER_TITLE,
                 geometry.x + 18,
@@ -3202,7 +3198,7 @@ fn surface_geometry(
                         .height
                         .saturating_sub(height.saturating_add(PANEL_HEIGHT + 8))
                         as i32,
-                surface.width.min(geometry.width),
+                620_u32.min(geometry.width),
                 height,
                 cfg!(not(target_os = "linux")),
             )

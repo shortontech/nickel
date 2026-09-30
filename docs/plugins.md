@@ -389,10 +389,14 @@ contains ordinary notifications and history. `nickel.notifications.invoke(id,key
 and `dismiss(id)` require `notifications-act` and recheck live notification
 identity. Trusted approval notifications are excluded from plugin data/actions.
 
-Plugins granted `run-command` may request
-`{ type: "run-submit", command: "..." }`. Nickel trims the command and rejects
-empty commands or those over 4096 characters before calling the platform's
-Run command handler.
+Plugins granted `run-command` use `nickel.run.get()` and
+`nickel.run.execute(command, expectedRevision?)`. Execution captures the current
+owner revision by default. Nickel rechecks the current grant, running owner,
+unlocked session, and revision before passing parsed arguments to the native
+Run adapter. Empty commands, NUL characters, and commands over 4096 characters
+are rejected. The read snapshot includes `available`, `revision`, and a nullable
+status message. The selected shell may declare an optional `run` surface for
+the Run shortcut; omission leaves the shortcut unavailable.
 Use `nickel.windows` for window actions and `nickel.audio.get/setVolume/setMuted`
 for audio controls; `selectOutput(id)` selects a current output device.
 Audio writes require `audio-control` and current native service authority.

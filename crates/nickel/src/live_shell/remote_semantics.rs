@@ -376,42 +376,6 @@ impl LiveShell {
 mod tests {
     use super::*;
 
-    #[test]
-    fn bundled_run_remote_text_mutation_uses_the_jsx_form() {
-        let mut shell = LiveShell::new().expect("live shell");
-        shell.run_visible = true;
-        shell.launcher_visible = true;
-        let _ = shell.scene(SurfaceRole::Launcher, 620, 180);
-        let (generation, nodes) = shell
-            .bounded_shell_semantics(SurfaceRole::Launcher, None)
-            .expect("active Run semantics");
-        let command = nodes
-            .iter()
-            .position(|node| node.id.as_str().ends_with("/run-command"))
-            .expect("JSX Run field");
-        assert_eq!(nodes[command].actions, [nickel_ui::ActionKind::SetValue]);
-        let outcome = shell
-            .perform_bounded_shell_action(
-                SurfaceRole::Launcher,
-                None,
-                generation,
-                command,
-                nickel_ui::SemanticAction::SetValue(nickel_ui::SemanticValueInput::Text(
-                    "echo ready".into(),
-                )),
-                2048,
-            )
-            .expect("guarded Run input");
-        assert!(outcome.effects.is_empty());
-        let (_, updated) = shell
-            .bounded_shell_semantics(SurfaceRole::Launcher, None)
-            .unwrap();
-        assert!(updated.iter().any(|node| {
-            node.id.as_str().ends_with("/run-command")
-                && node.value == Some(nickel_ui::SemanticValueSnapshot::Text("echo ready".into()))
-        }));
-    }
-
     fn assert_advertised_actions_are_guarded<A: UiApplication>(
         host: &nickel_ui::UiHost<A>,
         classify: impl Fn(&A::Message) -> RemoteActionDisposition,

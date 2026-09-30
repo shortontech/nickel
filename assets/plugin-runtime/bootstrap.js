@@ -311,6 +311,16 @@ const nickel = Object.freeze({
         },
         selectOutput(id) { __effects.push({type:'control-action',action:'audio-device',value:__nickelIdentity(id)}); }
     }),
+    run: Object.freeze({
+        get() { return __nickelResource('run', {available:false, status:null}); },
+        execute(command, expectedRevision) {
+            if (typeof command !== 'string' || !command.trim() || Array.from(command.trim()).length > 4096 || command.includes('\0')) throw TypeError('invalid Run command');
+            const current = __nickelResource('run', {available:false});
+            const revision = expectedRevision === undefined ? current.revision : expectedRevision;
+            if (!current.available || typeof revision !== 'string' || !revision.length || revision.length > 128) throw Error('Run unavailable');
+            __effects.push({type:'run.execute', command:command.trim(), revision});
+        }
+    }),
     projects: Object.freeze({
         show() { __effects.push({type:'projects.show'}); },
         toggle() { __effects.push({type:'projects.toggle'}); }

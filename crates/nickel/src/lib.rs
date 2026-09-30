@@ -1,5 +1,6 @@
 mod audio_capabilities;
 pub mod appearance_capabilities;
+pub mod run_capabilities;
 pub mod appearance_service;
 pub mod application_scale_capability;
 mod display_capabilities;

@@ -321,6 +321,34 @@ mod tests {
     }
 
     #[test]
+    fn run_client_captures_revision_and_preserves_parsed_command_text() {
+        let mut runtime = super::JsxRuntime::new(
+            "",
+            Some(r#"{"run":{"available":true,"revision":"owner:4","status":null}}"#),
+        )
+        .unwrap();
+        runtime
+            .eval(r#"nickel.run.execute(' editor "a b" ');"#)
+            .unwrap();
+        assert_eq!(
+            runtime.take_effects().unwrap(),
+            vec![
+                serde_json::json!({"type":"run.execute","command":"editor \"a b\"","revision":"owner:4"})
+            ]
+        );
+        for source in [
+            "nickel.run.execute('')",
+            "nickel.run.execute('a'.repeat(4097))",
+            "nickel.run.execute('abc', '')",
+        ] {
+            assert!(runtime.eval(source).is_err());
+        }
+        let mut unavailable = super::JsxRuntime::new("", None).unwrap();
+        assert!(unavailable.eval("nickel.run.execute('editor')").is_err());
+        assert!(unavailable.take_effects().unwrap().is_empty());
+    }
+
+    #[test]
     fn notification_client_uses_stable_ids_and_validates_actions() {
         let mut runtime = super::JsxRuntime::new(
             "",

@@ -10,6 +10,7 @@ import "./About.js";
 import "./OptionalFeatures.js";
 import "./KeyboardShortcuts.js";
 // @jsx h
+import { Run } from "./Run.js";
 import { WindowMenu } from "./WindowMenu.js";
 import { Taskbar } from "./Taskbar.js";
 import { Launcher } from "./Launcher.js";
@@ -19,11 +20,12 @@ import { VolumeOSD } from "./VolumeOSD.js";
 import { Notifications } from "./Notifications.js";
 import { Settings, SettingsNavigation, SettingControl } from "./Settings.js";
 
-export { Preview, WindowMenu, Taskbar, Launcher, QuickSettings, Notifications, VolumeOSD, Settings };
+export { Run, Preview, WindowMenu, Taskbar, Launcher, QuickSettings, Notifications, VolumeOSD, Settings };
 export { SettingsNavigation, SettingControl };
 
 // The shared package host supplies surface visibility; callers may provide snapshots.
 export function Shell(props) {
+    const Run = nickel.component("shell.run");
     const WindowMenu = nickel.component("shell.windowMenu");
     const Taskbar = nickel.component('shell.taskbar');
     const Launcher = nickel.component('shell.launcher');
@@ -36,6 +38,7 @@ export function Shell(props) {
     const visible = props?.visible || state.visible || {[nickel.data.surface?.id === 'quick-settings' ? 'quickSettings' : nickel.data.surface?.id === 'window-menu' ? 'windowMenu' : nickel.data.surface?.id === 'volume-osd' ? 'volumeOSD' : nickel.data.surface?.id]: true};
     const snapshots = props?.snapshots || state.snapshots || {};
     return <>
+        {visible.run ? <Run /> : null}
         {visible.taskbar ? <Taskbar data={snapshots.taskbar} /> : null}
         {visible.launcher ? <Launcher data={snapshots.launcher} /> : null}
         {visible.quickSettings ? <QuickSettings /> : null}

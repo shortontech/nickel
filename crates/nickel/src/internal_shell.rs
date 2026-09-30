@@ -350,11 +350,7 @@ impl InternalShellCoordinator {
                 SurfaceRole::Screenshot,
                 SurfaceRole::OnScreenKeyboard,
             ] {
-                if role == SurfaceRole::Launcher
-                    && !self
-                        .shell
-                        .plugin_surface_matches(&crate::plugin_panel::run_surface_key())
-                {
+                if role == SurfaceRole::Launcher {
                     continue;
                 }
                 if role == SurfaceRole::WindowContextMenu
@@ -1809,8 +1805,7 @@ mod tests {
         host.0.lock().unwrap().clear();
 
         assert!(coordinator.dismiss_ephemeral_on_focus_loss(SurfaceRole::Launcher));
-        let launcher = coordinator.surface(SurfaceRole::Launcher, None).unwrap().id;
-        assert!(!coordinator.visible(launcher));
+        assert!(coordinator.surface(SurfaceRole::Launcher, None).is_none());
         assert!(
             host.0.lock().unwrap().is_empty(),
             "focus loss must not restore the window displaced by launcher activation"
@@ -2718,31 +2713,47 @@ mod tests {
     }
 
     #[test]
-    fn production_meta_r_reducer_opens_internal_run_surface() {
-        let mut coordinator = coordinator();
-        coordinator.set_outputs(&[InternalOutput {
-            x: 0,
-            y: 0,
-            name: "nested".into(),
-            width: 800,
-            height: 600,
-            scale: 1.0,
-        }]);
-        let launcher = coordinator.surface(SurfaceRole::Launcher, None).unwrap().id;
-        let mut hotkeys = CompositorShortcutAdapter::default();
+    fn production_meta_r_reducer_opens_selected_shell_run_surface() {
+        std::thread::Builder::new()
+            .stack_size(32 * 1024 * 1024)
+            .spawn(|| {
+                let mut coordinator = coordinator();
+                coordinator.set_outputs(&[InternalOutput {
+                    x: 0,
+                    y: 0,
+                    name: "nested".into(),
+                    width: 800,
+                    height: 600,
+                    scale: 1.0,
+                }]);
+                assert!(coordinator.surface(SurfaceRole::Launcher, None).is_none());
+                let mut hotkeys = CompositorShortcutAdapter::default();
 
-        assert_eq!(
-            hotkeys.handle(KeyCode::SuperLeft, KeyEdge::Pressed).action,
-            None
-        );
-        assert_eq!(
-            hotkeys.handle(KeyCode::KeyR, KeyEdge::Pressed).action,
-            Some(HotkeyAction::ShowRun)
-        );
-        assert!(coordinator.global_shortcut(nickel_session_protocol::ShortcutAction::ShowRun));
+                assert_eq!(
+                    hotkeys.handle(KeyCode::SuperLeft, KeyEdge::Pressed).action,
+                    None
+                );
+                assert_eq!(
+                    hotkeys.handle(KeyCode::KeyR, KeyEdge::Pressed).action,
+                    Some(HotkeyAction::ShowRun)
+                );
+                assert!(
+                    coordinator.global_shortcut(nickel_session_protocol::ShortcutAction::ShowRun)
+                );
 
-        assert!(coordinator.visible(launcher));
-        assert!(!coordinator.scene(launcher).unwrap().is_empty());
+                let run = coordinator.shell.active_shell_surface_key("run");
+                assert!(coordinator.shell.plugin_surface_matches(&run));
+                assert!(
+                    !coordinator
+                        .shell
+                        .plugin_panel_scene(&run, 620, 180)
+                        .unwrap()
+                        .is_empty()
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     fn opened_screenshot() -> (InternalShellCoordinator, InternalSurfaceId) {

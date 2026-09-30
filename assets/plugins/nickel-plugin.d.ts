@@ -58,6 +58,8 @@ interface NickelSurfaceProps extends NickelProps {
     background?: NickelColor;
 }
 interface NickelWindowProps extends NickelProps {
+    onSubmit?: () => void;
+    onEscape?: () => void;
     id?: string;
     title?: string;
     width: number | "100%";
@@ -494,6 +496,7 @@ declare const nickel: Readonly<{
     /** Check operations before toggling native show-desktop; requires desktop-control. */
     desktop:Readonly<{get():NickelAvailability & {operations:Readonly<{toggleShowDesktop?:boolean}>};toggleShowDesktop():void}>;
     /** Requires projects-menu-show. */
+    run:Readonly<{get():Readonly<{available:boolean;revision?:string;status:string|null}>;execute(command:string,expectedRevision?:string):void}>;
     projects:Readonly<{show():void;toggle():void}>;
     /** Requires on-screen-keyboard-show. */
     keyboard:Readonly<{toggle():void}>;

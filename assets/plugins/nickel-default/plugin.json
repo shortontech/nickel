@@ -34,7 +34,8 @@
       "shell.settings.about": "./src/About.js#About",
       "shell.windowMenu": "./src/WindowMenu.js#WindowMenu",
       "shell.volumeOSD": "./src/VolumeOSD.js#VolumeOSD",
-      "shell.window-preview": "./src/Preview.js#Preview"
+      "shell.window-preview": "./src/Preview.js#Preview",
+      "shell.run": "./src/Run.js#Run"
     }
   },
   "capabilities": [
@@ -82,7 +83,8 @@
     "windows-focus",
     "windows-read",
     "workspaces-read",
-    "workspaces-switch"
+    "workspaces-switch",
+    "run-command"
   ],
   "surfaces": [
     {
@@ -147,6 +149,13 @@
       "kind": "overlay",
       "width": 300,
       "height": 214,
+      "initially_open": false
+    },
+    {
+      "id": "run",
+      "kind": "window",
+      "width": 620,
+      "height": 180,
       "initially_open": false
     }
   ]

@@ -1914,8 +1914,11 @@ fn coalesced_audio_feedback_uses_latest_state_and_suppresses_reconnect_only_chan
     assert_eq!(updates.len(), 1);
     assert!(shell.apply_system_status_update(updates.into_iter().next().unwrap()));
     assert!(shell.default_shell_surface_visible("volume-osd"));
-    shell.plugin_panel_scene(&shell.active_shell_surface_key("volume-osd"),420,96);
-    assert_eq!(crate::audio_capabilities::snapshot(&shell.audio,shell.locked)["percent"], 31);
+    shell.plugin_panel_scene(&shell.active_shell_surface_key("volume-osd"), 420, 96);
+    assert_eq!(
+        crate::audio_capabilities::snapshot(&shell.audio, shell.locked)["percent"],
+        31
+    );
     assert!(
         shell
             .plugin_panel_host_ref(&shell.active_shell_surface_key("volume-osd"))
@@ -1974,8 +1977,11 @@ fn audio_feedback_ignores_startup_metadata_and_reconnect_but_shows_value_changes
     status.volume_percent = 36;
     assert!(shell.apply_system_status_update(SystemStatusUpdate::Audio(status.clone())));
     assert!(shell.default_shell_surface_visible("volume-osd"));
-    shell.plugin_panel_scene(&shell.active_shell_surface_key("volume-osd"),420,96);
-    assert_eq!(crate::audio_capabilities::snapshot(&shell.audio,shell.locked)["percent"], 36);
+    shell.plugin_panel_scene(&shell.active_shell_surface_key("volume-osd"), 420, 96);
+    assert_eq!(
+        crate::audio_capabilities::snapshot(&shell.audio, shell.locked)["percent"],
+        36
+    );
     let first = shell.volume_osd_until.unwrap();
     status.muted = true;
     shell.apply_system_status_update(SystemStatusUpdate::Audio(status.clone()));
@@ -2382,6 +2388,8 @@ fn inherited_shell_selection_hides_base_roots_and_honors_omitted_settings() {
             })
         );
         assert_eq!(shell.taskbar_reservation_height(), 42);
+        assert!(!shell.global_shortcut(crate::platform::GlobalShortcut::ShowRun));
+        assert!(!shell.plugin_surface_matches(&shell.active_shell_surface_key("run")));
         assert_eq!(
             shell.shell_surface_effect_owner("nickel-default"),
             "example-theme"
@@ -2644,4 +2652,35 @@ fn selected_volume_surface_is_optional_and_hidden_by_lock() {
     shell.active_shell_package_id = "theme-without-volume".into();
     shell.show_volume_osd();
     assert!(shell.volume_osd_until.is_none());
+}
+
+#[test]
+fn run_effect_rechecks_current_authority_before_native_execution() {
+    with_package_runtime_stack(|| {
+        let mut shell = LiveShell::new().unwrap();
+        let owner = "nickel-default";
+        let snapshot = shell.plugin_run_snapshot(owner).unwrap();
+        let execute = crate::run_capabilities::Execute::parse(&serde_json::json!({"command":"must-not-execute-stale-command", "revision":snapshot["revision"]})).unwrap();
+        shell.plugin_activation_generation += 1;
+        assert!(
+            !shell.apply_plugin_effects(vec![crate::plugin_panel::PluginEffect::RunExecute {
+                plugin_id: owner.into(),
+                execute: execute.clone()
+            }])
+        );
+        assert!(shell.run_status.is_empty());
+        shell.locked = true;
+        assert!(shell.plugin_run_snapshot(owner).is_none());
+        let execute = crate::run_capabilities::Execute {
+            revision: crate::run_capabilities::revision(owner, shell.plugin_activation_generation),
+            ..execute
+        };
+        assert!(
+            !shell.apply_plugin_effects(vec![crate::plugin_panel::PluginEffect::RunExecute {
+                plugin_id: owner.into(),
+                execute
+            }])
+        );
+        assert!(shell.run_status.is_empty());
+    });
 }

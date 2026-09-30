@@ -176,13 +176,11 @@ mod platform {
     };
     use nickel_shell::plugin_panel::{
         PluginPanelApplication, codex_projects_manifest, manifest, on_screen_keyboard_manifest,
-        run_manifest,
     };
 
     fn bundled_manifest(id: &str) -> Option<&'static PluginManifest> {
         [
             manifest(),
-            run_manifest(),
             codex_projects_manifest(),
             on_screen_keyboard_manifest(),
         ]
@@ -1016,12 +1014,12 @@ mod platform {
             let directory = tempfile::tempdir().unwrap();
             let root = Path::new(concat!(
                 env!("CARGO_MANIFEST_DIR"),
-                "/../../assets/plugins/run"
+                "/../../assets/plugins/codex-projects"
             ));
             let manifest = std::fs::read_to_string(root.join("plugin.json")).unwrap();
             std::fs::write(
                 directory.path().join("plugin.json"),
-                manifest.replace("Nickel Run", "Renamed Run"),
+                manifest.replace("Nickel Codex Projects", "Renamed Projects"),
             )
             .unwrap();
             std::fs::copy(root.join("main.js"), directory.path().join("main.js")).unwrap();

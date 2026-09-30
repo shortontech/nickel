@@ -672,6 +672,7 @@ pub struct LiveShell {
     volume_osd_until: Option<Instant>,
     launcher_visible: bool,
     run_visible: bool,
+    run_status: HashMap<String, String>,
     locked: bool,
     lock_host: nickel_ui::UiHost<LockApplication>,
     lock_change_token: HostChangeToken,
@@ -1281,7 +1282,6 @@ impl LiveShell {
         let launcher_icons = LauncherIconCache::new();
         let mut plugin_registry = nickel_core::plugins::PluginRegistry::default();
         plugin_registry.register(crate::plugin_panel::manifest().clone())?;
-        plugin_registry.register(crate::plugin_panel::run_manifest().clone())?;
         plugin_registry.register(crate::plugin_panel::codex_projects_manifest().clone())?;
         plugin_registry.register(crate::plugin_panel::on_screen_keyboard_manifest().clone())?;
         #[cfg(test)]
@@ -1373,30 +1373,6 @@ impl LiveShell {
         } else {
             None
         };
-        let plugin_run_host = if plugin_activation.desired_enabled(
-            &crate::plugin_panel::run_manifest().id,
-            crate::plugin_panel::run_enabled(),
-        ) {
-            let id = &crate::plugin_panel::run_manifest().id;
-            plugin_registry.set_enabled(id, true)?;
-            match bundled_surface_host(
-                crate::plugin_panel::run_manifest(),
-                serde_json::json!({ "status": null }).to_string(),
-                crate::plugin_panel::PluginImages::new(),
-            ) {
-                Ok(started) => {
-                    plugin_registry.mark_running(id)?;
-                    Some(started)
-                }
-                Err(error) => {
-                    tracing::error!(plugin = id, %error, "plugin failed to start");
-                    plugin_registry.mark_failed(id, error)?;
-                    None
-                }
-            }
-        } else {
-            None
-        };
         let launcher_icon_revision = launcher_icons.revision();
         let mut shell = Self {
             application_scale_service: Default::default(),
@@ -1473,6 +1449,7 @@ impl LiveShell {
             settings_navigation_revision: 0,
             launcher_visible: false,
             run_visible: false,
+            run_status: HashMap::new(),
             locked: false,
             lock_host,
             lock_change_token: HostChangeToken::default(),
@@ -1587,9 +1564,6 @@ impl LiveShell {
             keyboard_override,
             keyboard_recipient: None,
         };
-        for (key, surface, host) in [plugin_run_host].into_iter().flatten() {
-            shell.plugin_surface_hosts.insert(key, (surface, host));
-        }
         if plugin_activation.desired_enabled("nickel-default", true) || safe_mode {
             shell.set_plugin_enabled("nickel-default", true)?;
         }
@@ -2339,10 +2313,10 @@ impl LiveShell {
             SurfaceRole::Taskbar => Vec::new(),
             SurfaceRole::Panel => unreachable!("plugin panels render through their surface key"),
             SurfaceRole::Launcher if self.run_visible => self
-                .plugin_panel_scene(&crate::plugin_panel::run_surface_key(), width, height)
+                .plugin_panel_scene(&self.active_shell_surface_key("run"), width, height)
                 .unwrap_or_default(),
             SurfaceRole::Launcher => self
-                .plugin_panel_scene(&crate::plugin_panel::run_surface_key(), width, height)
+                .plugin_panel_scene(&self.active_shell_surface_key("run"), width, height)
                 .unwrap_or_default(),
             SurfaceRole::ControlCenter => {
                 if self.quick_settings_surface_active() {
@@ -3085,7 +3059,7 @@ impl LiveShell {
     ) -> Option<nickel_core::plugins::PluginSurfaceKey> {
         if self.run_visible {
             self.run_host_ref()?;
-            Some(crate::plugin_panel::run_surface_key())
+            Some(self.active_shell_surface_key("run"))
         } else {
             let key = self.active_shell_surface_key("launcher");
             self.plugin_surface_hosts.contains_key(&key).then_some(key)
@@ -3161,7 +3135,7 @@ impl LiveShell {
         &self,
     ) -> HashSet<nickel_core::plugins::PluginSurfaceKey> {
         [
-            crate::plugin_panel::run_surface_key(),
+            self.active_shell_surface_key("run"),
             self.active_shell_surface_key("window-preview"),
         ]
         .into_iter()
@@ -3232,7 +3206,7 @@ impl LiveShell {
         &self,
         key: &nickel_core::plugins::PluginSurfaceKey,
     ) -> Option<HostChangeToken> {
-        let (inspection, surface_salt) = if *key == crate::plugin_panel::run_surface_key() {
+        let (inspection, surface_salt) = if *key == self.active_shell_surface_key("run") {
             // Both plugins share one native popup. Distinguish their tokens
             // even when their host-local frame generations happen to match.
             (self.run_host_ref()?.inspect(), 1_u64 << 63)
@@ -3932,6 +3906,7 @@ impl LiveShell {
             });
         [
             ("clock", Some(crate::clock_capabilities::snapshot())),
+            ("run", self.plugin_run_snapshot(id)),
             ("windows", self.external_plugin_windows(id)),
             ("windowMenu", self.plugin_window_menu(id)),
             ("windowDestinations", self.plugin_window_destinations(id)),
@@ -5041,8 +5016,6 @@ impl LiveShell {
             Self::retire_codex_projects_plugin_state as fn(&mut Self)
         } else if id == crate::plugin_panel::on_screen_keyboard_manifest().id {
             Self::retire_keyboard_plugin_state
-        } else if id == crate::plugin_panel::run_manifest().id {
-            Self::retire_run_plugin_state
         } else {
             return self.fail_installed_plugin_runtime(id, error);
         };
@@ -5050,20 +5023,9 @@ impl LiveShell {
         true
     }
 
-    fn retire_run_plugin_state(&mut self) {
-        self.retire_extra_panel_plugin_state(&crate::plugin_panel::run_manifest().id);
-        if self.run_visible {
-            self.run_visible = false;
-            self.set_launcher_visible(false);
-        }
-    }
-
     fn fail_run_plugin_runtime(&mut self, error: String) {
-        self.fail_bundled_plugin_runtime(
-            &crate::plugin_panel::run_manifest().id,
-            error,
-            Self::retire_run_plugin_state,
-        );
+        let id = self.active_shell_package_id.clone();
+        self.fail_installed_plugin_runtime(&id, error);
     }
 
     fn retire_preview_plugin_state(&mut self) {
@@ -5410,6 +5372,7 @@ impl LiveShell {
             if id == self.active_shell_package_id {
                 self.retire_preview_plugin_state();
             }
+            self.run_status.remove(id);
             self.package_runtimes.remove(id);
             self.application_search.retire(id);
             self.plugin_surface_hosts
@@ -5420,8 +5383,6 @@ impl LiveShell {
                 .retain(|key, _| key.plugin_id != id);
             if id == self.primary_panel_key.plugin_id {
                 self.primary_panel_key = crate::plugin_panel::surface_key();
-            } else if id == crate::plugin_panel::run_manifest().id {
-                self.retire_run_plugin_state();
             } else if id == crate::plugin_panel::codex_projects_manifest().id {
                 self.retire_codex_projects_plugin_state();
             } else if id == crate::plugin_panel::on_screen_keyboard_manifest().id {
@@ -5466,12 +5427,6 @@ impl LiveShell {
                     (surface, host),
                 );
             })
-        } else if id == crate::plugin_panel::run_manifest().id {
-            self.install_bundled_surface(
-                crate::plugin_panel::run_manifest(),
-                serde_json::json!({ "status": null }).to_string(),
-                crate::plugin_panel::PluginImages::new(),
-            )
         } else if id == crate::plugin_panel::codex_projects_manifest().id {
             let projection = nickel_codex_ui::ProjectMenuProjection::from_state(
                 &nickel_codex_ui::ChatState::default(),
@@ -5552,17 +5507,11 @@ impl LiveShell {
     }
 
     pub fn launcher_surface_size(&self) -> Option<(u32, u32)> {
-        self.run_visible.then(|| {
-            let surface = crate::plugin_panel::run_surface();
-            (surface.width, surface.height)
-        })
+        None
     }
 
     pub(crate) fn launcher_preferred_surface_size(&self, maximum: (u32, u32)) -> (u32, u32) {
-        let size = self.launcher_surface_size().unwrap_or_else(|| {
-            let surface = crate::plugin_panel::run_surface();
-            (surface.width, surface.height)
-        });
+        let size = self.launcher_surface_size().unwrap_or((620, 180));
         (size.0.min(maximum.0), size.1.min(maximum.1))
     }
 
@@ -6063,13 +6012,13 @@ impl LiveShell {
     fn run_host_ref(
         &self,
     ) -> Option<&nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>> {
-        self.plugin_panel_host_ref(&crate::plugin_panel::run_surface_key())
+        self.plugin_panel_host_ref(&self.active_shell_surface_key("run"))
     }
 
     fn run_host_mut(
         &mut self,
     ) -> Option<&mut nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>> {
-        self.plugin_panel_host_for(&crate::plugin_panel::run_surface_key())
+        self.plugin_panel_host_for(&self.active_shell_surface_key("run"))
     }
 
     fn preview_plugin_host_ref(
@@ -6444,30 +6393,32 @@ impl LiveShell {
                         }
                     }
                 }
-                crate::plugin_panel::PluginEffect::RunSubmit(command) => {
-                    match platform::execute_run_command(&command) {
+                crate::plugin_panel::PluginEffect::RunExecute { plugin_id, execute } => {
+                    let revision = crate::run_capabilities::revision(
+                        &plugin_id,
+                        self.plugin_activation_generation,
+                    );
+                    if !self.native_ui_service_granted(
+                        &plugin_id,
+                        nickel_core::plugins::PluginCapability::RunCommand,
+                    ) || !execute.is_current(&revision)
+                    {
+                        continue;
+                    }
+                    match platform::execute_run_command(&execute.command) {
                         Ok(()) => {
-                            self.set_launcher_visible(false);
+                            self.run_status
+                                .insert(plugin_id, "Command submitted".into());
                             changed = true;
                         }
                         Err(error) => {
-                            let status =
-                                format!("Could not run command: {}", launch_error_summary(&error));
-                            if let Some(host) = self.run_host_mut() {
-                                match host
-                                    .application_mut()
-                                    .sync_data(&serde_json::json!({ "status": status }))
-                                {
-                                    Ok(projected) => changed |= projected,
-                                    Err(error) => self.fail_run_plugin_runtime(error),
-                                }
-                            }
+                            self.run_status.insert(
+                                plugin_id,
+                                format!("Could not run command: {}", launch_error_summary(&error)),
+                            );
+                            changed = true;
                         }
                     }
-                }
-                crate::plugin_panel::PluginEffect::RunDismiss => {
-                    self.set_launcher_visible(false);
-                    changed = true;
                 }
                 crate::plugin_panel::PluginEffect::ToggleLauncher => {
                     self.request_launcher_toggle();
@@ -8298,7 +8249,9 @@ impl LiveShell {
                     true
                 }
             }
-            platform::GlobalShortcut::ShowRun => self.set_run_visible(true),
+            platform::GlobalShortcut::ShowRun => {
+                self.set_default_shell_surface_visible("run", true)
+            }
             platform::GlobalShortcut::OpenFiles => self.launch_named_application("Nickel File"),
             platform::GlobalShortcut::OpenSettings => self.launch_settings(None),
             platform::GlobalShortcut::ShowControlCenter => {
@@ -9570,6 +9523,12 @@ impl LiveShell {
             events: vec![HostEvent::Poll],
             ..HostBatch::default()
         });
+    }
+
+    fn plugin_run_snapshot(&self, id: &str) -> Option<serde_json::Value> {
+        self.native_ui_service_granted(id, nickel_core::plugins::PluginCapability::RunCommand).then(|| serde_json::json!({
+            "available":true,"revision":crate::run_capabilities::revision(id,self.plugin_activation_generation),"status":self.run_status.get(id)
+        }))
     }
 
     fn native_ui_service_granted(
