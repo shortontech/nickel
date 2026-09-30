@@ -307,19 +307,30 @@ impl Fixture for WindowPreviewFixture {
                     "id": (index + 1).to_string(),
                     "title": title,
                     "accessibleName": title,
-                    "closable": true,
+                    "canClose": true,
+                    "image":format!("window:{}",index+1),
                     "index": index,
                     "imageWidth": 244,
                     "selected": index == 0,
                 })
             })
             .collect::<Vec<_>>();
-        let mut application = PluginPanelApplication::bundled_with_data(
-            crate::plugin_panel::window_preview_manifest(),
-            "main.js",
-            serde_json::json!({"windows": windows}).to_string(),
-        )
-        .expect("bundled window preview fixture");
+        let package = crate::bundled_plugin_assets::load_package("nickel-default").unwrap();
+        let surface = package
+            .manifest
+            .surfaces
+            .iter()
+            .find(|s| s.id == "window-preview")
+            .unwrap();
+        let mut application =
+            PluginPanelApplication::from_package_surface(&package, &Default::default(), surface)
+                .expect("shared shell preview fixture");
+        application
+            .sync_host_data_field(
+                "windowPreviews",
+                &serde_json::json!({"available":true,"revision":"fixture","windows":windows}),
+            )
+            .unwrap();
         if v.id != "missing-preview" {
             let thumbnail = Arc::new(image::RgbaImage::from_pixel(
                 260,

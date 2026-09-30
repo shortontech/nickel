@@ -216,10 +216,16 @@ fn desired_plugin_surfaces(
         .collect()
 }
 
-fn fixed_plugin_surface_key(role: SurfaceRole) -> Option<nickel_core::plugins::PluginSurfaceKey> {
+fn fixed_plugin_surface_key(
+    role: SurfaceRole,
+    active: &HashSet<nickel_core::plugins::PluginSurfaceKey>,
+) -> Option<nickel_core::plugins::PluginSurfaceKey> {
     match role {
         SurfaceRole::VolumeOsd => None,
-        SurfaceRole::WindowPreview => Some(crate::plugin_panel::window_preview_surface_key()),
+        SurfaceRole::WindowPreview => active
+            .iter()
+            .find(|key| key.surface_id == "window-preview")
+            .cloned(),
         _ => None,
     }
 }
@@ -663,7 +669,6 @@ impl WinitShell {
             active_output_name: None,
             active_fixed_plugins: [
                 crate::plugin_panel::run_surface_key(),
-                crate::plugin_panel::window_preview_surface_key(),
             ]
             .into_iter()
             .collect(),
@@ -799,6 +804,7 @@ impl WinitShell {
             }
         }
         let mut panels = self.extra_plugin_panels.clone();
+        panels.retain(|key, _| !self.active_fixed_plugins.contains(key));
         let primary_key = nickel_core::plugins::PluginSurfaceKey {
             plugin_id: self.plugin_panel_owner.clone(),
             surface_id: self.plugin_panel_surface.id.clone(),
@@ -856,7 +862,7 @@ impl WinitShell {
         self.create_surface(SurfaceRole::ControlCenter, 0, primary, primary_name)?;
         self.create_surface(SurfaceRole::Notification, 0, primary, primary_name)?;
         for role in [SurfaceRole::WindowPreview] {
-            if fixed_plugin_surface_key(role)
+            if fixed_plugin_surface_key(role, &self.active_fixed_plugins)
                 .is_some_and(|key| self.active_fixed_plugins.contains(&key))
             {
                 self.create_surface(role, 0, primary, primary_name)?;
@@ -908,6 +914,7 @@ impl WinitShell {
             surface_id: self.plugin_panel_surface.id.clone(),
         };
         let mut active_panels = self.extra_plugin_panels.clone();
+        active_panels.retain(|key, _| !self.active_fixed_plugins.contains(key));
 
         if self.plugin_panel_enabled {
             active_panels.insert(
@@ -947,8 +954,10 @@ impl WinitShell {
             SurfaceRole::Screenshot => true,
             SurfaceRole::WindowContextMenu | SurfaceRole::VolumeOsd => false,
             SurfaceRole::Desktop => desired.contains(&(surface.output_name.clone(), surface.role)),
-            SurfaceRole::WindowPreview => fixed_plugin_surface_key(surface.role)
-                .is_some_and(|key| self.active_fixed_plugins.contains(&key)),
+            SurfaceRole::WindowPreview => {
+                fixed_plugin_surface_key(surface.role, &self.active_fixed_plugins)
+                    .is_some_and(|key| surface.plugin.as_ref() == Some(&key))
+            }
             SurfaceRole::Panel => panel_expected(surface),
             SurfaceRole::Taskbar => desired.contains(&(surface.output_name.clone(), surface.role)),
             _ => true,
@@ -1106,7 +1115,7 @@ impl WinitShell {
             if (role == SurfaceRole::Launcher && launcher_available
                 || role == SurfaceRole::OnScreenKeyboard && !keyboard_plugin_active
                 || role == SurfaceRole::Screenshot
-                || fixed_plugin_surface_key(role)
+                || fixed_plugin_surface_key(role, &self.active_fixed_plugins)
                     .is_some_and(|key| self.active_fixed_plugins.contains(&key)))
                 && !self.surfaces.iter().any(|surface| surface.role == role)
                 && let Err(error) = self.create_surface(role, 0, primary, primary_name)
@@ -2683,17 +2692,17 @@ impl WinitShell {
     ) -> Result<(), String> {
         let panel = plugin
             .map(|(_, surface)| surface.clone())
-            .unwrap_or_else(|| {
-                if role == SurfaceRole::WindowPreview {
-                    crate::plugin_panel::window_preview_surface().clone()
-                } else {
-                    self.plugin_panel_surface.clone()
-                }
-            });
+            .or_else(|| {
+                fixed_plugin_surface_key(role, &self.active_fixed_plugins)
+                    .and_then(|key| self.extra_plugin_panels.get(&key).cloned())
+            })
+            .unwrap_or_else(|| self.plugin_panel_surface.clone());
         let plugin_key = match role {
             SurfaceRole::Taskbar => None,
             SurfaceRole::VolumeOsd => None,
-            SurfaceRole::WindowPreview => Some(crate::plugin_panel::window_preview_surface_key()),
+            SurfaceRole::WindowPreview => {
+                fixed_plugin_surface_key(role, &self.active_fixed_plugins)
+            }
             SurfaceRole::Panel => Some(plugin.map_or_else(
                 || nickel_core::plugins::PluginSurfaceKey {
                     plugin_id: self.plugin_panel_owner.clone(),

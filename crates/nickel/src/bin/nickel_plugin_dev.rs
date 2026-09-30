@@ -176,7 +176,7 @@ mod platform {
     };
     use nickel_shell::plugin_panel::{
         PluginPanelApplication, codex_projects_manifest, manifest, on_screen_keyboard_manifest,
-        run_manifest, window_preview_manifest,
+        run_manifest,
     };
 
     fn bundled_manifest(id: &str) -> Option<&'static PluginManifest> {
@@ -185,7 +185,6 @@ mod platform {
             run_manifest(),
             codex_projects_manifest(),
             on_screen_keyboard_manifest(),
-            window_preview_manifest(),
         ]
         .into_iter()
         .find(|manifest| manifest.id == id)

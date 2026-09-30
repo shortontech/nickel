@@ -473,6 +473,12 @@ declare const nickel: Readonly<{
     /** Requires wallpaper-read; mutations also require wallpaper-control. Image identities are opaque. */
     wallpaper:Readonly<{get():NickelWallpaperSnapshot;listImages():NickelWallpaperSnapshot["images"];setPosition(position:NickelWallpaperPosition):void;resetCustomImage():void;/** Opens the native picker; no paths or arguments are accepted. */chooseImage():void;selectImage(id:string):void}>;
     /** Requires windows-read; activation requires windows-focus, closing requires windows-context. */
+    windowPreviews:Readonly<{
+        get():Readonly<{available:boolean;open?:boolean;revision?:string;taskSwitcher?:boolean;windows:ReadonlyArray<Readonly<{id:string;title:string;applicationName:string;selected:boolean;canClose:boolean;canActivate:boolean;image:string}>>}>;
+        activate(id:string,revision:string):void;
+        close(id:string,revision:string):void;
+        openMenu(id:string,revision:string):void;
+    }>;
     windows:Readonly<{list():ReadonlyArray<Readonly<NickelNativeWindow>>;activate(id:string):void;close(id:string):void}>;
     /** Requires applications-read; launch requires applications-launch; pin operations require applications-pin. */
     applications:Readonly<{list():ReadonlyArray<Readonly<NickelApplication>>;search(query:string):void;searchResults():NickelApplicationSearch;launch(id:string):void;togglePin(id:string):void;movePin(id:string,direction:-1|1):void;retryPinSave():void}>;

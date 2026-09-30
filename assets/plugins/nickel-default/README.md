@@ -206,3 +206,16 @@ commands. Movement destinations come from `windows.destinations()` and are
 validated against the current native workspace/output inventory. `maximize` is idempotent; `restore` restores a minimized window first,
 then fullscreen or maximized state on subsequent requests. Arbitrary fullscreen
 and snapping are unavailable in the Windows adapter and are reported as such.
+
+Window previews are the ordinary `shell.window-preview` component on the optional
+`window-preview` overlay. `nickel.windowPreviews.get()` exposes at most twelve
+hover candidates or five task-switch candidates, bounded native titles, native
+capabilities, selection, opaque image keys, and a revision. Activation, close,
+and menu requests carry the native window ID and that revision. The host checks
+read/action grants, lock state, package lifetime, and current native candidates.
+
+The native preview window role remains a placement and thumbnail bridge: Windows
+attaches native thumbnails to that window and Linux routes native preview focus,
+highlight, and task-switch placement through it. Its content uses the ordinary
+shared package runtime. The same declaration is excluded from generic panel
+presentation, so only the preview bridge presents its content.

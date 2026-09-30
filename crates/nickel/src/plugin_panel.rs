@@ -99,30 +99,6 @@ pub fn on_screen_keyboard_surface_key() -> nickel_core::plugins::PluginSurfaceKe
     }
 }
 
-pub fn window_preview_manifest() -> &'static PluginManifest {
-    static MANIFEST: OnceLock<PluginManifest> = OnceLock::new();
-    MANIFEST.get_or_init(|| {
-        PluginManifest::from_json(include_str!(
-            "../../../assets/plugins/window-preview/plugin.json"
-        ))
-        .expect("bundled window preview plugin manifest must be valid")
-    })
-}
-
-pub fn window_preview_surface() -> &'static PluginSurface {
-    window_preview_manifest()
-        .surfaces
-        .first()
-        .expect("bundled window preview needs a surface")
-}
-
-pub fn window_preview_surface_key() -> nickel_core::plugins::PluginSurfaceKey {
-    nickel_core::plugins::PluginSurfaceKey {
-        plugin_id: window_preview_manifest().id.clone(),
-        surface_id: window_preview_surface().id.clone(),
-    }
-}
-
 pub fn run_manifest() -> &'static PluginManifest {
     static MANIFEST: OnceLock<PluginManifest> = OnceLock::new();
     MANIFEST.get_or_init(|| {
@@ -438,7 +414,11 @@ pub enum PluginEffect {
         mode: ProjectionMode,
         revision: String,
     },
-    Preview(PreviewAction),
+    WindowPreviewRequest {
+        plugin_id: String,
+        revision: String,
+        action: PreviewAction,
+    },
 }
 
 fn preview_request(effect: &Value) -> Result<(PreviewAction, PluginCapability), String> {
@@ -1110,14 +1090,6 @@ impl PluginPanelApplication {
     }
 
     #[cfg(test)]
-    pub(crate) fn window_preview_with_test_source(
-        source: &str,
-        data: &Value,
-    ) -> Result<Self, String> {
-        Self::new_with_manifest(source, window_preview_manifest(), Some(data.to_string()))
-    }
-
-    #[cfg(test)]
     pub(crate) fn run_with_test_source(source: &str) -> Result<Self, String> {
         Self::new_with_manifest(
             source,
@@ -1286,6 +1258,7 @@ impl PluginPanelApplication {
                     | "windows"
                     | "windowMenu"
                     | "windowDestinations"
+                    | "windowPreviews"
                     | "applications"
                     | "applicationSearch"
                     | "features"
@@ -1332,12 +1305,14 @@ impl PluginPanelApplication {
         {
             return Err("tray data requires tray-read".into());
         }
-        if fields
-            .iter()
-            .any(|(field, _)| matches!(*field, "windows" | "windowMenu" | "windowDestinations"))
-            && !manifest
-                .capabilities
-                .contains(&PluginCapability::WindowsRead)
+        if fields.iter().any(|(field, _)| {
+            matches!(
+                *field,
+                "windows" | "windowMenu" | "windowDestinations" | "windowPreviews"
+            )
+        }) && !manifest
+            .capabilities
+            .contains(&PluginCapability::WindowsRead)
         {
             return Err("window data requires windows-read".into());
         }
@@ -2158,6 +2133,38 @@ impl PluginPanelApplication {
                             approved.push(PluginEffect::ContextTrayItem { id: id.to_owned() });
                         }
 
+                        _ if effect.get("type").and_then(Value::as_str)
+                            == Some("windowPreviews.action") =>
+                        {
+                            match preview_request(&effect) {
+                                Ok((action, capability))
+                                    if effect_manifest.capabilities.contains(&capability)
+                                        && effect_manifest
+                                            .capabilities
+                                            .contains(&PluginCapability::WindowsRead) =>
+                                {
+                                    let Some(revision) = effect
+                                        .get("revision")
+                                        .and_then(Value::as_str)
+                                        .filter(|s| !s.is_empty() && s.len() <= 128)
+                                    else {
+                                        self.last_error =
+                                            Some("preview revision is invalid".into());
+                                        return;
+                                    };
+                                    approved.push(PluginEffect::WindowPreviewRequest {
+                                        plugin_id: effect_manifest.id.clone(),
+                                        revision: revision.to_owned(),
+                                        action,
+                                    });
+                                }
+                                _ => {
+                                    self.last_error =
+                                        Some("preview action is invalid or not granted".into());
+                                    return;
+                                }
+                            }
+                        }
                         _ if effect["type"] == "preferences.set" => {
                             let request =
                                 crate::preferences_capabilities::PreferencesEffect::parse(&effect)
@@ -3815,7 +3822,7 @@ mod tests {
 
     #[test]
     fn bundled_plugin_packages_validate_with_manifest_sample_data() {
-        for name in ["hello-panel", "run", "window-preview"] {
+        for name in ["hello-panel", "run"] {
             let directory = format!("{}/../../assets/plugins/{name}", env!("CARGO_MANIFEST_DIR"));
             let package = PluginPackage::load(directory).unwrap();
             PluginPanelApplication::validate_package(&package)
@@ -4013,74 +4020,46 @@ mod tests {
     }
 
     #[test]
-    fn bundled_window_preview_renders_and_requests_a_typed_window_action() {
-        let data = serde_json::json!({"windows": [{
-            "id": "71", "title": "Document", "accessibleName": "Document",
-            "closable": true, "index": 0, "imageWidth": 244, "selected": false
-        }]});
-        let app = PluginPanelApplication::bundled_with_data(
-            crate::plugin_panel::window_preview_manifest(),
-            "main.js",
-            data.to_string(),
+    fn shared_window_preview_uses_public_snapshot_and_typed_revision_request() {
+        let package = crate::bundled_plugin_assets::load_package("nickel-default").unwrap();
+        let surface = package
+            .manifest
+            .surfaces
+            .iter()
+            .find(|s| s.id == "window-preview")
+            .unwrap();
+        let mut app =
+            PluginPanelApplication::from_package_surface(&package, &Default::default(), surface)
+                .unwrap();
+        app.sync_host_data_field(
+            "windowPreviews",
+            &serde_json::json!({"available":true,"revision":"r1","windows":[
+                {"id":"71","title":"Document","image":"window:71","canClose":true},
+                {"id":"72","title":"Mail","image":"window:72","canClose":true}
+            ]}),
         )
         .unwrap();
-        assert!(matches!(
-            &app.node,
-            PanelNode::Surface {
-                window_request: Some(_),
-                width: Length::Percent(1.0),
-                height: Length::Percent(1.0),
-                ..
-            }
-        ));
-        let mut host = nickel_ui::UiHost::new(app, 300, 214);
-        let target = host
-            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
-                role: nickel_ui::SemanticRole::Button,
-                name: "Document".into(),
-            })
-            .expect("window preview image button");
-        host.step(nickel_ui::HostBatch {
-            events: vec![nickel_ui::HostEvent::Ui(
-                nickel_ui::UiEvent::AccessibilityActivate(target.id),
-            )],
-            ..Default::default()
-        });
-        assert_eq!(
-            host.application_mut().take_effects(),
-            vec![PluginEffect::Preview(PreviewAction::Activate(
-                crate::model::WindowId(71)
-            ))]
-        );
-
-        let two_windows = serde_json::json!({"windows": [
-            {"id":"71","title":"Document","accessibleName":"Document","closable":true,"imageWidth":244,"selected":false},
-            {"id":"72","title":"Mail","accessibleName":"Mail","closable":true,"imageWidth":244,"selected":false}
-        ]});
-        let wide = nickel_ui::UiHost::new(
-            PluginPanelApplication::bundled_with_data(
-                crate::plugin_panel::window_preview_manifest(),
-                "main.js",
-                two_windows.to_string(),
-            )
-            .unwrap(),
-            600,
-            214,
-        );
-        let first = wide
-            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
-                role: SemanticRole::Button,
-                name: "Document".into(),
-            })
-            .unwrap();
-        let second = wide
-            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
-                role: SemanticRole::Button,
-                name: "Mail".into(),
-            })
-            .unwrap();
+        let mut host = nickel_ui::UiHost::new(app, 600, 214);
+        let selector = |name: &str| nickel_ui::SemanticSelector::RoleAndName {
+            role: SemanticRole::Button,
+            name: name.into(),
+        };
+        let first = host.query_unique(&selector("Document")).unwrap();
+        let second = host.query_unique(&selector("Mail")).unwrap();
         assert!(second.bounds.origin.x > first.bounds.origin.x);
         assert!(second.bounds.origin.x + second.bounds.size.width <= 600.0);
+        host.perform_semantic_action(
+            first.id,
+            nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
+        );
+        assert_eq!(
+            host.application_mut().take_effects(),
+            vec![PluginEffect::WindowPreviewRequest {
+                plugin_id: "nickel-default".into(),
+                revision: "r1".into(),
+                action: PreviewAction::Activate(crate::model::WindowId(71))
+            }]
+        );
     }
 
     #[test]
@@ -6862,9 +6841,13 @@ mod tests {
     #[test]
     fn external_preview_actions_use_grants_instead_of_plugin_identity() {
         for (request, capability, expected) in [(
-            "{type: 'preview-action', action: 'activate', window: '71'}",
+            "{type: 'windowPreviews.action', action: 'activate', window: '71', revision: 'r1'}",
             PluginCapability::WindowsFocus,
-            PluginEffect::Preview(PreviewAction::Activate(crate::model::WindowId(71))),
+            PluginEffect::WindowPreviewRequest {
+                plugin_id: "org.example.desktop-controls".into(),
+                revision: "r1".into(),
+                action: PreviewAction::Activate(crate::model::WindowId(71)),
+            },
         )] {
             let mut external_manifest = manifest().clone();
             external_manifest.id = "org.example.desktop-controls".into();
@@ -6882,6 +6865,13 @@ mod tests {
             denied.shortcut_outcome(Shortcut::Escape);
             assert!(denied.take_effects().is_empty());
             package.manifest.capabilities.push(capability);
+            let mut missing_read = PluginPanelApplication::from_package(&package).unwrap();
+            missing_read.shortcut_outcome(Shortcut::Escape);
+            assert!(missing_read.take_effects().is_empty());
+            package
+                .manifest
+                .capabilities
+                .push(PluginCapability::WindowsRead);
             let mut granted = PluginPanelApplication::from_package(&package).unwrap();
             granted.shortcut_outcome(Shortcut::Escape);
             assert_eq!(granted.take_effects(), vec![expected]);

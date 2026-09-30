@@ -723,6 +723,7 @@ pub struct LiveShell {
     #[cfg(target_os = "windows")]
     idle_policy: nickel_core::idle::IdlePolicy,
     preview_group: Option<usize>,
+    preview_generation: u64,
     preview_pending: Option<(usize, Instant)>,
     preview_focus_requested: bool,
     preview_pointer_inside: bool,
@@ -1283,7 +1284,6 @@ impl LiveShell {
         plugin_registry.register(crate::plugin_panel::run_manifest().clone())?;
         plugin_registry.register(crate::plugin_panel::codex_projects_manifest().clone())?;
         plugin_registry.register(crate::plugin_panel::on_screen_keyboard_manifest().clone())?;
-        plugin_registry.register(crate::plugin_panel::window_preview_manifest().clone())?;
         #[cfg(test)]
         let catalog = nickel_core::plugins::PluginCatalog::default();
         #[cfg(not(test))]
@@ -1523,6 +1523,7 @@ impl LiveShell {
                 shell_settings.idle_suspend_seconds,
             ),
             preview_group: None,
+            preview_generation: 1,
             preview_pending: None,
             preview_focus_requested: false,
             preview_pointer_inside: false,
@@ -1621,15 +1622,6 @@ impl LiveShell {
             let data = shell.keyboard_plugin_data();
             shell.start_initial_bundled_surface(
                 crate::plugin_panel::on_screen_keyboard_manifest(),
-                data.to_string(),
-            )?;
-        }
-        if plugin_activation
-            .desired_enabled(&crate::plugin_panel::window_preview_manifest().id, true)
-        {
-            let data = serde_json::json!({"windows": []});
-            shell.start_initial_bundled_surface(
-                crate::plugin_panel::window_preview_manifest(),
                 data.to_string(),
             )?;
         }
@@ -3000,6 +2992,7 @@ impl LiveShell {
             return Err(error);
         }
         if old != id {
+            self.retire_preview_plugin_state();
             for (key, (_, host)) in &self.plugin_surface_hosts {
                 if key.plugin_id == old
                     && let Err(error) = host.application().retire_surface()
@@ -3169,7 +3162,7 @@ impl LiveShell {
     ) -> HashSet<nickel_core::plugins::PluginSurfaceKey> {
         [
             crate::plugin_panel::run_surface_key(),
-            crate::plugin_panel::window_preview_surface_key(),
+            self.active_shell_surface_key("window-preview"),
         ]
         .into_iter()
         .filter(|key| self.plugin_surface_matches(key))
@@ -3243,7 +3236,7 @@ impl LiveShell {
             // Both plugins share one native popup. Distinguish their tokens
             // even when their host-local frame generations happen to match.
             (self.run_host_ref()?.inspect(), 1_u64 << 63)
-        } else if *key == crate::plugin_panel::window_preview_surface_key() {
+        } else if *key == self.active_shell_surface_key("window-preview") {
             if !self.preview_plugin_active() {
                 return None;
             }
@@ -3942,6 +3935,7 @@ impl LiveShell {
             ("windows", self.external_plugin_windows(id)),
             ("windowMenu", self.plugin_window_menu(id)),
             ("windowDestinations", self.plugin_window_destinations(id)),
+            ("windowPreviews", self.plugin_window_previews(id)),
             ("applications", self.external_plugin_applications(id)),
             ("applicationSearch", self.plugin_application_search(id)),
             ("notifications", self.external_plugin_notifications(id)),
@@ -3985,12 +3979,8 @@ impl LiveShell {
                 (id, fields)
             })
             .collect::<std::collections::BTreeMap<_, _>>();
-        let preview_projection = if *key == crate::plugin_panel::window_preview_surface_key() {
-            let group = self.preview_plugin_group()?;
-            Some(self.preview_plugin_projection(&group))
-        } else {
-            None
-        };
+        let window_previews = self.plugin_window_previews(&key.plugin_id);
+        let preview_images = self.plugin_window_preview_images(&key.plugin_id);
         let windows = self.external_plugin_windows(&key.plugin_id);
         let window_menu = self.plugin_window_menu(&key.plugin_id);
         let window_destinations = self.plugin_window_destinations(&key.plugin_id);
@@ -4027,13 +4017,7 @@ impl LiveShell {
         let result = (|| {
             let host = self.plugin_panel_host_for(key)?;
             let projected = (|| -> Result<bool, String> {
-                let preview_changed = if let Some((data, images)) = preview_projection {
-                    let data_changed = host.application_mut().sync_data(&data)?;
-                    let images_changed = host.application_mut().sync_images(images);
-                    data_changed || images_changed
-                } else {
-                    false
-                };
+                application_images.extend(preview_images);
                 let keyboard_changed = keyboard_data
                     .as_ref()
                     .map(|data| host.application_mut().sync_data(data))
@@ -4044,6 +4028,7 @@ impl LiveShell {
                     ("windows", windows.as_ref()),
                     ("windowMenu", window_menu.as_ref()),
                     ("windowDestinations", window_destinations.as_ref()),
+                    ("windowPreviews", window_previews.as_ref()),
                     ("applications", applications.as_ref()),
                     ("applicationSearch", application_search.as_ref()),
                     ("features", features.as_ref()),
@@ -4072,14 +4057,14 @@ impl LiveShell {
                 let dependency_changed = host
                     .application_mut()
                     .sync_composition_dependency_fields(&dependency_fields)?;
-                let application_images_changed = if applications.is_some() {
-                    host.application_mut()
-                        .sync_application_images(application_images)
-                } else {
-                    false
-                };
-                Ok(preview_changed
-                    || keyboard_changed
+                let application_images_changed =
+                    if applications.is_some() || window_previews.is_some() {
+                        host.application_mut()
+                            .sync_application_images(application_images)
+                    } else {
+                        false
+                    };
+                Ok(keyboard_changed
                     || resource_changed
                     || dependency_changed
                     || application_images_changed)
@@ -4972,6 +4957,9 @@ impl LiveShell {
         }
         tracing::warn!(plugin = id, %error, "installed plugin runtime failed");
         let _ = self.plugin_registry.mark_failed(id, error);
+        if id == self.active_shell_package_id {
+            self.retire_preview_plugin_state();
+        }
         self.package_runtimes.remove(id);
         self.retire_installed_composition_owner(id);
         if let Err(error) = self.reconcile_installed_contributors() {
@@ -5055,8 +5043,6 @@ impl LiveShell {
             Self::retire_keyboard_plugin_state
         } else if id == crate::plugin_panel::run_manifest().id {
             Self::retire_run_plugin_state
-        } else if id == crate::plugin_panel::window_preview_manifest().id {
-            Self::retire_preview_plugin_state
         } else {
             return self.fail_installed_plugin_runtime(id, error);
         };
@@ -5081,7 +5067,9 @@ impl LiveShell {
     }
 
     fn retire_preview_plugin_state(&mut self) {
-        self.retire_extra_panel_plugin_state(&crate::plugin_panel::window_preview_manifest().id);
+        let key = self.active_shell_surface_key("window-preview");
+        self.plugin_surface_hosts.remove(&key);
+        self.plugin_panel_memory.remove(&key);
         let preview_was_open = self.preview_group.is_some() || self.task_switcher_group.is_some();
         if self.task_switcher_group.is_some() {
             self.apply_task_switch_action(nickel_core::hotkeys::HotkeyAction::CancelSwitch);
@@ -5091,14 +5079,6 @@ impl LiveShell {
         } else {
             self.preview_pending = None;
         }
-    }
-
-    fn fail_preview_plugin_runtime(&mut self, error: String) {
-        self.fail_bundled_plugin_runtime(
-            &crate::plugin_panel::window_preview_manifest().id,
-            error,
-            Self::retire_preview_plugin_state,
-        );
     }
 
     /// Starts or retires a plugin instance after Settings has shown its grants.
@@ -5427,6 +5407,9 @@ impl LiveShell {
         self.plugin_activation_generation =
             self.plugin_activation_generation.wrapping_add(1).max(1);
         if !enabled {
+            if id == self.active_shell_package_id {
+                self.retire_preview_plugin_state();
+            }
             self.package_runtimes.remove(id);
             self.application_search.retire(id);
             self.plugin_surface_hosts
@@ -5443,8 +5426,6 @@ impl LiveShell {
                 self.retire_codex_projects_plugin_state();
             } else if id == crate::plugin_panel::on_screen_keyboard_manifest().id {
                 self.retire_keyboard_plugin_state();
-            } else if id == crate::plugin_panel::window_preview_manifest().id {
-                self.retire_preview_plugin_state();
             }
             if let Err(error) = self.reconcile_installed_contributors() {
                 tracing::warn!(%error,"contributor retirement refresh failed");
@@ -5508,13 +5489,6 @@ impl LiveShell {
             let data = self.keyboard_plugin_data();
             self.install_bundled_surface(
                 crate::plugin_panel::on_screen_keyboard_manifest(),
-                data.to_string(),
-                crate::plugin_panel::PluginImages::new(),
-            )
-        } else if id == crate::plugin_panel::window_preview_manifest().id {
-            let data = serde_json::json!({"windows": []});
-            self.install_bundled_surface(
-                crate::plugin_panel::window_preview_manifest(),
                 data.to_string(),
                 crate::plugin_panel::PluginImages::new(),
             )
@@ -6101,13 +6075,7 @@ impl LiveShell {
     fn preview_plugin_host_ref(
         &self,
     ) -> Option<&nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>> {
-        self.plugin_panel_host_ref(&crate::plugin_panel::window_preview_surface_key())
-    }
-
-    fn preview_plugin_host_mut(
-        &mut self,
-    ) -> Option<&mut nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>> {
-        self.plugin_panel_host_for(&crate::plugin_panel::window_preview_surface_key())
+        self.plugin_panel_host_ref(&self.active_shell_surface_key("window-preview"))
     }
 
     fn reconcile_plugin_surface_root(
@@ -7010,8 +6978,30 @@ impl LiveShell {
                         let _ = (mode, revision);
                     }
                 }
-                crate::plugin_panel::PluginEffect::Preview(action) => {
-                    if self.preview_plugin_action_allowed(action) {
+                crate::plugin_panel::PluginEffect::WindowPreviewRequest {
+                    plugin_id,
+                    revision,
+                    action,
+                } => {
+                    if self
+                        .plugin_window_previews(&plugin_id)
+                        .and_then(|v| {
+                            v.get("revision")
+                                .and_then(serde_json::Value::as_str)
+                                .map(str::to_owned)
+                        })
+                        .as_deref()
+                        == Some(&revision)
+                        && self.plugin_registry.get(&plugin_id).is_some_and(|entry| {
+                            entry.manifest.capabilities.contains(&match action {
+                                PreviewAction::Activate(_) => {
+                                    nickel_core::plugins::PluginCapability::WindowsFocus
+                                }
+                                _ => nickel_core::plugins::PluginCapability::WindowsContext,
+                            })
+                        })
+                        && self.preview_plugin_action_allowed(action)
+                    {
                         self.apply_preview_action(action);
                         changed = true;
                     }
@@ -8083,11 +8073,7 @@ impl LiveShell {
     }
 
     fn open_window_preview(&mut self, index: usize) {
-        if self.preview_plugin_host_ref().is_none() {
-            return;
-        }
-        if self.preview_group == Some(index) {
-            self.preview_pending = None;
+        if self.locked || !self.active_shell_declares("window-preview") {
             return;
         }
         let groups = self.panel_groups();
@@ -8097,8 +8083,17 @@ impl LiveShell {
         {
             return;
         }
+        self.set_default_shell_surface_visible("window-preview", true);
+        if self.preview_plugin_host_ref().is_none() {
+            return;
+        }
+        if self.preview_group == Some(index) {
+            self.preview_pending = None;
+            return;
+        }
         self.preview_pending = None;
         self.preview_group = Some(index);
+        self.preview_generation = self.preview_generation.wrapping_add(1).max(1);
         self.preview_images.clear();
         self.preview_refresh_deadline = None;
         self.preview_hovered = None;
@@ -8166,6 +8161,7 @@ impl LiveShell {
 
     fn close_window_preview(&mut self) {
         self.set_default_shell_surface_visible("window-menu", false);
+        self.preview_generation = self.preview_generation.wrapping_add(1).max(1);
         self.preview_group = None;
         self.preview_pending = None;
         self.preview_focus_requested = false;
@@ -8188,36 +8184,9 @@ impl LiveShell {
     }
 
     fn clear_preview_plugin_payload(&mut self) {
-        if let Some(host) = self.preview_plugin_host_mut() {
-            let data_changed = match host
-                .application_mut()
-                .sync_data(&serde_json::json!({"windows": []}))
-            {
-                Ok(changed) => changed,
-                Err(error) => {
-                    self.fail_preview_plugin_runtime(error);
-                    return;
-                }
-            };
-            let images_changed = host.application_mut().sync_images(Default::default());
-            let outcome = host.step(HostBatch {
-                application_changed: data_changed || images_changed,
-                events: vec![HostEvent::Poll],
-                ..HostBatch::default()
-            });
-            if let Some(error) = host.application_mut().take_runtime_failure() {
-                self.fail_preview_plugin_runtime(error);
-                return;
-            }
-            let _ = self.plugin_registry.record_memory(
-                &crate::plugin_panel::window_preview_manifest().id,
-                nickel_core::plugins::PluginMemory {
-                    native_ui_bytes: Some(outcome.telemetry.retained_frame_bytes as u64),
-                    ..Default::default()
-                },
-            );
+        if self.task_switcher_group.is_none() && self.preview_group.is_none() {
+            self.set_default_shell_surface_visible("window-preview", false);
         }
-        self.maybe_publish_plugin_status();
     }
 
     fn dismiss_window_menu(&mut self) {
@@ -8538,6 +8507,10 @@ impl LiveShell {
     }
 
     fn rebuild_task_switcher_preview(&mut self) {
+        self.preview_generation = self.preview_generation.wrapping_add(1).max(1);
+        if self.active_shell_declares("window-preview") && !self.locked {
+            self.set_default_shell_surface_visible("window-preview", true);
+        }
         let visible = self.task_switcher.visible_range(5);
         let ids = self.task_switcher.candidates()[visible].to_vec();
         let windows = ids
@@ -10111,7 +10084,7 @@ impl LiveShell {
             preview_dimensions(group.windows.len().min(12))
         };
         self.plugin_panel_scene(
-            &crate::plugin_panel::window_preview_surface_key(),
+            &self.active_shell_surface_key("window-preview"),
             width,
             height,
         )
@@ -10134,7 +10107,7 @@ impl LiveShell {
     }
 
     fn preview_plugin_action_allowed(&mut self, action: PreviewAction) -> bool {
-        if !self.preview_plugin_active() {
+        if self.locked || !self.preview_plugin_active() {
             return false;
         }
         let (PreviewAction::Activate(id) | PreviewAction::Close(id) | PreviewAction::OpenMenu(id)) =
@@ -10250,74 +10223,60 @@ impl LiveShell {
         })
     }
 
-    fn preview_plugin_projection(
-        &self,
-        group: &crate::model::WindowGroup,
-    ) -> (serde_json::Value, crate::plugin_panel::PluginImages) {
+    fn plugin_window_previews(&mut self, id: &str) -> Option<serde_json::Value> {
+        if !self
+            .plugin_registry
+            .get(id)
+            .is_some_and(|entry| entry.health == nickel_core::plugins::PluginHealth::Running)
+            || !self
+                .external_plugin_packages
+                .get(id)?
+                .manifest
+                .capabilities
+                .contains(&nickel_core::plugins::PluginCapability::WindowsRead)
+        {
+            return None;
+        }
+        if self.locked {
+            return Some(serde_json::json!({"available":false,"windows":[]}));
+        }
+        let group = self.preview_plugin_group();
         let switcher = self.task_switcher_group.is_some();
-        let limit = if switcher { 5 } else { 12 };
         let selected = self.task_switcher.selected().copied();
-        let windows = group
+        Some(crate::window_preview_capabilities::snapshot(
+            group.as_ref(),
+            switcher,
+            selected,
+            self.plugin_activation_generation,
+            self.preview_generation,
+        ))
+    }
+
+    fn plugin_window_preview_images(&mut self, id: &str) -> crate::plugin_panel::PluginImages {
+        if self.locked || self.plugin_window_previews(id).is_none() {
+            return Default::default();
+        }
+        let Some(group) = self.preview_plugin_group() else {
+            return Default::default();
+        };
+        group
             .windows
             .iter()
-            .take(limit)
-            .enumerate()
-            .map(|(index, window)| {
-                let title = if window.title.is_empty() {
-                    &group.application_name
-                } else {
-                    &window.title
-                };
-                let title = if title.is_empty() {
-                    "Untitled window"
-                } else {
-                    title
-                };
-                let title = title.chars().take(120).collect::<String>();
-                let accessible_name = if switcher {
-                    format!(
-                        "{}, {} of {}{}",
-                        title,
-                        index + 1,
-                        group.windows.len(),
-                        if selected == Some(window.id) {
-                            ", selected"
-                        } else {
-                            ""
-                        }
-                    )
-                } else {
-                    title.clone()
-                };
-                serde_json::json!({
-                    "id": window.id.0.to_string(),
-                    "title": title,
-                    "accessibleName": accessible_name,
-                    "closable": window.state.capabilities.close,
-                    "selected": switcher && selected == Some(window.id),
-                    "imageWidth": if switcher { 188 } else { 244 },
-                    "index": index,
-                })
+            .take(if self.task_switcher_group.is_some() {
+                5
+            } else {
+                12
             })
-            .collect::<Vec<_>>();
-        let images = group
-            .windows
-            .iter()
-            .take(limit)
             .enumerate()
             .filter_map(|(index, window)| {
                 self.preview_images.get(&window.id).map(|image| {
                     (
                         format!("window:{}", window.id.0),
-                        (0x7000_u16 + index as u16, Arc::clone(image)),
+                        (0x7000 + index as u16, Arc::clone(image)),
                     )
                 })
             })
-            .collect();
-        (
-            serde_json::json!({"windows": windows, "taskSwitcher": switcher}),
-            images,
-        )
+            .collect()
     }
 
     fn preview_plugin_event(
@@ -10326,35 +10285,13 @@ impl LiveShell {
         size: (u32, u32),
         authority: Option<nickel_ui::NormalizedIngressAuthority>,
     ) -> nickel_ui::HostEventOutcome {
-        let Some(group) = self.preview_plugin_group() else {
-            return Default::default();
-        };
-        let (data, images) = self.preview_plugin_projection(&group);
-        let Some(host) = self.preview_plugin_host_mut() else {
-            return Default::default();
-        };
-        let data_changed = match host.application_mut().sync_data(&data) {
-            Ok(changed) => changed,
-            Err(error) => {
-                self.fail_preview_plugin_runtime(error);
-                return Default::default();
-            }
-        };
-        let images_changed = host.application_mut().sync_images(images);
-        let mut outcome = host.step(HostBatch {
-            application_changed: data_changed || images_changed,
-            surface_size: Some(size),
-            events: vec![event],
-            normalized_authorities: authority.into_iter().collect(),
-            ..Default::default()
-        });
-        let effects = host.application_mut().take_effects();
-        if let Some(error) = host.application_mut().take_runtime_failure() {
-            self.fail_preview_plugin_runtime(error);
-            return Default::default();
-        }
-        outcome.changed |= self.apply_plugin_effects(effects);
-        outcome
+        self.plugin_surface_host_event(
+            &self.active_shell_surface_key("window-preview"),
+            event,
+            size,
+            None,
+            authority,
+        )
     }
 
     pub fn set_global_shortcut_capability(

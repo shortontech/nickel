@@ -4020,3 +4020,5 @@ mod tests {
         assert_eq!(ready.cache_entries, 3);
     }
 }
+
+mod window_preview_capabilities;

@@ -155,8 +155,17 @@ mod shell_surface_identity_tests {
 
     #[test]
     fn preview_accepts_only_overlay_plugin_placement() {
-        let key = crate::plugin_panel::window_preview_surface_key();
-        let surface = crate::plugin_panel::window_preview_surface();
+        let package = crate::bundled_plugin_assets::load_package("nickel-default").unwrap();
+        let key = nickel_core::plugins::PluginSurfaceKey {
+            plugin_id: package.manifest.id.clone(),
+            surface_id: "window-preview".into(),
+        };
+        let surface = package
+            .manifest
+            .surfaces
+            .iter()
+            .find(|s| s.id == "window-preview")
+            .unwrap();
         let mut identity = ShellSurfaceIdentity {
             application_id: "io.nickel.shell.surface.42.12".into(),
             role: ShellRole::Preview,

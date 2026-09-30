@@ -15,16 +15,16 @@ div.preview-content {
     gap: 8px;
 }
 
-text {
+window.window-preview text {
     color: #f3f5f8;
     font-size: 13px;
 }
 
-row {
+window.window-preview row {
     gap: 4px;
 }
 
-button {
+window.window-preview button {
     padding: 2px 6px;
     background: transparent;
     border: 1px solid transparent;

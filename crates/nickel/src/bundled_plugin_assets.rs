@@ -14,10 +14,6 @@ pub(crate) fn resolve(
             include_str!("../../../assets/plugins/on-screen-keyboard/main.js"),
             include_str!("../../../assets/plugins/on-screen-keyboard/ui.css"),
         ),
-        ("org.nickel.window-preview", "main.js") => (
-            include_str!("../../../assets/plugins/window-preview/main.js"),
-            include_str!("../../../assets/plugins/window-preview/ui.css"),
-        ),
         ("org.nickel.run", "main.js") => (
             include_str!("../../../assets/plugins/run/main.js"),
             include_str!("../../../assets/plugins/run/ui.css"),

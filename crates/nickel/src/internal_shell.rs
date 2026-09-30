@@ -300,7 +300,13 @@ impl InternalShellCoordinator {
         // from their former geometry must not activate the replacement keyboard.
         self.shell.cancel_keyboard_gestures();
         self.shell.retain_panel_outputs(outputs);
-        let panel_surfaces = self.shell.shell_panel_surfaces();
+        let fixed_keys = self.shell.shell_fixed_surface_keys();
+        let panel_surfaces = self
+            .shell
+            .shell_panel_surfaces()
+            .into_iter()
+            .filter(|(key, _)| !fixed_keys.contains(key))
+            .collect::<Vec<_>>();
         let taskbar_key = self.shell.taskbar_surface_key();
         let mut desired = Vec::new();
         for (index, output) in outputs.iter().enumerate() {
@@ -366,7 +372,7 @@ impl InternalShellCoordinator {
                 }
                 let plugin = match role {
                     SurfaceRole::WindowPreview => {
-                        Some(crate::plugin_panel::window_preview_surface_key())
+                        Some(self.shell.active_shell_surface_key("window-preview"))
                     }
                     _ => None,
                 };
@@ -1498,9 +1504,11 @@ impl InternalShellCoordinator {
 
     /// Service transitions can open or retire ordinary package windows between input turns.
     pub(crate) fn plugin_surface_topology_changed(&self) -> bool {
+        let fixed = self.shell.shell_fixed_surface_keys();
         let desired = self
             .plugin_surfaces()
             .into_iter()
+            .filter(|(key, _)| !fixed.contains(key))
             .map(|(key, _)| key)
             .collect::<HashSet<_>>();
         let mounted = self
@@ -2437,6 +2445,10 @@ mod tests {
     #[test]
     fn preview_slot_uses_its_plugin_surface_identity() {
         let mut coordinator = coordinator();
+        coordinator
+            .shell
+            .show_plugin_window("nickel-default", "window-preview")
+            .unwrap();
         coordinator.set_outputs(&[InternalOutput {
             x: 0,
             y: 0,
@@ -2448,9 +2460,17 @@ mod tests {
         let preview = coordinator
             .surface(SurfaceRole::WindowPreview, None)
             .unwrap();
+        let preview_key = coordinator.shell.active_shell_surface_key("window-preview");
+        assert!(
+            !coordinator
+                .entries
+                .iter()
+                .any(|entry| entry.role == SurfaceRole::Panel
+                    && entry.plugin.as_ref() == Some(&preview_key))
+        );
         assert_eq!(
             preview.plugin,
-            Some(crate::plugin_panel::window_preview_surface_key())
+            Some(coordinator.shell.active_shell_surface_key("window-preview"))
         );
     }
 

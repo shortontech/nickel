@@ -14,11 +14,12 @@ import { WindowMenu } from "./WindowMenu.js";
 import { Taskbar } from "./Taskbar.js";
 import { Launcher } from "./Launcher.js";
 import { QuickSettings } from "./QuickSettings.js";
+import { Preview } from "./Preview.js";
 import { VolumeOSD } from "./VolumeOSD.js";
 import { Notifications } from "./Notifications.js";
 import { Settings, SettingsNavigation, SettingControl } from "./Settings.js";
 
-export { WindowMenu, Taskbar, Launcher, QuickSettings, Notifications, VolumeOSD, Settings };
+export { Preview, WindowMenu, Taskbar, Launcher, QuickSettings, Notifications, VolumeOSD, Settings };
 export { SettingsNavigation, SettingControl };
 
 // The shared package host supplies surface visibility; callers may provide snapshots.
@@ -30,6 +31,7 @@ export function Shell(props) {
     const Notifications = nickel.component('shell.notifications');
     const Settings = nickel.component('shell.settings');
     const VolumeOSD = nickel.component('shell.volumeOSD');
+    const Preview = nickel.component('shell.window-preview');
     const state = nickel.data.shell || {};
     const visible = props?.visible || state.visible || {[nickel.data.surface?.id === 'quick-settings' ? 'quickSettings' : nickel.data.surface?.id === 'window-menu' ? 'windowMenu' : nickel.data.surface?.id === 'volume-osd' ? 'volumeOSD' : nickel.data.surface?.id]: true};
     const snapshots = props?.snapshots || state.snapshots || {};
@@ -40,6 +42,7 @@ export function Shell(props) {
         {visible.notifications ? <Notifications data={snapshots.notifications} /> : null}
         {visible.windowMenu ? <WindowMenu /> : null}
         {visible.volumeOSD ? <VolumeOSD /> : null}
+        {visible["window-preview"] ? <Preview /> : null}
         {visible.settings ? <Settings /> : null}
     </>;
 }

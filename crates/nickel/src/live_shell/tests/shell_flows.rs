@@ -49,152 +49,33 @@
 
 
     #[test]
-    fn window_preview_plugin_reports_memory_and_can_be_disabled_or_enabled() {
-        let mut shell = LiveShell::new().unwrap();
+    fn window_preview_shared_surface_retires_and_public_requests_recheck_revision_lock() {
+        let host = Arc::new(crate::session_host::StagedSessionHost::new(crate::session_host::default_session_host()));
+        let mut shell = LiveShell::new_with_session_host(host.clone()).unwrap();
         shell.launcher = crate::launcher::Launcher::new(Vec::new());
-        shell.windows = vec![OpenWindow {
-            id: WindowId(71),
-            application_id: None,
-            active: true,
-            title: "Document".into(),
-            state: Default::default(),
-        }];
-        let id = &crate::plugin_panel::window_preview_manifest().id;
-        let key = crate::plugin_panel::window_preview_surface_key();
+        shell.windows = vec![OpenWindow {id:WindowId(71),application_id:None,active:true,title:"Document".into(),state:Default::default()}];
         shell.open_window_preview(0);
-        shell.preview_images.insert(
-            WindowId(71),
-            Arc::new(RgbaImage::from_pixel(8, 8, Rgba([20, 40, 60, 255]))),
-        );
-        assert!(!shell.scene(SurfaceRole::WindowPreview, 300, 214).is_empty());
-        assert!(shell.plugin_surface_matches(&key));
-        assert!(shell
-            .plugin_surface_scene_for_output(&key, None, 300, 214)
-            .is_some());
-        assert!(shell.plugin_surface_change_token(&key).is_some());
         assert!(shell.preview_plugin_active());
-        let preview_host = shell.preview_plugin_host_mut().unwrap();
-        let image_bytes = preview_host.application().retained_image_bytes();
-        assert!(image_bytes > 0);
-        let frame_bytes = preview_host
-            .step(HostBatch::default())
-            .telemetry
-            .retained_frame_bytes as u64;
-        let status = shell
-            .plugin_status_snapshot()
-            .plugins
-            .into_iter()
-            .find(|plugin| &plugin.id == id)
-            .unwrap();
-        assert!(status.desired_enabled);
-        assert_eq!(
-            status.memory.native_ui_bytes,
-            Some(frame_bytes.saturating_add(image_bytes))
-        );
-
-        assert!(shell.set_plugin_enabled(id, false).unwrap());
+        assert!(!shell.window_preview_scene().is_empty());
+        assert!(shell.plugin_registry.get("org.nickel.window-preview").is_none());
+        let revision = shell.plugin_window_previews("nickel-default").unwrap()["revision"].as_str().unwrap().to_owned();
+        let request = |revision:String| crate::plugin_panel::PluginEffect::WindowPreviewRequest {plugin_id:"nickel-default".into(),revision,action:crate::window_preview::PreviewAction::Close(WindowId(71))};
+        host.take_commands();
+        assert!(!shell.apply_plugin_effects(vec![request("stale".into())]));
+        shell.close_window_preview();
+        shell.open_window_preview(0);
+        assert!(!shell.apply_plugin_effects(vec![request(revision.clone())]));
+        let revision = shell.plugin_window_previews("nickel-default").unwrap()["revision"].as_str().unwrap().to_owned();
+        shell.locked=true;
+        assert_eq!(shell.plugin_window_previews("nickel-default").unwrap()["available"],false);
+        assert!(!shell.apply_plugin_effects(vec![request(revision.clone())]));
+        shell.locked=false;
+        assert!(shell.apply_plugin_effects(vec![request(revision)]));
+        assert!(host.take_commands().iter().any(|command|matches!(command,crate::platform::ShellCommand::WindowAction{window:WindowId(71),action:crate::platform::WindowAction::Close})));
+        shell.set_plugin_enabled("nickel-default",false).unwrap();
         assert!(!shell.preview_plugin_active());
-        assert!(!shell.plugin_surface_matches(&key));
-        assert!(shell.plugin_surface_change_token(&key).is_none());
         assert!(shell.preview_group.is_none());
-        assert_eq!(
-            shell.plugin_registry().get(id).unwrap().memory,
-            nickel_core::plugins::PluginMemory::default()
-        );
-        assert!(!shell.surface_visible(SurfaceRole::WindowPreview));
-        assert!(shell.scene(SurfaceRole::WindowPreview, 300, 214).is_empty());
-        shell.open_window_preview(0);
-        assert!(!shell.surface_visible(SurfaceRole::WindowPreview));
-
-        assert!(shell.set_plugin_enabled(id, true).unwrap());
-        shell.open_window_preview(0);
-        assert!(shell.preview_plugin_active());
-        assert!(!shell.scene(SurfaceRole::WindowPreview, 300, 214).is_empty());
-    }
-
-    #[test]
-    fn window_preview_projection_failure_closes_its_surface() {
-        let mut shell = LiveShell::new().unwrap();
-        shell.launcher = crate::launcher::Launcher::new(Vec::new());
-        shell.windows = vec![OpenWindow {
-            id: WindowId(71),
-            application_id: None,
-            active: true,
-            title: "Document".into(),
-            state: Default::default(),
-        }];
-        let application = crate::plugin_panel::PluginPanelApplication::window_preview_with_test_source(
-            "function App() { if (nickel.data.windows.length > 0) throw Error('preview projection exploded'); return h(Panel, {}, h(Text, {}, 'Preview ready')); }",
-            &serde_json::json!({"windows": []}),
-        )
-        .unwrap();
-        shell.plugin_surface_hosts.insert(
-            crate::plugin_panel::window_preview_surface_key(),
-            (
-                crate::plugin_panel::window_preview_surface().clone(),
-                nickel_ui::UiHost::new(application, 300, 214),
-            ),
-        );
-        shell.open_window_preview(0);
-        assert!(shell.window_preview_scene().is_empty());
-        let id = &crate::plugin_panel::window_preview_manifest().id;
-        let entry = shell.plugin_registry().get(id).unwrap();
-        assert!(entry.desired_enabled);
-        assert!(matches!(&entry.health, nickel_core::plugins::PluginHealth::Failed(error) if error.contains("preview projection exploded")));
-        assert_eq!(entry.memory, nickel_core::plugins::PluginMemory::default());
-        assert!(shell.preview_group.is_none());
-        assert!(!shell.plugin_surface_matches(&crate::plugin_panel::window_preview_surface_key()));
-        assert!(!shell.surface_visible(SurfaceRole::WindowPreview));
-        assert!(shell.set_plugin_enabled(id, false).unwrap());
-        assert!(shell.set_plugin_enabled(id, true).unwrap());
-        assert!(shell.preview_plugin_host_ref().is_some());
-    }
-
-    #[test]
-    fn window_preview_callback_failure_closes_its_surface() {
-        let mut shell = LiveShell::new().unwrap();
-        shell.launcher = crate::launcher::Launcher::new(Vec::new());
-        shell.windows = vec![OpenWindow {
-            id: WindowId(71),
-            application_id: None,
-            active: true,
-            title: "Document".into(),
-            state: Default::default(),
-        }];
-        shell.open_window_preview(0);
-        let group = shell.preview_plugin_group().unwrap();
-        let (data, _) = shell.preview_plugin_projection(&group);
-        let application = crate::plugin_panel::PluginPanelApplication::window_preview_with_test_source(
-            "function App() { return h(Panel, {}, h(Button, {id: 'preview-fail', onClick: () => { throw Error('preview callback exploded'); }}, 'Break Preview')); }",
-            &data,
-        )
-        .unwrap();
-        shell.plugin_surface_hosts.insert(
-            crate::plugin_panel::window_preview_surface_key(),
-            (
-                crate::plugin_panel::window_preview_surface().clone(),
-                nickel_ui::UiHost::new(application, 300, 214),
-            ),
-        );
-        let target = shell.preview_plugin_host_ref()
-            .unwrap()
-            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
-                role: nickel_ui::SemanticRole::Button,
-                name: "Break Preview".into(),
-            })
-            .unwrap();
-        assert!(!shell
-            .preview_plugin_event(
-                nickel_ui::HostEvent::Ui(UiEvent::AccessibilityActivate(target.id)),
-                (300, 214),
-                None,
-            )
-            .changed);
-        let id = &crate::plugin_panel::window_preview_manifest().id;
-        let entry = shell.plugin_registry().get(id).unwrap();
-        assert!(matches!(&entry.health, nickel_core::plugins::PluginHealth::Failed(error) if error.contains("preview callback exploded")));
-        assert!(shell.preview_group.is_none());
-        assert!(!shell.surface_visible(SurfaceRole::WindowPreview));
+        assert!(shell.plugin_window_previews("nickel-default").is_none());
     }
 
     #[test]
@@ -229,8 +110,7 @@
         shell.rebuild_task_switcher_preview();
         assert!(!shell.scene(SurfaceRole::WindowPreview, 474, 214).is_empty());
         assert!(shell.preview_plugin_active());
-        let group = shell.task_switcher_group.clone().unwrap();
-        let (projection, _) = shell.preview_plugin_projection(&group);
+        let projection = shell.plugin_window_previews("nickel-default").unwrap();
         assert_eq!(projection["taskSwitcher"], true);
         assert_eq!(
             projection["windows"]
@@ -274,7 +154,7 @@
         assert!(shell.task_switcher_group.is_none());
 
         shell
-            .set_plugin_enabled(&crate::plugin_panel::window_preview_manifest().id, false)
+            .set_plugin_enabled("nickel-default", false)
             .unwrap();
         assert!(shell.task_switcher.session().is_none());
         assert!(shell.task_switcher_group.is_none());

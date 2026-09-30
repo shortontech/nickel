@@ -339,6 +339,12 @@ const nickel = Object.freeze({
         activate(id) { __effects.push({type:'tray.activate',id:__nickelIdentity(id)}); },
         contextMenu(id) { __effects.push({type:'tray.contextMenu',id:__nickelIdentity(id)}); }
     }),
+    windowPreviews: Object.freeze({
+        get() { return __nickelResource('windowPreviews', {available:false, windows:[]}); },
+        activate(id, revision) { __effects.push({type:'windowPreviews.action', action:'activate', window:__nickelIdentity(id), revision:__nickelIdentity(revision)}); },
+        close(id, revision) { __effects.push({type:'windowPreviews.action', action:'close', window:__nickelIdentity(id), revision:__nickelIdentity(revision)}); },
+        openMenu(id, revision) { __effects.push({type:'windowPreviews.action', action:'menu', window:__nickelIdentity(id), revision:__nickelIdentity(revision)}); }
+    }),
     windows: Object.freeze({
         list() { return __nickelResource('windows', []); },
         activate(id) { __effects.push({type:'windows.focus',id:__nickelIdentity(id)}); },

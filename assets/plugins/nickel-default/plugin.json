@@ -33,7 +33,8 @@
       "shell.settings.keyboardShortcuts": "./src/KeyboardShortcuts.js#KeyboardShortcuts",
       "shell.settings.about": "./src/About.js#About",
       "shell.windowMenu": "./src/WindowMenu.js#WindowMenu",
-      "shell.volumeOSD": "./src/VolumeOSD.js#VolumeOSD"
+      "shell.volumeOSD": "./src/VolumeOSD.js#VolumeOSD",
+      "shell.window-preview": "./src/Preview.js#Preview"
     }
   },
   "capabilities": [
@@ -139,6 +140,13 @@
       "height": 96,
       "anchor": "bottom-center",
       "passive": true,
+      "initially_open": false
+    },
+    {
+      "id": "window-preview",
+      "kind": "overlay",
+      "width": 300,
+      "height": 214,
       "initially_open": false
     }
   ]
