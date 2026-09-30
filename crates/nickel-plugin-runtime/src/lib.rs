@@ -110,6 +110,80 @@ mod tests {
     use super::*;
 
     #[test]
+    fn displays_facade_reads_latest_host_snapshot_and_emits_layout_effect() {
+        let mut runtime = JsxRuntime::new("", None).unwrap();
+        assert_eq!(
+            runtime
+                .eval_json::<bool>("nickel.displays.get() === undefined")
+                .unwrap(),
+            true
+        );
+        runtime
+            .set_data(r#"{"displays":{"generation":1,"outputs":[{"name":"HDMI-A-1"}]}}"#)
+            .unwrap();
+        assert_eq!(
+            runtime
+                .eval_json::<Value>("JSON.stringify(nickel.displays.get())")
+                .unwrap(),
+            serde_json::json!({"generation": 1, "outputs": [{"name": "HDMI-A-1"}]})
+        );
+        runtime
+            .eval("nickel.displays.get().outputs[0].name = 'mutated'")
+            .unwrap();
+        assert_eq!(
+            runtime
+                .eval_json::<Value>("JSON.stringify(nickel.displays.get())")
+                .unwrap(),
+            serde_json::json!({"generation": 1, "outputs": [{"name": "HDMI-A-1"}]})
+        );
+        runtime
+            .set_data(r#"{"displays":{"generation":2,"outputs":[]}}"#)
+            .unwrap();
+        assert_eq!(
+            runtime
+                .eval_json::<Value>("JSON.stringify(nickel.displays.get())")
+                .unwrap(),
+            serde_json::json!({"generation": 2, "outputs": []})
+        );
+
+        runtime.eval("let requestedLayout = {primary: 'HDMI-A-1', placements: [{name: 'HDMI-A-1', x: 0, y: 0, enabled: true, scale_120: 120, mode: {width: 1920, height: 1080, refresh_millihz: 60000}}]}; nickel.displays.setLayout(requestedLayout); requestedLayout.placements[0].x = 100; nickel.displays.confirm(); nickel.displays.revert()")
+            .unwrap();
+        assert_eq!(
+            runtime.take_effects().unwrap(),
+            vec![
+                serde_json::json!({
+                    "type": "displays.setLayout",
+                    "layout": {
+                        "primary": "HDMI-A-1",
+                        "placements": [{
+                            "name": "HDMI-A-1", "x": 0, "y": 0, "enabled": true,
+                            "scale_120": 120,
+                            "mode": {"width": 1920, "height": 1080, "refresh_millihz": 60000}
+                        }]
+                    }
+                }),
+                serde_json::json!({"type": "displays.confirm"}),
+                serde_json::json!({"type": "displays.revert"})
+            ]
+        );
+    }
+
+    #[test]
+    fn displays_facade_rejects_invalid_layout_envelopes_without_effects() {
+        let mut runtime = JsxRuntime::new("", None).unwrap();
+        for expression in [
+            "nickel.displays.setLayout(null)",
+            "nickel.displays.setLayout([])",
+            "nickel.displays.setLayout({primary: 1, placements: []})",
+            "nickel.displays.setLayout({primary: 'A', placements: []})",
+            "nickel.displays.setLayout({primary: 'A', placements: Array(33).fill({})})",
+        ] {
+            assert!(runtime.eval(expression).is_err(), "{expression}");
+        }
+        assert!(runtime.take_effects().unwrap().is_empty());
+    }
+
+    #[test]
     fn rejected_event_restores_hook_state_for_the_next_host() {
         let source = "function App() { const [count, setCount] = useState(0); return h(Window, {}, h(Button, {onClick: () => setCount(count + 1)}, String(count))); }";
         let mut runtime = JsxRuntime::new(source, None).unwrap();

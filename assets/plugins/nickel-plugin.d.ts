@@ -243,8 +243,28 @@ type NickelSurfaceRequest = Readonly<
     }
 >;
 
+/** The complete requested arrangement of connected outputs. */
+interface NickelDisplayLayout {
+    primary: string;
+    placements: ReadonlyArray<Readonly<{
+        name: string;
+        x: number;
+        y: number;
+        enabled: boolean;
+        /** Fractional scale units; 120 is 100%. */
+        scale_120: number;
+        mode?: Readonly<{
+            width: number;
+            height: number;
+            /** Vertical refresh rate in millihertz. */
+            refresh_millihz: number;
+        }> | null;
+    }>>;
+}
+
 declare const nickel: Readonly<{
     readonly data: Readonly<Record<string, unknown> & {
+        displays?: unknown;
         settings?: Readonly<Record<string, boolean | number | string>>;
         surface?: Readonly<{
             id: string;
@@ -257,4 +277,14 @@ declare const nickel: Readonly<{
     request(effect: string | Readonly<{ type: string; [key: string]: unknown }>): void;
     openDialog(id: string): void;
     openMenu(id: string): void;
+    displays: Readonly<{
+        /** Read a copy of the current host supplied display snapshot. */
+        get(): unknown;
+        /** Preview a complete display layout; it automatically reverts after 15 seconds unless confirmed. */
+        setLayout(layout: Readonly<NickelDisplayLayout>): void;
+        /** Keep the previewed layout. */
+        confirm(): void;
+        /** Restore the layout from before the preview. */
+        revert(): void;
+    }>;
 }>;

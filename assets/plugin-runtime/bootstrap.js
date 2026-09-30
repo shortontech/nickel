@@ -76,6 +76,22 @@ const nickel = Object.freeze({
     request(effect) { __effects.push(effect); },
     openDialog(id) { __effects.push(`open-dialog:${id}`); },
     openMenu(id) { __effects.push(`open-menu:${id}`); },
+    displays: Object.freeze({
+        get() {
+            const snapshot = __nickelData.displays;
+            return snapshot === undefined ? undefined : JSON.parse(JSON.stringify(snapshot));
+        },
+        setLayout(layout) {
+            if (layout === null || typeof layout !== 'object' || Array.isArray(layout)
+                || typeof layout.primary !== 'string'
+                || !Array.isArray(layout.placements)
+                || layout.placements.length < 1 || layout.placements.length > 32)
+                throw TypeError('invalid display layout');
+            __effects.push({type: 'displays.setLayout', layout: JSON.parse(JSON.stringify(layout))});
+        },
+        confirm() { __effects.push({type: 'displays.confirm'}); },
+        revert() { __effects.push({type: 'displays.revert'}); }
+    }),
     get data() { return __nickelData; }
 });
 
