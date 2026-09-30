@@ -100,3 +100,11 @@ grants. No page-specific Rust host or action-index adapter was added.
 Wallpaper image previews/names, arbitrary-image choosing, file artwork settings,
 and stock host activation still need migration. Native parser validation and
 synthetic public-client behavior checks passed; live visual acceptance remains.
+
+`DefaultApps.jsx` registers the Applications page through the same module graph.
+It consumes association targets/handlers and native revision strings, renders
+search and current/protected/read-only state, and reports native consent and
+write results. Writes invoke `nickel.associations.setDefault` with stable native
+identities; no Rust Settings projection or indexed page request is involved.
+Native parser validation and synthetic identity/consent/protection/search checks
+passed. Large catalog pagination and live visual acceptance remain unfinished.

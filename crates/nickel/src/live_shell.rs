@@ -3638,7 +3638,19 @@ impl LiveShell {
             .capabilities
             .contains(&nickel_core::plugins::PluginCapability::AssociationsRead)
             .then(|| {
-                crate::associations_capabilities::snapshot(self.associations_results.get(plugin_id))
+                let mut snapshot = crate::associations_capabilities::snapshot(
+                    self.associations_results.get(plugin_id),
+                );
+                let writable = !self.locked
+                    && manifest
+                        .capabilities
+                        .contains(&nickel_core::plugins::PluginCapability::AssociationsControl);
+                snapshot["writable"] = writable.into();
+                if !writable {
+                    snapshot["operations"]["setDefault"] = false.into();
+                    snapshot["operations"]["openSystemSettings"] = false.into();
+                }
+                snapshot
             })
     }
 

@@ -19,7 +19,8 @@
       "shell.settings.navigation": "./src/Settings.js#SettingsNavigation",
       "shell.settings.controls": "./src/Settings.js#SettingControl",
       "shell.settings.colorPicker": "./src/ColorPicker.js#ColorPicker",
-      "shell.settings.appearance": "./src/Appearance.js#Appearance"
+      "shell.settings.appearance": "./src/Appearance.js#Appearance",
+      "shell.settings.defaultApps": "./src/DefaultApps.js#DefaultApps"
     }
   },
   "capabilities": [
