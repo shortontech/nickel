@@ -2684,3 +2684,18 @@ fn run_effect_rechecks_current_authority_before_native_execution() {
         assert!(shell.run_status.is_empty());
     });
 }
+
+#[test]
+fn stock_window_menu_dismisses_after_native_window_focus_loss() {
+    with_package_runtime_stack(|| {
+        let mut shell = LiveShell::new().unwrap();
+        assert!(shell.set_default_shell_surface_visible("window-menu", true));
+        let key = shell.active_shell_surface_key("window-menu");
+        assert!(shell.plugin_panel_host_window_focus_for(&key, false, 320, 400));
+        assert!(shell.default_shell_surface_visible("window-menu"));
+        shell.plugin_panel_host_window_focus_for(&key, true, 320, 400);
+        assert!(shell.default_shell_surface_visible("window-menu"));
+        assert!(shell.plugin_panel_host_window_focus_for(&key, false, 320, 400));
+        assert!(!shell.default_shell_surface_visible("window-menu"));
+    });
+}

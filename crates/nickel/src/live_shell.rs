@@ -6049,7 +6049,24 @@ impl LiveShell {
         )
     }
 
-    #[cfg(any(test, target_os = "linux"))]
+    pub(crate) fn plugin_panel_host_window_focus_for(
+        &mut self,
+        key: &nickel_core::plugins::PluginSurfaceKey,
+        focused: bool,
+        width: u32,
+        height: u32,
+    ) -> bool {
+        self.step_generic_plugin_surface(
+            key,
+            HostBatch {
+                surface_size: Some((width, height)),
+                window_focused: Some(focused),
+                ..HostBatch::default()
+            },
+            None,
+        )
+    }
+
     pub(crate) fn plugin_panel_host_ui_for(
         &mut self,
         key: &nickel_core::plugins::PluginSurfaceKey,

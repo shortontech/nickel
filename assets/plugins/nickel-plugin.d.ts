@@ -58,6 +58,10 @@ interface NickelSurfaceProps extends NickelProps {
     background?: NickelColor;
 }
 interface NickelWindowProps extends NickelProps {
+    /** Native window activation, distinct from control focus; duplicate reports are ignored. */
+    onFocus?: () => void;
+    /** Native focus loss after activation; initial unactivated focus loss is ignored. */
+    onBlur?: () => void;
     onSubmit?: () => void;
     onEscape?: () => void;
     id?: string;

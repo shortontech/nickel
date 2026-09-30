@@ -1197,6 +1197,12 @@ pub trait Application: Sized {
         }
     }
 
+    /// Native window focus lifecycle, independent of focused controls.
+    /// Returned messages join the control transition callback batch before rebuild.
+    fn window_focus_message(&self, _focused: bool) -> Option<Self::Message> {
+        None
+    }
+
     /// Deliver a blur callback from the tree that preceded a rebuild. Applications
     /// with render-scoped callback tables can resolve it against that generation.
     fn update_removed_focus(&mut self, message: Self::Message) {
@@ -3636,6 +3642,15 @@ impl<A: Application> UiHost<A> {
         {
             self.pointer_icon = self.tree.pointer_icon_at(*point);
         }
+        let window_focus_message = match &event {
+            UiEvent::FocusGained if self.state.observe_window_focus(true) => {
+                self.application.window_focus_message(true)
+            }
+            UiEvent::FocusLost if self.state.observe_window_focus(false) => {
+                self.application.window_focus_message(false)
+            }
+            _ => None,
+        };
         let source = event.input_source();
         let direct_target = match &event {
             UiEvent::AccessibilityFocus(target)
@@ -3643,7 +3658,7 @@ impl<A: Application> UiHost<A> {
             | UiEvent::AccessibilityContextMenu(target) => Some(target.clone()),
             _ => None,
         };
-        let outcome =
+        let mut outcome =
             match self
                 .tree
                 .transition(&mut self.state, source, InteractionIntent::Event(event))
@@ -3662,6 +3677,9 @@ impl<A: Application> UiHost<A> {
                     };
                 }
             };
+        if let Some(message) = window_focus_message {
+            outcome.messages.push(message);
+        }
         let invalidation = outcome.invalidation;
         let disposition = outcome.disposition;
         let changed = invalidation != Invalidation::None || !outcome.messages.is_empty();

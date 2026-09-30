@@ -2687,6 +2687,12 @@ impl PluginPanelApplication {
 impl nickel_ui::Application for PluginPanelApplication {
     type Message = PluginMessage;
 
+    fn window_focus_message(&self, focused: bool) -> Option<Self::Message> {
+        self.node
+            .window_focus_action(focused)
+            .map(PluginMessage::Click)
+    }
+
     fn shortcut_outcome(&mut self, shortcut: Shortcut) -> nickel_ui::ShortcutOutcome {
         if self.overlay_open && shortcut == Shortcut::Escape {
             return nickel_ui::ShortcutOutcome::from_changed(false);
@@ -5548,6 +5554,88 @@ mod tests {
         assert_eq!(app.take_effects(), vec![PluginEffect::ShowLauncher]);
         assert!(app.button_message("open").is_none());
         assert!(app.last_error().is_none());
+    }
+
+    #[test]
+    fn native_window_focus_batches_control_and_window_callbacks_once() {
+        let mut manifest = PluginPackage::load(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/plugins/example-window"
+        ))
+        .unwrap()
+        .manifest;
+        manifest.capabilities = vec![PluginCapability::ProjectsMenuShow];
+        let source = r#"function App() {
+            const [show,setShow] = useState(true);
+            const [activated,setActivated] = useState(false);
+            return h(Window,{id:'main',width:320,height:180,onFocus:()=>{setActivated(true);nickel.projects.show();},onBlur:()=>nickel.projects.toggle()},
+                show ? h(TextField,{id:'field',placeholder:'Field',value:'',autoFocus:true,onChange:()=>{},onBlur:()=>{if(activated){setShow(false);nickel.projects.show();}}}) : null);
+        }"#;
+        let app = PluginPanelApplication::new_with_manifest(source, &manifest, None).unwrap();
+        let mut host = nickel_ui::UiHost::new(app, 320, 180);
+        host.step(nickel_ui::HostBatch {
+            window_focused: Some(false),
+            ..Default::default()
+        });
+        // Initial loss may precede first compositor activation; it does not dismiss the window.
+        assert!(host.application_mut().take_effects().is_empty());
+        host.step(nickel_ui::HostBatch {
+            window_focused: Some(true),
+            ..Default::default()
+        });
+        assert_eq!(
+            host.application_mut().take_effects(),
+            vec![PluginEffect::ProjectsVisibility {
+                plugin_id: manifest.id.clone(),
+                toggle: false
+            }]
+        );
+        host.step(nickel_ui::HostBatch {
+            window_focused: Some(true),
+            ..Default::default()
+        });
+        assert!(host.application_mut().take_effects().is_empty());
+        let field = host
+            .query_unique(&nickel_ui::SemanticSelector::Role(SemanticRole::TextField))
+            .unwrap();
+        host.request_focus(field.id);
+        assert!(
+            host.application_mut().take_effects().is_empty(),
+            "control focus does not activate the Window callback"
+        );
+        // A focused child callback can rebuild; the root callback still belongs to the old batch.
+        host.step(nickel_ui::HostBatch {
+            window_focused: Some(false),
+            ..Default::default()
+        });
+        assert_eq!(
+            host.application_mut().take_effects(),
+            vec![
+                PluginEffect::ProjectsVisibility {
+                    plugin_id: manifest.id.clone(),
+                    toggle: false
+                },
+                PluginEffect::ProjectsVisibility {
+                    plugin_id: manifest.id.clone(),
+                    toggle: true
+                }
+            ]
+        );
+        host.step(nickel_ui::HostBatch {
+            window_focused: Some(false),
+            ..Default::default()
+        });
+        assert!(host.application_mut().take_effects().is_empty());
+
+        manifest.capabilities.clear();
+        let app = PluginPanelApplication::new_with_manifest(source, &manifest, None).unwrap();
+        let mut denied = nickel_ui::UiHost::new(app, 320, 180);
+        denied.step(nickel_ui::HostBatch {
+            window_focused: Some(true),
+            ..Default::default()
+        });
+        assert!(denied.application_mut().take_effects().is_empty());
+        assert!(denied.application().last_error().is_some());
     }
 
     #[test]

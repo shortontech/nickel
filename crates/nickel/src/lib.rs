@@ -2996,6 +2996,24 @@ pub fn run() -> Result<(), String> {
                     sync_visibility(&mut shell, &mut state);
                 }
             }
+            Some(ShellEvent::FocusChanged { surface, focused })
+                if shell
+                    .surface(surface)
+                    .is_some_and(|entry| entry.plugin_key().is_some()) =>
+            {
+                let entry = shell.surface(surface).expect("routed plugin surface");
+                let key = entry.plugin_key().expect("plugin owner").clone();
+                let (width, height) = entry.window().size();
+                if !focused {
+                    shell.stop_text_input(surface);
+                } else {
+                    shell.set_active_output_from_surface(surface);
+                }
+                if state.plugin_panel_host_window_focus_for(&key, focused, width, height) {
+                    sync_visibility(&mut shell, &mut state);
+                    render_role(&mut shell, &mut state, SurfaceRole::Panel)?;
+                }
+            }
             Some(ShellEvent::FocusChanged { focused: false, .. }) => {}
             Some(ShellEvent::FocusChanged {
                 surface,

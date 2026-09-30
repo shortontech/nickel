@@ -247,6 +247,8 @@ pub enum PanelNode {
         accessibility_label: Option<String>,
         escape_action: Option<usize>,
         submit_action: Option<usize>,
+        focus_action: Option<usize>,
+        blur_action: Option<usize>,
         class_name: Option<String>,
         background: u32,
         width: Length,
@@ -1282,6 +1284,14 @@ impl PanelNode {
                         .map(|action| action as usize),
                     submit_action: value
                         .get("submitAction")
+                        .and_then(Value::as_u64)
+                        .map(|action| action as usize),
+                    focus_action: value
+                        .get("focusAction")
+                        .and_then(Value::as_u64)
+                        .map(|action| action as usize),
+                    blur_action: value
+                        .get("blurAction")
                         .and_then(Value::as_u64)
                         .map(|action| action as usize),
                     children: Self::parse_flow_children(children)?,
@@ -3548,6 +3558,19 @@ impl PanelNode {
             } => request.title.as_deref(),
             _ => None,
         }
+    }
+
+    pub fn window_focus_action(&self, focused: bool) -> Option<usize> {
+        let Self::Surface {
+            window_request: Some(_),
+            focus_action,
+            blur_action,
+            ..
+        } = self
+        else {
+            return None;
+        };
+        if focused { *focus_action } else { *blur_action }
     }
 
     pub fn window_shortcut_action(&self, shortcut: Shortcut) -> Option<usize> {

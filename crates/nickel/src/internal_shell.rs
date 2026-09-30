@@ -999,8 +999,12 @@ impl InternalShellCoordinator {
                 nickel_ui::UiEvent::FocusLost
             };
             changed |= if let Some(key) = entry.plugin.as_ref() {
-                self.shell
-                    .plugin_panel_host_ui_for(key, event, entry.size.0, entry.size.1)
+                self.shell.plugin_panel_host_window_focus_for(
+                    key,
+                    focused,
+                    entry.size.0,
+                    entry.size.1,
+                )
             } else {
                 self.shell
                     .shell_role_host_ui(entry.role, event, entry.size.0, entry.size.1)

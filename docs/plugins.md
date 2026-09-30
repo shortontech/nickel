@@ -315,6 +315,13 @@ output; a work-area reservation grant permits JSX to omit the reservation;
 and `bottom_offset` is the maximum dock distance JSX may request. These resolved
 values reach native placement. The manifest still determines the surface kind
 and anchor until the full authority envelope replaces its duplicated geometry.
+`Window` and `FixedWindow` accept `onFocus` and `onBlur` callbacks for native
+window activation and focus loss. They are separate from control focus callbacks.
+Duplicate native reports are ignored, and an initial focus loss before activation
+does not call `onBlur`. Control blur callbacks run before window blur in one
+transaction against the existing callback generation. A package can dismiss a
+transient window with `onBlur={() => nickel.surfaces.hide("menu")}`.
+
 `window.dock { bottom: 20px; }` also sets the bottom distance for a `Window`
 root with `className="dock"`; CSS `bottom` requires a `window` selector and
 cannot exceed the manifest bound. An explicit JSX `bottomOffset` wins over CSS.

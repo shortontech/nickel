@@ -126,6 +126,7 @@ struct PointerModalityState {
     scrollbar_grab_offset: Option<f32>,
     input_modality: InputModality,
     window_focused: bool,
+    observed_window_focus: Option<bool>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -303,6 +304,7 @@ impl UiStateStore {
                 scrollbar_grab_offset: None,
                 input_modality: InputModality::default(),
                 window_focused: true,
+                observed_window_focus: None,
             },
             navigation: NavigationState::default(),
             text: TextSelectionState {
@@ -587,6 +589,16 @@ impl UiStateStore {
         } else {
             self.pointer.input_modality = modality;
             Invalidation::Paint
+        }
+    }
+
+    /// Ignore duplicate lifecycle reports and an initial compositor focus loss
+    /// before the window has ever received focus.
+    pub(crate) fn observe_window_focus(&mut self, focused: bool) -> bool {
+        let previous = self.pointer.observed_window_focus.replace(focused);
+        match previous {
+            Some(previous) => previous != focused,
+            None => focused,
         }
     }
 
