@@ -3592,6 +3592,7 @@ dependencies = [
  "libc",
  "nickel-input",
  "nickel-storage",
+ "semver",
  "serde",
  "serde_json",
  "sha2",
