@@ -263,34 +263,8 @@ impl SettingsApp {
         }
         let theme = self.ui_theme();
         let palette = self.palette();
-        let rows = self.default_apps.iter().enumerate().map(|(index, row)| {
-            let current = row
-                .snapshot
-                .as_ref()
-                .and_then(|snapshot| snapshot.effective.as_ref())
-                .map(|handler| handler.name.clone())
-                .unwrap_or_else(|| "No default".into());
-            // The handler name already communicates the ordinary state. Reserve the
-            // supporting line for actionable outcomes and failures instead of repeating
-            // operating-system ownership beneath every compact row.
-            let detail = row.status.clone().unwrap_or_default();
-            ui! {
-                <Container background={palette.surface} padding={Insets { top: 2.0, right: 4.0, bottom: 2.0, left: 4.0 }}>
-                    {SettingsRow::new(theme, row.label.clone(), detail).compact().trailing(
-                        Button::semantic(
-                            theme,
-                            SettingsMessage::ToggleDefaultAppSelect(index),
-                            current,
-                            ButtonPresentation::Quiet,
-                        )
-                        .id(format!("default-app-{index}"))
-                        .width(220.0)
-                    )}
-                </Container>
-            }
-        });
         let matching_targets = crate::default_apps_plugin::matching_targets(self);
-        let curated = if self.settings_jsx_enabled {
+        let rendered = if self.settings_jsx_enabled {
             let data = crate::default_apps_plugin::projection_for_targets(self, &matching_targets);
             self.default_apps_page
                 .borrow_mut()
@@ -301,20 +275,23 @@ impl SettingsApp {
                 .as_mut()
                 .map_err(|error| error.clone())
                 .and_then(|page| page.render(&data, theme))
-                .ok()
         } else {
-            None
+            Err("Settings plugin is disabled".into())
         };
-        let jsx_active = curated.is_some();
         let crate::default_apps_plugin::DefaultAppsRendered {
             curated,
             catalog_nodes,
             stylesheet: catalog_stylesheet,
-        } = curated.unwrap_or_else(|| crate::default_apps_plugin::DefaultAppsRendered {
-            curated: AnyView::new(Column::new().gap(2.0).children(rows)),
-            catalog_nodes: std::collections::BTreeMap::new(),
-            stylesheet: nickel_plugin_presentation::css::StyleSheet::default(),
-        });
+        } = match rendered {
+            Ok(rendered) => rendered,
+            Err(error) => {
+                return self.settings_plugin_recovery(
+                    "Default Apps settings are unavailable",
+                    error,
+                    None,
+                );
+            }
+        };
         let target_results = if self.default_apps_loading && self.default_app_targets.is_empty() {
             AnyView::new(
                 Text::new(
@@ -344,17 +321,8 @@ impl SettingsApp {
                             &catalog_stylesheet,
                         );
                     }
-                    let kind = target.family().label();
                     AnyView::new(
-                        SettingsRow::new(theme, key, kind).trailing(
-                            Button::semantic(
-                                theme,
-                                SettingsMessage::BrowseDefaultAppTarget(target),
-                                "Choose app",
-                                ButtonPresentation::Quiet,
-                            )
-                            .width(112.0),
-                        ),
+                        Text::new(format!("{key} is unavailable")).color(theme.text.secondary),
                     )
                 },
             )
@@ -385,70 +353,7 @@ impl SettingsApp {
                 .child(collection),
             )
         };
-        let advanced = SettingsRow::new(
-            theme,
-            "File types and links",
-            self.default_app_target_status
-                .as_deref()
-                .unwrap_or_default(),
-        )
-        .compact()
-        .trailing(
-            SettingsSearchField::new(
-                theme,
-                "default-app-advanced-target",
-                &self.default_app_target_query,
-                "Search file types and protocols",
-                default_app_target_search_message,
-            )
-            .width(320.0),
-        );
-        let families = [
-            nickel_platform::AssociationFamily::Web,
-            nickel_platform::AssociationFamily::Documents,
-            nickel_platform::AssociationFamily::Images,
-            nickel_platform::AssociationFamily::Audio,
-            nickel_platform::AssociationFamily::Video,
-            nickel_platform::AssociationFamily::Archives,
-            nickel_platform::AssociationFamily::OtherFiles,
-            nickel_platform::AssociationFamily::Protocols,
-        ];
-        let family_buttons =
-            std::iter::once((None, format!("All ({})", self.default_app_targets.len())))
-                .chain(families.into_iter().filter_map(|family| {
-                    let count = self
-                        .default_app_targets
-                        .iter()
-                        .filter(|target| target.family() == family)
-                        .count();
-                    (count > 0).then_some((Some(family), format!("{} ({count})", family.label())))
-                }))
-                .map(|(family, label)| {
-                    Button::semantic(
-                        theme,
-                        SettingsMessage::DefaultAppTargetFamily(family),
-                        label,
-                        if self.default_app_target_family == family {
-                            ButtonPresentation::Primary
-                        } else {
-                            ButtonPresentation::Quiet
-                        },
-                    )
-                });
-        let family_filters =
-            nickel_ui::Grid::auto_fit(Track::minmax(Track::px(110.0), Track::fr(1.0)))
-                .gap(4.0)
-                .children(family_buttons);
-        let content = if jsx_active {
-            Column::new().gap(10.0).child(curated).child(target_results)
-        } else {
-            Column::new()
-                .gap(10.0)
-                .child(curated)
-                .child(advanced)
-                .child(family_filters)
-                .child(target_results)
-        };
+        let content = Column::new().gap(10.0).child(curated).child(target_results);
         AnyView::new(ui! {
             <Column grow={1.0} padding={Insets { top: 16.0, right: 24.0, bottom: 20.0, left: 20.0 }} gap={10.0}>
                 <VerticalScroll id={"default-apps-list"} on_scroll={SettingsMessage::DefaultAppsPageScroll} offset={0.0} theme={theme}>

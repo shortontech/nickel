@@ -683,10 +683,6 @@ fn sidebar_search_message(value: String) -> SettingsMessage {
     SettingsMessage::SidebarSearchChanged(value)
 }
 
-fn default_app_target_search_message(value: String) -> SettingsMessage {
-    SettingsMessage::DefaultAppTargetChanged(value)
-}
-
 fn default_app_handler_search_message(value: String) -> SettingsMessage {
     SettingsMessage::DefaultAppHandlerSearchChanged(value)
 }
@@ -4933,7 +4929,7 @@ mod tests {
     }
 
     #[test]
-    fn disabled_settings_plugin_keeps_the_native_default_app_picker() {
+    fn disabled_settings_plugin_recovers_without_native_default_app_rows() {
         let mut app = SettingsApp::with_initial_page(SettingsPage::DefaultApps);
         app.settings_jsx_enabled = false;
         app.default_apps[0].snapshot = Some(nickel_platform::AssociationSnapshot {
@@ -4949,28 +4945,14 @@ mod tests {
             scope: nickel_platform::AssociationScope::User,
             detail: "User association".into(),
         });
-        let mut host = UiHost::new(app, 850, 900);
-        let chooser = host
-            .semantic_targets_for_message(&SettingsMessage::ToggleDefaultAppSelect(0))
-            .into_iter()
-            .next()
-            .expect("native chooser remains available");
-        host.perform_semantic_action(
-            chooser.id,
-            nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
-        );
+        let host = UiHost::new(app, 850, 900);
         assert!(
-            host.application_mut()
-                .default_app_picker_page
-                .borrow()
-                .is_none()
+            host.semantic_targets_for_message(&SettingsMessage::ToggleDefaultAppSelect(0))
+                .is_empty()
         );
         assert!(
             !host
-                .semantic_targets_for_message(&SettingsMessage::SetDefaultApp {
-                    row: 0,
-                    handler_id: "fixture.desktop".into(),
-                })
+                .semantic_targets_for_message(&SettingsMessage::Navigate(SettingsPage::Plugins))
                 .is_empty()
         );
     }
