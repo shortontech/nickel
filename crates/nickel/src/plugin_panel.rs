@@ -1681,9 +1681,6 @@ impl PluginPanelApplication {
     }
 
     pub fn rendered_taskbar_item_matches(&self, index: usize, id: &str) -> bool {
-        if self.manifest.id != taskbar_manifest().id {
-            return false;
-        }
         self.projection_data
             .as_deref()
             .and_then(|data| serde_json::from_str::<serde_json::Value>(data).ok())
@@ -2092,7 +2089,6 @@ impl nickel_ui::Application for PluginPanelApplication {
                         }
                         _ if effect.get("type").and_then(Value::as_str)
                             == Some("taskbar-activate-item")
-                            && self.manifest.id == taskbar_manifest().id
                             && self
                                 .manifest
                                 .capabilities
@@ -2125,7 +2121,6 @@ impl nickel_ui::Application for PluginPanelApplication {
                         }
                         _ if effect.get("type").and_then(Value::as_str)
                             == Some("taskbar-context-item")
-                            && self.manifest.id == taskbar_manifest().id
                             && self
                                 .manifest
                                 .capabilities
@@ -2156,7 +2151,6 @@ impl nickel_ui::Application for PluginPanelApplication {
                         }
                         _ if effect.get("type").and_then(Value::as_str)
                             == Some("taskbar-move-pin")
-                            && self.manifest.id == taskbar_manifest().id
                             && self
                                 .manifest
                                 .capabilities
@@ -2196,7 +2190,6 @@ impl nickel_ui::Application for PluginPanelApplication {
                         }
                         _ if effect.get("type").and_then(Value::as_str)
                             == Some("taskbar-activate-tray")
-                            && self.manifest.id == taskbar_manifest().id
                             && self
                                 .manifest
                                 .capabilities
@@ -2214,7 +2207,6 @@ impl nickel_ui::Application for PluginPanelApplication {
                         }
                         _ if effect.get("type").and_then(Value::as_str)
                             == Some("taskbar-context-tray")
-                            && self.manifest.id == taskbar_manifest().id
                             && self
                                 .manifest
                                 .capabilities
@@ -2232,7 +2224,6 @@ impl nickel_ui::Application for PluginPanelApplication {
                         }
                         _ if effect.get("type").and_then(Value::as_str)
                             == Some("taskbar-menu-close-all")
-                            && self.manifest.id == taskbar_manifest().id
                             && self
                                 .manifest
                                 .capabilities
@@ -2242,7 +2233,6 @@ impl nickel_ui::Application for PluginPanelApplication {
                         }
                         _ if effect.get("type").and_then(Value::as_str)
                             == Some("taskbar-window-menu-action")
-                            && self.manifest.id == taskbar_manifest().id
                             && self
                                 .manifest
                                 .capabilities
@@ -3124,6 +3114,33 @@ mod tests {
                 direction: 1,
             }]
         );
+    }
+
+    #[test]
+    fn desktop_actions_follow_capabilities_instead_of_plugin_identity() {
+        let source = r#"function App() { return h(FixedWindow, {width: '100%', height: 56, output: 'all', edge: 'bottom', reserveWorkArea: true},
+            h(Button, {id: 'activate', onClick: () => nickel.request({type: 'taskbar-activate-item', index: 0, id: 'app.example'})}, 'Activate')) }"#;
+        let mut manifest = taskbar_manifest().clone();
+        manifest.id = "org.example.custom-bar".into();
+        let mut application =
+            PluginPanelApplication::new_with_manifest(source, &manifest, None).unwrap();
+        application.update(application.button_message("activate").unwrap());
+        assert_eq!(
+            application.take_effects(),
+            vec![PluginEffect::ActivateTaskbarItem {
+                index: 0,
+                id: "app.example".into(),
+            }]
+        );
+
+        manifest
+            .capabilities
+            .retain(|capability| *capability != PluginCapability::WindowsFocus);
+        let mut denied =
+            PluginPanelApplication::new_with_manifest(source, &manifest, None).unwrap();
+        denied.update(denied.button_message("activate").unwrap());
+        assert!(denied.take_effects().is_empty());
+        assert!(denied.last_error().is_some());
     }
 
     #[test]
