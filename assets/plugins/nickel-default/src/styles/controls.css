@@ -1,4 +1,8 @@
-/* Public native compound-control parts. Packages may replace every rule. */
+/* Public native compound-control parts. Packages may replace every rule.
+ * Select parts (select-header, option, select-indicator) and menu-item
+ * receive their owning control's id/className and inherited CSS variables.
+ * Header/option heights drive native hit regions and accessibility bounds.
+ */
 switch {
     width: 44px; height: 44px;
     align-items: center; justify-content: center;
@@ -32,3 +36,34 @@ slider-thumb {
     width: 20px; height: 20px; border-radius: 10px;
     background: var(--nickel-text); border: 1px solid var(--nickel-accent);
 }
+select { width: 180px; }
+select-header {
+    height: 30px; padding: 5px 36px 4px 12px;
+    background: var(--nickel-control); color: var(--nickel-text);
+    border-radius: var(--nickel-radius-control); border: 1px solid var(--nickel-border);
+    font-size: var(--nickel-font-size); line-height: var(--nickel-line-height);
+}
+option {
+    height: 34px; padding: 7px 12px;
+    background: var(--nickel-surface-hover); color: var(--nickel-text);
+    font-size: var(--nickel-font-size); line-height: var(--nickel-line-height);
+}
+select-indicator { width: 32px; padding: 5px 6px 4px 6px; color: var(--nickel-text); font-size: 7px; }
+menu {
+    width: 200px; padding: 2px; border-radius: 6px;
+    background: var(--nickel-surface-raised); color: var(--nickel-text);
+    border: 1px solid var(--nickel-border);
+}
+menu-item {
+    height: 28px; padding: 8px; border-radius: 4px;
+    color: var(--nickel-text); font-size: 8px;
+}
+menu-item:hover { background: var(--nickel-surface-hover); }
+menu-item:active { background: var(--nickel-selected); }
+menu-item:focus { background: var(--nickel-selected); }
+select-header:hover { background: var(--nickel-surface-hover); }
+select-header:active { background: var(--nickel-selected); }
+select-header:focus { background: var(--nickel-selected); }
+option:hover { background: var(--nickel-selected); }
+option:active { background: var(--nickel-accent-soft); }
+option:focus { background: var(--nickel-selected); }

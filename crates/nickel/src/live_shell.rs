@@ -94,9 +94,7 @@ fn normalized_input(event: &HostEvent) -> Option<&nickel_input::InputEvent> {
 
 use nickel_core::task_switcher::{SwitchWindow, TaskSwitchEffect, TaskSwitcher};
 use nickel_core::{
-    launcher_preferences::LauncherPreferences,
-    shell_settings::ShellSettings,
-    theme::{Appearance, ThemePalette},
+    launcher_preferences::LauncherPreferences, shell_settings::ShellSettings, theme::ThemePalette,
     wallpaper_settings::WallpaperSettings,
 };
 use nickel_file::desktop::{DesktopOutput, Point as DesktopPoint};
@@ -285,7 +283,7 @@ impl LockApplication {
         Self {
             password: Zeroizing::new(password.to_owned()),
             status,
-            palette: ThemePalette::from_appearance(Appearance::default()),
+            palette: ThemePalette::from_appearance(nickel_core::theme::Appearance::default()),
             effects: Vec::new(),
         }
     }

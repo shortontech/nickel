@@ -108,3 +108,11 @@ write results. Writes invoke `nickel.associations.setDefault` with stable native
 identities; no Rust Settings projection or indexed page request is involved.
 Native parser validation and synthetic identity/consent/protection/search checks
 passed. Large catalog pagination and live visual acceptance remain unfinished.
+
+`Displays.jsx` owns display selection, draft layout, drag arrangement/snapping,
+mode selection, scale, and primary display selection. It submits whole layouts
+with native connector identities; changed native snapshots discard stale drafts.
+Preview confirmation uses capability snapshot state. Orientation controls require
+an explicit native operation-availability flag; application-scale policy and
+identify-display operations remain unfinished. No old Display page adapter is
+used by this module. Native preview/revert authority remains in Nickel.
