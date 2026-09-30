@@ -551,6 +551,11 @@ function __nickelDropSurface(id) {
 }
 
 function __nickelTakeEffects() {
+    if (__compositionCheckpoint !== null) {
+        if (__compositionCheckpoint.activeSurface === __activeSurface) __compositionCheckpoint.active.effects = [];
+        const saved = __compositionCheckpoint.surfaces.get(__activeSurface);
+        if (saved) saved.effects = [];
+    }
     return JSON.stringify(__effects.splice(0));
 }
 
@@ -774,4 +779,76 @@ function __nickelDispatchBatch(events, previous = false) {
         __nickelRollbackEvent();
         throw error;
     }
+}
+
+// Native composition checkpoints cover bootstrap-owned presentation state.
+// They deliberately do not snapshot package globals or closure-captured values.
+let __compositionCheckpoint = null;
+function __nickelBeginCheckpoint() {
+    if (__compositionCheckpoint !== null || __pendingRender !== null || __pendingEvent !== null) throw Error('checkpoint already pending');
+    const seen = new Map();
+    const extensible = new Map();
+    let nodes = 0;
+    function copy(value, depth = 0) {
+        if (value === null || typeof value !== 'object') return value;
+        if (depth > 128 || ++nodes > 16384) throw Error('checkpoint value exceeds limit');
+        if (seen.has(value)) return seen.get(value);
+        if (!Array.isArray(value) && Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null) throw Error('unsupported checkpoint hook value');
+        const result = Array.isArray(value) ? [] : Object.create(Object.getPrototypeOf(value));
+        seen.set(value, result);
+        extensible.set(value, Object.isExtensible(value));
+        for (const key of Reflect.ownKeys(value)) {
+            const descriptor = Object.getOwnPropertyDescriptor(value, key);
+            if (!descriptor || !('value' in descriptor)) throw Error('checkpoint cannot invoke hook accessors');
+            Object.defineProperty(result, key, {...descriptor, value:copy(descriptor.value, depth + 1)});
+        }
+        return result;
+    }
+    function state(hooks, handlers, previousHandlers, effects, data) {
+        return {hooks:new Map(Array.from(hooks, ([path, slots]) => [path, slots.slice()])),
+            values:Array.from(hooks.values(), slots => slots.map(entry => copy(entry.kind === 'ref' ? entry.value.current : entry.value))),
+            handlers:handlers.slice(), previousHandlers:previousHandlers.slice(), effects:copy(effects), data};
+    }
+    const active = state(__componentHooks, __handlers, __previousHandlers, __effects, __nickelData);
+    const surfaces = new Map(Array.from(__surfaceStates, ([id, value]) => [id, state(value.hooks, value.handlers, value.previousHandlers, value.effects, value.data)]));
+    __compositionCheckpoint = {active, surfaces, graph:seen, extensible, apps:new Map(__surfaceApps), activeSurface:__activeSurface,
+        settingsValues:copy(__settingsValues), settingsSnapshot:copy(__settingsSnapshot), settingsPagesSnapshot:copy(__settingsPagesSnapshot)};
+}
+function __nickelFinishCheckpoint(accepted) {
+    const checkpoint = __compositionCheckpoint;
+    if (checkpoint === null) throw Error('checkpoint is unavailable');
+    if (__pendingRender !== null || __pendingEvent !== null) { if (accepted) throw Error('unfinished local checkpoint transaction'); __nickelRollbackRender(); }
+    __compositionCheckpoint = null;
+    if (accepted) return;
+    // Restore supported mutable hook objects in place: existing approved event
+    // closures can retain these identities. Arbitrary closure cells/globals are
+    // still outside this graph and are not presented as rolled back.
+    const originals = new Map(Array.from(checkpoint.graph, ([original, snapshot]) => [snapshot, original]));
+    const original = value => originals.has(value) ? originals.get(value) : value;
+    for (const [target, snapshot] of checkpoint.graph) {
+        if (Object.isExtensible(target) !== checkpoint.extensible.get(target)) throw Error('checkpoint hook integrity cannot be restored');
+        if (Object.getPrototypeOf(target) !== Object.getPrototypeOf(snapshot) && !Reflect.setPrototypeOf(target, Object.getPrototypeOf(snapshot))) throw Error('checkpoint hook prototype cannot be restored');
+        for (const key of Reflect.ownKeys(target)) { if (!Object.prototype.hasOwnProperty.call(snapshot, key) && !Reflect.deleteProperty(target, key)) throw Error('checkpoint hook property cannot be restored'); }
+        for (const key of Reflect.ownKeys(snapshot)) {
+            const descriptor = Object.getOwnPropertyDescriptor(snapshot, key);
+            Object.defineProperty(target, key, {...descriptor, value:original(descriptor.value)});
+        }
+    }
+    function restore(state) {
+        let index = 0;
+        for (const slots of state.hooks.values()) {
+            const values = state.values[index++];
+            slots.forEach((entry, slot) => { if (entry.kind === 'ref') entry.value.current = original(values[slot]); else entry.value = original(values[slot]); });
+        }
+        return {hooks:state.hooks, handlers:state.handlers, previousHandlers:state.previousHandlers, effects:original(state.effects), data:state.data};
+    }
+    __surfaceStates.clear();
+    for (const [id, state] of checkpoint.surfaces) __surfaceStates.set(id, restore(state));
+    __surfaceApps.clear();
+    for (const [id, app] of checkpoint.apps) __surfaceApps.set(id, app);
+    const active = restore(checkpoint.active);
+    __componentHooks = active.hooks; __handlers = active.handlers; __previousHandlers = active.previousHandlers;
+    __effects = active.effects; __nickelData = active.data; __activeSurface = checkpoint.activeSurface;
+    __settingsValues = original(checkpoint.settingsValues); __settingsSnapshot = original(checkpoint.settingsSnapshot); __settingsPagesSnapshot = original(checkpoint.settingsPagesSnapshot);
+    __visitedComponents = new Set(); __componentChildren = new Map(); __currentComponent = null; __hookIndex = 0; __listKeyErrors = [];
 }

@@ -25,6 +25,8 @@ pub struct JsxRuntime {
     settings_provider: Option<String>,
     settings_revision: u64,
     settings_data: Option<String>,
+    checkpoint: Option<(u64, Option<String>)>,
+    invalidated: bool,
 }
 
 impl JsxRuntime {
@@ -34,6 +36,8 @@ impl JsxRuntime {
             settings_provider: None,
             settings_revision: 0,
             settings_data: None,
+            checkpoint: None,
+            invalidated: false,
         };
         runtime
             .context
@@ -54,6 +58,9 @@ impl JsxRuntime {
     }
 
     pub fn eval(&mut self, source: &str) -> Result<(), String> {
+        if self.invalidated {
+            return Err("runtime checkpoint was invalidated".into());
+        }
         self.context
             .eval(Source::from_bytes(source))
             .map_err(|error| error.to_string())?;
@@ -61,6 +68,9 @@ impl JsxRuntime {
     }
 
     pub fn eval_json<T: DeserializeOwned>(&mut self, source: &str) -> Result<T, String> {
+        if self.invalidated {
+            return Err("runtime checkpoint was invalidated".into());
+        }
         let value = self
             .context
             .eval(Source::from_bytes(source))
@@ -123,6 +133,39 @@ impl JsxRuntime {
         parsed
     }
 
+    /// Checkpoint bootstrap-owned hooks, surface handlers and queued effects.
+    /// Plain object/array hook values preserve identity on rollback. Unsupported
+    /// or irreversible restoration invalidates execution. Package globals and
+    /// arbitrary closure state remain outside this contract.
+    pub fn begin_transaction(&mut self) -> Result<(), String> {
+        if self.checkpoint.is_some() {
+            return Err("runtime transaction already pending".into());
+        }
+        self.eval("__nickelBeginCheckpoint()")?;
+        self.checkpoint = Some((self.settings_revision, self.settings_data.clone()));
+        Ok(())
+    }
+
+    pub fn finish_transaction(&mut self, accepted: bool) -> Result<(), String> {
+        let (revision, data) = self
+            .checkpoint
+            .take()
+            .ok_or("runtime transaction is unavailable")?;
+        if let Err(error) = self.eval(if accepted {
+            "__nickelFinishCheckpoint(true)"
+        } else {
+            "__nickelFinishCheckpoint(false)"
+        }) {
+            self.invalidated = true;
+            return Err(error);
+        }
+        if !accepted {
+            self.settings_revision = revision;
+            self.settings_data = data;
+        }
+        Ok(())
+    }
+
     pub fn take_effects(&mut self) -> Result<Vec<Value>, String> {
         self.eval_json("__nickelTakeEffects()")
     }
@@ -142,6 +185,31 @@ impl JsxRuntime {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn checkpoint_discards_consumed_effects_and_restores_supported_hook_objects_in_place() {
+        let mut runtime=super::JsxRuntime::new("function App(){const [state]=useState({count:0});return h(Button,{onClick:()=>{state.count++;globalThis.outside=(globalThis.outside||0)+1;nickel.request('show-launcher');}},String(state.count));}",None).unwrap();
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        runtime.begin_transaction().unwrap();
+        runtime
+            .render("__nickelDispatch(0,null)", |_| Ok(()))
+            .unwrap();
+        runtime.finish_event(true).unwrap();
+        assert_eq!(runtime.take_effects().unwrap().len(), 1);
+        runtime.finish_transaction(false).unwrap();
+        assert!(runtime.take_effects().unwrap().is_empty());
+        let tree = runtime
+            .render("__nickelRender()", |node| Ok(node.clone()))
+            .unwrap();
+        assert_eq!(tree["children"][0], "0");
+        // Arbitrary package globals are explicitly outside the checkpoint.
+        assert_eq!(
+            runtime
+                .eval_json::<u64>("JSON.stringify(globalThis.outside)")
+                .unwrap(),
+            1
+        );
+    }
+
     #[test]
     fn session_client_copies_account_and_captures_revision_without_private_ui_requests() {
         let data = r#"{"session":{"revision":"current","account":{"displayName":"Ada","username":"ada"},"locked":false,"support":{"lock":true,"logout":true,"suspend":true,"reboot":true,"powerOff":true,"restartShell":false}}}"#;

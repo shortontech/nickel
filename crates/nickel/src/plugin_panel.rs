@@ -1969,6 +1969,15 @@ impl nickel_ui::Application for PluginPanelApplication {
         if events.is_empty() {
             return;
         }
+        let composition_previous_events =
+            self.composition.as_ref().map(|state| state.events.clone());
+        let composition_previous_native = self.composition.as_ref().map(|_| {
+            (
+                self.node.clone(),
+                self.effects.clone(),
+                self.pending_transient.clone(),
+            )
+        });
         let mut validation_rejected = false;
         let (rendered, effects) = if let Some(state) = &mut self.composition {
             let result = (|| {
@@ -1986,7 +1995,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                     .clone();
                 let mut host = state.host.borrow_mut();
 
-                let rendered = host.dispatch_expanded(
+                let rendered = host.dispatch_expanded_pending(
                     &state.mount,
                     &handle,
                     event.get(1).unwrap_or(&Value::Null),
@@ -3458,18 +3467,30 @@ impl nickel_ui::Application for PluginPanelApplication {
                 self.last_error = Some(error);
             }
         })();
-        if let Some(state) = &self.composition {
+        if let Some(state) = &mut self.composition {
+            let accepted = self.last_error.is_none();
+            let mut host = state.host.borrow_mut();
+            if host.transaction_pending()
+                && let Err(error) = host.finish_transaction(accepted)
+            {
+                self.runtime_failure = Some(error.clone());
+                self.last_error = Some(error);
+            }
             if self.last_error.is_some() {
-                // Mixed-context renders cannot use the single-context rollback
-                // path. Retire participants before any denied effect can execute.
-                let owners = state.manifests.keys().cloned().collect::<Vec<_>>();
-                for owner in owners {
-                    state.host.borrow_mut().retire(&owner);
+                if let Some((node, effects, transient)) = composition_previous_native {
+                    self.node = node;
+                    self.effects = effects;
+                    self.pending_transient = transient;
                 }
-                self.runtime_failure = self.last_error.clone();
+                if let Some(events) = composition_previous_events {
+                    state.events = events;
+                }
+                // Supported bootstrap state and queued effects were restored;
+                // package globals and closure mutations are outside this contract.
             }
             return;
         }
+
         if let Err(error) = self
             .runtime
             .borrow_mut()
@@ -3902,8 +3923,15 @@ mod tests {
             } else {
                 assert!(application.take_effects().is_empty());
                 assert!(application.last_error().is_some());
-                // The base grant does not authorize a replacement's callback.
-                assert!(application.take_runtime_failure().is_some());
+                // Denial restores supported hook/presentation state; the base
+                // grant still cannot authorize a replacement's callback.
+                assert!(application.take_runtime_failure().is_none());
+                let node = format!("{:?}", application.node);
+                assert!(node.contains("derived0"));
+                assert!(!node.contains("derived1"));
+                application.update(application.button_message("replacement").unwrap());
+                assert!(application.take_effects().is_empty());
+                assert!(format!("{:?}", application.node).contains("derived0"));
             }
         }
     }

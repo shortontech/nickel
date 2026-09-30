@@ -103,11 +103,21 @@ struct PackageRuntime {
     exports: BTreeMap<String, String>,
     assets: BTreeMap<String, String>,
 }
+#[derive(Clone)]
 struct MountState {
     reference: ComponentReference,
     generation: u64,
     props: Value,
     surface: Option<Value>,
+}
+
+struct CompositionCheckpoint {
+    mounts: BTreeMap<u64, MountState>,
+    effects: Vec<OwnedComponentEffect>,
+    nested_mounts: BTreeMap<(u64, String), ComponentMount>,
+    callbacks: BTreeMap<u64, CallbackGrant>,
+    children: BTreeMap<u64, OwnedChildGrant>,
+    data: BTreeMap<PackageIdentity, Value>,
 }
 
 /// One generic composition host, one context/module cache per package.
@@ -119,12 +129,14 @@ pub struct ShellCompositionRuntime {
     packages: BTreeMap<PackageIdentity, PackageRuntime>,
     mounts: BTreeMap<u64, MountState>,
     next_mount: u64,
+    next_generation: u64,
     effects: Vec<OwnedComponentEffect>,
     nested_mounts: BTreeMap<(u64, String), ComponentMount>,
     callbacks: BTreeMap<u64, CallbackGrant>,
     children: BTreeMap<u64, OwnedChildGrant>,
     next_callback: u64,
     callback_depth: usize,
+    checkpoint: Option<CompositionCheckpoint>,
 }
 
 impl ShellCompositionRuntime {
@@ -157,12 +169,14 @@ impl ShellCompositionRuntime {
             packages: BTreeMap::new(),
             mounts: BTreeMap::new(),
             next_mount: 0,
+            next_generation: 0,
             effects: Vec::new(),
             nested_mounts: BTreeMap::new(),
             callbacks: BTreeMap::new(),
             children: BTreeMap::new(),
             next_callback: 0,
             callback_depth: 0,
+            checkpoint: None,
         };
         let contribution_catalog = host
             .resolution
@@ -406,6 +420,91 @@ impl ShellCompositionRuntime {
         })
     }
 
+    /// Begin a bounded transaction spanning every participating owner context.
+    /// IDs remain monotonic so rolled-back mount/callback handles cannot be reused.
+    pub fn begin_transaction(&mut self) -> Result<(), String> {
+        if self.checkpoint.is_some() {
+            return Err("composition transaction already pending".into());
+        }
+        let mut started = Vec::new();
+        for (owner, package) in &self.packages {
+            if let Err(error) = package.runtime.borrow_mut().begin_transaction() {
+                for owner in started {
+                    let _ = self.packages[&owner]
+                        .runtime
+                        .borrow_mut()
+                        .finish_transaction(false);
+                }
+                return Err(error);
+            }
+            started.push(owner.clone());
+        }
+        self.checkpoint = Some(CompositionCheckpoint {
+            mounts: self.mounts.clone(),
+            effects: self.effects.clone(),
+            nested_mounts: self.nested_mounts.clone(),
+            callbacks: self.callbacks.clone(),
+            children: self.children.clone(),
+            data: self
+                .packages
+                .iter()
+                .map(|(owner, package)| (owner.clone(), package.data.clone()))
+                .collect(),
+        });
+        Ok(())
+    }
+
+    pub fn transaction_pending(&self) -> bool {
+        self.checkpoint.is_some()
+    }
+
+    pub fn finish_transaction(&mut self, accepted: bool) -> Result<(), String> {
+        let checkpoint = self
+            .checkpoint
+            .take()
+            .ok_or("composition transaction is unavailable")?;
+        let mut failure = None;
+        for package in self.packages.values() {
+            if let Err(error) = package.runtime.borrow_mut().finish_transaction(accepted) {
+                failure = Some(error);
+            }
+        }
+        if !accepted {
+            self.mounts = checkpoint.mounts;
+            self.effects = checkpoint.effects;
+            self.nested_mounts = checkpoint.nested_mounts;
+            self.callbacks = checkpoint.callbacks;
+            self.children = checkpoint.children;
+            for (owner, data) in checkpoint.data {
+                if let Some(package) = self.packages.get_mut(&owner) {
+                    package.data = data;
+                }
+            }
+        }
+        if let Some(error) = failure {
+            self.effects.clear();
+            let owners = self.packages.keys().cloned().collect::<Vec<_>>();
+            for owner in owners {
+                self.retire(&owner);
+            }
+            return Err(format!("composition checkpoint failed: {error}"));
+        }
+        Ok(())
+    }
+
+    fn transactional<T>(
+        &mut self,
+        operation: impl FnOnce(&mut Self) -> Result<T, String>,
+    ) -> Result<T, String> {
+        if self.checkpoint.is_some() {
+            return operation(self);
+        }
+        self.begin_transaction()?;
+        let result = operation(self);
+        self.finish_transaction(result.is_ok())?;
+        result
+    }
+
     pub fn render(
         &mut self,
         mount: &ComponentMount,
@@ -430,6 +529,15 @@ impl ShellCompositionRuntime {
         props: &Value,
         validate: impl FnOnce(&Value) -> Result<(), String>,
     ) -> Result<RenderedComponent, String> {
+        self.transactional(|host| host.render_validated_inner(mount, props, validate))
+    }
+
+    fn render_validated_inner(
+        &mut self,
+        mount: &ComponentMount,
+        props: &Value,
+        validate: impl FnOnce(&Value) -> Result<(), String>,
+    ) -> Result<RenderedComponent, String> {
         bounded_json(props)?;
         if !props.is_object() {
             return Err("component props must be an object".into());
@@ -449,6 +557,15 @@ impl ShellCompositionRuntime {
     }
 
     pub fn dispatch_validated(
+        &mut self,
+        handle: &ComponentEventHandle,
+        value: &Value,
+        validate: impl FnOnce(&Value) -> Result<(), String>,
+    ) -> Result<RenderedComponent, String> {
+        self.transactional(|host| host.dispatch_validated_inner(handle, value, validate))
+    }
+
+    fn dispatch_validated_inner(
         &mut self,
         handle: &ComponentEventHandle,
         value: &Value,
@@ -481,29 +598,20 @@ impl ShellCompositionRuntime {
         props: &Value,
         validate: impl FnOnce(&Value) -> Result<(), String>,
     ) -> Result<RenderedComponent, String> {
-        self.validate_mount(mount)?;
-        if let Some(surface) = self.mounts[&mount.id].surface.clone() {
-            for package in self.packages.values_mut() {
-                package
-                    .data
-                    .as_object_mut()
-                    .ok_or("package snapshot must be an object")?
-                    .insert("surface".into(), surface.clone());
+        self.transactional(|host| {
+            host.validate_mount(mount)?;
+            if let Some(surface) = host.mounts[&mount.id].surface.clone() {
+                for package in host.packages.values_mut() {
+                    package
+                        .data
+                        .as_object_mut()
+                        .ok_or("package snapshot must be an object")?
+                        .insert("surface".into(), surface.clone());
+                }
             }
-        }
-        let result = self
-            .render(mount, props)
-            .and_then(|rendered| self.expand_rendered(mount.id, rendered, validate));
-        if result.is_err() {
-            // Each context has committed its local render by this point. Until
-            // multi-context rollback exists, retire the transaction participants
-            // so failed expansion cannot retain executable callbacks/effects.
-            let owners = self.packages.keys().cloned().collect::<Vec<_>>();
-            for owner in owners {
-                self.retire(&owner);
-            }
-        }
-        result
+            let rendered = host.render(mount, props)?;
+            host.expand_rendered(mount.id, rendered, validate)
+        })
     }
 
     pub fn dispatch_expanded(
@@ -513,17 +621,27 @@ impl ShellCompositionRuntime {
         value: &Value,
         validate: impl FnOnce(&Value) -> Result<(), String>,
     ) -> Result<RenderedComponent, String> {
-        self.validate_mount(root)?;
-        let result = (|| {
-            self.dispatch(handle, value)?;
-            let props = self.mounts[&root.id].props.clone();
-            self.render_expanded(root, &props, validate)
-        })();
+        self.transactional(|host| {
+            host.validate_mount(root)?;
+            host.dispatch(handle, value)?;
+            let props = host.mounts[&root.id].props.clone();
+            host.render_expanded(root, &props, validate)
+        })
+    }
+
+    /// Leave hooks/handlers/effects provisional until the native adapter has
+    /// approved the entire effect batch. The adapter must finish_transaction.
+    pub fn dispatch_expanded_pending(
+        &mut self,
+        root: &ComponentMount,
+        handle: &ComponentEventHandle,
+        value: &Value,
+        validate: impl FnOnce(&Value) -> Result<(), String>,
+    ) -> Result<RenderedComponent, String> {
+        self.begin_transaction()?;
+        let result = self.dispatch_expanded(root, handle, value, validate);
         if result.is_err() {
-            let owners = self.packages.keys().cloned().collect::<Vec<_>>();
-            for owner in owners {
-                self.retire(&owner);
-            }
+            self.finish_transaction(false)?;
         }
         result
     }
@@ -751,8 +869,8 @@ impl ShellCompositionRuntime {
                     token,
                     OwnedChildGrant {
                         receiver: receiver.id,
-                        generation: self.mounts[&receiver.id]
-                            .generation
+                        generation: self
+                            .next_generation
                             .checked_add(1)
                             .ok_or("component generation exhausted")?,
                         source: source_mount,
@@ -787,8 +905,8 @@ impl ShellCompositionRuntime {
                     token,
                     CallbackGrant {
                         receiver: receiver.id,
-                        generation: self.mounts[&receiver.id]
-                            .generation
+                        generation: self
+                            .next_generation
                             .checked_add(1)
                             .ok_or("component generation exhausted")?,
                         source,
@@ -915,6 +1033,11 @@ impl ShellCompositionRuntime {
     }
 
     pub fn take_effects(&mut self) -> Vec<OwnedComponentEffect> {
+        // Once handed to native approval, a rejected batch is discarded rather
+        // than resurrected from the checkpoint as a queued request.
+        if let Some(checkpoint) = &mut self.checkpoint {
+            checkpoint.effects.clear();
+        }
         std::mem::take(&mut self.effects)
     }
 
@@ -934,10 +1057,11 @@ impl ShellCompositionRuntime {
         let state = &self.mounts[&id];
         let owner = state.reference.owner.clone();
         let previous_generation = state.generation;
-        let generation = state
-            .generation
+        let generation = self
+            .next_generation
             .checked_add(1)
             .ok_or("component generation exhausted")?;
+        self.next_generation = generation;
         let package = self
             .packages
             .get_mut(&owner)
@@ -979,10 +1103,7 @@ impl ShellCompositionRuntime {
         let rendered = result?;
         drop(runtime);
         self.mounts.get_mut(&id).unwrap().generation = generation;
-        if let Err(error) = self.drain_effects(&owner, id, previous_generation, event.is_some()) {
-            self.retire(&owner);
-            return Err(error);
-        }
+        self.drain_effects(&owner, id, previous_generation, event.is_some())?;
         Ok(rendered)
     }
 
@@ -1318,6 +1439,129 @@ mod tests {
             &BTreeMap::new(),
         )
         .unwrap()
+    }
+
+    fn transactional_cross_owner_host() -> ShellCompositionRuntime {
+        let mut base = package(
+            "base",
+            "export function Shell(){const [state]=useState({count:0});const ref=useRef({count:0});return h(Column,null,h(Text,null,'base'+state.count+':'+ref.current.count),h(nickel.component('shell.taskbar'),{onChange:()=>{state.count++;ref.current.count++;nickel.windows.activate('base');}}));}\nexport function Taskbar(){}\nexport function QuickSettings(){}\nexport default Shell;",
+            None,
+        );
+        base.manifest
+            .composition
+            .as_mut()
+            .unwrap()
+            .exports
+            .insert("shell".into(), "./main.js#Shell".into());
+        let child = package(
+            "child",
+            "export function Taskbar(props){const [count,setCount]=useState(0);return h(Button,{onClick:()=>{setCount(count+1);props.onChange();nickel.windows.activate('child');}},'child'+count);}\nexport default Taskbar;",
+            Some("base"),
+        );
+        ShellCompositionRuntime::new(
+            &BTreeMap::from([("base".into(), base), ("child".into(), child)]),
+            "child",
+            &BTreeMap::new(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn failed_checkpoint_restoration_invalidates_all_executable_participants() {
+        let package = package(
+            "base",
+            "export function Taskbar(){const [state]=useState({count:0});return h(Button,{onClick:()=>{state.count++;Object.freeze(state);nickel.windows.activate('owned');}},String(state.count));}\nexport function QuickSettings(){}\nexport default Taskbar;",
+            None,
+        );
+        let mut host = ShellCompositionRuntime::new(
+            &BTreeMap::from([("base".into(), package)]),
+            "base",
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let root = host
+            .mount(&host.component("shell.taskbar").unwrap())
+            .unwrap();
+        let initial = host
+            .render_expanded(&root, &serde_json::json!({}), |_| Ok(()))
+            .unwrap();
+        let escaped_runtime = host
+            .shared_owner_runtime(&host.resolution().active)
+            .unwrap();
+        let error = host
+            .dispatch_expanded(&root, &initial.events[&0], &Value::Null, |_| {
+                Err("native rejected".into())
+            })
+            .err()
+            .unwrap();
+        assert!(error.contains("checkpoint failed"));
+        assert!(
+            escaped_runtime
+                .borrow_mut()
+                .eval("globalThis.afterFailure=true")
+                .is_err()
+        );
+        assert!(host.packages.is_empty());
+        assert!(host.mounts.is_empty());
+        assert!(host.take_effects().is_empty());
+        assert!(host.dispatch(&initial.events[&0], &Value::Null).is_err());
+    }
+
+    #[test]
+    fn rejected_expansion_restores_all_owner_hooks_handlers_and_effects() {
+        let mut host = transactional_cross_owner_host();
+        let root = host.mount(&host.component("shell").unwrap()).unwrap();
+        let initial = host
+            .render_expanded(&root, &serde_json::json!({}), |_| Ok(()))
+            .unwrap();
+        assert!(
+            host.dispatch_expanded(&root, &initial.events[&0], &Value::Null, |_| Err(
+                "native tree rejected".into()
+            ))
+            .is_err()
+        );
+        assert!(host.take_effects().is_empty());
+        // A rejected attempt leaves the previously accepted handler usable.
+        let accepted = host
+            .dispatch_expanded(&root, &initial.events[&0], &Value::Null, |_| Ok(()))
+            .unwrap();
+        assert!(accepted.node.to_string().contains("base1:1"));
+        assert!(accepted.node.to_string().contains("child1"));
+        let effects = host.take_effects();
+        assert_eq!(effects.len(), 2);
+        assert_eq!(effects[0].owner().id, "base");
+        assert_eq!(effects[1].owner().id, "child");
+    }
+
+    #[test]
+    fn denied_native_effect_batch_restores_cross_owner_state_and_revokes_provisional_handles() {
+        let mut host = transactional_cross_owner_host();
+        let root = host.mount(&host.component("shell").unwrap()).unwrap();
+        let initial = host
+            .render_expanded(&root, &serde_json::json!({}), |_| Ok(()))
+            .unwrap();
+        let provisional = host
+            .dispatch_expanded_pending(&root, &initial.events[&0], &Value::Null, |_| Ok(()))
+            .unwrap();
+        assert!(provisional.node.to_string().contains("base1:1"));
+        assert_eq!(host.take_effects().len(), 2);
+        // Native approval rejects the complete batch, including the allowed
+        // callback that ran before the later forbidden child operation.
+        host.finish_transaction(false).unwrap();
+        assert!(host.take_effects().is_empty());
+        assert!(
+            host.dispatch(&provisional.events[&0], &Value::Null)
+                .is_err()
+        );
+        let restored = host
+            .render_expanded(&root, &serde_json::json!({}), |_| Ok(()))
+            .unwrap();
+        assert!(restored.node.to_string().contains("base0:0"));
+        assert!(restored.node.to_string().contains("child0"));
+        assert!(
+            host.dispatch(&provisional.events[&0], &Value::Null)
+                .is_err()
+        );
     }
 
     #[test]
