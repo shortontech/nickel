@@ -7182,7 +7182,7 @@ impl NickelSession {
         let committed = self
             .internal_shell
             .as_mut()
-            .and_then(|shell| shell.shell_mut().take_preferences_commit());
+            .and_then(|shell| shell.take_preferences_commit());
         if let Some(settings) = committed {
             if let Ok(transitions) = self
                 .workspaces

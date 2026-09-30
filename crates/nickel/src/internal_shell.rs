@@ -1501,6 +1501,10 @@ impl InternalShellCoordinator {
         &mut self.shell
     }
 
+    pub(crate) fn take_preferences_commit(&mut self) -> Option<nickel_core::shell_settings::ShellSettings> {
+        self.shell.take_preferences_commit()
+    }
+
     pub(crate) fn plugin_status_snapshot(&self) -> nickel_session_protocol::PluginStatusSnapshot {
         self.shell.plugin_status_snapshot()
     }
