@@ -253,6 +253,13 @@ function __nickelFeatureEffect(operation, values = {}) {
     if (!snapshot?.available || !snapshot.operations?.[operation]) throw Error('feature operation is unavailable');
     __effects.push({type:'features.' + operation, revision:snapshot.revision, ...values});
 }
+function __nickelDecideShell(token, revision, confirm) {
+            const snapshot = __nickelResource('plugins', {available:false,writable:false});
+            const preview = snapshot.shellPreview;
+            if (!snapshot.available || !snapshot.writable || !preview || typeof token !== 'string' || token !== preview.token || !preview[confirm ? 'canConfirm' : 'canRevert']) throw Error('shell preview decision is unavailable');
+            if (typeof revision !== 'string' || revision !== snapshot.revision) throw Error('plugin inventory is stale');
+            __effects.push({type:confirm ? 'plugins.confirmShell' : 'plugins.revertShell', token, revision});
+}
 const nickel = Object.freeze({
     shortcuts: Object.freeze({
         get() { return __nickelResource('shortcuts', {available:false,editable:false,shortcuts:[],reason:'Shortcut read capability is unavailable'}); }
@@ -435,10 +442,12 @@ const nickel = Object.freeze({
             id = __nickelIdentity(id);
             const snapshot = this.get();
             const plugin = snapshot.plugins.find(plugin => plugin.id === id);
-            if (!snapshot.available || !snapshot.writable || !plugin || !plugin.shell) throw Error('shell selection is unavailable');
+            if (!snapshot.available || !snapshot.writable || snapshot.shellPreview || !plugin || !plugin.shell) throw Error('shell selection is unavailable');
             if (typeof revision !== 'string' || revision !== snapshot.revision) throw Error('plugin inventory is stale');
             __effects.push({type:'plugins.selectShell',id,revision});
         },
+        confirmShell(token, revision) { __nickelDecideShell(token, revision, true); },
+        revertShell(token, revision) { __nickelDecideShell(token, revision, false); },
         setSetting(id, key, value, revision) {
             id = __nickelIdentity(id); key = __nickelIdentity(key);
             const snapshot = this.get();

@@ -12,6 +12,12 @@ use nickel_ui::{
 pub struct ProjectionRecoveryState {
     pub projection_only: bool,
     pub pending_projection: Option<ProjectionMode>,
+    pub shell_preview: Option<u64>,
+}
+impl ProjectionRecoveryState {
+    pub fn trusted_visible(&self) -> bool {
+        self.projection_only || self.shell_preview.is_some()
+    }
 }
 pub struct ProjectionRecoveryApp {
     palette: ThemePalette,
@@ -47,9 +53,19 @@ impl ProjectionRecoveryApp {
         self.state.pending_projection = None;
         self.dirty = true;
     }
+    pub fn show_shell_preview(&mut self, token: u64) {
+        self.state.shell_preview = Some(token);
+        self.dirty = true;
+    }
+    pub fn dismiss_shell_preview(&mut self) {
+        if self.state.shell_preview.take().is_some() {
+            self.dirty = true;
+        }
+    }
     pub fn dismiss(&mut self) {
         if self.state.projection_only {
-            self.state = Default::default();
+            self.state.projection_only = false;
+            self.state.pending_projection = None;
             self.dirty = true;
         }
     }
@@ -73,6 +89,7 @@ impl Application for ProjectionRecoveryApp {
             ControlAction::ConfirmProjection | ControlAction::CancelProjection => {
                 self.state.pending_projection = None
             }
+            ControlAction::ConfirmShellPreview(_) | ControlAction::RevertShellPreview(_) => {}
             _ => return,
         };
         self.effects.push(message);
@@ -85,6 +102,40 @@ impl Application for ProjectionRecoveryApp {
         } else {
             ReadingDirection::LeftToRight
         };
+        if let Some(token) = self.state.shell_preview {
+            return AnyView::new(
+                Container::new()
+                    .width(context.viewport.size.width.max(280.0))
+                    .height(context.viewport.size.height.max(240.0))
+                    .padding(24.0)
+                    .background(self.palette.panel)
+                    .child(
+                        Column::new()
+                            .gap(12.0)
+                            .child(Text::new("Keep the preview shell?").color(self.palette.text))
+                            .child(
+                                Text::new(
+                                    "The previous shell returns automatically after 15 seconds.",
+                                )
+                                .color(self.palette.text),
+                            )
+                            .child(
+                                Row::new()
+                                    .gap(8.0)
+                                    .child(button(
+                                        self.palette,
+                                        ControlAction::RevertShellPreview(token),
+                                        "Restore previous shell",
+                                    ))
+                                    .child(button(
+                                        self.palette,
+                                        ControlAction::ConfirmShellPreview(token),
+                                        "Keep this shell",
+                                    )),
+                            ),
+                    ),
+            );
+        }
         projection_chooser_view(
             self.palette,
             self.state.pending_projection,

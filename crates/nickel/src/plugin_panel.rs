@@ -194,6 +194,10 @@ pub enum PluginEffect {
         plugin_id: String,
         effect: crate::preferences_capabilities::PreferencesEffect,
     },
+    ShellPreviewDecision {
+        plugin_id: String,
+        effect: crate::plugins_capabilities::ShellPreviewDecision,
+    },
     ShellSelection {
         plugin_id: String,
         effect: crate::plugins_capabilities::ShellSelectionEffect,
@@ -2168,6 +2172,40 @@ impl PluginPanelApplication {
                                     });
                             match request {
                                 Ok(effect) => approved.push(PluginEffect::Preferences {
+                                    plugin_id: effect_manifest.id.clone(),
+                                    effect,
+                                }),
+                                Err(error) => {
+                                    self.last_error = Some(error);
+                                    return;
+                                }
+                            }
+                        }
+                        Some("plugins.confirmShell" | "plugins.revertShell") => {
+                            let request =
+                                crate::plugins_capabilities::ShellPreviewDecision::parse(&effect)
+                                    .and_then(|request| {
+                                        if !effect_manifest
+                                            .capabilities
+                                            .contains(&PluginCapability::PluginsRead)
+                                            || !effect_manifest
+                                                .capabilities
+                                                .contains(&PluginCapability::PluginsControl)
+                                        {
+                                            return Err(
+                                                "shell preview grants are unavailable".into()
+                                            );
+                                        }
+                                        let data: Value = self
+                                            .projection_data
+                                            .as_deref()
+                                            .and_then(|data| serde_json::from_str(data).ok())
+                                            .ok_or("plugin inventory is unavailable")?;
+                                        request.validate(&data["plugins"])?;
+                                        Ok(request)
+                                    });
+                            match request {
+                                Ok(effect) => approved.push(PluginEffect::ShellPreviewDecision {
                                     plugin_id: effect_manifest.id.clone(),
                                     effect,
                                 }),

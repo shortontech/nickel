@@ -1,4 +1,5 @@
 mod preference_persistence;
+mod shell_selection;
 
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -615,6 +616,9 @@ pub struct LiveShell {
     audio_status_observed: bool,
     associations_results: HashMap<String, serde_json::Value>,
     plugins_results: HashMap<String, serde_json::Value>,
+    shell_selection_preview: Option<shell_selection::ShellPreview>,
+    shell_preview_sequence: u64,
+    confirmed_shell_package_id: String,
     settings_navigation: Option<serde_json::Value>,
     settings_navigation_revision: u64,
     volume_osd_until: Option<Instant>,
@@ -1338,6 +1342,9 @@ impl LiveShell {
             audio_status_observed: false,
             associations_results: HashMap::new(),
             plugins_results: HashMap::new(),
+            shell_selection_preview: None,
+            shell_preview_sequence: 0,
+            confirmed_shell_package_id: "nickel-default".into(),
             settings_navigation: None,
             settings_navigation_revision: 0,
             launcher_visible: false,
@@ -1488,6 +1495,8 @@ impl LiveShell {
         {
             if let Err(error) = shell.select_shell_package(selected) {
                 tracing::warn!(%error, "selected shell could not start");
+            } else {
+                shell.confirmed_shell_package_id = selected.into();
             }
         }
         shell.maybe_publish_plugin_status();
@@ -2082,7 +2091,11 @@ impl LiveShell {
                         .remote_access_protected()
                 })
                 .unwrap_or_else(|| {
-                    !self.control_host.application().view_state().projection_only
+                    !self
+                        .control_host
+                        .application()
+                        .view_state()
+                        .trusted_visible()
                         || self.control_host.remote_access_protected()
                 }),
             SurfaceRole::Notification => {
@@ -2159,7 +2172,12 @@ impl LiveShell {
                         height,
                     )
                     .unwrap_or_default()
-                } else if self.control_host.application().view_state().projection_only {
+                } else if self
+                    .control_host
+                    .application()
+                    .view_state()
+                    .trusted_visible()
+                {
                     self.sync_control_host(width, height);
                     self.control_host.commands().to_vec()
                 } else {
@@ -2641,7 +2659,12 @@ impl LiveShell {
             SurfaceRole::Panel => !self.plugin_surface_hosts.is_empty(),
             SurfaceRole::Launcher => false,
             SurfaceRole::ControlCenter => {
-                self.control_visible && self.control_host.application().view_state().projection_only
+                self.control_visible
+                    && self
+                        .control_host
+                        .application()
+                        .view_state()
+                        .trusted_visible()
             }
             SurfaceRole::Notification => self.trusted_notification_visible(),
             SurfaceRole::VolumeOsd => false,
@@ -2678,7 +2701,11 @@ impl LiveShell {
         }
         if role == SurfaceRole::ControlCenter {
             return self.control_visible
-                && self.control_host.application().view_state().projection_only;
+                && self
+                    .control_host
+                    .application()
+                    .view_state()
+                    .trusted_visible();
         }
 
         if role == SurfaceRole::Notification {
@@ -2779,9 +2806,6 @@ impl LiveShell {
             for surface in initial {
                 self.show_plugin_window(id, &surface)?;
             }
-            #[cfg(not(test))]
-            nickel_core::plugins::PluginActivationSettings::select_shell_default(id)
-                .map_err(|error| error.to_string())?;
             Ok(())
         })();
         if let Err(error) = transition {
@@ -3534,6 +3558,7 @@ impl LiveShell {
                     }
                 }
                 snapshot["selectedShell"] = serde_json::json!(self.active_shell_package_id);
+                snapshot["shellPreview"] = self.shell_preview_snapshot(plugin_id);
                 snapshot
             })
     }
@@ -3662,7 +3687,7 @@ impl LiveShell {
             return Some(match self.session_host.projection_outputs() {
                 Ok(outputs) => serde_json::json!({"available": true, "outputs": outputs,
                     "revision": crate::display_capabilities::revision(&outputs),
-                    "projectionModes": if !self.control_host.application().view_state().projection_only {crate::display_capabilities::projection_modes(&outputs)} else {serde_json::json!([])},
+                    "projectionModes": if !self.control_host.application().view_state().trusted_visible() {crate::display_capabilities::projection_modes(&outputs)} else {serde_json::json!([])},
                     "application_scale": self.application_scale_service.snapshot(),
                     "operations": {"setOrientation": true, "setApplicationScale": true, "identify": true},
                     "pending_confirmation": self.display_preview.is_some(),
@@ -4774,6 +4799,13 @@ impl LiveShell {
         }
         self.plugin_activation_generation =
             self.plugin_activation_generation.wrapping_add(1).max(1);
+        if self
+            .shell_selection_preview
+            .as_ref()
+            .is_some_and(|preview| preview.selected == id || preview.owner == id)
+        {
+            self.recover_pending_shell("The preview shell or its requesting provider failed.");
+        }
         self.maybe_publish_plugin_status();
         true
     }
@@ -5177,6 +5209,15 @@ impl LiveShell {
             if let Err(error) = self.reconcile_installed_contributors() {
                 tracing::warn!(%error,"contributor retirement refresh failed");
             }
+            if self
+                .shell_selection_preview
+                .as_ref()
+                .is_some_and(|preview| preview.selected == id || preview.owner == id)
+            {
+                self.recover_pending_shell(
+                    "The preview shell or its requesting provider was disabled.",
+                );
+            }
             self.maybe_publish_plugin_status();
             return Ok(true);
         }
@@ -5268,6 +5309,12 @@ impl LiveShell {
         );
         push("on-screen-keyboard", Some(self.keyboard_deadline));
         push("clock", Some(self.clock_deadline));
+        push(
+            "shell-selection-preview",
+            self.shell_selection_preview
+                .as_ref()
+                .map(|preview| preview.deadline),
+        );
         push("launcher-preferences", self.launcher_preference_deadline);
         push("lock", self.lock_deadline);
         push(
@@ -5419,9 +5466,14 @@ impl LiveShell {
     }
 
     pub fn poll_deadlines(&mut self, now: Instant) -> ShellDeadlineOutcome {
+        let shell_recovered = self
+            .shell_selection_preview
+            .as_ref()
+            .is_some_and(|preview| now >= preview.deadline)
+            && self.recover_pending_shell("Shell preview expired without confirmation.");
         let settings_changed = self.dispatch_pending_desktop_settings();
         let mut outcome = ShellDeadlineOutcome {
-            visibility_changed: settings_changed,
+            visibility_changed: settings_changed || shell_recovered,
             redraw: self.poll_host_deadlines(now),
             ..ShellDeadlineOutcome::default()
         };
@@ -6272,6 +6324,36 @@ impl LiveShell {
                         changed = true;
                     }
                 }
+                crate::plugin_panel::PluginEffect::ShellPreviewDecision { plugin_id, effect } => {
+                    let result = self
+                        .plugin_registry
+                        .get(&plugin_id)
+                        .filter(|entry| {
+                            entry.desired_enabled
+                                && entry.health == nickel_core::plugins::PluginHealth::Running
+                        })
+                        .and_then(|_| self.plugin_management(&plugin_id))
+                        .ok_or("shell preview grant is unavailable".to_owned())
+                        .and_then(|snapshot| effect.validate(&snapshot))
+                        .and_then(|()| {
+                            if effect.confirm {
+                                self.confirm_shell_preview(Some(&plugin_id), effect.token)
+                            } else {
+                                self.revert_shell_preview(
+                                    Some(&plugin_id),
+                                    effect.token,
+                                    "The previous shell was restored.",
+                                )
+                            }
+                        });
+                    if let Err(error) = result {
+                        self.plugins_results.insert(
+                            plugin_id,
+                            serde_json::json!({"status":"rejected","detail":error}),
+                        );
+                    }
+                    changed = true;
+                }
                 crate::plugin_panel::PluginEffect::ShellSelection { plugin_id, effect } => {
                     let result = self
                         .plugin_registry
@@ -6283,12 +6365,12 @@ impl LiveShell {
                         .and_then(|_| self.plugin_management(&plugin_id))
                         .ok_or("shell selection grant is unavailable".to_owned())
                         .and_then(|snapshot| effect.validate(&snapshot))
-                        .and_then(|()| self.select_shell_package(&effect.id));
+                        .and_then(|()| self.begin_shell_preview(&plugin_id, &effect.id));
                     self.plugins_results.insert(
                         plugin_id,
                         match result {
                             Ok(_) => {
-                                serde_json::json!({"status":"applied","selectedShell":effect.id})
+                                serde_json::json!({"status":if self.shell_selection_preview.is_some(){"preview"}else{"confirmed"},"selectedShell":effect.id})
                             }
                             Err(error) => serde_json::json!({"status":"rejected","detail":error}),
                         },
@@ -6586,7 +6668,12 @@ impl LiveShell {
                 authority,
             );
         }
-        if !self.control_host.application().view_state().projection_only {
+        if !self
+            .control_host
+            .application()
+            .view_state()
+            .trusted_visible()
+        {
             return Default::default();
         }
         self.sync_control_host(size.0, size.1);
@@ -6631,7 +6718,7 @@ impl LiveShell {
                     self.control_host
                         .application()
                         .view_state()
-                        .projection_only
+                        .trusted_visible()
                         .then(|| self.control_host.inspect())
                 })?,
             _ => return None,
@@ -7678,6 +7765,11 @@ impl LiveShell {
                 {
                     self.locked = locked;
                     if locked {
+                        self.recover_pending_shell(
+                            "The shell preview ended when the session locked.",
+                        );
+                    }
+                    if locked {
                         self.hide_volume_osd();
                     }
                     let application = self.lock_host.application_mut();
@@ -8144,7 +8236,16 @@ impl LiveShell {
     }
 
     fn set_control_visible(&mut self, visible: bool) {
-        if !self.control_host.application().view_state().projection_only {
+        if !visible && self.shell_selection_preview.is_some() {
+            self.recover_pending_shell("Shell preview dismissed.");
+            return;
+        }
+        if !self
+            .control_host
+            .application()
+            .view_state()
+            .trusted_visible()
+        {
             if visible {
                 self.set_default_shell_surface_visible("launcher", false);
             }
@@ -8180,6 +8281,10 @@ impl LiveShell {
     }
 
     pub(crate) fn apply_control_visibility(&mut self, visible: bool) {
+        if !visible && self.shell_selection_preview.is_some() {
+            self.recover_pending_shell("Shell preview dismissed.");
+            return;
+        }
         self.control_visible = visible;
         if !visible {
             self.control_host.application_mut().dismiss();
@@ -8307,6 +8412,7 @@ impl LiveShell {
     /// whichever application was active before this surface opened.
     pub(crate) fn dismiss_ephemeral_on_focus_loss(&mut self, role: SurfaceRole) -> bool {
         match role {
+            SurfaceRole::ControlCenter if self.shell_selection_preview.is_some() => false,
             SurfaceRole::ControlCenter => {
                 self.control_host.application_mut().dismiss();
                 std::mem::replace(&mut self.control_visible, false)
@@ -9674,12 +9780,20 @@ impl LiveShell {
     fn quick_settings_surface_active(&self) -> bool {
         self.plugin_panel_host_ref(&self.active_shell_surface_key("quick-settings"))
             .is_some()
-            && !self.control_host.application().view_state().projection_only
+            && !self
+                .control_host
+                .application()
+                .view_state()
+                .trusted_visible()
     }
 
     pub(crate) fn control_surface_available(&self) -> bool {
         self.active_shell_declares("quick-settings")
-            || self.control_host.application().view_state().projection_only
+            || self
+                .control_host
+                .application()
+                .view_state()
+                .trusted_visible()
     }
 
     pub(crate) fn plugin_surface_host_event(
@@ -9848,6 +9962,20 @@ impl LiveShell {
                         .projection_preview_failed();
                 }
             }
+            ControlAction::ConfirmShellPreview(token) => {
+                if let Err(error) = self.confirm_shell_preview(None, token) {
+                    tracing::warn!(%error,"trusted shell confirmation failed");
+                }
+            }
+            ControlAction::RevertShellPreview(token) => {
+                if !self.locked {
+                    let _ = self.revert_shell_preview(
+                        None,
+                        token,
+                        "The previous shell was restored from trusted recovery.",
+                    );
+                }
+            }
             ControlAction::ConfirmProjection => {
                 self.projection_chooser.confirm();
                 self.projection_rollback_deadline = None;
@@ -9862,6 +9990,9 @@ impl LiveShell {
         &mut self,
         mode: nickel_core::display_projection::ProjectionMode,
     ) -> bool {
+        if self.shell_selection_preview.is_some() {
+            return false;
+        }
         #[cfg(target_os = "linux")]
         {
             use nickel_core::display_projection::{
@@ -10003,9 +10134,16 @@ impl LiveShell {
         layout: nickel_session_protocol::OutputLayout,
         expected_revision: &str,
     ) -> bool {
+        if self.shell_selection_preview.is_some() {
+            return false;
+        }
         #[cfg(target_os = "linux")]
         {
-            if self.control_host.application().view_state().projection_only
+            if self
+                .control_host
+                .application()
+                .view_state()
+                .trusted_visible()
                 || self.display_preview.is_some()
                 || self.projection_rollback_deadline.is_some()
             {

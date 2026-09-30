@@ -255,6 +255,12 @@ impl ShellSelectionEffect {
         Ok(Self { id, revision })
     }
     pub(crate) fn validate(&self, snapshot: &Value) -> Result<(), String> {
+        if snapshot
+            .get("shellPreview")
+            .is_some_and(|preview| !preview.is_null())
+        {
+            return Err("a shell preview is already pending".into());
+        }
         if snapshot["available"] != true || snapshot["writable"] != true {
             return Err("shell selection is unavailable".into());
         }
@@ -271,6 +277,65 @@ impl ShellSelectionEffect {
                 .any(|plugin| plugin["id"] == self.id && plugin["shell"] == true)
         }) {
             return Err("shell package is unavailable".into());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShellPreviewDecision {
+    pub token: u64,
+    pub revision: u64,
+    pub confirm: bool,
+}
+impl ShellPreviewDecision {
+    pub(crate) fn parse(value: &Value) -> Result<Self, String> {
+        let confirm = match value["type"].as_str() {
+            Some("plugins.confirmShell") => true,
+            Some("plugins.revertShell") => false,
+            _ => return Err("invalid shell preview decision".into()),
+        };
+        let token = value["token"]
+            .as_str()
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|token| *token > 0)
+            .ok_or("invalid shell preview token")?;
+        let revision = value["revision"]
+            .as_str()
+            .and_then(|value| value.parse().ok())
+            .ok_or("invalid plugin inventory revision")?;
+        Ok(Self {
+            token,
+            revision,
+            confirm,
+        })
+    }
+    pub(crate) fn validate(&self, snapshot: &Value) -> Result<(), String> {
+        if snapshot["available"] != true || snapshot["writable"] != true {
+            return Err("shell preview decision is unavailable".into());
+        }
+        if snapshot["revision"]
+            .as_str()
+            .and_then(|value| value.parse::<u64>().ok())
+            != Some(self.revision)
+        {
+            return Err("plugin inventory is stale".into());
+        }
+        let preview = &snapshot["shellPreview"];
+        if preview["token"]
+            .as_str()
+            .and_then(|value| value.parse::<u64>().ok())
+            != Some(self.token)
+        {
+            return Err("shell preview token is stale".into());
+        }
+        if preview[if self.confirm {
+            "canConfirm"
+        } else {
+            "canRevert"
+        }] != true
+        {
+            return Err("shell preview decision is unavailable".into());
         }
         Ok(())
     }

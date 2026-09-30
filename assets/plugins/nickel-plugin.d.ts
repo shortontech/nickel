@@ -517,13 +517,16 @@ declare const nickel: Readonly<{
     }>;
     plugins: Readonly<{
         /** Requires plugins-read; unavailable memory counters are null. */
-        get(): Readonly<{available:boolean; writable:boolean; revision?:string; truncated?:boolean; reason?:string; selectedShell?:string; plugins:ReadonlyArray<NickelPluginStatus>; lastResult?:Readonly<{status:string;detail?:string}> | null}>;
+        get(): Readonly<{available:boolean; writable:boolean; revision?:string; truncated?:boolean; reason?:string; selectedShell?:string; shellPreview?:Readonly<{token:string;previousShell:string;selectedShell:string;deadlineUnixMilliseconds:number;canConfirm:boolean;canRevert:boolean}>|null; plugins:ReadonlyArray<NickelPluginStatus>; lastResult?:Readonly<{status:string;detail?:string}> | null}>;
         list(): ReadonlyArray<NickelPluginStatus>;
         /** Requires plugins-read and plugins-control and a current inventory revision. */
         enable(id:string, revision:string):void;
         disable(id:string, revision:string):void;
         setEnabled(id:string, enabled:boolean, revision:string):void;
+        /** Start a timed preview; confirmation persists the selection. */
         selectShell(id:string, revision:string):void;
+        confirmShell(token:string, revision:string):void;
+        revertShell(token:string, revision:string):void;
         setSetting(id:string, key:string, value:boolean|number|string, revision:string):void;
     }>;
     /** Read-only reference: native shortcut remapping is currently unsupported. Requires shortcuts-read. */

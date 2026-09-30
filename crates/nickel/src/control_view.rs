@@ -27,6 +27,8 @@ pub enum ControlAction {
         id: String,
     },
     PreviewProjection(ProjectionMode),
+    ConfirmShellPreview(u64),
+    RevertShellPreview(u64),
     ConfirmProjection,
     CancelProjection,
 }

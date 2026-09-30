@@ -2323,7 +2323,13 @@ fn inherited_shell_selection_hides_base_roots_and_honors_omitted_settings() {
                 effect: selection
             }
         ]));
-        assert_eq!(shell.plugins_results["nickel-default"]["status"], "applied");
+        assert_eq!(shell.plugins_results["nickel-default"]["status"], "preview");
+        let token = shell.shell_selection_preview.as_ref().unwrap().token;
+        assert!(
+            shell
+                .confirm_shell_preview(Some("nickel-default"), token)
+                .unwrap()
+        );
         assert!(shell.package_runtimes.contains_key("nickel-default"));
         assert!(
             !shell
