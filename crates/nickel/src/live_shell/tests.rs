@@ -1,3 +1,232 @@
+// Boa package evaluation needs the same stack reserve as the shipped host.
+fn with_package_runtime_stack(test: impl FnOnce() + Send + 'static) {
+    std::thread::Builder::new()
+        .stack_size(32 * 1024 * 1024)
+        .spawn(test)
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+fn embedded_package_visibility_preserves_shared_runtime_until_disable() {
+    with_package_runtime_stack(|| {
+        use nickel_core::plugins::{
+            PluginHealth, PluginPackage, PluginPackageSource, PluginSurfaceKey,
+        };
+        let manifest = br#"{"api_version":1,"id":"org.example.embedded-lifecycle","name":"Embedded lifecycle","entry":"src/main.js","capabilities":["settings-write"],"surfaces":[{"id":"first","kind":"window","width":400,"height":240},{"id":"second","kind":"window","width":400,"height":240,"initially_open":false}]}"#;
+        let source = b"import { shared } from './state.js';\nregisterSetting({id:'enabled',group:'Example',label:'Enabled',type:'switch',defaultValue:false,onChange:()=>{shared.count+=10;}});\nexport default function App() { const id=nickel.data.surface.id; return h(Window,{id,width:400,height:240},h(Text,{},String(shared.count)),h(Button,{onClick:()=>{shared.count++;}},'Increment')); }";
+        let package = PluginPackage::from_embedded(&[
+            ("plugin.json", manifest),
+            ("src/main.js", source),
+            ("src/state.js", b"export const shared = {count:0};"),
+        ])
+        .unwrap();
+        let id = package.manifest.id.clone();
+        let mut shell = LiveShell::new().unwrap();
+        shell
+            .plugin_registry
+            .register(package.manifest.clone())
+            .unwrap();
+        shell
+            .external_plugin_packages
+            .insert(id.clone(), PluginPackageSource::embedded(package));
+        shell.set_plugin_enabled(&id, true).unwrap();
+        let runtime = shell.package_runtimes[&id].clone();
+        let first = PluginSurfaceKey {
+            plugin_id: id.clone(),
+            surface_id: "first".into(),
+        };
+        let second = PluginSurfaceKey {
+            plugin_id: id.clone(),
+            surface_id: "second".into(),
+        };
+        assert!(shell.plugin_surface_hosts.contains_key(&first));
+        assert!(!shell.plugin_surface_hosts.contains_key(&second));
+        shell.plugin_panel_scene(&first, 400, 240).unwrap();
+        let button = shell
+            .plugin_panel_host_for(&first)
+            .unwrap()
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: nickel_ui::SemanticRole::Button,
+                name: "Increment".into(),
+            })
+            .unwrap();
+        assert!(shell.plugin_panel_host_ui_for(
+            &first,
+            nickel_ui::UiEvent::AccessibilityActivate(button.id),
+            400,
+            240
+        ));
+        assert!(shell.close_plugin_window(&first).unwrap());
+        assert!(
+            shell
+                .plugin_surface_hosts
+                .keys()
+                .all(|key| key.plugin_id != id)
+        );
+        assert_eq!(
+            shell.plugin_registry.get(&id).unwrap().health,
+            PluginHealth::Running
+        );
+        assert!(std::rc::Rc::ptr_eq(&runtime, &shell.package_runtimes[&id]));
+        assert!(
+            shell
+                .package_settings_registry
+                .settings_snapshot()
+                .settings
+                .iter()
+                .any(|setting| setting.provider_package == id)
+        );
+        shell.apply_plugin_effects(vec![
+            crate::plugin_panel::PluginEffect::InvokeRegisteredSetting {
+                caller: id.clone(),
+                provider: id.clone(),
+                id: "enabled".into(),
+                value: serde_json::Value::Bool(true),
+            },
+        ]);
+        assert!(shell.show_plugin_window(&id, "second").unwrap());
+        assert!(std::rc::Rc::ptr_eq(
+            &runtime,
+            &shell
+                .plugin_panel_host_for(&second)
+                .unwrap()
+                .application()
+                .shared_runtime()
+        ));
+        let count: u32 = runtime
+            .borrow_mut()
+            .eval_json("JSON.stringify(__nickelRequireModule('src/state.js').shared.count)")
+            .unwrap();
+        assert_eq!(count, 11);
+        shell.show_plugin_window(&id, "first").unwrap();
+        assert!(std::rc::Rc::ptr_eq(
+            &runtime,
+            &shell
+                .plugin_panel_host_for(&first)
+                .unwrap()
+                .application()
+                .shared_runtime()
+        ));
+        shell.set_plugin_enabled(&id, false).unwrap();
+        assert!(!shell.package_runtimes.contains_key(&id));
+        assert!(
+            shell
+                .package_settings_registry
+                .settings_snapshot()
+                .settings
+                .iter()
+                .all(|setting| setting.provider_package != id)
+        );
+        assert!(shell.show_plugin_window(&id, "second").is_err());
+        shell.set_plugin_enabled(&id, true).unwrap();
+        assert!(!std::rc::Rc::ptr_eq(&runtime, &shell.package_runtimes[&id]));
+        let count: u32 = shell.package_runtimes[&id]
+            .borrow_mut()
+            .eval_json("JSON.stringify(__nickelRequireModule('src/state.js').shared.count)")
+            .unwrap();
+        assert_eq!(count, 0);
+    });
+}
+
+#[test]
+fn embedded_package_can_enable_with_all_windows_initially_closed() {
+    with_package_runtime_stack(|| {
+        let manifest=br#"{"api_version":1,"id":"org.example.hidden-package","name":"Hidden package","entry":"main.js","surfaces":[{"id":"first","kind":"window","width":400,"height":240,"initially_open":false},{"id":"second","kind":"window","width":400,"height":240,"initially_open":false}]}"#;
+        let source=b"registerSetting({id:'flag',group:'Hidden',label:'Flag',type:'switch',defaultValue:false}); function App() { return h(Window,{id:nickel.data.surface.id,width:400,height:240},h(Text,{},'Hidden package')); }";
+        let package = nickel_core::plugins::PluginPackage::from_embedded(&[
+            ("plugin.json", manifest),
+            ("main.js", source),
+        ])
+        .unwrap();
+        let id = package.manifest.id.clone();
+        let mut shell = LiveShell::new().unwrap();
+        shell
+            .plugin_registry
+            .register(package.manifest.clone())
+            .unwrap();
+        shell.external_plugin_packages.insert(
+            id.clone(),
+            nickel_core::plugins::PluginPackageSource::embedded(package),
+        );
+        shell.set_plugin_enabled(&id, true).unwrap();
+        let runtime = shell.package_runtimes[&id].clone();
+        assert!(
+            shell
+                .plugin_surface_hosts
+                .keys()
+                .all(|key| key.plugin_id != id)
+        );
+        assert!(
+            shell
+                .package_settings_registry
+                .settings_snapshot()
+                .settings
+                .iter()
+                .any(|setting| setting.provider_package == id)
+        );
+        shell.show_plugin_window(&id, "second").unwrap();
+        let key = nickel_core::plugins::PluginSurfaceKey {
+            plugin_id: id.clone(),
+            surface_id: "second".into(),
+        };
+        assert!(std::rc::Rc::ptr_eq(
+            &runtime,
+            &shell
+                .plugin_panel_host_for(&key)
+                .unwrap()
+                .application()
+                .shared_runtime()
+        ));
+        shell.set_plugin_enabled(&id, false).unwrap();
+        assert!(!shell.package_runtimes.contains_key(&id));
+    });
+}
+
+#[test]
+fn embedded_default_shell_starts_only_taskbar_and_uses_normal_surface_lifecycle() {
+    with_package_runtime_stack(|| {
+        let mut shell = LiveShell::new().unwrap();
+        let id = "nickel-default";
+        assert!(!shell.plugin_registry.get(id).unwrap().desired_enabled);
+        assert!(!shell.package_runtimes.contains_key(id));
+        shell.set_plugin_enabled(id, true).unwrap();
+        let runtime = shell.package_runtimes[id].clone();
+        let surfaces = shell
+            .plugin_surface_hosts
+            .keys()
+            .filter(|key| key.plugin_id == id)
+            .map(|key| key.surface_id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(surfaces, vec!["taskbar"]);
+        for surface in ["launcher", "settings", "quick-settings", "notifications"] {
+            assert!(shell.show_plugin_window(id, surface).unwrap());
+            let key = nickel_core::plugins::PluginSurfaceKey {
+                plugin_id: id.into(),
+                surface_id: surface.into(),
+            };
+            assert!(std::rc::Rc::ptr_eq(
+                &runtime,
+                &shell
+                    .plugin_panel_host_for(&key)
+                    .unwrap()
+                    .application()
+                    .shared_runtime()
+            ));
+            assert!(shell.close_plugin_window(&key).unwrap());
+        }
+        shell.set_plugin_enabled(id, false).unwrap();
+        assert!(!shell.package_runtimes.contains_key(id));
+        assert!(
+            shell
+                .plugin_surface_hosts
+                .keys()
+                .all(|key| key.plugin_id != id)
+        );
+    });
+}
+
 #[test]
 fn installed_package_settings_follow_activation_and_retirement() {
     let root = tempfile::tempdir().unwrap();
@@ -13,7 +242,9 @@ fn installed_package_settings_follow_activation_and_retirement() {
         .plugin_registry
         .register(descriptor.manifest.clone())
         .unwrap();
-    shell.external_plugin_packages.insert(id.into(), descriptor);
+    shell
+        .external_plugin_packages
+        .insert(id.into(), descriptor.into());
     shell.set_plugin_enabled(id, true).unwrap();
     let snapshot = shell.package_settings_registry.settings_snapshot();
     assert!(
@@ -436,7 +667,7 @@ fn installed_badge_extension_composes_into_taskbar_and_retires_on_disable() {
             .unwrap();
         shell
             .external_plugin_packages
-            .insert(descriptor.manifest.id.clone(), descriptor);
+            .insert(descriptor.manifest.id.clone(), descriptor.into());
     }
     assert!(
         shell
@@ -618,7 +849,7 @@ fn badge_slot_can_target_an_installed_window_plugin() {
             .unwrap();
         shell
             .external_plugin_packages
-            .insert(descriptor.manifest.id.clone(), descriptor);
+            .insert(descriptor.manifest.id.clone(), descriptor.into());
     }
     shell
         .set_plugin_enabled("org.example.badge-host", true)
@@ -687,7 +918,7 @@ fn section_slot_can_target_an_installed_window_plugin() {
             .unwrap();
         shell
             .external_plugin_packages
-            .insert(descriptor.manifest.id.clone(), descriptor);
+            .insert(descriptor.manifest.id.clone(), descriptor.into());
     }
     shell
         .set_plugin_enabled("org.example.section-host", true)
@@ -741,7 +972,7 @@ fn installed_dock_uses_jsx_distance_and_output_within_its_grant() {
         .unwrap();
     shell
         .external_plugin_packages
-        .insert(descriptor.manifest.id.clone(), descriptor);
+        .insert(descriptor.manifest.id.clone(), descriptor.into());
     shell
         .set_plugin_enabled("org.example.placed-dock", true)
         .unwrap();
@@ -789,7 +1020,7 @@ fn installed_top_overlay_uses_css_distance_within_its_grant() {
         .unwrap();
     shell
         .external_plugin_packages
-        .insert(descriptor.manifest.id.clone(), descriptor);
+        .insert(descriptor.manifest.id.clone(), descriptor.into());
     shell
         .set_plugin_enabled("org.example.top-overlay", true)
         .unwrap();
@@ -836,7 +1067,7 @@ fn installed_panel_can_be_enabled_measured_and_disabled() {
         .unwrap();
     shell
         .external_plugin_packages
-        .insert(descriptor.manifest.id.clone(), descriptor);
+        .insert(descriptor.manifest.id.clone(), descriptor.into());
 
     assert!(shell.set_plugin_enabled("org.example.panel", true).unwrap());
     assert!(shell.surface_visible(crate::winit_shell::SurfaceRole::Panel));
@@ -949,7 +1180,9 @@ fn installed_panel_with_windows_read_tracks_the_live_window_list() {
         .plugin_registry
         .register(descriptor.manifest.clone())
         .unwrap();
-    shell.external_plugin_packages.insert(id.into(), descriptor);
+    shell
+        .external_plugin_packages
+        .insert(id.into(), descriptor.into());
     shell.set_plugin_enabled(id, true).unwrap();
     shell.windows = vec![crate::model::OpenWindow {
         id: crate::model::WindowId(71),
@@ -1162,7 +1395,7 @@ fn installed_component_window_activates_and_retires_with_its_plugin() {
     shell.plugin_registry.register(package.manifest).unwrap();
     shell
         .external_plugin_packages
-        .insert(id.clone(), descriptor);
+        .insert(id.clone(), descriptor.into());
 
     assert!(shell.set_plugin_enabled(&id, true).unwrap());
     let panels = shell.plugin_panels();
@@ -1207,7 +1440,7 @@ fn external_notification_projection_requires_read_capability() {
     shell.notification = shell.notification_feed.snapshot();
     shell
         .external_plugin_packages
-        .insert(id.clone(), descriptor);
+        .insert(id.clone(), descriptor.into());
     assert!(shell.external_plugin_notifications(&id).is_none());
 
     shell
@@ -1273,7 +1506,7 @@ fn external_application_catalog_requires_read_capability() {
         )]);
     shell
         .external_plugin_packages
-        .insert(id.clone(), descriptor);
+        .insert(id.clone(), descriptor.into());
     assert!(shell.external_plugin_applications(&id).is_none());
 
     shell
@@ -1314,7 +1547,7 @@ fn installed_windows_use_jsx_sizes_within_manifest_bounds() {
     shell.plugin_registry.register(package.manifest).unwrap();
     shell
         .external_plugin_packages
-        .insert("org.example.bounded-windows".into(), descriptor);
+        .insert("org.example.bounded-windows".into(), descriptor.into());
     shell
         .set_plugin_enabled("org.example.bounded-windows", true)
         .unwrap();
@@ -1392,7 +1625,9 @@ fn installed_plugin_can_reposition_only_its_open_window() {
     };
     let mut shell = LiveShell::new().unwrap();
     shell.plugin_registry.register(package.manifest).unwrap();
-    shell.external_plugin_packages.insert(id.into(), descriptor);
+    shell
+        .external_plugin_packages
+        .insert(id.into(), descriptor.into());
     shell.set_plugin_enabled(id, true).unwrap();
 
     assert!(
@@ -1485,7 +1720,9 @@ fn closing_one_installed_window_preserves_its_sibling_and_memory_account() {
     };
     let mut shell = LiveShell::new().unwrap();
     shell.plugin_registry.register(package.manifest).unwrap();
-    shell.external_plugin_packages.insert(id.into(), descriptor);
+    shell
+        .external_plugin_packages
+        .insert(id.into(), descriptor.into());
     shell.set_plugin_enabled(id, true).unwrap();
     let panels = shell.plugin_panels();
     assert_eq!(panels.len(), 2);
@@ -1608,7 +1845,7 @@ fn declared_dialog_starts_closed_and_dismisses_without_retiring_its_plugin() {
     shell.plugin_registry.register(package.manifest).unwrap();
     shell
         .external_plugin_packages
-        .insert(id.clone(), descriptor);
+        .insert(id.clone(), descriptor.into());
 
     shell.set_plugin_enabled(&id, true).unwrap();
     let status = shell.plugin_status_snapshot();
@@ -1698,9 +1935,10 @@ fn declared_dialog_starts_closed_and_dismisses_without_retiring_its_plugin() {
     assert!(shell.close_plugin_window(&home[0].0).unwrap());
     assert!(shell.plugin_panels().is_empty());
     let status = shell.plugin_registry.get(&id).unwrap();
-    assert!(!status.desired_enabled);
-    assert_eq!(status.health, nickel_core::plugins::PluginHealth::Disabled);
-    assert_eq!(status.memory.native_ui_bytes, None);
+    assert!(status.desired_enabled);
+    assert_eq!(status.health, nickel_core::plugins::PluginHealth::Running);
+    assert_eq!(status.memory.native_ui_bytes, Some(0));
+    assert!(shell.show_plugin_window(&id, "home").unwrap());
 }
 
 #[test]
@@ -1745,7 +1983,7 @@ fn closing_dialog_owner_retires_its_dialog_but_preserves_sibling_window() {
     shell.plugin_registry.register(package.manifest).unwrap();
     shell
         .external_plugin_packages
-        .insert(id.clone(), descriptor);
+        .insert(id.clone(), descriptor.into());
     shell.set_plugin_enabled(&id, true).unwrap();
     assert!(shell.show_plugin_window(&id, "confirm").unwrap());
     assert_eq!(shell.plugin_panels().len(), 3);
@@ -1779,7 +2017,7 @@ fn declared_overlay_opens_and_hides_without_retiring_its_plugin() {
     shell.plugin_registry.register(package.manifest).unwrap();
     shell
         .external_plugin_packages
-        .insert(id.clone(), descriptor);
+        .insert(id.clone(), descriptor.into());
     shell.set_plugin_enabled(&id, true).unwrap();
     let home = shell.plugin_panels();
     assert_eq!(home.len(), 1);
@@ -1876,7 +2114,7 @@ fn installed_dock_uses_declared_offset_and_translucent_panel() {
         .unwrap();
     shell
         .external_plugin_packages
-        .insert(descriptor.manifest.id.clone(), descriptor);
+        .insert(descriptor.manifest.id.clone(), descriptor.into());
 
     assert!(shell.set_plugin_enabled("org.example.dock", true).unwrap());
     let dock_key = shell.plugin_panels()[0].0.clone();
@@ -1930,7 +2168,7 @@ fn two_installed_panels_render_and_retire_independently() {
             .unwrap();
         shell
             .external_plugin_packages
-            .insert(id.clone(), descriptor);
+            .insert(id.clone(), descriptor.into());
         assert!(shell.set_plugin_enabled(&id, true).unwrap());
     }
     let panels = shell.plugin_panels();
@@ -2007,7 +2245,9 @@ fn one_installed_package_runs_two_surfaces_and_updates_both_settings_views() {
         .plugin_registry
         .register(descriptor.manifest.clone())
         .unwrap();
-    shell.external_plugin_packages.insert(id.into(), descriptor);
+    shell
+        .external_plugin_packages
+        .insert(id.into(), descriptor.into());
     shell.plugin_settings.insert(
         id.into(),
         std::collections::BTreeMap::from([("show-label".into(), serde_json::json!(true))]),
@@ -2118,7 +2358,7 @@ fn internal_shell_presents_two_surfaces_from_one_package_on_one_output() {
             .unwrap();
         shell
             .external_plugin_packages
-            .insert(id.clone(), descriptor);
+            .insert(id.clone(), descriptor.into());
         shell.set_plugin_enabled(&id, true).unwrap();
     }
     coordinator.set_outputs(&[crate::internal_shell::InternalOutput {
@@ -2183,7 +2423,7 @@ fn installed_panel_start_failure_is_visible_until_disabled() {
         .unwrap();
     shell
         .external_plugin_packages
-        .insert(descriptor.manifest.id.clone(), descriptor);
+        .insert(descriptor.manifest.id.clone(), descriptor.into());
 
     assert!(
         shell
@@ -2237,7 +2477,9 @@ fn installed_plugin_callback_failure_retires_all_surfaces_without_changing_desir
         .plugin_registry
         .register(descriptor.manifest.clone())
         .unwrap();
-    shell.external_plugin_packages.insert(id.into(), descriptor);
+    shell
+        .external_plugin_packages
+        .insert(id.into(), descriptor.into());
     shell.set_plugin_enabled(id, true).unwrap();
     let panels = shell.plugin_panels();
     assert_eq!(panels.len(), 2);
@@ -2314,7 +2556,7 @@ fn failing_slot_projection_retires_provider_without_stopping_contributor() {
             .unwrap();
         shell
             .external_plugin_packages
-            .insert(descriptor.manifest.id.clone(), descriptor);
+            .insert(descriptor.manifest.id.clone(), descriptor.into());
     }
     shell.set_plugin_enabled(id, true).unwrap();
     let (key, surface) = shell.plugin_panels().pop().unwrap();

@@ -653,6 +653,10 @@ pub struct LiveShell {
         String,
         std::rc::Rc<std::cell::RefCell<nickel_plugin_runtime::JsxRuntime>>,
     >,
+    package_runtimes: std::collections::BTreeMap<
+        String,
+        std::rc::Rc<std::cell::RefCell<nickel_plugin_runtime::JsxRuntime>>,
+    >,
     package_settings_generation: u64,
     package_settings_values: nickel_plugin_runtime::settings::SettingsValueSnapshot,
     package_settings_value_revisions: std::collections::BTreeMap<String, u64>,
@@ -660,7 +664,7 @@ pub struct LiveShell {
     plugin_settings:
         std::collections::BTreeMap<String, std::collections::BTreeMap<String, serde_json::Value>>,
     external_plugin_packages:
-        std::collections::BTreeMap<String, nickel_core::plugins::PluginPackageDescriptor>,
+        std::collections::BTreeMap<String, nickel_core::plugins::PluginPackageSource>,
     primary_panel_key: nickel_core::plugins::PluginSurfaceKey,
     plugin_activation_generation: u64,
     #[cfg(target_os = "linux")]
@@ -1456,18 +1460,29 @@ impl LiveShell {
                 tracing::warn!(plugin = %id, "installed plugin cannot replace a native shell surface");
                 continue;
             }
-            if plugin_registry.entries().count() >= 64 {
+            if plugin_registry.entries().count() >= 63 {
                 tracing::warn!(plugin = %id, "plugin status capacity reached");
                 continue;
             }
             match plugin_registry.register(descriptor.manifest.clone()) {
                 Ok(()) => {
-                    external_plugin_packages.insert(id, descriptor);
+                    external_plugin_packages.insert(id, descriptor.into());
                 }
                 Err(error) => {
                     tracing::warn!(plugin = %id, %error, "installed plugin was not registered")
                 }
             }
+        }
+        // Bundled source is an ordinary package, initially disabled. Persisted
+        // activation still goes through the same reviewed lifecycle as disk sources.
+        let package = crate::bundled_plugin_assets::load_package("nickel-default")?;
+        let id = package.manifest.id.clone();
+        if !external_plugin_packages.contains_key(&id) {
+            plugin_registry.register(package.manifest.clone())?;
+            external_plugin_packages.insert(
+                id,
+                nickel_core::plugins::PluginPackageSource::embedded(package),
+            );
         }
         let plugin_settings = plugin_registry
             .entries()
@@ -1740,6 +1755,7 @@ impl LiveShell {
             plugin_registry,
             package_settings_registry: Default::default(),
             package_settings_runtimes: Default::default(),
+            package_runtimes: Default::default(),
             package_settings_generation: 0,
             package_settings_values: Default::default(),
             package_settings_value_revisions: Default::default(),
@@ -4199,19 +4215,8 @@ impl LiveShell {
         for dialog in owned_dialogs {
             self.close_plugin_window(&dialog)?;
         }
-        // Transient surfaces depend on an ordinary surface to open them.
-        // Retire the package when closing this one would leave only transients.
-        if !self.plugin_panels().iter().any(|(surface, placement)| {
-            surface.plugin_id == key.plugin_id
-                && surface != key
-                && !matches!(
-                    placement.kind,
-                    nickel_core::plugins::PluginSurfaceKind::Dialog
-                        | nickel_core::plugins::PluginSurfaceKind::Overlay
-                )
-        }) {
-            return self.set_plugin_enabled(&key.plugin_id, false);
-        }
+        // Surface visibility does not determine package lifetime. The shared
+        // runtime remains owned until explicit disable or runtime failure.
         if let Some(host) = self.plugin_panel_host_for(key) {
             host.application().retire_surface()?;
         }
@@ -4400,11 +4405,10 @@ impl LiveShell {
             .map(Ok)
             .unwrap_or_else(|| external_plugin_settings(&package.manifest))?;
         let runtime = self
-            .plugin_surface_hosts
-            .iter()
-            .find(|(key, _)| key.plugin_id == id)
-            .map(|(_, (_, host))| host.application().shared_runtime())
-            .ok_or_else(|| format!("plugin {id:?} has no live sibling runtime"))?;
+            .package_runtimes
+            .get(id)
+            .cloned()
+            .ok_or_else(|| format!("plugin {id:?} has no live package runtime"))?;
         let application =
             crate::plugin_panel::PluginPanelApplication::from_package_surface_with_runtime(
                 &package,
@@ -4587,12 +4591,52 @@ impl LiveShell {
         }
     }
 
+    // A provider may have no visible surface. Execute through the ordinary
+    // package application so callback requests retain manifest effect validation.
+    // No native host or visible surface is installed for this evaluation.
+    fn invoke_hidden_package_setting(
+        &self,
+        provider: &str,
+        id: &str,
+        value: &serde_json::Value,
+    ) -> Result<Vec<crate::plugin_panel::PluginEffect>, String> {
+        let package = self
+            .external_plugin_packages
+            .get(provider)
+            .ok_or("Settings provider source is unavailable")?
+            .load()?;
+        let runtime = self
+            .package_runtimes
+            .get(provider)
+            .cloned()
+            .ok_or("Settings provider runtime is unavailable")?;
+        let surface = package
+            .manifest
+            .surfaces
+            .first()
+            .ok_or("Settings provider has no declared surface")?;
+        let settings = self
+            .plugin_settings
+            .get(provider)
+            .cloned()
+            .unwrap_or_default();
+        let mut application =
+            crate::plugin_panel::PluginPanelApplication::from_package_surface_with_runtime(
+                &package,
+                &settings,
+                surface,
+                crate::plugin_panel::package_images(&package)?,
+                Some(runtime),
+            )?;
+        let result = application.invoke_registered_setting(id, value);
+        application.retire_surface()?;
+        result
+    }
+
     fn refresh_package_settings(&mut self) {
-        let mut runtimes = std::collections::BTreeMap::new();
+        let mut runtimes = self.package_runtimes.clone();
         for (key, (_, host)) in &self.plugin_surface_hosts {
-            runtimes
-                .entry(key.plugin_id.clone())
-                .or_insert_with(|| host.application().shared_runtime());
+            runtimes.insert(key.plugin_id.clone(), host.application().shared_runtime());
         }
         for (id, host) in &self.plugin_slot_hosts {
             runtimes
@@ -4757,6 +4801,7 @@ impl LiveShell {
             return Ok(false);
         }
         values.insert(key.to_owned(), value.clone());
+        let mut replacement_runtime = None;
         let replacement = if entry.desired_enabled {
             self.external_plugin_packages
                 .get(id)
@@ -4787,12 +4832,14 @@ impl LiveShell {
                                             | nickel_core::plugins::PluginSurfaceKind::Overlay
                                     )
                             })
-                            .ok_or("installed plugin has no open ordinary surface")?;
+                            .or_else(|| package.manifest.surfaces.first())
+                            .ok_or("installed plugin has no declared surface")?;
                         let runtime = crate::plugin_panel::PluginPanelApplication::shared_package_runtime(
                             &package,
                             &values,
                             first_surface,
                         )?;
+                        replacement_runtime = Some(runtime.clone());
                         let images = crate::plugin_panel::package_images(&package)?;
                         package
                             .manifest
@@ -4816,6 +4863,9 @@ impl LiveShell {
         nickel_core::plugins::PluginPreferences::update_default(&manifest, key, value)
             .map_err(|error| format!("could not save plugin setting: {error}"))?;
         self.plugin_settings.insert(id.to_owned(), values);
+        if let Some(runtime) = replacement_runtime {
+            self.package_runtimes.insert(id.to_owned(), runtime);
+        }
         let mut replaced_panels = false;
         if let Some(replacements) = replacement {
             let mut extension_bytes = None;
@@ -4912,6 +4962,7 @@ impl LiveShell {
             .map(|contribution| contribution.target_plugin.clone());
         tracing::warn!(plugin = id, %error, "installed plugin runtime failed");
         let _ = self.plugin_registry.mark_failed(id, error);
+        self.package_runtimes.remove(id);
         if self
             .plugin_slot_hosts
             .remove(id)
@@ -5225,10 +5276,10 @@ impl LiveShell {
                                 &settings,
                                 first_surface,
                             )?;
-                            surfaces
+                            let panels = surfaces
                                 .iter()
                                 .filter(|surface| {
-                                    !matches!(
+                                    surface.initially_open && !matches!(
                                         surface.kind,
                                         nickel_core::plugins::PluginSurfaceKind::Dialog
                                             | nickel_core::plugins::PluginSurfaceKind::Overlay
@@ -5243,7 +5294,8 @@ impl LiveShell {
                                         Ok((application, resolved))
                                     })
                                 })
-                                .collect::<Result<Vec<_>, _>>()
+                                .collect::<Result<Vec<_>, _>>()?;
+                            Ok((runtime, panels))
                         })
                     } else {
                         Err("installed plugin needs a panel, dock, or window to open its declared transient surfaces".into())
@@ -5279,6 +5331,7 @@ impl LiveShell {
             return Ok(true);
         }
         if !enabled {
+            self.package_runtimes.remove(id);
             if self.plugin_slot_hosts.remove(id).is_some_and(|host| {
                 host.contract == nickel_core::plugins::PluginSlotContract::Action
             }) {
@@ -5340,7 +5393,8 @@ impl LiveShell {
             }
             Ok(())
         } else if let Some(external_panel) = external_panel {
-            external_panel.map(|panels| {
+            external_panel.map(|(runtime, panels)| {
+                self.package_runtimes.insert(id.to_owned(), runtime);
                 for (application, surface) in panels {
                     let host = nickel_ui::UiHost::new(application, surface.width, surface.height);
                     let key = nickel_core::plugins::PluginSurfaceKey {
@@ -6604,6 +6658,11 @@ impl LiveShell {
                             self.plugin_slot_hosts
                                 .get_mut(&provider)
                                 .map(|host| host.application.invoke_registered_setting(&id, &value))
+                        })
+                        .or_else(|| {
+                            self.package_runtimes
+                                .contains_key(&provider)
+                                .then(|| self.invoke_hidden_package_setting(&provider, &id, &value))
                         });
                     if let Some(Ok(effects)) = result {
                         self.package_settings_invoking = true;

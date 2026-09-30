@@ -59,7 +59,7 @@ pieces are implemented.
 The draft presents switches, sliders, select options, actions, and editable
 text/number values and grouped controls. Color settings use the replaceable
 `ColorPicker` with preset swatches, hue, saturation, brightness, optional alpha,
-and CSS color text entry. It falls back to text for shortcuts and repeated values.
+and CSS color text entry. Repeated values use editable keyed rows with bounded add/remove actions. Shortcuts still fall back to text.
 This generic picker does not complete Spec 0263's appearance migration:
 interface hue, intensity, modes, transparency, and remaining appearance controls must move
 from the existing page to public capabilities before activation. Unresolved
@@ -147,3 +147,13 @@ against the caller's declared surfaces and enforces passive-window and placement
 rules. These operations do not target another package implicitly. The default
 taskbar opens its own launcher/quick settings, and the launcher opens its own
 Settings window and closes itself after invoking application launch.
+
+## Package activation preparation
+
+The shared shell source catalog registers embedded `nickel-default` disabled.
+It can be enabled through the normal package lifecycle; activation opens only
+its taskbar. Launcher and Settings declare `initially_open: false`, and transient
+surfaces continue to require explicit show requests. Showing or closing windows
+uses the same paths as an installed package. A package keeps its shared runtime
+and Settings registrations when all windows close; explicit disable or a runtime
+failure retires it. The stock shell remains selected until the host cutover.

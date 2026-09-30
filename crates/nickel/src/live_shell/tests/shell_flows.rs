@@ -55,7 +55,7 @@
                 directory: directory.into(),
                 manifest: package.manifest.clone(),
                 source_digest: package.source_digest(),
-            },
+            }.into(),
         );
         shell.set_plugin_enabled(&package.manifest.id, true).unwrap();
         assert_eq!(shell.primary_panel_key.plugin_id, package.manifest.id);
@@ -145,7 +145,7 @@
                 directory: directory.into(),
                 manifest: package.manifest.clone(),
                 source_digest: package.source_digest(),
-            },
+            }.into(),
         );
         assert!(shell.plugin_audio(&id).is_none());
         shell
@@ -795,7 +795,7 @@
                 directory: directory.into(),
                 manifest: package.manifest.clone(),
                 source_digest: package.source_digest(),
-            },
+            }.into(),
         );
         shell.set_plugin_enabled(&package.manifest.id, true).unwrap();
         assert!(shell
@@ -2328,7 +2328,7 @@
                 directory: directory.into(),
                 manifest: package.manifest.clone(),
                 source_digest: package.source_digest(),
-            },
+            }.into(),
         );
         shell.set_plugin_enabled(&package.manifest.id, true).unwrap();
         let active = shell

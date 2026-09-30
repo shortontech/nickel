@@ -3763,6 +3763,7 @@ mod tests {
             nickel_core::plugins::PluginSurfaceKind::Dock,
         ] {
             let panel = nickel_core::plugins::PluginSurface {
+                initially_open: true,
                 id: "main".into(),
                 kind,
                 width: 360,
@@ -3855,6 +3856,7 @@ mod tests {
             scale: 1.5,
         };
         let window = nickel_core::plugins::PluginSurface {
+            initially_open: true,
             id: "main".into(),
             kind: nickel_core::plugins::PluginSurfaceKind::Window,
             width: 520,

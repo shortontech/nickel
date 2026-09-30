@@ -81,6 +81,50 @@ impl PluginPackageDescriptor {
     }
 }
 
+/// A discovered package backed by disk or immutable bundled source.
+/// Both sources enter the same runtime, grants, and lifecycle paths.
+pub struct PluginPackageSource {
+    pub manifest: PluginManifest,
+    pub source_digest: String,
+    source: PackageSource,
+}
+
+enum PackageSource {
+    Directory(PluginPackageDescriptor),
+    Embedded(PluginPackage),
+}
+
+impl From<PluginPackageDescriptor> for PluginPackageSource {
+    fn from(descriptor: PluginPackageDescriptor) -> Self {
+        Self {
+            manifest: descriptor.manifest.clone(),
+            source_digest: descriptor.source_digest.clone(),
+            source: PackageSource::Directory(descriptor),
+        }
+    }
+}
+
+impl PluginPackageSource {
+    pub fn embedded(package: PluginPackage) -> Self {
+        Self {
+            manifest: package.manifest.clone(),
+            source_digest: package.source_digest(),
+            source: PackageSource::Embedded(package),
+        }
+    }
+
+    pub fn load(&self) -> Result<PluginPackage, String> {
+        let package = match &self.source {
+            PackageSource::Directory(descriptor) => descriptor.load()?,
+            PackageSource::Embedded(package) => package.clone(),
+        };
+        if package.manifest != self.manifest || package.source_digest() != self.source_digest {
+            return Err("plugin source changed after registration".into());
+        }
+        Ok(package)
+    }
+}
+
 pub struct PluginPackageFailure {
     pub directory: String,
     pub reason: String,
@@ -858,6 +902,9 @@ impl PluginContributionMode {
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct PluginSurface {
+    /// Ordinary surfaces open at activation by default. Transients stay explicit.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub initially_open: bool,
     pub id: String,
     pub kind: PluginSurfaceKind,
     pub width: u32,
@@ -878,6 +925,13 @@ pub struct PluginSurface {
     pub passive: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<String>,
+}
+
+fn default_true() -> bool {
+    true
+}
+fn is_true(value: &bool) -> bool {
+    *value
 }
 
 fn is_zero_i32(value: &i32) -> bool {
@@ -2139,6 +2193,7 @@ mod tests {
         let template = manifest.surfaces[0].clone();
         manifest.surfaces = (0..17)
             .map(|index| PluginSurface {
+                initially_open: true,
                 id: format!("surface-{index}"),
                 ..template.clone()
             })
