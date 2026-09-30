@@ -639,6 +639,12 @@ pub struct LiveShell {
     panel_hover: Option<TaskbarHover>,
     panel_hover_output: Option<String>,
     plugin_registry: nickel_core::plugins::PluginRegistry,
+    package_settings_registry: nickel_core::settings_registry::SettingsRegistry,
+    package_settings_runtimes: std::collections::BTreeMap<
+        String,
+        std::rc::Rc<std::cell::RefCell<nickel_plugin_runtime::JsxRuntime>>,
+    >,
+    package_settings_generation: u64,
     plugin_settings:
         std::collections::BTreeMap<String, std::collections::BTreeMap<String, serde_json::Value>>,
     external_plugin_packages:
@@ -1715,6 +1721,9 @@ impl LiveShell {
             panel_hover: None,
             panel_hover_output: None,
             plugin_registry,
+            package_settings_registry: Default::default(),
+            package_settings_runtimes: Default::default(),
+            package_settings_generation: 0,
             plugin_settings,
             external_plugin_packages,
             primary_panel_key: crate::plugin_panel::surface_key(),
@@ -4388,7 +4397,71 @@ impl LiveShell {
         }
     }
 
+    fn refresh_package_settings(&mut self) {
+        let mut runtimes = std::collections::BTreeMap::new();
+        for (key, (_, host)) in &self.plugin_surface_hosts {
+            runtimes
+                .entry(key.plugin_id.clone())
+                .or_insert_with(|| host.application().shared_runtime());
+        }
+        for (id, host) in &self.plugin_slot_hosts {
+            runtimes
+                .entry(id.clone())
+                .or_insert_with(|| host.application.shared_runtime());
+        }
+        let retired = self
+            .package_settings_runtimes
+            .keys()
+            .filter(|id| !runtimes.contains_key(*id))
+            .cloned()
+            .collect::<Vec<_>>();
+        for id in retired {
+            self.package_settings_registry.retire_provider(&id);
+            self.package_settings_runtimes.remove(&id);
+        }
+        let mut changed_runtime = false;
+        for (id, runtime) in &runtimes {
+            if self
+                .package_settings_runtimes
+                .get(id)
+                .is_some_and(|previous| std::rc::Rc::ptr_eq(previous, runtime))
+            {
+                continue;
+            }
+            match runtime
+                .borrow_mut()
+                .publish_settings(&mut self.package_settings_registry, id)
+            {
+                Ok(()) => {
+                    self.package_settings_runtimes
+                        .insert(id.clone(), runtime.clone());
+                    changed_runtime = true;
+                }
+                Err(error) => {
+                    self.package_settings_registry.retire_provider(id);
+                    tracing::warn!(plugin_id = %id, %error, "package Settings registration rejected");
+                }
+            }
+        }
+        let generation = self
+            .package_settings_registry
+            .settings_snapshot()
+            .generation;
+        if changed_runtime || generation != self.package_settings_generation {
+            for (id, runtime) in runtimes {
+                if let Err(error) = runtime
+                    .borrow_mut()
+                    .set_settings_registry(&self.package_settings_registry)
+                {
+                    tracing::warn!(plugin_id = %id, %error, "package Settings snapshot failed");
+                }
+            }
+            self.package_settings_generation = generation;
+        }
+    }
+
     fn maybe_publish_plugin_status(&mut self) {
+        self.refresh_package_settings();
         #[cfg(target_os = "linux")]
         {
             let snapshot = self.plugin_status_snapshot();
