@@ -15,7 +15,7 @@ function App() {
         const first = !data.dashboardVisible && data.results[0];
         if (first) nickel.request({type: "launcher-activate-result", index: first.index, id: first.id});
     };
-    return <Window title="Nickel Launcher" width={620} height={548} className="launcher-window"
+    return <Window title="Nickel Launcher" className="launcher-window"
         onEscape={escape} onSubmit={!data.dashboardVisible && data.results.length ? submit : undefined}>
       <div className="launcher-content">
         {data.status ? <Text className="launcher-status">{data.status}</Text> : null}

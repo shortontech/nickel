@@ -387,6 +387,7 @@ fn exercise(
     )?;
     wait_for_launcher_visibility(test_input, &environment, true, Duration::from_secs(2))?;
     verify_layout_snapshot(test_input, &environment, "org.nickel.launcher/main")?;
+    verify_launcher_control_layout(test_input, &environment)?;
     let launcher_memory = wait_for_plugin_native_memory(
         test_input,
         &environment,
@@ -660,7 +661,11 @@ fn panel_geometry(surfaces: &str, key: &str) -> Option<(i32, i32, u32, u32)> {
 fn surface_geometry(surfaces: &str, role: &str, key: &str) -> Option<(i32, i32, u32, u32)> {
     let geometry = surfaces
         .lines()
-        .find(|line| line.starts_with(&format!("{role}\twinit\t")) && line.ends_with(key))?
+        .find(|line| {
+            line.starts_with(&format!("{role}\t"))
+                && line.ends_with(key)
+                && line.split('\t').count() == 4
+        })?
         .split('\t')
         .nth(2)?;
     let (origin, size) = geometry.split_once(' ')?;
@@ -1453,6 +1458,43 @@ fn verify_taskbar_control_layout(
     }
     if launcher[0] + launcher[2] > control[0] {
         return Err(format!("taskbar launcher overlaps its control area: {launcher:?}, {control:?}"));
+    }
+    Ok(())
+}
+
+fn verify_launcher_control_layout(
+    test_input: &Path,
+    environment: &[(String, String)],
+) -> Result<(), String> {
+    const LAUNCHER: &str = "org.nickel.launcher/main";
+    let surfaces = checked(test_input, environment, &["surfaces"])?;
+    let (_, _, width, height) = surface_geometry(&surfaces, "Launcher", LAUNCHER)
+        .ok_or_else(|| format!("launcher has no mapped surface geometry: {surfaces}"))?;
+    if (width, height) != (620, 548) {
+        return Err(format!("launcher CSS size is {width}x{height}, expected 620x548"));
+    }
+    let query = plugin_control_geometry(test_input, environment, LAUNCHER, "launcher-query")?;
+    let settings = plugin_control_geometry(test_input, environment, LAUNCHER, "launcher-settings")?;
+    for (name, [x, y, control_width, control_height]) in
+        [("search field", query), ("Settings button", settings)]
+    {
+        if ![x, y, control_width, control_height]
+            .iter()
+            .all(|value| value.is_finite())
+            || control_width <= 0.0
+            || control_height <= 0.0
+            || x < 0.0
+            || y < 0.0
+            || x + control_width > width as f32 + 1.0
+            || y + control_height > height as f32 + 1.0
+        {
+            return Err(format!(
+                "launcher {name} is outside its window: {x},{y},{control_width},{control_height} in {width}x{height}"
+            ));
+        }
+    }
+    if query[1] + query[3] > settings[1] {
+        return Err(format!("launcher search overlaps its footer: {query:?}, {settings:?}"));
     }
     Ok(())
 }

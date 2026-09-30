@@ -1,4 +1,6 @@
 window.launcher-window {
+    width: 620px;
+    height: 548px;
     background: var(--nickel-panel);
     border: 1px solid var(--nickel-border);
     border-radius: 10px;

@@ -16,7 +16,7 @@ function App() {
         if (first)
             nickel.request({ type: "launcher-activate-result", index: first.index, id: first.id });
     };
-    return h(Window, { title: "Nickel Launcher", width: 620, height: 548, className: "launcher-window", onEscape: escape, onSubmit: !data.dashboardVisible && data.results.length ? submit : undefined },
+    return h(Window, { title: "Nickel Launcher", className: "launcher-window", onEscape: escape, onSubmit: !data.dashboardVisible && data.results.length ? submit : undefined },
         h("div", { className: "launcher-content" },
             data.status ? h(Text, { className: "launcher-status" }, data.status) : null,
             h(TextField, { id: "launcher-query", className: "launcher-search", value: data.query, placeholder: "Search applications", onChange: query => nickel.request({ type: "launcher-set-query", query }) }),

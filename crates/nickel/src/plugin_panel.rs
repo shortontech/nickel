@@ -3479,6 +3479,10 @@ mod tests {
             projection.to_json(),
         )
         .unwrap();
+        let surface = application
+            .resolved_surface(&launcher_manifest().surfaces[0])
+            .unwrap();
+        assert_eq!((surface.width, surface.height), (620, 548));
         let placeholder = crate::live_shell::launcher_placeholder_icon();
         application.sync_images(
             projection
