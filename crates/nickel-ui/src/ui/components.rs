@@ -421,6 +421,16 @@ impl<Message> Grid<Message> {
         self
     }
 
+    pub fn align_items(mut self, align: Align) -> Self {
+        self.0 = self.0.align_items(align);
+        self
+    }
+
+    pub fn justify_content(mut self, justify: Justify) -> Self {
+        self.0 = self.0.justify_content(justify);
+        self
+    }
+
     pub fn padding(mut self, padding: impl Into<Insets>) -> Self {
         self.0 = self.0.padding(padding);
         self

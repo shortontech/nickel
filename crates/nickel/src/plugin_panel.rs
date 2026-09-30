@@ -4440,6 +4440,34 @@ mod tests {
     }
 
     #[test]
+    fn generic_div_grid_applies_css_justification_and_alignment() {
+        let package = PluginPackage {
+            manifest: manifest().clone(),
+            images: Default::default(),
+            stylesheet: ".grid { display: grid; grid-template-columns: 40px 60px; width: 200px; height: 80px; justify-content: center; align-items: center; } button#short { height: 20px; } button#tall { height: 40px; }".into(),
+            source: "function App() { return h(FixedWindow, {width: '100%', height: '100%'}, h('div', {className: 'grid'}, h(Button, {id: 'short', onClick: () => {}}, 'Short'), h(Button, {id: 'tall', onClick: () => {}}, 'Tall'))); }".into(),
+        };
+        let host = nickel_ui::UiHost::new(
+            PluginPanelApplication::from_package(&package).unwrap(),
+            400,
+            120,
+        );
+        let button = |name: &str| {
+            host.query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: SemanticRole::Button,
+                name: name.into(),
+            })
+            .unwrap()
+            .bounds
+        };
+        let short = button("Short");
+        let tall = button("Tall");
+        assert!((short.origin.x - 50.0).abs() < 1.0);
+        assert!((tall.origin.x - short.origin.x - 40.0).abs() < 1.0);
+        assert!((short.origin.y - tall.origin.y - 10.0).abs() < 1.0);
+    }
+
+    #[test]
     fn generic_div_flex_uses_explicit_css_dimensions_for_alignment() {
         let package = PluginPackage {
             manifest: manifest().clone(),

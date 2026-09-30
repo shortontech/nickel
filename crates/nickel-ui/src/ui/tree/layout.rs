@@ -588,10 +588,15 @@ pub(super) fn layout_element<Message: Clone>(
                         .fold(0.0, f32::max)
                 })
                 .collect::<Vec<_>>();
+            let track_width = widths.iter().sum::<f32>()
+                + element.style.gap * widths.len().saturating_sub(1) as f32;
+            let (leading, extra_gap) = justify_offsets(
+                (content.size.width - track_width).max(0.0),
+                widths.len(),
+                element.style.justify_content,
+            );
             let content_extent = Size::new(
-                (widths.iter().sum::<f32>()
-                    + element.style.gap * widths.len().saturating_sub(1) as f32)
-                    .max(content.size.width),
+                track_width.max(content.size.width),
                 (row_heights.iter().sum::<f32>()
                     + element.style.gap * rows.saturating_sub(1) as f32)
                     .max(content.size.height),
@@ -651,15 +656,33 @@ pub(super) fn layout_element<Message: Clone>(
                 let column = index % column_count;
                 let row = index / column_count;
                 let x = content.origin.x - offset_x
+                    + leading
                     + widths[..column].iter().sum::<f32>()
-                    + element.style.gap * column as f32;
-                let y = content.origin.y - offset_y
+                    + (element.style.gap + extra_gap) * column as f32;
+                let row_y = content.origin.y - offset_y
                     + row_heights[..row].iter().sum::<f32>()
                     + element.style.gap * row as f32;
+                let alignment = child.style.align_self.unwrap_or(element.style.align_items);
+                let item_height = measured[index].height.min(row_heights[row]);
+                let row_baseline = if alignment == Align::Baseline {
+                    measured[row * column_count..measured.len().min((row + 1) * column_count)]
+                        .iter()
+                        .map(|size| size.height * 0.8)
+                        .fold(0.0, f32::max)
+                } else {
+                    0.0
+                };
+                let (y, height) = match alignment {
+                    Align::Stretch => (row_y, row_heights[row]),
+                    Align::Center => (row_y + (row_heights[row] - item_height) / 2.0, item_height),
+                    Align::End => (row_y + row_heights[row] - item_height, item_height),
+                    Align::Baseline => (row_y + row_baseline - item_height * 0.8, item_height),
+                    Align::Start => (row_y, item_height),
+                };
                 child_indices.push(layout_element(
                     child,
                     &resolved_child_id(id, child, index),
-                    Rect::new(x, y, widths[column], row_heights[row]),
+                    Rect::new(x, y, widths[column], height),
                     foreground,
                     descendant_clip,
                     tree,
@@ -1075,6 +1098,27 @@ fn resolve_track(track: &Track, contribution: f32) -> (f32, f32) {
     }
 }
 
+fn justify_offsets(free: f32, count: usize, justify: Justify) -> (f32, f32) {
+    if count == 0 {
+        return (0.0, 0.0);
+    }
+    match justify {
+        Justify::Start => (0.0, 0.0),
+        Justify::Center => (free / 2.0, 0.0),
+        Justify::End => (free, 0.0),
+        Justify::SpaceBetween if count > 1 => (0.0, free / (count - 1) as f32),
+        Justify::SpaceAround => {
+            let space = free / count as f32;
+            (space / 2.0, space)
+        }
+        Justify::SpaceEvenly => {
+            let space = free / (count + 1) as f32;
+            (space, space)
+        }
+        _ => (0.0, 0.0),
+    }
+}
+
 fn flex_bounds<Message>(
     content: Rect,
     axis: Axis,
@@ -1158,21 +1202,7 @@ fn flex_bounds<Message>(
         Axis::Vertical => content.size.height,
     };
     let free = (available - occupied).max(0.0);
-    let (leading, extra_gap) = match justify {
-        Justify::Start => (0.0, 0.0),
-        Justify::Center => (free / 2.0, 0.0),
-        Justify::End => (free, 0.0),
-        Justify::SpaceBetween if rects.len() > 1 => (0.0, free / (rects.len() - 1) as f32),
-        Justify::SpaceAround => {
-            let space = free / rects.len() as f32;
-            (space / 2.0, space)
-        }
-        Justify::SpaceEvenly => {
-            let space = free / (rects.len() + 1) as f32;
-            (space, space)
-        }
-        _ => (0.0, 0.0),
-    };
+    let (leading, extra_gap) = justify_offsets(free, rects.len(), justify);
     let shared_baseline = if axis == Axis::Horizontal {
         children
             .iter()

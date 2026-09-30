@@ -1888,6 +1888,12 @@ impl PanelNode {
                         if let Some(gap) = style.gap {
                             grid = grid.gap(gap);
                         }
+                        if let Some(align) = style.align_items {
+                            grid = grid.align_items(align);
+                        }
+                        if let Some(justify) = style.justify_content {
+                            grid = grid.justify_content(justify);
+                        }
                         for child in children {
                             grid = grid.child(child.view_as_scoped_with_slots::<Message>(
                                 images, stylesheet, scope, slots,

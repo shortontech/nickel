@@ -2276,6 +2276,32 @@ fn grid_resolves_fixed_auto_fractional_repeated_and_auto_fit_tracks() {
 }
 
 #[test]
+fn grid_uses_justification_and_item_alignment() {
+    let grid = UiFrame::layout(
+        Grid::tracks([Track::px(40.0), Track::px(60.0)])
+            .justify_content(Justify::Center)
+            .align_items(Align::Center)
+            .children([
+                Button::new(TestMessage::Option(0), "Short").height(20.0),
+                Button::new(TestMessage::Option(1), "Tall").height(40.0),
+            ]),
+        Rect::new(0.0, 0.0, 200.0, 80.0),
+    );
+    let short = grid
+        .unique_semantic_target_for_message(&TestMessage::Option(0))
+        .unwrap()
+        .bounds;
+    let tall = grid
+        .unique_semantic_target_for_message(&TestMessage::Option(1))
+        .unwrap()
+        .bounds;
+    assert_eq!(short.origin.x, 50.0);
+    assert_eq!(tall.origin.x, 90.0);
+    assert_eq!(short.origin.y, 10.0);
+    assert_eq!(tall.origin.y, 0.0);
+}
+
+#[test]
 fn generated_valid_layouts_have_finite_nonnegative_geometry() {
     for width in [0.0, 1.0, 37.0, 400.0] {
         for height in [0.0, 1.0, 91.0, 300.0] {
