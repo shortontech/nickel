@@ -131,11 +131,6 @@ pub enum Command {
     PublishPluginStatus {
         snapshot: PluginStatusSnapshot,
     },
-    /// Current lower-bound memory measured by the separate Nickel Settings process.
-    ReportSettingsPluginMemory {
-        enabled: bool,
-        memory: PluginMemorySnapshot,
-    },
     SetPluginEnabled {
         id: String,
         enabled: bool,

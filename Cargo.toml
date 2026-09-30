@@ -30,7 +30,6 @@ members = [
     "crates/nickel-plugin-presentation",
     "crates/nickel-render-assets",
     "crates/nickel-session-protocol",
-    "crates/nickel-settings",
     "crates/nickel-terminal",
     "crates/nickel-terminal-ui",
 ]

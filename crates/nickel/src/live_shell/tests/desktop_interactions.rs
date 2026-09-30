@@ -1206,20 +1206,32 @@
         );
     }
 
-    #[test]
-    fn desktop_settings_destinations_are_typed_and_keep_the_invoking_output() {
-        assert_eq!(
-            super::SettingsDestination::Appearance.arguments(),
-            ["--screen", "appearance"]
-        );
-        assert_eq!(
-            super::SettingsDestination::Display {
-                output: "DP-2".into()
-            }
-            .arguments(),
-            ["--screen", "display", "--output", "DP-2"]
-        );
-    }
+#[test]
+fn desktop_settings_destinations_are_typed_and_keep_the_invoking_output() {
+    let palette = nickel_core::theme::ThemePalette::from_appearance(Default::default());
+    let mut desktop = super::DesktopApplication::fixture(None, palette);
+    desktop.open_background_context(None);
+    nickel_ui::Application::update(
+        &mut desktop,
+        super::desktop::DesktopMessage::Command(super::desktop::DesktopCommand::Personalize),
+    );
+    assert_eq!(
+        desktop.pending_settings.take(),
+        Some(super::SettingsDestination::Appearance)
+    );
+    desktop.set_active_output("DP-2".into(), nickel_file::desktop::Point::default(), 1.0);
+    desktop.open_background_context(None);
+    nickel_ui::Application::update(
+        &mut desktop,
+        super::desktop::DesktopMessage::Command(super::desktop::DesktopCommand::DisplaySettings),
+    );
+    assert_eq!(
+        desktop.pending_settings.take(),
+        Some(super::SettingsDestination::Display {
+            output: "DP-2".into()
+        })
+    );
+}
     #[test]
     #[cfg(target_os = "linux")]
     fn native_desktop_initial_scene_and_hotplug_use_output_topology() {

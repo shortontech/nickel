@@ -58,6 +58,7 @@ pub struct DesktopApplication {
     #[cfg(target_os = "linux")]
     pending_launches: nickel_file::FileLaunches<()>,
     pub(super) error: Option<String>,
+    pub(super) pending_settings: Option<SettingsDestination>,
     pub(super) file_window_host: Arc<dyn FileWindowHost>,
 }
 
@@ -156,20 +157,6 @@ pub(super) enum SettingsDestination {
     Display { output: String },
 }
 
-impl SettingsDestination {
-    pub(super) fn arguments(&self) -> Vec<String> {
-        match self {
-            Self::Appearance => vec!["--screen".into(), "appearance".into()],
-            Self::Display { output } => vec![
-                "--screen".into(),
-                "display".into(),
-                "--output".into(),
-                output.clone(),
-            ],
-        }
-    }
-}
-
 #[derive(Clone, Debug, PartialEq)]
 pub enum DesktopMessage {
     Activate(DesktopEntryId),
@@ -205,6 +192,7 @@ impl DesktopApplication {
             watch: DirectoryWatch::start(&path).ok(),
             layout,
             active_output: "primary".into(),
+            pending_settings: None,
             output_origin: DesktopPoint::default(),
             overflow_offsets: HashMap::new(),
             active_scale: 1.0,
@@ -808,28 +796,7 @@ impl DesktopApplication {
     }
 
     fn launch_settings(&mut self, destination: SettingsDestination) {
-        let result = std::env::current_exe()
-            .map_err(|error| error.to_string())
-            .and_then(|exe| {
-                let exe = exe.with_file_name(if cfg!(target_os = "windows") {
-                    "nickel-settings.exe"
-                } else {
-                    "nickel-settings"
-                });
-                let mut command = std::process::Command::new(exe);
-                #[cfg(target_os = "linux")]
-                command.env_remove("__EGL_VENDOR_LIBRARY_FILENAMES");
-                command.args(destination.arguments());
-                #[cfg(target_os = "linux")]
-                crate::model::authorize_trusted_session_client(&mut command);
-                command
-                    .spawn()
-                    .map(|_| ())
-                    .map_err(|error| error.to_string())
-            });
-        if let Err(error) = result {
-            self.error = Some(format!("Could not open Settings: {error}"));
-        }
+        self.pending_settings = Some(destination);
     }
 
     // Keyboard edges and native pointer snapshots share selection policy; neither
@@ -1784,6 +1751,7 @@ impl DesktopApplication {
                 scale: 1.0,
             }]),
             active_output: "primary".into(),
+            pending_settings: None,
             output_origin: DesktopPoint::default(),
             overflow_offsets: HashMap::new(),
             active_scale: 1.0,

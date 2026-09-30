@@ -10299,7 +10299,6 @@ Used by:
 - nickel-remote-control 0.1.0
 - nickel-render-assets 0.1.0
 - nickel-session-protocol 0.1.0
-- nickel-settings 0.1.0
 - nickel-storage 0.1.0
 - nickel-terminal 0.1.0
 - nickel-terminal-ui 0.1.0

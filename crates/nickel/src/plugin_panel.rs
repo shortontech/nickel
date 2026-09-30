@@ -369,6 +369,10 @@ pub enum PluginEffect {
         plugin_id: String,
         effect: crate::plugins_capabilities::ShellSelectionEffect,
     },
+    PluginsSetting {
+        plugin_id: String,
+        effect: crate::plugins_capabilities::PluginsSettingEffect,
+    },
     Plugins {
         plugin_id: String,
         effect: crate::plugins_capabilities::PluginsEffect,
@@ -1715,6 +1719,8 @@ impl PluginPanelApplication {
                     | "appearance"
                     | "wallpaper"
                     | "session"
+                    | "system"
+                    | "navigation"
             )
         }) {
             return Err("unknown host data field".into());
@@ -1778,6 +1784,7 @@ impl PluginPanelApplication {
             ("bluetooth", PluginCapability::BluetoothRead),
             ("associations", PluginCapability::AssociationsRead),
             ("plugins", PluginCapability::PluginsRead),
+            ("navigation", PluginCapability::SettingsRead),
             ("preferences", PluginCapability::PreferencesRead),
         ] {
             if fields.iter().any(|(name, _)| *name == field)
@@ -3001,6 +3008,40 @@ impl nickel_ui::Application for PluginPanelApplication {
                                     });
                             match request {
                                 Ok(effect) => approved.push(PluginEffect::ShellSelection {
+                                    plugin_id: effect_manifest.id.clone(),
+                                    effect,
+                                }),
+                                Err(error) => {
+                                    self.last_error = Some(error);
+                                    return;
+                                }
+                            }
+                        }
+                        Some("plugins.setSetting") => {
+                            let request =
+                                crate::plugins_capabilities::PluginsSettingEffect::parse(&effect)
+                                    .and_then(|request| {
+                                        if !effect_manifest
+                                            .capabilities
+                                            .contains(&PluginCapability::PluginsRead)
+                                            || !effect_manifest
+                                                .capabilities
+                                                .contains(&PluginCapability::PluginsControl)
+                                        {
+                                            return Err(
+                                                "plugin management grants are unavailable".into()
+                                            );
+                                        }
+                                        let data: Value = self
+                                            .projection_data
+                                            .as_deref()
+                                            .and_then(|data| serde_json::from_str(data).ok())
+                                            .ok_or("plugin inventory is unavailable")?;
+                                        request.validate(&data["plugins"])?;
+                                        Ok(request)
+                                    });
+                            match request {
+                                Ok(effect) => approved.push(PluginEffect::PluginsSetting {
                                     plugin_id: effect_manifest.id.clone(),
                                     effect,
                                 }),

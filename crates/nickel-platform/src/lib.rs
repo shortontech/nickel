@@ -8,8 +8,6 @@ mod default_apps;
 mod executable_identity;
 #[cfg(target_os = "linux")]
 pub use default_apps::spawn_with_default;
-#[cfg(target_os = "windows")]
-pub mod local_control;
 mod maintenance;
 mod media;
 mod peripherals;

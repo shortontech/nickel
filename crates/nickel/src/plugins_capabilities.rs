@@ -17,6 +17,7 @@ pub(crate) fn snapshot(
             "version": plugin.version, "enabled": plugin.desired_enabled,
             "health": plugin.health, "grants": plugin.capabilities,
             "surfaces": plugin.surfaces, "composition": plugin.composition,
+            "settings": plugin.settings,
             "memory": {
                 "jsHeapBytes": plugin.memory.js_heap_bytes,
                 "nativeUiBytes": plugin.memory.native_ui_bytes,
@@ -86,9 +87,101 @@ impl PluginsEffect {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct PluginsSettingEffect {
+    pub id: String,
+    pub key: String,
+    pub revision: u64,
+    pub prior_value: Value,
+    pub value: Value,
+}
+impl PluginsSettingEffect {
+    pub(crate) fn parse(value: &Value) -> Result<Self, String> {
+        if value["type"] != "plugins.setSetting" {
+            return Err("unknown plugin setting operation".into());
+        }
+        let identity = |name: &str| {
+            value[name]
+                .as_str()
+                .filter(|id| !id.is_empty() && id.len() <= 128 && !id.chars().any(char::is_control))
+                .map(str::to_owned)
+                .ok_or_else(|| format!("invalid plugin setting {name}"))
+        };
+        let scalar = |name: &str| {
+            value
+                .get(name)
+                .filter(|value| {
+                    value.is_boolean()
+                        || value.is_number()
+                        || value.as_str().is_some_and(|text| text.len() <= 65535)
+                })
+                .cloned()
+                .ok_or_else(|| format!("invalid plugin setting {name}"))
+        };
+        Ok(Self {
+            id: identity("id")?,
+            key: identity("key")?,
+            revision: value["revision"]
+                .as_str()
+                .and_then(|value| value.parse().ok())
+                .ok_or("invalid plugin revision")?,
+            prior_value: scalar("priorValue")?,
+            value: scalar("value")?,
+        })
+    }
+    pub(crate) fn validate(&self, snapshot: &Value) -> Result<(), String> {
+        if snapshot["available"] != true || snapshot["writable"] != true {
+            return Err("plugin setting management is unavailable".into());
+        }
+        if snapshot["revision"]
+            .as_str()
+            .and_then(|value| value.parse::<u64>().ok())
+            != Some(self.revision)
+        {
+            return Err("plugin inventory is stale".into());
+        }
+        let setting = snapshot["plugins"]
+            .as_array()
+            .and_then(|plugins| plugins.iter().find(|plugin| plugin["id"] == self.id))
+            .and_then(|plugin| plugin["settings"].as_array())
+            .and_then(|settings| settings.iter().find(|setting| setting["id"] == self.key))
+            .ok_or("plugin setting is unavailable")?;
+        if setting["value"] != self.prior_value {
+            return Err("plugin setting has changed".into());
+        }
+        let kind: nickel_session_protocol::PluginSettingKind =
+            serde_json::from_value(setting["kind"].clone())
+                .map_err(|_| "invalid plugin setting metadata")?;
+        if !kind.accepts(&self.value) {
+            return Err("plugin setting value is outside its bounds".into());
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn metadata_settings_require_current_revision_prior_value_and_declared_bounds() {
+        let mut snapshot = json!({"available":true,"writable":true,"revision":"7","plugins":[{"id":"example","settings":[{"id":"count","kind":{"kind":"integer","min":1,"max":4},"value":2}]}]});
+        let effect=PluginsSettingEffect::parse(&json!({"type":"plugins.setSetting","id":"example","key":"count","revision":"7","priorValue":2,"value":3})).unwrap();
+        assert!(effect.validate(&snapshot).is_ok());
+        let mut outside = effect.clone();
+        outside.value = json!(5);
+        assert!(outside.validate(&snapshot).is_err());
+        outside.value = json!(1.5);
+        assert!(outside.validate(&snapshot).is_err());
+        snapshot["plugins"][0]["settings"][0]["value"] = json!(3);
+        assert!(effect.validate(&snapshot).is_err());
+        snapshot["plugins"][0]["settings"][0]["value"] = json!(2);
+        snapshot["revision"] = json!("8");
+        assert!(effect.validate(&snapshot).is_err());
+        snapshot["revision"] = json!("7");
+        snapshot["writable"] = json!(false);
+        assert!(effect.validate(&snapshot).is_err());
+    }
+
     #[test]
     fn lifecycle_requests_reject_stale_unknown_and_readonly_inventory() {
         let effect = PluginsEffect::parse(

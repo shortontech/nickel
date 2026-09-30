@@ -181,20 +181,6 @@
         );
     }
 
-    #[test]
-    fn settings_activation_is_registered_without_an_in_process_window() {
-        let mut shell = LiveShell::new().unwrap();
-        let id = crate::settings_plugin_report::ID;
-        let entry = shell.plugin_registry().get(id).unwrap();
-        assert!(entry.desired_enabled);
-        assert_eq!(entry.health, nickel_core::plugins::PluginHealth::Starting);
-        assert!(shell.set_plugin_enabled(id, false).unwrap());
-        let disabled = shell.plugin_registry().get(id).unwrap();
-        assert!(!disabled.desired_enabled);
-        assert_eq!(disabled.health, nickel_core::plugins::PluginHealth::Disabled);
-        assert!(shell.set_plugin_enabled(id, true).unwrap());
-        assert_eq!(shell.plugin_registry().get(id).unwrap().health, nickel_core::plugins::PluginHealth::Starting);
-    }
 
 
 

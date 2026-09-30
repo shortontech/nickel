@@ -305,7 +305,7 @@ mod tests {
             ModuleSource {path:"Plugins.js",source:include_str!("../../../assets/plugins/nickel-default/src/Plugins.js")},
             ModuleSource {path:"styles/plugins.css",source:include_str!("../../../assets/plugins/nickel-default/src/styles/plugins.css")},
         ]).unwrap();
-        let mut runtime = JsxRuntime::new_modules(&graph, Some(r#"{"plugins":{"available":true,"writable":true,"revision":"7","plugins":[{"id":"example","name":"Example","enabled":true,"health":{"state":"running"},"grants":["windows-read"],"surfaces":[],"composition":[],"memory":{"jsHeapBytes":null,"nativeUiBytes":null,"textureBytes":null,"trackedPeakBytes":null,"timers":0,"subscriptions":0}}]}}"#)).unwrap();
+        let mut runtime = JsxRuntime::new_modules(&graph, Some(r#"{"plugins":{"available":true,"writable":true,"revision":"7","plugins":[{"id":"example","name":"Example","enabled":false,"health":{"state":"running"},"grants":["windows-read"],"surfaces":[],"composition":[],"memory":{"jsHeapBytes":null,"nativeUiBytes":null,"textureBytes":null,"trackedPeakBytes":null,"timers":0,"subscriptions":0}}]}}"#)).unwrap();
         let mut registry = nickel_core::settings_registry::SettingsRegistry::default();
         runtime
             .publish_settings(&mut registry, "nickel-default")
@@ -321,6 +321,91 @@ mod tests {
         assert!(rendered.contains("Example"));
         assert!(rendered.contains("Unavailable"));
         assert!(rendered.contains("Authorized capabilities"));
+        fn find<'a>(node: &'a serde_json::Value, id: &str) -> Option<&'a serde_json::Value> {
+            if node["id"] == id {
+                return Some(node);
+            }
+            node["children"]
+                .as_array()?
+                .iter()
+                .find_map(|child| find(child, id))
+        }
+        let action = find(&tree, "plugin-toggle-0").unwrap()["action"]
+            .as_u64()
+            .unwrap();
+        let reviewed = runtime
+            .render(&format!("__nickelDispatch({action})"), |node| {
+                Ok(node.clone())
+            })
+            .unwrap();
+        assert!(runtime.take_effects().unwrap().is_empty());
+        let confirm = find(&reviewed, "plugin-review-confirm").unwrap();
+        assert_ne!(confirm["disabled"], serde_json::json!(true));
+        let action = confirm["action"].as_u64().unwrap();
+        runtime
+            .render(&format!("__nickelDispatch({action})"), |node| {
+                Ok(node.clone())
+            })
+            .unwrap();
+        assert_eq!(
+            runtime.take_effects().unwrap(),
+            vec![
+                serde_json::json!({"type":"plugins.enable","id":"example","revision":"7","priorEnabled":false})
+            ]
+        );
+        let tree = runtime
+            .render("__nickelRender()", |node| Ok(node.clone()))
+            .unwrap();
+        let action = find(&tree, "plugin-toggle-0").unwrap()["action"]
+            .as_u64()
+            .unwrap();
+        runtime
+            .render(&format!("__nickelDispatch({action})"), |node| {
+                Ok(node.clone())
+            })
+            .unwrap();
+        let mut data: serde_json::Value = runtime.eval_json("JSON.stringify(nickel.data)").unwrap();
+        data["plugins"]["revision"] = serde_json::json!("8");
+        runtime.set_data(&data.to_string()).unwrap();
+        let stale = runtime
+            .render("__nickelRender()", |node| Ok(node.clone()))
+            .unwrap();
+        assert_eq!(
+            find(&stale, "plugin-review-confirm").unwrap()["disabled"],
+            serde_json::json!(true)
+        );
+        assert!(runtime.take_effects().unwrap().is_empty());
+    }
+
+    #[test]
+    fn plugin_metadata_edits_capture_prior_values_and_lossless_revision() {
+        let mut runtime=super::JsxRuntime::new("",Some(r#"{"plugins":{"available":true,"writable":true,"revision":"9007199254740993","plugins":[{"id":"example","settings":[{"id":"count","value":2}]}]},"system":{"available":true,"version":"0.1.0","platform":"linux","architecture":"x86_64"}}"#)).unwrap();
+        runtime.eval("nickel.plugins.setSetting('example','count',3,'9007199254740993');nickel.system.get().version='mutated';").unwrap();
+        assert_eq!(
+            runtime.take_effects().unwrap()[0],
+            serde_json::json!({"type":"plugins.setSetting","id":"example","key":"count","revision":"9007199254740993","priorValue":2,"value":3})
+        );
+        assert_eq!(
+            runtime
+                .eval_json::<String>("JSON.stringify(nickel.system.get().version)")
+                .unwrap(),
+            "0.1.0"
+        );
+        assert!(
+            runtime
+                .eval("nickel.plugins.setSetting('example','unknown',3,'9007199254740993')")
+                .is_err()
+        );
+        assert!(
+            runtime
+                .eval("nickel.plugins.setSetting('example','count',{},'9007199254740993')")
+                .is_err()
+        );
+        assert!(
+            runtime
+                .eval("nickel.plugins.setSetting('example','count',3,'1')")
+                .is_err()
+        );
     }
 
     #[test]

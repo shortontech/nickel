@@ -308,6 +308,7 @@ interface NickelPluginStatus {
     readonly grants:ReadonlyArray<string>;
     readonly surfaces:ReadonlyArray<string>;
     readonly composition:ReadonlyArray<string>;
+    readonly settings:ReadonlyArray<{id:string;label:string;description:string;value:boolean|number|string;kind:Readonly<{kind:"boolean"|"integer"|"text"|"choice";min?:number;max?:number;max_length?:number;options?:ReadonlyArray<string>}>}>;
     readonly memory:Readonly<{jsHeapBytes:number | null;nativeUiBytes:number | null;textureBytes:number | null;trackedPeakBytes:number | null;timers:number;subscriptions:number;componentBreakdownAvailable:false}>;
 }
 
@@ -326,6 +327,9 @@ declare const nickel: Readonly<{
     request(effect: string | Readonly<{ type: string; [key: string]: unknown }>): void;
     openDialog(id: string): void;
     openMenu(id: string): void;
+    system: Readonly<{
+        get():Readonly<{available:boolean;version:string|null;platform:string|null;architecture:string|null}>;
+    }>;
     plugins: Readonly<{
         /** Requires plugins-read; unavailable memory counters are null. */
         get(): Readonly<{available:boolean; writable:boolean; revision?:string; plugins:ReadonlyArray<NickelPluginStatus>; lastResult?:Readonly<{status:string;detail?:string}> | null}>;
@@ -334,6 +338,7 @@ declare const nickel: Readonly<{
         enable(id:string, revision:string):void;
         disable(id:string, revision:string):void;
         setEnabled(id:string, enabled:boolean, revision:string):void;
+        setSetting(id:string, key:string, value:boolean|number|string, revision:string):void;
     }>;
     /** Read-only reference: native shortcut remapping is currently unsupported. Requires shortcuts-read. */
     shortcuts: Readonly<{

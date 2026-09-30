@@ -601,22 +601,10 @@ fn gio_content_type(output: &str) -> Option<String> {
     })
 }
 
-/// Opens the Nickel Settings surface backed by this same association service.
+/// Opens the operating system's native default-application controls.
+/// Native applications can use this fallback independently of the active shell.
 pub fn open_default_application_settings() -> Result<(), AssociationError> {
-    let current = std::env::current_exe()
-        .map_err(|error| AssociationError(format!("could not locate Nickel Settings: {error}")))?;
-    let executable = current.with_file_name(if cfg!(target_os = "windows") {
-        "nickel-settings.exe"
-    } else {
-        "nickel-settings"
-    });
-    std::process::Command::new(&executable)
-        .args(["--screen", "default-apps"])
-        .spawn()
-        .map(|_| ())
-        .map_err(|error| {
-            AssociationError(format!("could not open {}: {error}", executable.display()))
-        })
+    crate::associations_capability::open_native_default_apps_settings()
 }
 
 fn infer_portable_mime(path: &Path) -> Option<&'static str> {

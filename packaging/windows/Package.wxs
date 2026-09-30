@@ -91,17 +91,6 @@
         <RegistryValue Root="HKCU" Key="Software\Nickel\Installer\Components"
                        Name="Nickel" Type="integer" Value="1" KeyPath="yes" />
       </Component>
-      <Component Id="NickelSettingsExecutable" Guid="E121D8E8-B064-440C-A122-D02D0C638084">
-        <File Id="NickelSettingsExe" Source="$(PayloadDir)\nickel-settings.exe">
-          <Shortcut Id="NickelSettingsStartMenuShortcut"
-                    Directory="ProgramMenuNickel"
-                    Name="Nickel Settings"
-                    Description="Configure Nickel"
-                    WorkingDirectory="InstallFolder" />
-        </File>
-        <RegistryValue Root="HKCU" Key="Software\Nickel\Installer\Components"
-                       Name="Settings" Type="integer" Value="1" KeyPath="yes" />
-      </Component>
       <Component Id="NickelTerminalExecutable" Guid="44ABC6CB-01CF-4901-B42F-78BF83165413">
         <File Id="NickelTerminalExe" Source="$(PayloadDir)\nickel-terminal.exe">
           <Shortcut Id="NickelTerminalStartMenuShortcut"

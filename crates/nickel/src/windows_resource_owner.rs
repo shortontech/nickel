@@ -796,7 +796,6 @@ pub(crate) fn protected_executable(name: Option<&str>) -> bool {
     matches!(
         name.to_ascii_lowercase().as_str(),
         "nickel.exe"
-            | "nickel-settings.exe"
             | "nickel-login.exe"
             | "nickel-screenshot.exe"
             | "consent.exe"
@@ -962,7 +961,6 @@ mod tests {
         );
         assert!(protected_executable(None));
         assert!(protected_executable(Some("CONSENT.EXE")));
-        assert!(protected_executable(Some("nickel-settings.exe")));
         assert!(!protected_executable(Some("ordinary.exe")));
     }
     #[test]

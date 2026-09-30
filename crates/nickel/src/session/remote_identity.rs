@@ -609,8 +609,7 @@ pub(super) fn protected_executable(path: &std::path::Path) -> bool {
     let name = name.strip_suffix(" (deleted)").unwrap_or(name);
     // These processes host permission/credential controls. Protect the whole
     // process because a page or prompt may change between individual requests.
-    name == "nickel-settings"
-        || name == "nickel-login"
+    name == "nickel-login"
         || name == "polkit-kde-authentication-agent-1"
         || name == "polkit-gnome-authentication-agent-1"
         || name == "lxqt-policykit-agent"
@@ -1366,12 +1365,7 @@ mod tests {
     #[test]
     fn permission_and_credential_processes_remain_protected_after_executable_replacement() {
         let _fixture = EXECUTABLE_FIXTURES.lock().unwrap();
-        for name in [
-            "nickel-settings",
-            "nickel-settings (deleted)",
-            "pinentry-qt",
-            "polkit-kde-authentication-agent-1",
-        ] {
+        for name in ["pinentry-qt", "polkit-kde-authentication-agent-1"] {
             assert!(protected_executable(&PathBuf::from("/usr/bin").join(name)));
         }
         assert!(!protected_executable(std::path::Path::new(

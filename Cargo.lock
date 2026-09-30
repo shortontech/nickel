@@ -3827,33 +3827,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "nickel-settings"
-version = "0.1.0"
-dependencies = [
- "futures-lite",
- "image",
- "nickel-build-support",
- "nickel-codex",
- "nickel-core",
- "nickel-i18n",
- "nickel-input",
- "nickel-logging",
- "nickel-platform",
- "nickel-plugin-presentation",
- "nickel-plugin-runtime",
- "nickel-session-protocol",
- "nickel-ui",
- "nickel-ui-testkit",
- "resvg",
- "serde",
- "serde_json",
- "tracing",
- "windows",
- "winit 0.30.13",
- "zbus",
-]
-
-[[package]]
 name = "nickel-storage"
 version = "0.1.0"
 dependencies = [

@@ -640,11 +640,11 @@ mod tests {
     #[test]
     fn trusted_session_client_retains_only_production_session_capabilities() {
         install_trusted_session_capability(
-            "/run/user/1000/nickel-settings.sock".into(),
+            "/run/user/1000/nickel-test-client.sock".into(),
             "secret".into(),
         );
         let application = Application::new(
-            "nickel-settings".into(),
+            "nickel-test-client".into(),
             "Nickel Settings".into(),
             None,
             None,
@@ -657,13 +657,13 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(environment.contains(&(
             "NICKEL_SESSION_CONTROL".into(),
-            Some("/run/user/1000/nickel-settings.sock".into())
+            Some("/run/user/1000/nickel-test-client.sock".into())
         )));
         assert!(environment.contains(&("NICKEL_SESSION_TOKEN".into(), Some("secret".into()))));
         assert!(environment.contains(&("NICKEL_SHELL_TEST_CONTROL".into(), None)));
         assert!(environment.contains(&("__EGL_VENDOR_LIBRARY_FILENAMES".into(), None)));
         clear_trusted_session_capability(std::ffi::OsStr::new(
-            "/run/user/1000/nickel-settings.sock",
+            "/run/user/1000/nickel-test-client.sock",
         ));
     }
 }

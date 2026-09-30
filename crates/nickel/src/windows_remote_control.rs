@@ -258,12 +258,6 @@ fn resource_label(scope: &nickel_remote_control::leases::ResourceScope) -> Strin
     }
     .into()
 }
-struct LocalRequest {
-    envelope: nickel_session_protocol::ClientEnvelope,
-    queued_at: Instant,
-    deadline: Instant,
-    reply: SyncSender<ServerMessage>,
-}
 enum ObservationKind {
     Windows,
     Outputs,
@@ -676,7 +670,6 @@ fn move_to_windows_pointer_target(
     Ok(())
 }
 enum OwnerRequest {
-    Local(LocalRequest),
     Observation {
         permit: DesktopPermit,
         prepared: Box<crate::platform::remote_observation::Prepared>,
@@ -3761,8 +3754,6 @@ impl WindowsDesktopAuthority {
 }
 
 pub(crate) struct WindowsRemoteControl {
-    _transport: Option<nickel_platform::local_control::LocalControlServer>,
-    settings_plugin_report: Option<crate::settings_plugin_report::SettingsPluginReport>,
     receiver: Receiver<OwnerRequest>,
     remote_control: RemoteControlRuntime,
     local_cues: crate::local_cues::LocalCues,
@@ -3925,42 +3916,9 @@ impl WindowsRemoteControl {
             settings_worker: settings_worker.clone(),
             platform_refresh_worker: platform_refresh_worker.clone(),
         });
-        let transport = nickel_platform::local_control::LocalControlServer::start(move |frame| {
-            let envelope: nickel_session_protocol::ClientEnvelope =
-                nickel_session_protocol::decode(&frame).map_err(io::Error::other)?;
-            let request_id = envelope.request_id;
-            // Authentication belongs to the OS pipe, never an inherited token.
-            if !envelope.token.is_empty() {
-                return Err(io::Error::new(
-                    io::ErrorKind::PermissionDenied,
-                    "unexpected local token",
-                ));
-            }
-            let (reply, response) = mpsc::sync_channel(1);
-            sender
-                .try_send(OwnerRequest::Local(LocalRequest {
-                    envelope,
-                    queued_at: Instant::now(),
-                    deadline: Instant::now() + Duration::from_secs(1),
-                    reply,
-                }))
-                .map_err(|_| {
-                    io::Error::new(io::ErrorKind::WouldBlock, "Windows owner queue full")
-                })?;
-            let message = response.recv_timeout(Duration::from_secs(1)).map_err(|_| {
-                io::Error::new(io::ErrorKind::TimedOut, "Windows owner unavailable")
-            })?;
-            nickel_session_protocol::encode(&nickel_session_protocol::ServerEnvelope {
-                request_id,
-                message,
-            })
-            .map_err(io::Error::other)
-        })?;
         let desktop_unlocked =
             desktop_session.is_some_and(crate::platform::remote_observation::desktop_is_unlocked);
         let mut owner = Self {
-            _transport: Some(transport),
-            settings_plugin_report: None,
             receiver,
             remote_control: RemoteControlRuntime::default(),
             local_cues: Default::default(),
@@ -5174,142 +5132,6 @@ impl WindowsRemoteControl {
                 }
                 OwnerRequest::CancelApplicationPlacement { ticket } => {
                     self.pending_output_launches.remove(&ticket.id);
-                }
-                OwnerRequest::Local(request) => {
-                    if Instant::now() >= request.deadline
-                        || self
-                            .last_stop
-                            .is_some_and(|stopped| request.queued_at <= stopped)
-                    {
-                        continue;
-                    }
-                    let result = match request.envelope.request {
-                        Request::Query(Query::Plugins) => shell.as_ref().map_or_else(
-                            || error("Windows shell is unavailable"),
-                            |(_, state)| {
-                                let mut snapshot = state.plugin_status_snapshot();
-                                if let Some(report) = &self.settings_plugin_report {
-                                    report.append_to(&mut snapshot, Instant::now());
-                                }
-                                ServerMessage::Plugins(snapshot)
-                            },
-                        ),
-                        Request::Command(Command::ReportSettingsPluginMemory {
-                            enabled,
-                            memory,
-                        }) => {
-                            match crate::settings_plugin_report::SettingsPluginReport::new(
-                                enabled,
-                                memory,
-                                Instant::now(),
-                            ) {
-                                Ok(report) => {
-                                    self.settings_plugin_report = Some(report);
-                                    shell.as_ref().map_or_else(
-                                        || error("Windows shell is unavailable"),
-                                        |(_, state)| {
-                                            let mut snapshot = state.plugin_status_snapshot();
-                                            if let Some(report) = &self.settings_plugin_report {
-                                                report.append_to(&mut snapshot, Instant::now());
-                                            }
-                                            ServerMessage::Plugins(snapshot)
-                                        },
-                                    )
-                                }
-                                Err(message) => error(message),
-                            }
-                        }
-                        Request::Command(Command::SetPluginEnabled {
-                            id,
-                            enabled,
-                            observed_generation,
-                        }) => shell.as_mut().map_or_else(
-                            || error("Windows shell is unavailable"),
-                            |(shell, state)| {
-                                if state.plugin_status_snapshot().activation_generation
-                                    != observed_generation
-                                {
-                                    return error("plugin status changed; refresh Settings");
-                                }
-                                match state.set_plugin_enabled(&id, enabled) {
-                                    Ok(changed) => {
-                                        if changed
-                                            && let Err(reason) = shell.set_plugin_surfaces(
-                                                state.shell_fixed_surface_keys(),
-                                                state.shell_panel_surfaces(),
-                                            )
-                                        {
-                                            return error(reason);
-                                        }
-                                        if changed {
-                                            crate::sync_visibility(shell, state);
-                                        }
-                                        if changed
-                                            && let Err(reason) = crate::render_role(
-                                                shell,
-                                                state,
-                                                crate::winit_shell::SurfaceRole::Panel,
-                                            )
-                                        {
-                                            return error(reason);
-                                        }
-                                        if changed
-                                            && let Err(reason) = crate::render_role(
-                                                shell,
-                                                state,
-                                                crate::winit_shell::SurfaceRole::Taskbar,
-                                            )
-                                        {
-                                            return error(reason);
-                                        }
-                                        ServerMessage::Plugins(state.plugin_status_snapshot())
-                                    }
-                                    Err(reason) => error(reason),
-                                }
-                            },
-                        ),
-                        Request::Command(Command::SetPluginSetting {
-                            id,
-                            key,
-                            value,
-                            observed_generation,
-                        }) => shell.as_mut().map_or_else(
-                            || error("Windows shell is unavailable"),
-                            |(shell, state)| {
-                                if state.plugin_status_snapshot().activation_generation
-                                    != observed_generation
-                                {
-                                    return error("plugin status changed; refresh Settings");
-                                }
-                                match state.set_plugin_setting(&id, &key, value) {
-                                    Ok(changed) => {
-                                        if changed
-                                            && let Err(reason) = crate::render_role(
-                                                shell,
-                                                state,
-                                                crate::winit_shell::SurfaceRole::Panel,
-                                            )
-                                        {
-                                            return error(reason);
-                                        }
-                                        if changed
-                                            && let Err(reason) = crate::render_role(
-                                                shell,
-                                                state,
-                                                crate::winit_shell::SurfaceRole::Taskbar,
-                                            )
-                                        {
-                                            return error(reason);
-                                        }
-                                        ServerMessage::Plugins(state.plugin_status_snapshot())
-                                    }
-                                    Err(reason) => error(reason),
-                                }
-                            },
-                        ),
-                        request => self.handle(request),
-                    };
-                    let _ = request.reply.try_send(result);
                 }
                 OwnerRequest::Connection {
                     permit,
@@ -10960,8 +10782,6 @@ mod tests {
         let peripheral_observation_worker = Arc::new(WindowsPlatformRefreshWorker::default());
         let display_state = Arc::new(std::sync::Mutex::new(WindowsDisplayState::default()));
         WindowsRemoteControl {
-            _transport: None,
-            settings_plugin_report: None,
             receiver,
             remote_control: RemoteControlRuntime::default(),
             local_cues: Default::default(),
@@ -11213,31 +11033,5 @@ mod tests {
         let mut control = control.lock().unwrap();
         assert!(control.leases().iter().any(|active| active.id == lease));
         assert!(control.leases_mut().reserve_input(lease, 8).is_ok());
-    }
-    #[test]
-    fn expired_settings_request_cannot_change_owner_generation() {
-        let mut owner = owner();
-        let (reply, receiver) = mpsc::sync_channel(1);
-        owner
-            .authority
-            .sender
-            .try_send(OwnerRequest::Local(LocalRequest {
-                envelope: nickel_session_protocol::ClientEnvelope {
-                    token: String::new(),
-                    request_id: 1,
-                    request: Request::Command(Command::ApplyRemoteControl {
-                        requested_enabled: false,
-                        generation: 99,
-                    }),
-                },
-                queued_at: Instant::now() - Duration::from_millis(2),
-                deadline: Instant::now() - Duration::from_millis(1),
-                reply,
-            }))
-            .ok()
-            .unwrap();
-        owner.poll_with_shell(None, None);
-        assert_eq!(owner.remote_control.status().generation, 0);
-        assert!(receiver.try_recv().is_err());
     }
 }

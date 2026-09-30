@@ -606,57 +606,6 @@ fn safe_mode_suppresses_installed_autostart_without_discarding_saved_choice() {
     assert!(!super::should_auto_start_installed_plugin(false, false));
 }
 
-#[test]
-fn settings_status_is_idle_until_the_separate_process_reports_memory() {
-    let shell = LiveShell::new().unwrap();
-    let snapshot = shell.plugin_status_snapshot();
-    let settings = snapshot
-        .plugins
-        .iter()
-        .find(|plugin| plugin.id == crate::settings_plugin_report::ID)
-        .unwrap();
-    assert!(settings.desired_enabled);
-    assert_eq!(
-        settings.health,
-        nickel_session_protocol::PluginRuntimeHealth::Idle
-    );
-    assert!(settings.memory.native_ui_bytes.is_none());
-    let reported_at = Instant::now();
-    let report = crate::settings_plugin_report::SettingsPluginReport::new(
-        true,
-        nickel_session_protocol::PluginMemorySnapshot {
-            native_ui_bytes: Some(4096),
-            ..Default::default()
-        },
-        reported_at,
-    )
-    .unwrap();
-    let mut running = snapshot.clone();
-    report.append_to(&mut running, reported_at);
-    let settings = running
-        .plugins
-        .iter()
-        .find(|plugin| plugin.id == crate::settings_plugin_report::ID)
-        .unwrap();
-    assert_eq!(
-        settings.health,
-        nickel_session_protocol::PluginRuntimeHealth::Running
-    );
-    assert_eq!(settings.memory.native_ui_bytes, Some(4096));
-    let mut closed = snapshot;
-    report.append_to(&mut closed, reported_at + Duration::from_secs(6));
-    let settings = closed
-        .plugins
-        .iter()
-        .find(|plugin| plugin.id == crate::settings_plugin_report::ID)
-        .unwrap();
-    assert_eq!(
-        settings.health,
-        nickel_session_protocol::PluginRuntimeHealth::Idle
-    );
-    assert!(settings.memory.native_ui_bytes.is_none());
-}
-
 include!("tests/wallpaper.rs");
 include!("tests/shell_flows.rs");
 
@@ -3675,6 +3624,103 @@ fn plugin_management_rechecks_grants_and_retires_disabled_package_resources() {
             effect: restore,
         }]);
         assert!(!shell.plugin_registry.get(&id).unwrap().desired_enabled);
+    });
+}
+
+#[test]
+fn desktop_settings_requests_open_shared_surface_and_preserve_navigation_identity() {
+    with_package_runtime_stack(|| {
+        let mut shell = LiveShell::new().unwrap();
+        shell.desktop_host.application_mut().set_active_output(
+            "DP-2".into(),
+            nickel_file::desktop::Point::default(),
+            1.0,
+        );
+        shell
+            .desktop_host
+            .application_mut()
+            .open_background_context(None);
+        nickel_ui::Application::update(
+            shell.desktop_host.application_mut(),
+            super::desktop::DesktopMessage::Command(
+                super::desktop::DesktopCommand::DisplaySettings,
+            ),
+        );
+        let outcome = shell.poll_deadlines(Instant::now());
+        assert!(outcome.visibility_changed);
+        assert!(shell.default_shell_surface_visible("settings"));
+        assert_eq!(
+            shell.settings_navigation.as_ref().unwrap()["destination"],
+            "displays"
+        );
+        assert_eq!(
+            shell.settings_navigation.as_ref().unwrap()["output"],
+            "DP-2"
+        );
+        assert!(shell.settings_navigation.as_ref().unwrap()["revision"].is_string());
+        assert!(
+            !shell
+                .plugin_registry
+                .entries()
+                .any(|entry| entry.manifest.id == "org.nickel.settings")
+        );
+    });
+}
+
+#[test]
+fn public_plugin_metadata_setting_updates_existing_runtime_with_checked_prior_state() {
+    with_package_runtime_stack(|| {
+        use nickel_core::plugins::{PluginPackage, PluginPackageSource};
+        let package=PluginPackage::from_embedded(&[
+            ("plugin.json",br#"{"api_version":1,"id":"org.example.metadata-edit","name":"Metadata edit","entry":"main.js","capabilities":["plugins-read","plugins-control"],"settings":[{"id":"count","label":"Count","kind":"integer","default":2,"min":1,"max":4}],"surfaces":[{"id":"main","kind":"window","width":400,"height":240}]}"#),
+            ("main.js",b"export default function App(){return h(Window,{id:'main',width:400,height:240},h(Text,{},String(nickel.data.settings.count)));}"),
+        ]).unwrap();
+        let id = package.manifest.id.clone();
+        let mut shell = LiveShell::new().unwrap();
+        shell
+            .plugin_registry
+            .register(package.manifest.clone())
+            .unwrap();
+        shell
+            .external_plugin_packages
+            .insert(id.clone(), PluginPackageSource::embedded(package));
+        shell.set_plugin_enabled(&id, true).unwrap();
+        let mut effect = crate::plugins_capabilities::PluginsSettingEffect {
+            id: id.clone(),
+            key: "count".into(),
+            revision: shell.plugin_activation_generation,
+            prior_value: serde_json::json!(2),
+            value: serde_json::json!(3),
+        };
+        shell.locked = true;
+        shell.apply_plugin_effects(vec![crate::plugin_panel::PluginEffect::PluginsSetting {
+            plugin_id: id.clone(),
+            effect: effect.clone(),
+        }]);
+        assert_eq!(
+            shell.plugin_management(&id).unwrap()["plugins"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|plugin| plugin["id"] == id)
+                .unwrap()["settings"][0]["value"],
+            2
+        );
+        shell.locked = false;
+        effect.prior_value = serde_json::json!(1);
+        shell.apply_plugin_effects(vec![crate::plugin_panel::PluginEffect::PluginsSetting {
+            plugin_id: id.clone(),
+            effect: effect.clone(),
+        }]);
+        assert_eq!(shell.plugins_results[&id]["status"], "rejected");
+        effect.prior_value = serde_json::json!(2);
+        shell.apply_plugin_effects(vec![crate::plugin_panel::PluginEffect::PluginsSetting {
+            plugin_id: id.clone(),
+            effect,
+        }]);
+        assert_eq!(shell.plugin_settings[&id]["count"], 3);
+        assert_eq!(shell.plugins_results[&id]["status"], "applied");
+        assert!(shell.package_runtimes.contains_key(&id));
     });
 }
 

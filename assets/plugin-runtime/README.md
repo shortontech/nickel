@@ -18,7 +18,5 @@ component callbacks retain their producing package's authority; a parent grant
 does not authorize its replacement's effects. Native component parsing, layout,
 input, rendering, and operating-system services remain host-owned.
 
-The plugin branch is still undergoing host cutover. The old Settings package and
-`nickel-settings` binary remain retirement targets, not the extension model for
-new pages. See the active shell-package spec for remaining composition and ABI
-work.
+The `nickel-default` Settings window uses the shared package runtime and public
+APIs. See the active shell-package spec for remaining composition and ABI work.

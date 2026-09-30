@@ -284,6 +284,9 @@ const nickel = Object.freeze({
         },
         selectImage(id) { __nickelAppearanceEffect('wallpaper', {kind:'select_approved_image',image_id:__nickelIdentity(id)}); }
     }),
+    system: Object.freeze({
+        get() { return __nickelResource('system', {available:false,version:null,platform:null,architecture:null}); }
+    }),
     session: Object.freeze({
         get() { return __nickelResource('session', {revision:'',account:null,locked:false,support:{lock:false,logout:false,suspend:false,reboot:false,powerOff:false,restartShell:false}}); },
         lock() { __nickelSessionAction('lock'); },
@@ -378,6 +381,16 @@ const nickel = Object.freeze({
             if (!snapshot.available || !snapshot.writable || !plugin || !plugin.shell) throw Error('shell selection is unavailable');
             if (typeof revision !== 'string' || revision !== snapshot.revision) throw Error('plugin inventory is stale');
             __effects.push({type:'plugins.selectShell',id,revision});
+        },
+        setSetting(id, key, value, revision) {
+            id = __nickelIdentity(id); key = __nickelIdentity(key);
+            const snapshot = this.get();
+            const plugin = snapshot.plugins.find(plugin => plugin.id === id);
+            const setting = plugin?.settings?.find(setting => setting.id === key);
+            if (!snapshot.available || !snapshot.writable || !setting) throw Error('plugin setting management is unavailable');
+            if (typeof revision !== 'string' || revision !== snapshot.revision) throw Error('plugin inventory is stale');
+            if (!['boolean','number','string'].includes(typeof value)) throw TypeError('invalid plugin setting value');
+            __effects.push({type:'plugins.setSetting',id,key,revision,priorValue:setting.value,value});
         },
         setEnabled(id, enabled, revision) {
             id = __nickelIdentity(id);

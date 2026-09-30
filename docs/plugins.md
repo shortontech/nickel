@@ -78,12 +78,10 @@ This targets the nested session, so it does not press a controller Guide button
 or toggle the host desktop's launcher. The file is removed with the temporary
 profile when dev mode stops.
 
-`nickel-settings --plugin-status` prints the live plugin status as JSON when
-run as an authorized Settings companion. It lets Windows development sessions
-inspect which first-party plugins actually started.
-On Windows, `nickel-settings.exe --plugin-status --plugin-status-file status.json`
-writes the same snapshot to a file, including when the GUI executable has no
-console output handle.
+The ordinary shell's Plugins Settings page reads `nickel.plugins.get()` and
+`list()` with a `plugins-read` grant. Package status and telemetry are reported
+by the shared host. Lifecycle and configuration requests require
+`plugins-control` and the currently observed activation revision.
 
 On Windows, build `nickel-plugin.exe` and `nickel.exe` beside each other, then
 run `nickel-plugin.exe dev assets/plugins/hello-panel`. The command starts a
@@ -455,12 +453,12 @@ For a quick edit loop, run
 `nickel-plugin dev assets/plugins/example-control-section` (or use the
 [task action example](../assets/plugins/example-task-action/)). The command
 stages the extension in an isolated profile and reloads it after edits.
-Settings measures the retained native component tree in each extension's own
+Nickel measures the retained native component tree in each extension's own
 account. The target plugin's rendered UI measurement also includes contributed
 nodes, so these category totals overlap; they should not be added to estimate
 process memory. Each extension's JavaScript heap measurement remains unavailable.
 
-Settings lists each plugin with an enable switch and shows its runtime health,
+The Plugins page lists each plugin with activation controls and shows its runtime health,
 tracked memory, peak tracked memory, and the measured categories. Tracked memory
 is a lower bound: native UI bytes are measured for rendered plugin trees, while
 the embedded JavaScript heap and some shared allocations cannot yet be assigned

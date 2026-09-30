@@ -238,10 +238,11 @@ struct PendingPopoverAnchor {
 }
 #[path = "live_shell/desktop.rs"]
 mod desktop;
+use desktop::SettingsDestination;
+#[cfg(test)]
+use desktop::retain_unchanged_desktop_icons;
 #[allow(unused_imports)]
 pub use desktop::{DesktopApplication, DesktopCommand, DesktopMessage};
-#[cfg(test)]
-use desktop::{SettingsDestination, retain_unchanged_desktop_icons};
 
 struct WallpaperChooserRequest {
     plugin_id: String,
@@ -685,6 +686,8 @@ pub struct LiveShell {
     audio_status_observed: bool,
     associations_results: HashMap<String, serde_json::Value>,
     plugins_results: HashMap<String, serde_json::Value>,
+    settings_navigation: Option<serde_json::Value>,
+    settings_navigation_revision: u64,
     volume_osd_until: Option<Instant>,
     launcher_visible: bool,
     run_visible: bool,
@@ -1458,7 +1461,6 @@ impl LiveShell {
         plugin_registry.register(crate::plugin_panel::codex_projects_manifest().clone())?;
         plugin_registry.register(crate::plugin_panel::on_screen_keyboard_manifest().clone())?;
         plugin_registry.register(crate::plugin_panel::window_preview_manifest().clone())?;
-        plugin_registry.register(crate::settings_plugin_report::manifest().clone())?;
         #[cfg(test)]
         let catalog = nickel_core::plugins::PluginCatalog::default();
         #[cfg(not(test))]
@@ -1524,9 +1526,6 @@ impl LiveShell {
                 }
                 nickel_core::plugins::PluginActivationSettings::default()
             });
-        if plugin_activation.desired_enabled(crate::settings_plugin_report::ID, true) {
-            plugin_registry.set_enabled(crate::settings_plugin_report::ID, true)?;
-        }
         let plugin_panel_host = if plugin_activation.desired_enabled(
             &crate::plugin_panel::manifest().id,
             crate::plugin_panel::enabled(),
@@ -1671,6 +1670,8 @@ impl LiveShell {
             audio_status_observed: false,
             associations_results: HashMap::new(),
             plugins_results: HashMap::new(),
+            settings_navigation: None,
+            settings_navigation_revision: 0,
             launcher_visible: false,
             run_visible: false,
             locked: false,
@@ -4364,6 +4365,17 @@ impl LiveShell {
         if wallpaper.is_some() {
             application_images.extend(self.appearance_capabilities.wallpaper_images.clone());
         }
+        let system = serde_json::json!({"available":true,"version":env!("CARGO_PKG_VERSION"),"platform":std::env::consts::OS,"architecture":std::env::consts::ARCH});
+        let navigation = self
+            .plugin_registry
+            .get(&key.plugin_id)
+            .filter(|entry| {
+                entry
+                    .manifest
+                    .capabilities
+                    .contains(&nickel_core::plugins::PluginCapability::SettingsRead)
+            })
+            .and_then(|_| self.settings_navigation.clone());
         let wifi = self.plugin_connectivity(&key.plugin_id, true);
         let bluetooth = self.plugin_connectivity(&key.plugin_id, false);
         let displays = self.plugin_displays(&key.plugin_id);
@@ -4400,6 +4412,8 @@ impl LiveShell {
                     ("appearance", appearance.as_ref()),
                     ("wallpaper", wallpaper.as_ref()),
                     ("session", session.as_ref()),
+                    ("system", Some(&system)),
+                    ("navigation", navigation.as_ref()),
                     ("wifi", wifi.as_ref()),
                     ("bluetooth", bluetooth.as_ref()),
                     ("displays", displays.as_ref()),
@@ -4788,11 +4802,6 @@ impl LiveShell {
                     desired_enabled: entry.desired_enabled,
                     health: match &entry.health {
                         PluginHealth::Disabled => PluginRuntimeHealth::Disabled,
-                        PluginHealth::Starting
-                            if entry.manifest.id == crate::settings_plugin_report::ID =>
-                        {
-                            PluginRuntimeHealth::Idle
-                        }
                         PluginHealth::Starting => PluginRuntimeHealth::Starting,
                         PluginHealth::Running => PluginRuntimeHealth::Running,
                         PluginHealth::Failed(error) => {
@@ -5807,10 +5816,6 @@ impl LiveShell {
 
         self.plugin_activation_generation =
             self.plugin_activation_generation.wrapping_add(1).max(1);
-        if id == crate::settings_plugin_report::ID {
-            self.maybe_publish_plugin_status();
-            return Ok(true);
-        }
         if !enabled {
             self.package_runtimes.remove(id);
             self.application_search.retire(id);
@@ -6321,7 +6326,9 @@ impl LiveShell {
     }
 
     pub fn poll_deadlines(&mut self, now: Instant) -> ShellDeadlineOutcome {
+        let settings_changed = self.dispatch_pending_desktop_settings();
         let mut outcome = ShellDeadlineOutcome {
+            visibility_changed: settings_changed,
             redraw: self.poll_host_deadlines(now),
             ..ShellDeadlineOutcome::default()
         };
@@ -7433,6 +7440,31 @@ impl LiveShell {
                             Err(error) => serde_json::json!({"status":"rejected","detail":error}),
                         },
                     );
+                    changed = true;
+                }
+                crate::plugin_panel::PluginEffect::PluginsSetting { plugin_id, effect } => {
+                    let result = self
+                        .plugin_registry
+                        .get(&plugin_id)
+                        .filter(|entry| {
+                            entry.desired_enabled
+                                && entry.health == nickel_core::plugins::PluginHealth::Running
+                        })
+                        .and_then(|_| self.plugin_management(&plugin_id))
+                        .ok_or_else(|| "plugin management is unavailable".to_owned())
+                        .and_then(|snapshot| effect.validate(&snapshot))
+                        .and_then(|()| {
+                            self.set_plugin_setting(&effect.id, &effect.key, effect.value)
+                        });
+                    let value = match result {
+                        Ok(_) => {
+                            serde_json::json!({"status":"applied","id":effect.id,"key":effect.key})
+                        }
+                        Err(error) => {
+                            serde_json::json!({"status":"rejected","detail":error.chars().take(512).collect::<String>()})
+                        }
+                    };
+                    self.plugins_results.insert(plugin_id, value);
                     changed = true;
                 }
                 crate::plugin_panel::PluginEffect::Plugins { plugin_id, effect } => {
@@ -10166,9 +10198,40 @@ impl LiveShell {
         true
     }
 
-    fn launch_settings(&mut self, _screen: Option<&str>) -> bool {
+    fn launch_settings(&mut self, screen: Option<&str>) -> bool {
+        self.request_settings_navigation(screen, None);
         self.set_default_shell_surface_visible("launcher", false);
         self.set_default_shell_surface_visible("settings", true)
+    }
+
+    fn request_settings_navigation(&mut self, screen: Option<&str>, output: Option<&str>) {
+        let destination = match screen {
+            Some("display") => "displays",
+            Some("network") => "wifi",
+            Some("nickel-bar") => "shell-preferences",
+            Some("keyboard-shortcuts") => "keyboard-shortcuts",
+            Some(other) => other,
+            None => return,
+        };
+        self.settings_navigation_revision =
+            self.settings_navigation_revision.wrapping_add(1).max(1);
+        self.settings_navigation = Some(
+            serde_json::json!({"destination":destination,"revision":self.settings_navigation_revision.to_string(),"output":output}),
+        );
+    }
+
+    fn dispatch_pending_desktop_settings(&mut self) -> bool {
+        let Some(destination) = self.desktop_host.application_mut().pending_settings.take() else {
+            return false;
+        };
+        match destination {
+            SettingsDestination::Appearance => self.launch_settings(Some("appearance")),
+            SettingsDestination::Display { output } => {
+                self.launch_settings(Some("displays"));
+                self.request_settings_navigation(Some("displays"), Some(&output));
+                true
+            }
+        }
     }
 
     fn open_active_window_menu(&mut self) -> bool {

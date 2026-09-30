@@ -266,7 +266,7 @@ fn handlers(versioned: VersionedAssociationSnapshot) -> AssociationHandlers {
 }
 
 #[cfg(target_os = "windows")]
-fn open_native_default_apps_settings() -> Result<(), AssociationError> {
+pub(crate) fn open_native_default_apps_settings() -> Result<(), AssociationError> {
     std::process::Command::new("explorer.exe")
         .arg("ms-settings:defaultapps")
         .spawn()
@@ -275,7 +275,7 @@ fn open_native_default_apps_settings() -> Result<(), AssociationError> {
 }
 
 #[cfg(target_os = "linux")]
-fn open_native_default_apps_settings() -> Result<(), AssociationError> {
+pub(crate) fn open_native_default_apps_settings() -> Result<(), AssociationError> {
     let desktop = std::env::var("XDG_CURRENT_DESKTOP")
         .unwrap_or_default()
         .to_ascii_lowercase();
@@ -292,7 +292,7 @@ fn open_native_default_apps_settings() -> Result<(), AssociationError> {
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-fn open_native_default_apps_settings() -> Result<(), AssociationError> {
+pub(crate) fn open_native_default_apps_settings() -> Result<(), AssociationError> {
     Err(AssociationError(
         "system Default apps settings are unsupported on this platform".into(),
     ))

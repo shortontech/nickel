@@ -4503,7 +4503,7 @@ mod compound_css_tests {
     #[test]
     fn stock_compound_controls_are_external_css() {
         let sheet = StyleSheet::compile(include_str!(
-            "../../../assets/plugins/settings/settings-controls.css"
+            "../../../assets/plugins/nickel-default/src/styles/controls.css"
         ))
         .unwrap();
         assert_eq!(

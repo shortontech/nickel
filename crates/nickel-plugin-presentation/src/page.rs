@@ -171,9 +171,10 @@ mod tests {
 
     #[test]
     fn rejected_action_restores_hooks_and_validated_action_updates_the_shared_tree() {
-        let manifest =
-            PluginManifest::from_json(include_str!("../../../assets/plugins/settings/plugin.json"))
-                .unwrap();
+        let manifest = PluginManifest::from_json(include_str!(
+            "../../../assets/plugins/example-window/plugin.json"
+        ))
+        .unwrap();
         let source = "function App() { const [count, setCount] = useState(0); return h('div', {}, h(Button, {id: 'increment', onClick: () => { setCount(count + 1); nickel.request({type: 'increment', count: count + 1}); }}, String(count))); }";
         let mut page = JsxPage::new(source, manifest, None).unwrap();
         let data = json!({"generation": 1});
@@ -213,9 +214,10 @@ mod tests {
 
     #[test]
     fn scoped_pages_share_one_runtime_without_mixing_handlers_or_state() {
-        let manifest =
-            PluginManifest::from_json(include_str!("../../../assets/plugins/settings/plugin.json"))
-                .unwrap();
+        let manifest = PluginManifest::from_json(include_str!(
+            "../../../assets/plugins/example-window/plugin.json"
+        ))
+        .unwrap();
         let runtime = Rc::new(RefCell::new(JsxRuntime::new("", None).unwrap()));
         let source = |name: &str| {
             format!(
@@ -287,9 +289,10 @@ mod tests {
 
     #[test]
     fn auxiliary_render_invalidates_handlers_until_the_window_renders_again() {
-        let manifest =
-            PluginManifest::from_json(include_str!("../../../assets/plugins/settings/plugin.json"))
-                .unwrap();
+        let manifest = PluginManifest::from_json(include_str!(
+            "../../../assets/plugins/example-window/plugin.json"
+        ))
+        .unwrap();
         let source = "function Metadata() { return h('metadata', {value: nickel.data.label}); } function App() { return h(Button, {id: 'go', onClick: () => nickel.request({type: 'go'})}, 'Go'); }";
         let mut page = JsxPage::new(source, manifest, None).unwrap();
         let data = json!({"label":"Settings"});
@@ -318,9 +321,10 @@ mod tests {
 
     #[test]
     fn shared_switch_rejects_handlers_while_disabled() {
-        let manifest =
-            PluginManifest::from_json(include_str!("../../../assets/plugins/settings/plugin.json"))
-                .unwrap();
+        let manifest = PluginManifest::from_json(include_str!(
+            "../../../assets/plugins/example-window/plugin.json"
+        ))
+        .unwrap();
         let mut disabled = JsxPage::new(
             "function App() { return h(Switch, {id: 'integration', state: 'disabled-on', accessibilityLabel: 'Integration', onClick: () => nickel.request({type: 'toggle'})}); }",
             manifest.clone(),
@@ -342,9 +346,10 @@ mod tests {
 
     #[test]
     fn disabled_button_needs_no_handler_and_cannot_be_dispatched() {
-        let manifest =
-            PluginManifest::from_json(include_str!("../../../assets/plugins/settings/plugin.json"))
-                .unwrap();
+        let manifest = PluginManifest::from_json(include_str!(
+            "../../../assets/plugins/example-window/plugin.json"
+        ))
+        .unwrap();
         let mut page = JsxPage::new(
             "function App() { return h(Button, {id: 'pending', disabled: true}, 'Pending'); }",
             manifest,
@@ -358,9 +363,10 @@ mod tests {
 
     #[test]
     fn color_swatch_keeps_selection_and_dispatches_its_handler() {
-        let manifest =
-            PluginManifest::from_json(include_str!("../../../assets/plugins/settings/plugin.json"))
-                .unwrap();
+        let manifest = PluginManifest::from_json(include_str!(
+            "../../../assets/plugins/example-window/plugin.json"
+        ))
+        .unwrap();
         let source = "function App() { return h(Div, {}, h(ColorSwatch, {id: 'accent', color: '#336699', selected: true, accessibilityLabel: 'Blue accent', onClick: () => nickel.request({type: 'accent', hue: 210})}), h(ColorSwatch, {accessibilityLabel: 'Custom color', onClick: () => nickel.request({type: 'custom'})})); }";
         let mut page = JsxPage::new(source, manifest, None).unwrap();
         let node = page.render(&json!({})).unwrap();
@@ -393,9 +399,10 @@ mod tests {
 
     #[test]
     fn select_preserves_options_and_dispatches_the_chosen_action() {
-        let manifest =
-            PluginManifest::from_json(include_str!("../../../assets/plugins/settings/plugin.json"))
-                .unwrap();
+        let manifest = PluginManifest::from_json(include_str!(
+            "../../../assets/plugins/example-window/plugin.json"
+        ))
+        .unwrap();
         let source = "function App() { return h(Select, {id: 'wallpaper-position', accessibilityLabel: 'Wallpaper position', value: 'Fill', open: true, onClick: () => nickel.request({type: 'toggle'})}, h(Option, {id: 'fill', onClick: () => nickel.request({type: 'position', value: 'fill'})}, 'Fill'), h(Option, {id: 'fit', onClick: () => nickel.request({type: 'position', value: 'fit'})}, 'Fit')); }";
         let mut page = JsxPage::new(source, manifest, None).unwrap();
         let node = page.render(&json!({})).unwrap();
@@ -412,9 +419,10 @@ mod tests {
 
     #[test]
     fn clickable_div_requires_an_accessible_label() {
-        let manifest =
-            PluginManifest::from_json(include_str!("../../../assets/plugins/settings/plugin.json"))
-                .unwrap();
+        let manifest = PluginManifest::from_json(include_str!(
+            "../../../assets/plugins/example-window/plugin.json"
+        ))
+        .unwrap();
         let mut page = JsxPage::new(
             "function App() { return h(Div, {onClick: () => nickel.request({type: 'activate'})}, h(Text, {}, 'Visual label')); }",
             manifest,
@@ -426,9 +434,10 @@ mod tests {
 
     #[test]
     fn window_slot_places_host_content_inside_the_jsx_layout() {
-        let manifest =
-            PluginManifest::from_json(include_str!("../../../assets/plugins/settings/plugin.json"))
-                .unwrap();
+        let manifest = PluginManifest::from_json(include_str!(
+            "../../../assets/plugins/example-window/plugin.json"
+        ))
+        .unwrap();
         let source = "function App() { return h(Window, {id: 'main', width: '100%', height: '100%'}, h(Div, {}, h(Slot, {id: 'content'}))); }";
         let mut page = JsxPage::new(source, manifest, Some("main".into())).unwrap();
         let node = page.render(&json!({})).unwrap();

@@ -75,7 +75,6 @@ but is not a substitute for a supported Windows toolchain or native run.
 ```sh
 cargo build -p nickel --no-default-features --features backend-winit \
   --bin nickel-nested --bin nickel-test-input --bin nickel-nested-acceptance
-cargo build -p nickel-settings --bin nickel-settings
 ./target/debug/nickel-nested-acceptance
 ```
 

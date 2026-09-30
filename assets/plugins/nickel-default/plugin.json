@@ -30,7 +30,8 @@
       "shell.settings.fileArtwork": "./src/Preferences.js#FileArtwork",
       "shell.settings.plugins": "./src/Plugins.js#Plugins",
       "shell.settings.optionalFeatures": "./src/OptionalFeatures.js#OptionalFeatures",
-      "shell.settings.keyboardShortcuts": "./src/KeyboardShortcuts.js#KeyboardShortcuts"
+      "shell.settings.keyboardShortcuts": "./src/KeyboardShortcuts.js#KeyboardShortcuts",
+      "shell.settings.about": "./src/About.js#About"
     }
   },
   "capabilities": [

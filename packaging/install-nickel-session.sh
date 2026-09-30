@@ -15,7 +15,7 @@ if [ -z "$install_mode" ]; then
     fi
 fi
 
-for executable in nickel-login nickel nickel-settings nickel-terminal; do
+for executable in nickel-login nickel nickel-terminal; do
     if [ ! -x "$release/$executable" ]; then
         echo "Missing $release/$executable; build the release session first." >&2
         exit 1
@@ -28,7 +28,7 @@ if ! "$release/nickel" --available-backends | grep -qx udev; then
     exit 1
 fi
 
-for executable in nickel-login nickel nickel-settings nickel-terminal; do
+for executable in nickel-login nickel nickel-terminal; do
     destination="$install_root/usr/local/bin/$executable"
     if [ "$install_mode" = symlink ]; then
         mkdir -p "$(dirname "$destination")"
@@ -42,14 +42,10 @@ for executable in nickel-login nickel nickel-settings nickel-terminal; do
 done
 install -Dm644 "$repository/packaging/nickel.desktop" \
     "$install_root/usr/share/wayland-sessions/nickel.desktop"
-install -Dm644 "$repository/packaging/nickel-settings.desktop" \
-    "$install_root/usr/share/applications/nickel-settings.desktop"
 install -Dm644 "$repository/packaging/nickel-terminal.desktop" \
     "$install_root/usr/share/applications/nickel-terminal.desktop"
 install -Dm644 "$repository/packaging/nickel-portals.conf" \
     "$install_root/usr/share/xdg-desktop-portal/nickel-portals.conf"
-install -Dm644 "$repository/assets/icons/nickel-settings.png" \
-    "$install_root/usr/share/icons/hicolor/512x512/apps/nickel-settings.png"
 install -Dm644 "$repository/LICENSE-MIT" \
     "$install_root/usr/share/doc/nickel/LICENSE-MIT"
 install -Dm644 "$repository/LICENSE-APACHE" \

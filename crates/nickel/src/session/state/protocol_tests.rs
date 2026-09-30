@@ -8764,7 +8764,7 @@ fn fractional_scale_is_published_with_required_viewporter_protocol() {
 }
 
 #[test]
-fn ordinary_session_exposes_a_restricted_settings_adapter_without_pid_authority() {
+fn ordinary_session_exposes_restricted_protocol_service_without_pid_authority() {
     let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
     let mut event_loop = EventLoop::try_new().unwrap();
     let display = Display::new().unwrap();
