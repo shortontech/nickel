@@ -2139,8 +2139,7 @@ fn codex_approval_notification_revises_in_place_and_retires_on_resolution() {
     shell.apply_session_launcher_visibility(true);
     shell.scene(SurfaceRole::Launcher, 920, 680);
     let typing_focus = shell
-        .plugin_launcher_host
-        .as_ref()
+        .launcher_host_ref()
         .expect("bundled launcher")
         .inspect()
         .keyboard_focus
@@ -2184,12 +2183,7 @@ fn codex_approval_notification_revises_in_place_and_retires_on_resolution() {
     shell.sync_codex_approval_notifications(vec![(owner, snapshot("/safe"))]);
     shell.refresh_fast();
     assert_eq!(
-        shell
-            .plugin_launcher_host
-            .as_ref()
-            .unwrap()
-            .inspect()
-            .keyboard_focus,
+        shell.launcher_host_ref().unwrap().inspect().keyboard_focus,
         typing_focus
     );
     let first = shell
@@ -2650,8 +2644,7 @@ fn rejected_launcher_focus_request_does_not_project_internal_focus() {
     assert!(!shell.surface_visible(crate::winit_shell::SurfaceRole::Launcher));
     assert!(
         shell
-            .plugin_launcher_host
-            .as_ref()
+            .launcher_host_ref()
             .unwrap()
             .inspect()
             .keyboard_focus
@@ -3275,8 +3268,7 @@ fn compositor_owned_shell_scenario_routes_focus_switching_and_files_without_tran
     shell.apply_session_launcher_visibility(true);
     assert!(
         shell
-            .plugin_launcher_host
-            .as_ref()
+            .launcher_host_ref()
             .unwrap()
             .inspect()
             .keyboard_focus

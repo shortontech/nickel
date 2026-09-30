@@ -175,7 +175,7 @@ impl LiveShell {
                 }
             }
             SurfaceRole::Launcher => {
-                if let Some(host) = self.plugin_launcher_host.as_ref() {
+                if let Some(host) = self.launcher_host_ref() {
                     plugin_projection(host, |leaf, action| {
                         leaf == "launcher-query" && action == nickel_ui::ActionKind::SetValue
                     })
@@ -402,11 +402,8 @@ impl LiveShell {
                 }
                 outcome?
             }
-            SurfaceRole::Launcher if self.plugin_launcher_host.is_some() => {
-                let plugin = self
-                    .plugin_launcher_host
-                    .as_mut()
-                    .expect("launcher plugin exists");
+            SurfaceRole::Launcher if self.launcher_host_ref().is_some() => {
+                let plugin = self.launcher_host_mut().expect("launcher plugin exists");
                 let outcome = mutate(plugin, generation, node, action, clipboard_limit);
                 let requested = plugin.application_mut().take_effects();
                 if let Some(error) = plugin.application_mut().take_runtime_failure() {
@@ -423,7 +420,7 @@ impl LiveShell {
                 if self
                     .sync_plugin_launcher()
                     .ok_or("launcher plugin failed")?
-                    && let Some(plugin) = self.plugin_launcher_host.as_mut()
+                    && let Some(plugin) = self.launcher_host_mut()
                 {
                     plugin.step(HostBatch {
                         application_changed: true,

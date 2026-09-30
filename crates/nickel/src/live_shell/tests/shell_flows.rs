@@ -1448,11 +1448,15 @@
             &projection,
         )
         .unwrap();
-        shell.plugin_launcher_host = Some(nickel_ui::UiHost::new(application, 920, 680));
+        shell.plugin_panel_extra_hosts.insert(
+            crate::plugin_panel::launcher_surface_key(),
+            (
+                crate::plugin_panel::launcher_surface().clone(),
+                nickel_ui::UiHost::new(application, 920, 680),
+            ),
+        );
         shell.apply_session_launcher_visibility(true);
-        let target = shell
-            .plugin_launcher_host
-            .as_ref()
+        let target = shell.launcher_host_ref()
             .unwrap()
             .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
                 role: nickel_ui::SemanticRole::Button,
@@ -1487,7 +1491,13 @@
             &projection,
         )
         .unwrap();
-        shell.plugin_launcher_host = Some(nickel_ui::UiHost::new(application, 920, 680));
+        shell.plugin_panel_extra_hosts.insert(
+            crate::plugin_panel::launcher_surface_key(),
+            (
+                crate::plugin_panel::launcher_surface().clone(),
+                nickel_ui::UiHost::new(application, 920, 680),
+            ),
+        );
         shell.launcher.set_query("trigger");
         assert!(shell.scene(SurfaceRole::Launcher, 920, 680).is_empty());
         let entry = shell
@@ -1507,7 +1517,13 @@
             &projection,
         )
         .unwrap();
-        shell.plugin_launcher_host = Some(nickel_ui::UiHost::new(application, 920, 680));
+        shell.plugin_panel_extra_hosts.insert(
+            crate::plugin_panel::launcher_surface_key(),
+            (
+                crate::plugin_panel::launcher_surface().clone(),
+                nickel_ui::UiHost::new(application, 920, 680),
+            ),
+        );
         shell.apply_session_launcher_visibility(true);
         assert!(shell.set_run_visible(true));
         shell.launcher.set_query("trigger");
@@ -1607,7 +1623,7 @@
         assert_eq!(shell.taskbar_reservation_height(), 0);
         assert!(shell.scene(SurfaceRole::Taskbar, 800, 56).is_empty());
         assert!(!shell.panel_click(20.0, 800, false));
-        assert!(shell.plugin_launcher_host.is_some());
+        assert!(shell.launcher_host_ref().is_some());
         let id = &crate::plugin_panel::taskbar_manifest().id;
         assert!(shell.set_plugin_enabled(id, false).unwrap());
         assert!(shell.set_plugin_enabled(id, true).unwrap());
@@ -1661,7 +1677,7 @@
         shell.set_plugin_enabled(id, true).unwrap();
         shell.apply_session_launcher_visibility(true);
         shell.scene(SurfaceRole::Launcher, 920, 680);
-        let host = shell.plugin_launcher_host.as_mut().unwrap();
+        let host = shell.launcher_host_mut().unwrap();
         let target = host
             .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
                 role: nickel_ui::SemanticRole::Button,
@@ -1689,7 +1705,7 @@
         shell.set_plugin_enabled(id, true).unwrap();
         shell.apply_session_launcher_visibility(true);
         shell.scene(SurfaceRole::Launcher, 920, 680);
-        let host = shell.plugin_launcher_host.as_ref().unwrap();
+        let host = shell.launcher_host_ref().unwrap();
         let search = host
             .query_unique(&nickel_ui::SemanticSelector::Role(
                 nickel_ui::SemanticRole::TextField,
@@ -1724,7 +1740,7 @@
         shell.set_plugin_enabled(id, true).unwrap();
         shell.apply_session_launcher_visibility(true);
         shell.scene(SurfaceRole::Launcher, 920, 680);
-        let host = shell.plugin_launcher_host.as_mut().unwrap();
+        let host = shell.launcher_host_mut().unwrap();
         let target = host
             .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
                 role: nickel_ui::SemanticRole::Button,
@@ -1754,9 +1770,7 @@
         shell.scene(SurfaceRole::Launcher, 920, 680);
         let projection = shell.current_plugin_launcher_projection();
         assert_eq!(projection.status.as_deref(), Some("Could not launch Demo"));
-        assert!(!shell
-            .plugin_launcher_host
-            .as_ref()
+        assert!(!shell.launcher_host_ref()
             .unwrap()
             .query(&nickel_ui::SemanticSelector::RoleAndName {
                 role: nickel_ui::SemanticRole::Text,
