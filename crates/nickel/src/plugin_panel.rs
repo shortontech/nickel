@@ -1881,6 +1881,24 @@ impl nickel_ui::Application for PluginPanelApplication {
                         },
                     }]))
                 }
+                PluginMessage::Drop(action, gesture) => {
+                    let bounds = |rect: nickel_ui::Rect| {
+                        serde_json::json!({
+                            "x": rect.origin.x,
+                            "y": rect.origin.y,
+                            "width": rect.size.width,
+                            "height": rect.size.height,
+                        })
+                    };
+                    Some(serde_json::json!([action, {
+                        "x": gesture.position.x,
+                        "y": gesture.position.y,
+                        "sourceId": gesture.source_id.as_str(),
+                        "sourceBounds": bounds(gesture.source_bounds),
+                        "targetId": gesture.target_id.as_str(),
+                        "targetBounds": bounds(gesture.target_bounds),
+                    }]))
+                }
                 PluginMessage::Scroll => None,
             })
             .collect::<Vec<_>>();

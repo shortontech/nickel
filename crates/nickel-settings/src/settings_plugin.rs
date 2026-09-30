@@ -6,7 +6,7 @@ use nickel_plugin_presentation::{
     css::StyleSheet,
     page::JsxPage,
 };
-use nickel_ui::{AnyView, DragGesture, SemanticTheme};
+use nickel_ui::{AnyView, DragGesture, DropGesture, SemanticTheme};
 use serde_json::{Value, json};
 
 use crate::SettingsMessage;
@@ -37,6 +37,10 @@ impl PluginUiMessage for SettingsMessage {
     }
 
     fn drag(_seed: Self, _gesture: DragGesture) -> Self {
+        Self::IgnoredPluginPresentation
+    }
+
+    fn drop(_seed: Self, _gesture: DropGesture) -> Self {
         Self::IgnoredPluginPresentation
     }
 

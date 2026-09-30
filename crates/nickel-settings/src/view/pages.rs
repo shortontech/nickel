@@ -1,5 +1,5 @@
 use super::*;
-use nickel_ui::{CollectionState, Column, ComponentBuilderExt, Container, Row};
+use nickel_ui::{CollectionState, Column, Container, Row};
 
 pub(crate) fn codex_switch_state(state: &FeatureState) -> SwitchState {
     let available = state.capability.support == FeatureSupport::Supported

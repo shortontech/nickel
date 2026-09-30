@@ -3584,7 +3584,17 @@ impl LiveShell {
                 }
             });
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "windows")]
+        {
+            let read = crate::windows_plugin_display::read();
+            return Some(serde_json::json!({
+                "available": read.available,
+                "reason": read.reason,
+                "outputs": read.outputs,
+                "pending_confirmation": read.pending_confirmation,
+            }));
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
         Some(serde_json::json!({
             "available": false,
             "reason": "display layout control is unavailable on this platform",
@@ -11808,7 +11818,17 @@ impl LiveShell {
             }
             false
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "windows")]
+        {
+            match crate::windows_plugin_display::set_layout(&plugin_id, &layout) {
+                Ok(()) => true,
+                Err(error) => {
+                    tracing::warn!(%error, "plugin display layout preview failed");
+                    false
+                }
+            }
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
         {
             let _ = (plugin_id, layout);
             false
@@ -11816,6 +11836,16 @@ impl LiveShell {
     }
 
     fn confirm_plugin_display_layout(&mut self, plugin_id: &str) -> bool {
+        #[cfg(target_os = "windows")]
+        {
+            return match crate::windows_plugin_display::confirm(plugin_id) {
+                Ok(()) => true,
+                Err(error) => {
+                    tracing::warn!(%error, "plugin display layout confirmation failed");
+                    false
+                }
+            };
+        }
         if self
             .display_preview
             .as_ref()
@@ -11860,7 +11890,20 @@ impl LiveShell {
             }
             false
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "windows")]
+        {
+            let Some(plugin_id) = plugin_id else {
+                return false;
+            };
+            match crate::windows_plugin_display::revert(plugin_id) {
+                Ok(()) => true,
+                Err(error) => {
+                    tracing::warn!(%error, "plugin display layout recovery failed");
+                    false
+                }
+            }
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
         {
             let _ = plugin_id;
             false
