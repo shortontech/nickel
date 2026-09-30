@@ -18,6 +18,8 @@ mod windows_application_registry;
 mod windows_emergency_chord;
 #[cfg(target_os = "windows")]
 mod windows_external_accessibility;
+#[cfg(target_os = "windows")]
+pub(crate) mod windows_plugin_display;
 #[cfg(any(test, target_os = "windows"))]
 #[cfg_attr(all(test, not(target_os = "windows")), allow(dead_code))]
 mod windows_remote_application_scale;
