@@ -6,6 +6,8 @@ import "./Wifi.js";
 import "./Bluetooth.js";
 import "./Preferences.js";
 import "./Plugins.js";
+import "./OptionalFeatures.js";
+import "./KeyboardShortcuts.js";
 // @jsx h
 import { Taskbar } from "./Taskbar.js";
 import { Launcher } from "./Launcher.js";
