@@ -3,21 +3,18 @@
 
 use nickel_plugin_presentation::{
     components::{PanelNode, PluginImages},
-    css::StyleSheet,
     page::JsxPage,
 };
 use nickel_ui::{AnyView, SemanticTheme};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::{SettingsApp, SettingsMessage, SettingsPage};
+use crate::{SettingsApp, SettingsMessage, SettingsPage, settings_plugin::StyledSettingsPage};
 
 const STALE_STATUS: &str = "Display selection changed; refresh the page";
 
 pub(super) struct DisplayPage {
-    page: JsxPage,
-    stylesheet: StyleSheet,
-    last_theme: Option<SemanticTheme>,
+    page: StyledSettingsPage,
 }
 
 #[derive(Clone)]
@@ -40,14 +37,12 @@ impl DisplayPage {
 
     pub(super) fn new_with_page(page: JsxPage) -> Result<Self, String> {
         Ok(Self {
-            page,
-            stylesheet: StyleSheet::default(),
-            last_theme: None,
+            page: StyledSettingsPage::new(page),
         })
     }
 
     pub(super) fn retained_bytes(&self) -> usize {
-        self.page.retained_bytes() + self.stylesheet.estimated_retained_bytes() as usize
+        self.page.retained_bytes()
     }
 
     pub(super) fn render(
@@ -55,15 +50,12 @@ impl DisplayPage {
         data: &Value,
         theme: SemanticTheme,
     ) -> Result<(Vec<DisplayCardView>, [AnyView<SettingsMessage>; 7]), String> {
-        self.page.render(data)?;
-        if self.last_theme != Some(theme) {
-            self.stylesheet = crate::settings_plugin::stylesheet_template(
-                include_str!("../../../assets/plugins/settings/settings-display.css"),
-                theme,
-            )?;
-            self.last_theme = Some(theme);
-        }
-        let Some(root @ PanelNode::Div { .. }) = self.page.node() else {
+        let (root, stylesheet) = self.page.render(
+            data,
+            theme,
+            include_str!("../../../assets/plugins/settings/settings-display.css"),
+        )?;
+        let PanelNode::Div { .. } = root else {
             return Err("Display actions have an invalid root".into());
         };
         let PanelNode::Div {
@@ -143,7 +135,7 @@ impl DisplayPage {
         let controls = std::array::from_fn(|index| {
             control_nodes[index].view_as_scoped::<SettingsMessage>(
                 &images,
-                &self.stylesheet,
+                stylesheet,
                 Some("display"),
             )
         });

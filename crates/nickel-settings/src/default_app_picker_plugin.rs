@@ -11,14 +11,12 @@ use nickel_ui::{AnyView, CollectionState, SemanticTheme, VirtualWindow};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::{SettingsApp, SettingsMessage};
+use crate::{SettingsApp, SettingsMessage, settings_plugin::StyledSettingsPage};
 
 const STALE_STATUS: &str = STALE_DATA;
 
 pub(super) struct DefaultAppPickerPage {
-    page: JsxPage,
-    stylesheet: StyleSheet,
-    last_theme: Option<SemanticTheme>,
+    page: StyledSettingsPage,
     data: Option<Value>,
     data_bytes: usize,
 }
@@ -41,18 +39,14 @@ impl DefaultAppPickerPage {
 
     pub(super) fn new_with_page(page: JsxPage) -> Result<Self, String> {
         Ok(Self {
-            page,
-            stylesheet: StyleSheet::default(),
-            last_theme: None,
+            page: StyledSettingsPage::new(page),
             data: None,
             data_bytes: 0,
         })
     }
 
     pub(super) fn retained_bytes(&self) -> usize {
-        self.page.retained_bytes()
-            + self.stylesheet.estimated_retained_bytes() as usize
-            + self.data_bytes
+        self.page.retained_bytes() + self.data_bytes
     }
 
     pub(super) fn render(
@@ -60,15 +54,12 @@ impl DefaultAppPickerPage {
         data: &Value,
         theme: SemanticTheme,
     ) -> Result<DefaultAppPickerRendered, String> {
-        self.page.render(data)?;
-        if self.last_theme != Some(theme) {
-            self.stylesheet = crate::settings_plugin::stylesheet_template(
-                include_str!("../../../assets/plugins/settings/settings-default-app-picker.css"),
-                theme,
-            )?;
-            self.last_theme = Some(theme);
-        }
-        let Some(root @ PanelNode::Div { .. }) = self.page.node() else {
+        let (root, stylesheet) = self.page.render(
+            data,
+            theme,
+            include_str!("../../../assets/plugins/settings/settings-default-app-picker.css"),
+        )?;
+        let PanelNode::Div { .. } = root else {
             return Err("Default application picker structure is invalid".into());
         };
         let header = root
@@ -110,11 +101,11 @@ impl DefaultAppPickerPage {
         Ok(DefaultAppPickerRendered {
             header: header.view_as_scoped::<SettingsMessage>(
                 &PluginImages::new(),
-                &self.stylesheet,
+                stylesheet,
                 Some("default-app-picker"),
             ),
             candidates: nodes,
-            stylesheet: self.stylesheet.clone(),
+            stylesheet: stylesheet.clone(),
         })
     }
 

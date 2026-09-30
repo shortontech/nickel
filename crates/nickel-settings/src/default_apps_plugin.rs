@@ -12,14 +12,12 @@ use nickel_ui::{AnyView, Column, SemanticTheme, VirtualWindow};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::{SettingsApp, SettingsMessage, SettingsPage};
+use crate::{SettingsApp, SettingsMessage, SettingsPage, settings_plugin::StyledSettingsPage};
 
 const STALE_STATUS: &str = STALE_DATA;
 
 pub(super) struct DefaultAppsPage {
-    page: JsxPage,
-    stylesheet: StyleSheet,
-    last_theme: Option<SemanticTheme>,
+    page: StyledSettingsPage,
 }
 
 pub(super) struct DefaultAppsRendered {
@@ -40,14 +38,12 @@ impl DefaultAppsPage {
 
     pub(super) fn new_with_page(page: JsxPage) -> Result<Self, String> {
         Ok(Self {
-            page,
-            stylesheet: StyleSheet::default(),
-            last_theme: None,
+            page: StyledSettingsPage::new(page),
         })
     }
 
     pub(super) fn retained_bytes(&self) -> usize {
-        self.page.retained_bytes() + self.stylesheet.estimated_retained_bytes() as usize
+        self.page.retained_bytes()
     }
 
     pub(super) fn render(
@@ -55,15 +51,12 @@ impl DefaultAppsPage {
         data: &Value,
         theme: SemanticTheme,
     ) -> Result<DefaultAppsRendered, String> {
-        self.page.render(data)?;
-        if self.last_theme != Some(theme) {
-            self.stylesheet = crate::settings_plugin::stylesheet_template(
-                include_str!("../../../assets/plugins/settings/settings-default-apps.css"),
-                theme,
-            )?;
-            self.last_theme = Some(theme);
-        }
-        let Some(root @ PanelNode::Div { children, .. }) = self.page.node() else {
+        let (root, stylesheet) = self.page.render(
+            data,
+            theme,
+            include_str!("../../../assets/plugins/settings/settings-default-apps.css"),
+        )?;
+        let PanelNode::Div { children, .. } = root else {
             return Err("Default Apps page structure is invalid".into());
         };
         root.direct_child_with_class("default-app-curated")
@@ -107,13 +100,13 @@ impl DefaultAppsPage {
                 children
                     .iter()
                     .filter(|child| !std::ptr::eq(*child, catalog_section))
-                    .map(|child| child.view_as::<SettingsMessage>(&images, &self.stylesheet)),
+                    .map(|child| child.view_as::<SettingsMessage>(&images, stylesheet)),
             ),
         );
         Ok(DefaultAppsRendered {
             curated: view,
             catalog_nodes,
-            stylesheet: self.stylesheet.clone(),
+            stylesheet: stylesheet.clone(),
         })
     }
 
