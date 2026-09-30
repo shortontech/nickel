@@ -18,9 +18,8 @@ without starting the shell. Live interactions still need `nickel-plugin dev`.
 The [default shell package](nickel-default/) contains ordinary JSX/CSS modules
 for shell surfaces and an optional Settings window. Plugins register settings
 or custom JSX pages through the public registry; they do not need a native
-Settings adapter. The old [Settings package](settings/) remains during retirement
-and should not be used as the model for new pages. Stock activation is still
-being migrated on the plugin branch.
+Settings adapter. The default shell is the stock presentation package; derived
+shells can replace its exported components and omit its Settings window.
 
 Inspect installed packages beneath Nickel's per-user `plugins/` configuration
 directory:
