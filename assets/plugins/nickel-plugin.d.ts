@@ -295,6 +295,7 @@ interface NickelDisplayMode {
 
 type NickelDisplayTransform = "normal" | "rotate90" | "rotate180" | "rotate270" | "flipped" | "flipped90" | "flipped180" | "flipped270";
 interface NickelDisplaySnapshot {
+    projectionModes?: ReadonlyArray<Readonly<{id:NickelProjectionMode;label:string}>>;
     revision?: string;
     operations?: Readonly<{setOrientation?: boolean; setApplicationScale?: boolean; identify?: boolean}>;
     transforms?: ReadonlyArray<NickelDisplayTransform>;
@@ -338,6 +339,9 @@ interface NickelPluginStatus {
 
 /** Read clients return copies; missing grants produce empty or unavailable snapshots. */
 interface NickelContribution {readonly id:string;readonly provider:string;readonly version:string;readonly key:string;readonly component:NickelComponent}
+interface NickelWorkspaceSnapshot extends NickelAvailability {revision?:string;workspaces:ReadonlyArray<Readonly<{id:string;active:boolean}>>;activeWorkspace?:string|null;operations:Readonly<{switch?:boolean;create?:boolean;remove?:boolean}>}
+type NickelProjectionMode = "internal"|"duplicate"|"extend"|"external";
+interface NickelClockSnapshot {unixMilliseconds:number;utcOffsetMinutes:number}
 interface NickelAvailability { available: boolean; reason?: string | null }
 interface NickelWritable extends NickelAvailability { writable?: boolean; revision?: string }
 interface NickelAppearancePreferences {
@@ -437,6 +441,8 @@ declare const nickel: Readonly<{
         applicationSearch?:NickelApplicationSearch;
         notifications?:NickelNotificationSnapshot|null;
         tray?:ReadonlyArray<Readonly<NickelTrayItem>>;
+        clock?:NickelClockSnapshot;
+        workspaces?:NickelWorkspaceSnapshot;
         wifi?:NickelWifiSnapshot;
         bluetooth?:NickelBluetoothSnapshot;
         settings?: Readonly<Record<string, boolean | number | string>>;
@@ -482,6 +488,16 @@ declare const nickel: Readonly<{
     /** Requires tray-read; activation requires tray-activate; context menus require tray-context. */
     tray:Readonly<{list():ReadonlyArray<Readonly<NickelTrayItem>>;activate(id:string):void;contextMenu(id:string):void}>;
     session:Readonly<{get():NickelSessionSnapshot;lock():void;logout():void;suspend():void;reboot():void;powerOff():void;restartShell():void}>;
+    /** Requires workspaces-read; mutations require workspaces-switch. IDs are opaque decimal strings. */
+    workspaces:Readonly<{get():NickelWorkspaceSnapshot;switch(id:string):void;create():void;remove(id:string):void}>;
+    /** Check operations before toggling native show-desktop; requires desktop-control. */
+    desktop:Readonly<{get():NickelAvailability & {operations:Readonly<{toggleShowDesktop?:boolean}>};toggleShowDesktop():void}>;
+    /** Requires projects-menu-show. */
+    projects:Readonly<{show():void;toggle():void}>;
+    /** Requires on-screen-keyboard-show. */
+    keyboard:Readonly<{toggle():void}>;
+    /** Native wall-clock snapshot updates each minute. Format its values in JSX. */
+    clock:Readonly<{get():Readonly<NickelClockSnapshot>}>;
     /** Requires preferences-read; set requires preferences-control. Unavailable choices are preserved until explicitly changed. */
     preferences:Readonly<{get():NickelPreferencesSnapshot;set(patch:Partial<NickelPreferences>):void}>;
     /** Requires network-read; controls require network-control and an available operation. */
@@ -540,6 +556,8 @@ declare const nickel: Readonly<{
         setApplicationScale(policy: NickelApplicationScalePolicy, expectedRevision?: string): void;
         /** Requires operations.identify; unsupported platforms reject the operation. */
         identify(expectedRevision?: string): void;
+        /** Preview a supported projectionModes entry; confirm/revert finish its transaction. */
+        previewProjection(mode:NickelProjectionMode):void;
         /** Keep the previewed layout. */
         confirm(): void;
         /** Restore the layout from before the preview. */
