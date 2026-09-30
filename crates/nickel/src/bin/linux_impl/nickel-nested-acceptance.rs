@@ -789,6 +789,7 @@ fn verify_control_plugin_retires(
     let id = "org.nickel.control-center";
     press_super_key(test_input, environment, "a")?;
     wait_for_control_visibility(test_input, environment, true, Duration::from_secs(2))?;
+    verify_layout_snapshot(test_input, environment, "org.nickel.control-center/main")?;
     thread::sleep(Duration::from_millis(250));
     checked(test_input, environment, &["key", "escape", "pressed"])?;
     checked(test_input, environment, &["key", "escape", "released"])?;
