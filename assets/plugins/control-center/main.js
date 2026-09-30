@@ -36,7 +36,7 @@ function App() {
                         h(Button, { id: "audio-section", onClick: () => setAudioOpen(!audioOpen) }, audioOpen ? "Less" : "More")),
                     h(Row, null,
                         h(Button, { id: "audio-down", onClick: () => request("audio-volume", Math.max(0, data.audio.percent - 10)) }, "\u2212"),
-                        h(Progress, { percent: data.audio.percent, width: 220, height: 8 }),
+                        h(Progress, { className: "audio-progress", percent: data.audio.percent, width: 220, height: 8 }),
                         h(Button, { id: "audio-up", onClick: () => request("audio-volume", Math.min(100, data.audio.percent + 10)) }, "+")),
                     audioOpen ? data.audio.devices.map(device => h(Button, { key: device.id, id: "audio-" + device.id, onClick: () => request("audio-device", device.id) }, device.name + (device.isDefault ? " · Default" : ""))) : null,
                     h(Text, { className: "control-section-title" }, "Workspaces"),

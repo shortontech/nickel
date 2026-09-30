@@ -3221,6 +3221,8 @@ mod tests {
             let pixel = renderer.pixels()[(y * 420 + x) as usize];
             image::Rgba([pixel.r, pixel.g, pixel.b, pixel.a])
         });
+        assert_eq!(image.get_pixel(20, 47).0, [123, 166, 255, 255]);
+        assert_eq!(image.get_pixel(300, 47).0, [74, 82, 98, 255]);
         let output = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../target/nickel-ui-snapshots/volume-osd-shared.png");
         std::fs::create_dir_all(output.parent().unwrap()).unwrap();

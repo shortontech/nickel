@@ -17,3 +17,9 @@ text {
     font-size: 15px;
     line-height: 20px;
 }
+
+progress.volume-progress {
+    background: #4a5262;
+    color: #7ba6ff;
+    border-radius: 4px;
+}

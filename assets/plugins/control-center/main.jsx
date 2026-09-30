@@ -48,7 +48,7 @@ function App() {
                     </Row>
                     <Row>
                         <Button id="audio-down" onClick={() => request("audio-volume", Math.max(0, data.audio.percent - 10))}>−</Button>
-                        <Progress percent={data.audio.percent} width={220} height={8} />
+                        <Progress className="audio-progress" percent={data.audio.percent} width={220} height={8} />
                         <Button id="audio-up" onClick={() => request("audio-volume", Math.min(100, data.audio.percent + 10))}>+</Button>
                     </Row>
                     {audioOpen ? data.audio.devices.map(device => <Button key={device.id} id={"audio-" + device.id}

@@ -290,6 +290,7 @@ pub enum PanelNode {
     },
     Image {
         id: Option<String>,
+        class_name: Option<String>,
         asset: String,
         accessibility_label: Option<String>,
         width: u32,
@@ -299,6 +300,7 @@ pub enum PanelNode {
         context_action: Option<usize>,
     },
     Progress {
+        class_name: Option<String>,
         percent: u8,
         width: u32,
         height: u32,
@@ -507,6 +509,8 @@ impl PanelNode {
                 | Self::Column { class_name, .. }
                 | Self::ScrollView { class_name, .. }
                 | Self::Text { class_name, .. }
+                | Self::Image { class_name, .. }
+                | Self::Progress { class_name, .. }
                 | Self::Slider { class_name, .. }
                 | Self::Switch { class_name, .. }
                 | Self::ColorSwatch { class_name, .. }
@@ -637,6 +641,19 @@ impl PanelNode {
                     label,
                     ..
                 } => capacity(id) + class_name.as_ref().map_or(0, capacity) + capacity(label),
+                Self::Image {
+                    id,
+                    class_name,
+                    asset,
+                    accessibility_label,
+                    ..
+                } => {
+                    id.as_ref().map_or(0, capacity)
+                        + class_name.as_ref().map_or(0, capacity)
+                        + capacity(asset)
+                        + accessibility_label.as_ref().map_or(0, capacity)
+                }
+                Self::Progress { class_name, .. } => class_name.as_ref().map_or(0, capacity),
                 Self::Select {
                     id,
                     class_name,
@@ -744,6 +761,9 @@ impl PanelNode {
                     | "color-swatch"
                     | "select"
                     | "button"
+                    | "image"
+                    | "image-button"
+                    | "progress"
             )
         {
             return Err(format!("className is not supported on {kind} yet"));
@@ -1228,6 +1248,7 @@ impl PanelNode {
                 };
                 Ok(Self::Image {
                     id,
+                    class_name,
                     asset,
                     accessibility_label,
                     width: dimension("width")?,
@@ -1258,6 +1279,7 @@ impl PanelNode {
                     .filter(|height| (1..=256).contains(height))
                     .ok_or("progress height must be 1 to 256")? as u32;
                 Ok(Self::Progress {
+                    class_name,
                     percent,
                     width,
                     height,
@@ -2139,6 +2161,7 @@ impl PanelNode {
             }
             Self::Image {
                 id,
+                class_name,
                 asset,
                 accessibility_label,
                 width,
@@ -2147,6 +2170,12 @@ impl PanelNode {
                 action,
                 context_action,
             } => {
+                let kind = if action.is_some() {
+                    "image-button"
+                } else {
+                    "image"
+                };
+                let style = stylesheet.resolve(kind, id.as_deref(), class_name.as_deref());
                 let visual = images.get(asset).map_or_else(
                     || {
                         AnyView::new(
@@ -2195,28 +2224,43 @@ impl PanelNode {
                         .semantic_role(SemanticRole::Image)
                         .accessibility_label(label.clone());
                 }
-                AnyView::new(container)
+                with_margin(
+                    AnyView::new(apply_container_style(container, &style)),
+                    &style,
+                )
             }
             Self::Progress {
+                class_name,
                 percent,
                 width,
                 height,
-            } => AnyView::new(
-                Container::new()
+            } => {
+                let style = stylesheet.resolve("progress", None, class_name.as_deref());
+                let radius = style.radius.unwrap_or(0.0);
+                let fill = Container::new()
+                    .width(*width as f32 * f32::from(*percent) / 100.0)
+                    .height(*height as f32)
+                    .radius(radius);
+                let fill = if style.color == Some(0) {
+                    fill.clear_background()
+                } else {
+                    fill.background(style.color.unwrap_or(0xffaaaaaa))
+                };
+                let track = Container::new()
                     .semantic_role(SemanticRole::Status)
                     .accessibility_label(format!("{percent}%"))
                     .width(*width as f32)
                     .height(*height as f32)
-                    .background(0xff4a5262)
-                    .radius(*height as f32 / 2.0)
-                    .child(
-                        Container::new()
-                            .width(*width as f32 * f32::from(*percent) / 100.0)
-                            .height(*height as f32)
-                            .background(0xff7ba6ff)
-                            .radius(*height as f32 / 2.0),
-                    ),
-            ),
+                    .align_items(nickel_ui::Align::Start)
+                    .radius(radius)
+                    .child(fill);
+                let track = if style.background == Some(0) {
+                    track.clear_background()
+                } else {
+                    track.background(style.background.unwrap_or(0xff555555))
+                };
+                with_margin(AnyView::new(track), &style)
+            }
             Self::Spacer { class_name } => {
                 let style = stylesheet.resolve("spacer", None, class_name.as_deref());
                 AnyView::new(Spacer::flex().grow(style.grow.unwrap_or(1.0)))
@@ -3092,6 +3136,7 @@ pub fn render_panel_validated(
 #[cfg(test)]
 mod class_lookup_tests {
     use super::PanelNode;
+    use serde_json::json;
 
     #[test]
     fn direct_class_lookup_uses_whitespace_tokens_and_rejects_duplicates() {
@@ -3109,6 +3154,28 @@ mod class_lookup_tests {
             children.push(child("selected"));
         }
         assert!(root.direct_child_with_class("selected").is_none());
+    }
+
+    #[test]
+    fn image_and_progress_accept_classes_in_the_rendered_tree() {
+        let root = PanelNode::parse(&json!({
+            "kind": "column",
+            "children": [
+                {"kind": "image", "asset": "icon", "width": 24, "height": 24,
+                 "className": "icon compact", "children": []},
+                {"kind": "progress", "percent": 50, "width": 100, "height": 8,
+                 "className": "meter compact", "children": []}
+            ]
+        }))
+        .unwrap();
+        assert!(matches!(
+            root.direct_child_with_class("icon"),
+            Some(PanelNode::Image { .. })
+        ));
+        assert!(matches!(
+            root.direct_child_with_class("meter"),
+            Some(PanelNode::Progress { .. })
+        ));
     }
 }
 

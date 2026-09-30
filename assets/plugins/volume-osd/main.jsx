@@ -5,7 +5,7 @@ function App() {
     return <FixedWindow width={420} height={96} edge="bottom" anchor="bottom-center" className="volume-osd">
         <Column className="volume-content">
             <Text>{audio.label}</Text>
-            <Progress percent={audio.percent} width={372} height={8} />
+            <Progress className="volume-progress" percent={audio.percent} width={372} height={8} />
         </Column>
     </FixedWindow>;
 }
