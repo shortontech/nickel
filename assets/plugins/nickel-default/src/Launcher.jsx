@@ -103,7 +103,7 @@ export function Launcher() {
             <Pages id="launcher-search" page={safeResultPage} total={results.length} onChange={setResultPage} />
         </ScrollView>}
         <Row className="launcher-footer">
-            <Button id="launcher-account" className="launcher-account-button" onClick={() => nickel.surfaces.show("quick-settings")}>{session.account.displayName || "Local session"}</Button>
+            <Button id="launcher-account" className="launcher-account-button" onClick={() => nickel.surfaces.show("quick-settings")}>{session.account?.displayName || "Local session"}</Button>
             {session.support.logout ? <Button id="launcher-logout" className="launcher-footer-button" onClick={() => {setLogoutOpen(true); nickel.openDialog("launcher-logout-dialog");}}>Log out</Button> : null}
             <Button id="launcher-settings" className="launcher-footer-button" onClick={() => nickel.surfaces.show("settings")}>Settings</Button>
         </Row>
