@@ -458,6 +458,51 @@ mod tests {
     }
 
     #[test]
+    fn displays_application_scale_and_identify_capture_current_revisions() {
+        let mut runtime = JsxRuntime::new("", None).unwrap();
+        assert!(
+            runtime
+                .eval("nickel.displays.setApplicationScale({policy:'follow'})")
+                .is_err()
+        );
+        runtime.set_data(r#"{"displays":{"revision":"0123456789abcdef","operations":{"identify":true},"application_scale":{"available":true,"revision":"fedcba9876543210","configured":{"policy":"follow"},"supported_scales":[120,180]}}}"#).unwrap();
+        runtime
+            .eval("nickel.displays.getApplicationScale().configured.policy='custom'")
+            .unwrap();
+        assert_eq!(
+            runtime
+                .eval_json::<String>(
+                    "JSON.stringify(nickel.displays.getApplicationScale().configured.policy)"
+                )
+                .unwrap(),
+            "follow"
+        );
+        for script in [
+            "nickel.displays.setApplicationScale({policy:'custom',scale_120:181})",
+            "nickel.displays.setApplicationScale({policy:'custom',scale_120:180.5})",
+            "nickel.displays.setApplicationScale({policy:'follow'},'0123456789abcdef')",
+            "nickel.displays.identify('fedcba9876543210')",
+        ] {
+            assert!(runtime.eval(script).is_err());
+        }
+        assert!(runtime.take_effects().unwrap().is_empty());
+        runtime.eval("nickel.displays.setApplicationScale({policy:'custom',scale_120:180});nickel.displays.identify()").unwrap();
+        assert_eq!(
+            runtime.take_effects().unwrap(),
+            vec![
+                serde_json::json!({"type":"displays.setApplicationScale","revision":"fedcba9876543210","policy":{"policy":"custom","scale_120":180}}),
+                serde_json::json!({"type":"displays.identify","revision":"0123456789abcdef"})
+            ]
+        );
+        runtime
+            .set_data(
+                r#"{"displays":{"revision":"0123456789abcdef","operations":{"identify":false}}}"#,
+            )
+            .unwrap();
+        assert!(runtime.eval("nickel.displays.identify()").is_err());
+    }
+
+    #[test]
     fn displays_facade_reads_latest_host_snapshot_and_emits_layout_effect() {
         let mut runtime = JsxRuntime::new("", None).unwrap();
         assert_eq!(

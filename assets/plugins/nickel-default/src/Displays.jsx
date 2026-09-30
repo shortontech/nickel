@@ -2,6 +2,32 @@
 import { arrangement, snapPlacement } from "./display-layout.js";
 import "./styles/displays.css";
 
+function ApplicationScaleControls() {
+    const snapshot = nickel.displays.getApplicationScale();
+    if (!snapshot.available) return <Text wrap={true}>{snapshot.reason || "Application UI scale is unavailable."}</Text>;
+    const policy = snapshot.configured || {policy:"follow"};
+    const custom = snapshot.supported_scales?.includes(policy.scale_120) ? policy.scale_120 : 120;
+    const set = next => nickel.displays.setApplicationScale(next, snapshot.revision);
+    const outcomes = snapshot.last_result?.outcomes || [];
+    return <Column className="display-modes">
+        <Text className="display-heading">Application UI scale</Text>
+        {[{id:"follow",label:"Follow Nickel"},{id:"unchanged",label:"Leave application settings unchanged"},{id:"custom",label:"Custom scale"}].map(choice =>
+            <Button key={choice.id} id={"application-scale-"+choice.id} state={policy.policy===choice.id?"selected":"unselected"}
+                onClick={()=>set(choice.id==="custom"?{policy:"custom",scale_120:custom}:{policy:choice.id})}>{choice.label}</Button>)}
+        {policy.policy==="custom" ? <Column>
+            <Text>{Math.round(custom/1.2)+"%"}</Text>
+            <Slider id="application-scale-value" accessibilityLabel="Application UI scale" min={60} max={480} step={30} value={custom}
+                onChange={value=>set({policy:"custom",scale_120:value})}/>
+        </Column>:null}
+        {snapshot.native_per_monitor ? <Text wrap={true}>Windows manages native application DPI per display. This preference is saved for compatible applications.</Text>:null}
+        {snapshot.toolkits?.some(toolkit=>!toolkit.available) ? <Text wrap={true}>Some application toolkits are unavailable on this system.</Text>:null}
+        {outcomes.some(outcome=>outcome.kind==="confirmed" && outcome.restart_required) ? <Text wrap={true}>Restart affected applications to use the new scale.</Text>:null}
+        {snapshot.uncertain ? <Text wrap={true}>An application scale change could not be confirmed. Refresh before trying again.</Text>:null}
+        {outcomes.some(outcome=>outcome.kind==="external_conflict") ? <Text wrap={true}>Some application settings changed elsewhere and were left unchanged.</Text>:null}
+        {outcomes.some(outcome=>outcome.kind==="failed") || snapshot.last_result?.rejected ? <Text wrap={true}>The application scale change could not be completed.</Text>:null}
+    </Column>;
+}
+
 export function Displays() {
     const snapshot = nickel.displays.get() || {available:false,outputs:[],reason:"Display capability is unavailable."};
     const outputs = snapshot.outputs || [];
@@ -9,7 +35,7 @@ export function Displays() {
     const draftState = useRef(null);
     const setDraft = next => { draftState.current = next; };
     const drag = useRef(null);
-    const revision = JSON.stringify(outputs);
+    const revision = snapshot.revision || JSON.stringify(outputs);
     if (draftState.current && draftState.current.revision !== revision) draftState.current = null;
     const draft = draftState.current ? draftState.current.outputs : outputs;
     const selected = draft.find(output => output.name === selectedName) || draft[0];
@@ -27,10 +53,10 @@ export function Displays() {
         const placement=snapPlacement(moved,draft);
         update(output.name,{geometry:{...moved.geometry,...placement}});
     };
-    if (!snapshot.available) return <Text wrap={true}>{snapshot.reason || "Display control is unavailable."}</Text>;
-    if (!selected) return <Text>No displays are available.</Text>;
+    if (!snapshot.available) return <Column><Text wrap={true}>{snapshot.reason || "Display control is unavailable."}</Text><ApplicationScaleControls/></Column>;
+    if (!selected) return <Column><Text>No displays are available.</Text><ApplicationScaleControls/></Column>;
     return <Column className="display-page">
-        <Text className="display-heading">Arrange displays</Text>
+        <Row><Text className="display-heading">Arrange displays</Text><Button id="display-identify" disabled={!snapshot.operations?.identify} onClick={()=>nickel.displays.identify(snapshot.revision)}>Identify</Button></Row>
         <Text wrap={true}>Drag displays to match their physical positions. Apply to preview your changes.</Text>
         <Layer id="display-arrangement" className="display-arrangement">
             {view.cards.map((card,index) => <Box key={card.name} x={card.x} y={card.y} width={card.width} height={card.height}>
@@ -65,7 +91,7 @@ export function Displays() {
             onChange={value=>update(selected.name,{scale_120:value})}/>
         <Row className="display-actions">
             <Button id="display-primary" disabled={!selected.enabled} onClick={()=>setDraft({revision,outputs:draft.map(output=>({...output,primary:output.name===selected.name}))})}>Make primary</Button>
-            <Button id="display-apply" disabled={!draft.some(output=>output.enabled)} onClick={()=>nickel.displays.setLayout(layout(draft))}>Apply</Button>
+            <Button id="display-apply" disabled={!draft.some(output=>output.enabled)} onClick={()=>nickel.displays.setLayout(layout(draft), snapshot.revision)}>Apply</Button>
             <Button id="display-discard" onClick={()=>setDraft(null)}>Discard draft</Button>
         </Row>
         {snapshot.pending_confirmation ? <Row className="display-actions">
@@ -73,6 +99,7 @@ export function Displays() {
             <Button id="display-keep" disabled={snapshot.can_confirm === false} onClick={()=>nickel.displays.confirm()}>Keep</Button>
             <Button id="display-revert" disabled={snapshot.can_revert === false} onClick={()=>nickel.displays.revert()}>Revert</Button>
         </Row>:null}
+        <ApplicationScaleControls/>
     </Column>;
 }
 registerSettingsPage({id:"displays",group:"System",label:"Displays",description:"Arrange displays and change their modes and scale",component:Displays});

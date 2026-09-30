@@ -1652,6 +1652,7 @@ pub(crate) fn shell_command_payload(command: ShellCommand) -> SessionCommand {
                 output,
             }
         }
+        ShellCommand::IdentifyOutputs => SessionCommand::IdentifyOutputs,
         ShellCommand::ApplyOutputs(layout) => SessionCommand::ApplyOutputs { layout },
     }
 }

@@ -373,6 +373,23 @@ const nickel = Object.freeze({
             const snapshot = __nickelData.displays;
             return snapshot === undefined ? undefined : JSON.parse(JSON.stringify(snapshot));
         },
+        getApplicationScale() { return __nickelResource('displays', {}).application_scale || {available:false,reason:'Application scale capability is unavailable'}; },
+        setApplicationScale(policy, expectedRevision) {
+            const snapshot = this.getApplicationScale();
+            const revision = expectedRevision === undefined ? snapshot.revision : expectedRevision;
+            if (snapshot.available !== true || typeof revision !== 'string' || revision.length !== 16 || revision !== snapshot.revision) throw Error('application scale observation is unavailable or stale');
+            if (!policy || typeof policy !== 'object' || Array.isArray(policy)) throw TypeError('invalid application scale policy');
+            if (policy.policy === 'custom') {
+                if (!Number.isInteger(policy.scale_120) || !snapshot.supported_scales?.includes(policy.scale_120)) throw RangeError('unsupported custom application scale');
+            } else if (policy.policy !== 'follow' && policy.policy !== 'unchanged') throw TypeError('invalid application scale policy');
+            __effects.push({type:'displays.setApplicationScale',revision,policy:JSON.parse(JSON.stringify(policy))});
+        },
+        identify(expectedRevision) {
+            const snapshot = this.get();
+            const revision = expectedRevision === undefined ? snapshot?.revision : expectedRevision;
+            if (snapshot?.operations?.identify !== true || typeof revision !== 'string' || revision.length !== 16 || revision !== snapshot.revision) throw Error('display identification is unavailable or stale');
+            __effects.push({type:'displays.identify',revision});
+        },
         setLayout(layout, expectedRevision) {
             if (layout === null || typeof layout !== 'object' || Array.isArray(layout)
                 || typeof layout.primary !== 'string'

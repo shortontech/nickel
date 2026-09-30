@@ -586,6 +586,7 @@ impl RetainedPackageRuntime {
 }
 
 pub struct LiveShell {
+    application_scale_service: crate::application_scale_capability::ApplicationScaleService,
     appearance_capabilities: crate::appearance_capabilities::AppearanceCapabilities,
     preferences_capabilities: crate::preferences_capabilities::PreferencesCapabilities,
     preferences_commit_pending: Option<ShellSettings>,
@@ -1712,6 +1713,7 @@ impl LiveShell {
         };
         let launcher_icon_revision = launcher_icons.revision();
         let mut shell = Self {
+            application_scale_service: Default::default(),
             appearance_capabilities: Default::default(),
             preferences_capabilities: Default::default(),
             preferences_commit_pending: None,
@@ -3863,13 +3865,14 @@ impl LiveShell {
             return Some(match self.session_host.projection_outputs() {
                 Ok(outputs) => serde_json::json!({"available": true, "outputs": outputs,
                     "revision": crate::display_capabilities::revision(&outputs),
-                    "operations": {"setOrientation": true},
+                    "application_scale": self.application_scale_service.snapshot(),
+                    "operations": {"setOrientation": true, "setApplicationScale": true, "identify": true},
                     "pending_confirmation": self.display_preview.is_some(),
                     "can_confirm": self.display_preview.as_ref().is_some_and(|preview| preview.owner == plugin_id && Instant::now() < preview.deadline && output_layout_from_snapshot(&outputs) == preview.applied),
                     "can_revert": self.display_preview.as_ref().is_some_and(|preview| preview.owner == plugin_id && (output_layout_from_snapshot(&outputs) == preview.applied || output_layout_from_snapshot(&outputs) == preview.previous)),
                     "transforms": ["normal","rotate90","rotate180","rotate270","flipped","flipped90","flipped180","flipped270"]}),
                 Err(error) => {
-                    serde_json::json!({"available": false, "reason": error, "outputs": []})
+                    serde_json::json!({"available": false, "reason": error, "outputs": [], "application_scale": self.application_scale_service.snapshot(), "operations": {"setApplicationScale": true, "identify": false}})
                 }
             });
         }
@@ -3884,7 +3887,8 @@ impl LiveShell {
                 "pending_confirmation": read.pending_confirmation,
                 "can_confirm": read.can_confirm,
                 "can_revert": read.can_revert,
-                "operations": {"setOrientation": read.available},
+                "application_scale": self.application_scale_service.snapshot(),
+                "operations": {"setOrientation": read.available, "setApplicationScale": true, "identify": false},
                 "transforms": ["normal","rotate90","rotate180","rotate270"],
             }));
         }
@@ -6782,6 +6786,47 @@ impl LiveShell {
         let mut changed = false;
         for effect in effects {
             match effect {
+                crate::plugin_panel::PluginEffect::SetApplicationScale { plugin_id, effect } => {
+                    let granted = self.plugin_display_control_granted(&plugin_id) && !self.locked;
+                    if granted {
+                        // The transaction is synchronous: this owner cannot process
+                        // a grant change until every guarded journal/native step ends.
+                        match self.application_scale_service.execute(&effect, || {
+                            if granted {
+                                Ok(())
+                            } else {
+                                Err("display control grant was retired".into())
+                            }
+                        }) {
+                            Ok(()) => changed = true,
+                            Err(error) => {
+                                tracing::warn!(%error, "application scale capability rejected");
+                                changed = true;
+                            }
+                        }
+                    }
+                }
+                crate::plugin_panel::PluginEffect::IdentifyDisplays {
+                    plugin_id,
+                    revision,
+                } => {
+                    if self.plugin_display_control_granted(&plugin_id) && !self.locked {
+                        let snapshot = self
+                            .plugin_displays(&plugin_id)
+                            .unwrap_or(serde_json::Value::Null);
+                        if snapshot["revision"].as_str() == Some(&revision)
+                            && snapshot["operations"]["identify"] == true
+                        {
+                            #[cfg(target_os = "linux")]
+                            {
+                                changed |= self.send_session_command(
+                                    "identify-plugin-displays",
+                                    ShellCommand::IdentifyOutputs,
+                                );
+                            }
+                        }
+                    }
+                }
                 crate::plugin_panel::PluginEffect::SetDisplayLayout {
                     plugin_id,
                     layout,

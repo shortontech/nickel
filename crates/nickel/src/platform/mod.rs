@@ -847,6 +847,8 @@ pub enum ShellCommand {
         window: WindowId,
         output: String,
     },
+    #[cfg(target_os = "linux")]
+    IdentifyOutputs,
     ApplyOutputs(nickel_session_protocol::OutputLayout),
 }
 

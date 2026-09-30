@@ -438,6 +438,14 @@ pub enum PluginEffect {
         id: String,
         value: Value,
     },
+    SetApplicationScale {
+        plugin_id: String,
+        effect: crate::application_scale_capability::ApplicationScaleEffect,
+    },
+    IdentifyDisplays {
+        plugin_id: String,
+        revision: String,
+    },
     SetDisplayLayout {
         plugin_id: String,
         layout: nickel_session_protocol::OutputLayout,
@@ -2477,6 +2485,75 @@ impl nickel_ui::Application for PluginPanelApplication {
                             });
                         }
                         _ if effect.get("type").and_then(Value::as_str)
+                            == Some("displays.setApplicationScale") =>
+                        {
+                            let request =
+                                crate::application_scale_capability::ApplicationScaleEffect::parse(
+                                    &effect,
+                                )
+                                .and_then(|request| {
+                                    if !self
+                                        .manifest
+                                        .capabilities
+                                        .contains(&PluginCapability::DisplayControl)
+                                    {
+                                        return Err("display control is not granted".into());
+                                    }
+                                    let data: Value = self
+                                        .projection_data
+                                        .as_deref()
+                                        .and_then(|data| serde_json::from_str(data).ok())
+                                        .ok_or("application scale observation is unavailable")?;
+                                    request.validate(&data["displays"]["application_scale"])?;
+                                    Ok(request)
+                                });
+                            match request {
+                                Ok(effect) => approved.push(PluginEffect::SetApplicationScale {
+                                    plugin_id: self.manifest.id.clone(),
+                                    effect,
+                                }),
+                                Err(error) => {
+                                    self.last_error = Some(error);
+                                    return;
+                                }
+                            }
+                        }
+                        _ if effect.get("type").and_then(Value::as_str)
+                            == Some("displays.identify") =>
+                        {
+                            if !self
+                                .manifest
+                                .capabilities
+                                .contains(&PluginCapability::DisplayControl)
+                            {
+                                self.last_error = Some("display control is not granted".into());
+                                return;
+                            }
+                            let data: Value = self
+                                .projection_data
+                                .as_deref()
+                                .and_then(|data| serde_json::from_str(data).ok())
+                                .unwrap_or(Value::Null);
+                            let Some(revision) = effect["revision"]
+                                .as_str()
+                                .filter(|revision| revision.len() == 16)
+                            else {
+                                self.last_error = Some("display observation is unavailable".into());
+                                return;
+                            };
+                            if data["displays"]["revision"].as_str() != Some(revision)
+                                || data["displays"]["operations"]["identify"] != true
+                            {
+                                self.last_error =
+                                    Some("display identification is unavailable or stale".into());
+                                return;
+                            }
+                            approved.push(PluginEffect::IdentifyDisplays {
+                                plugin_id: self.manifest.id.clone(),
+                                revision: revision.into(),
+                            });
+                        }
+                        _ if effect.get("type").and_then(Value::as_str)
                             == Some("displays.setLayout") =>
                         {
                             if !effect_manifest
@@ -4181,6 +4258,47 @@ mod tests {
                 .unwrap()
                 .contains("#123456")
         );
+    }
+
+    #[test]
+    fn display_policy_effects_require_grants_current_revisions_and_availability() {
+        let mut manifest = PluginPackage::load(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/plugins/example-window"
+        ))
+        .unwrap()
+        .manifest;
+        let source = r#"function App(){return h(Window,{id:'main',width:520,height:340},h(Button,{id:'scale',onClick:()=>nickel.request({type:'displays.setApplicationScale',revision:'0123456789abcdef',policy:{policy:'custom',scale_120:180}})},'Scale'),h(Button,{id:'identify',onClick:()=>nickel.request({type:'displays.identify',revision:'0123456789abcdef'})},'Identify'));}"#;
+        manifest.capabilities.clear();
+        let mut denied =
+            PluginPanelApplication::new_with_manifest(source, &manifest, Some("{}".into()))
+                .unwrap();
+        for id in ["scale", "identify"] {
+            denied.update(denied.button_message(id).unwrap());
+            assert!(denied.take_effects().is_empty());
+        }
+        manifest.capabilities.push(PluginCapability::DisplayControl);
+        let mut granted =
+            PluginPanelApplication::new_with_manifest(source, &manifest, Some("{}".into()))
+                .unwrap();
+        let snapshot = serde_json::json!({"available":true,"revision":"0123456789abcdef","operations":{"identify":true},"application_scale":{"available":true,"revision":"0123456789abcdef"}});
+        granted.sync_host_data_field("displays", &snapshot).unwrap();
+        granted.update(granted.button_message("scale").unwrap());
+        assert!(matches!(
+            granted.take_effects().as_slice(),
+            [PluginEffect::SetApplicationScale { .. }]
+        ));
+        granted.update(granted.button_message("identify").unwrap());
+        assert!(matches!(
+            granted.take_effects().as_slice(),
+            [PluginEffect::IdentifyDisplays { .. }]
+        ));
+        let stale = serde_json::json!({"available":true,"revision":"fedcba9876543210","operations":{"identify":false},"application_scale":{"available":true,"revision":"fedcba9876543210"}});
+        granted.sync_host_data_field("displays", &stale).unwrap();
+        for id in ["scale", "identify"] {
+            granted.update(granted.button_message(id).unwrap());
+            assert!(granted.take_effects().is_empty());
+        }
     }
 
     #[test]
