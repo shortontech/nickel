@@ -45,6 +45,14 @@ button.clock-button {
     min-width: 120px;
 }
 
+badge.task-badge {
+    width: 30px;
+    height: 24px;
+    border-radius: 12px;
+    color: #ffffff;
+    font-size: 12px;
+}
+
 window.taskbar-menu {
     background: #2b303cf1;
     padding: 8px;

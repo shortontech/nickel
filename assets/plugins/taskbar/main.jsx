@@ -67,7 +67,7 @@ function App() {
             {items.flatMap(item => [
                 <Task key={item.id} item={item} />,
                 ...badges.filter(badge => badge.item === item.id).slice(0, 3).map((badge, index) =>
-                    <Badge key={badge.pluginId + ":" + item.id + ":" + index}
+                    <Badge key={badge.pluginId + ":" + item.id + ":" + index} className="task-badge"
                         label={badge.label} count={badge.count} color={badge.color} />)
             ])}
             <Spacer className="taskbar-spacer" />

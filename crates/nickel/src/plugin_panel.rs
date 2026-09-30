@@ -4174,6 +4174,37 @@ mod tests {
     }
 
     #[test]
+    fn badge_css_styles_the_taskbar_extension_visual() {
+        let mut app = PluginPanelApplication::new(
+            "function App() { return h(Panel, null, h(Badge, {count: 5, label: 'Mail', color: 0xffc9354c, className: 'task-badge'})); }",
+        )
+        .unwrap();
+        app.stylesheet = StyleSheet::compile(
+            "badge.task-badge { background: #123456; border-radius: 7px; color: #abcdef; font-size: 12px; }",
+        )
+        .unwrap();
+        let host = nickel_ui::UiHost::new(app, 120, 56);
+        assert!(host.commands().iter().any(|command| matches!(
+            command,
+            nickel_ui::backend::PaintCommand::RoundedFill { color: 0xff123456, radius, .. } if *radius == 7.0
+        )));
+        assert!(host.commands().iter().any(|command| matches!(
+            command,
+            nickel_ui::backend::PaintCommand::Text {
+                color: 0xffabcdef,
+                ..
+            }
+        )));
+        assert!(
+            host.query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: SemanticRole::Status,
+                name: "Mail: 5".into(),
+            })
+            .is_ok()
+        );
+    }
+
+    #[test]
     fn generic_div_uses_css_grid_tracks_for_plugin_controls() {
         let mut external_manifest = manifest().clone();
         external_manifest.id = "org.example.css-grid".into();

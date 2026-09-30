@@ -216,6 +216,7 @@ pub enum PanelNode {
         label: String,
         count: u16,
         color: u32,
+        class_name: Option<String>,
     },
     Widget {
         label: String,
@@ -509,6 +510,7 @@ impl PanelNode {
                 | Self::Column { class_name, .. }
                 | Self::ScrollView { class_name, .. }
                 | Self::Text { class_name, .. }
+                | Self::Badge { class_name, .. }
                 | Self::Image { class_name, .. }
                 | Self::Progress { class_name, .. }
                 | Self::Slider { class_name, .. }
@@ -622,8 +624,15 @@ impl PanelNode {
         });
         own + descendants
             + match self {
-                Self::Badge { item, label, .. } => {
-                    item.as_ref().map_or(0, capacity) + capacity(label)
+                Self::Badge {
+                    item,
+                    label,
+                    class_name,
+                    ..
+                } => {
+                    item.as_ref().map_or(0, capacity)
+                        + capacity(label)
+                        + class_name.as_ref().map_or(0, capacity)
                 }
                 Self::Widget { label, value, .. } => capacity(label) + capacity(value),
                 Self::Action {
@@ -764,6 +773,7 @@ impl PanelNode {
                     | "image"
                     | "image-button"
                     | "progress"
+                    | "badge"
             )
         {
             return Err(format!("className is not supported on {kind} yet"));
@@ -887,6 +897,7 @@ impl PanelNode {
                     item,
                     label,
                     count,
+                    class_name,
                     color: value
                         .get("color")
                         .and_then(Value::as_u64)
@@ -1817,24 +1828,31 @@ impl PanelNode {
                 label,
                 count,
                 color,
+                class_name,
                 ..
-            } => AnyView::new(
-                Container::new()
+            } => {
+                let style = stylesheet.resolve("badge", None, class_name.as_deref());
+                let text = styled_text(
+                    Text::new(count.to_string()).color(0xffffffff).scale(0.72),
+                    &style,
+                );
+                let container = Container::new()
                     .width(30.0)
                     .height(24.0)
-                    .background(*color)
                     .radius(12.0)
+                    .align_items(nickel_ui::Align::Center)
+                    .justify_content(nickel_ui::Justify::Center)
                     .semantic_role(SemanticRole::Status)
                     .accessibility_label(format!("{label}: {count}"))
-                    .child(
-                        Text::new(count.to_string())
-                            .width(30.0)
-                            .height(24.0)
-                            .align(nickel_ui::TextAlign::Center)
-                            .color(0xffffffff)
-                            .scale(0.72),
-                    ),
-            ),
+                    .child(text);
+                let container = apply_container_style(container, &style);
+                let container = if style.background.is_none() {
+                    container.background(*color)
+                } else {
+                    container
+                };
+                with_margin(AnyView::new(container), &style)
+            }
             Self::Widget { .. } => AnyView::new(Spacer::fixed(0.0)),
             Self::Action { .. } | Self::Section { .. } => AnyView::new(Spacer::fixed(0.0)),
             Self::Div {
@@ -2854,6 +2872,7 @@ impl PanelNode {
                 label,
                 count,
                 color,
+                ..
             } => {
                 if badges.len() >= 32 {
                     return Err("extension has too many badges".into());
@@ -3164,7 +3183,9 @@ mod class_lookup_tests {
                 {"kind": "image", "asset": "icon", "width": 24, "height": 24,
                  "className": "icon compact", "children": []},
                 {"kind": "progress", "percent": 50, "width": 100, "height": 8,
-                 "className": "meter compact", "children": []}
+                 "className": "meter compact", "children": []},
+                {"kind": "badge", "count": 3,
+                 "className": "task-badge compact", "children": []}
             ]
         }))
         .unwrap();
@@ -3175,6 +3196,10 @@ mod class_lookup_tests {
         assert!(matches!(
             root.direct_child_with_class("meter"),
             Some(PanelNode::Progress { .. })
+        ));
+        assert!(matches!(
+            root.direct_child_with_class("task-badge"),
+            Some(PanelNode::Badge { .. })
         ));
     }
 }

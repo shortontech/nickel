@@ -50,7 +50,7 @@ function App() {
             h(Button, { id: "taskbar-launcher", className: "launcher-button", icon: "logo", accessibilityLabel: "Open Nickel Start", onClick: () => nickel.request({ type: "toggle-launcher" }) }, "Nickel"),
             items.flatMap(item => [
                 h(Task, { key: item.id, item: item }),
-                ...badges.filter(badge => badge.item === item.id).slice(0, 3).map((badge, index) => h(Badge, { key: badge.pluginId + ":" + item.id + ":" + index, label: badge.label, count: badge.count, color: badge.color }))
+                ...badges.filter(badge => badge.item === item.id).slice(0, 3).map((badge, index) => h(Badge, { key: badge.pluginId + ":" + item.id + ":" + index, className: "task-badge", label: badge.label, count: badge.count, color: badge.color }))
             ]),
             h(Spacer, { className: "taskbar-spacer" }),
             data.keyboardEnabled ? h(Button, { id: "taskbar-keyboard", className: "utility-button", accessibilityLabel: "On-screen keyboard", onClick: () => nickel.request({ type: "toggle-on-screen-keyboard" }) }, "\u2328") : null,
