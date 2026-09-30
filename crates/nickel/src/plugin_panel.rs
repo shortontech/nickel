@@ -4377,6 +4377,48 @@ mod tests {
     }
 
     #[test]
+    fn plugin_css_inherits_text_properties_through_layout_nodes() {
+        let package = PluginPackage {
+            manifest: manifest().clone(),
+            images: Default::default(),
+            stylesheet: "window.parent { color: #123456; font-size: 20px; line-height: 28px; } div.nested { color: #abcdef; } button.override { color: #fedcba; } text.own { color: #aabbcc; }".into(),
+            source: "function App() { return h(FixedWindow, {width: '100%', height: '100%', className: 'parent'}, h(Text, {}, 'Root text'), h('div', {className: 'nested'}, h(Text, {}, 'Nested text'), h(Text, {className: 'own', color: 0xff112233}, 'Own text'), h(Button, {id: 'nested-button', onClick: () => {}}, 'Nested button'), h(TextField, {id: 'nested-field', value: '', placeholder: 'Enter', onChange: () => {}})), h(Button, {id: 'override', className: 'override', onClick: () => {}}, 'Override')); }".into(),
+        };
+        let host = nickel_ui::UiHost::new(
+            PluginPanelApplication::from_package(&package).unwrap(),
+            500,
+            300,
+        );
+        let painted = |label: &str| {
+            host.commands()
+                .iter()
+                .find_map(|command| match command {
+                    nickel_ui::backend::PaintCommand::Text {
+                        bounds,
+                        text,
+                        scale,
+                        color,
+                        ..
+                    } if text == label => Some((*scale, *color, bounds.size.height)),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("missing painted text {label:?}"))
+        };
+        for (label, color) in [
+            ("Root text", 0xff123456),
+            ("Nested text", 0xffabcdef),
+            ("Own text", 0xffaabbcc),
+            ("Nested button", 0xffabcdef),
+            ("Enter", 0xffabcdef),
+            ("Override", 0xfffedcba),
+        ] {
+            let (scale, painted_color, height) = painted(label);
+            assert_eq!((scale, painted_color), (-20.0, color), "{label}");
+            assert!(height >= 28.0, "{label} lost its inherited line height");
+        }
+    }
+
+    #[test]
     fn badge_css_styles_the_taskbar_extension_visual() {
         let mut app = PluginPanelApplication::new(
             "function App() { return h(Panel, null, h(Badge, {count: 5, label: 'Mail', color: 0xffc9354c, className: 'task-badge'})); }",

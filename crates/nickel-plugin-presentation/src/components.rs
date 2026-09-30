@@ -294,7 +294,7 @@ pub enum PanelNode {
     },
     Text {
         value: String,
-        color: u32,
+        color: Option<u32>,
         class_name: Option<String>,
         wrap: bool,
     },
@@ -493,6 +493,30 @@ fn styled_text<Message>(mut text: Text<Message>, style: &ControlStyle) -> Text<M
         text = text.line_height(line_height);
     }
     text
+}
+
+#[derive(Clone, Copy, Default)]
+struct InheritedTextStyle {
+    color: Option<u32>,
+    font_size: Option<f32>,
+    line_height: Option<f32>,
+}
+
+impl InheritedTextStyle {
+    fn extend(self, style: &ControlStyle) -> Self {
+        Self {
+            color: style.color.or(self.color),
+            font_size: style.font_size.or(self.font_size),
+            line_height: style.line_height.or(self.line_height),
+        }
+    }
+
+    fn apply(self, mut style: ControlStyle) -> ControlStyle {
+        style.color = style.color.or(self.color);
+        style.font_size = style.font_size.or(self.font_size);
+        style.line_height = style.line_height.or(self.line_height);
+        style
+    }
 }
 
 impl PanelNode {
@@ -1213,7 +1237,7 @@ impl PanelNode {
                 color: value
                     .get("color")
                     .and_then(Value::as_u64)
-                    .map_or(0xfff4f6fa, |color| color as u32),
+                    .map(|color| color as u32),
             }),
             "image" | "image-button" => {
                 if !children.is_empty() {
@@ -1826,7 +1850,13 @@ impl PanelNode {
         scope: Option<&str>,
         slots: &mut dyn FnMut(&str) -> Option<AnyView<Message>>,
     ) -> AnyView<Message> {
-        self.view_as_scoped_with_slots(images, stylesheet, scope, slots)
+        self.view_as_scoped_with_slots(
+            images,
+            stylesheet,
+            scope,
+            InheritedTextStyle::default(),
+            slots,
+        )
     }
 
     fn view_as_scoped_with_slots<Message: PluginUiMessage>(
@@ -1834,6 +1864,7 @@ impl PanelNode {
         images: &PluginImages,
         stylesheet: &StyleSheet,
         scope: Option<&str>,
+        inherited: InheritedTextStyle,
         slots: &mut dyn FnMut(&str) -> Option<AnyView<Message>>,
     ) -> AnyView<Message> {
         match self {
@@ -1847,7 +1878,7 @@ impl PanelNode {
                 let style = stylesheet.resolve("badge", None, class_name.as_deref());
                 let text = styled_text(
                     Text::new(count.to_string()).color(0xffffffff).scale(0.72),
-                    &style,
+                    &inherited.apply(style.clone()),
                 );
                 let container = Container::new()
                     .width(30.0)
@@ -1896,7 +1927,11 @@ impl PanelNode {
                         }
                         for child in children {
                             grid = grid.child(child.view_as_scoped_with_slots::<Message>(
-                                images, stylesheet, scope, slots,
+                                images,
+                                stylesheet,
+                                scope,
+                                inherited.extend(&style),
+                                slots,
                             ));
                         }
                         grid = grid.direction(stylesheet.reading_direction());
@@ -1923,7 +1958,11 @@ impl PanelNode {
                         }
                         for child in children {
                             row = row.child(child.view_as_scoped_with_slots::<Message>(
-                                images, stylesheet, scope, slots,
+                                images,
+                                stylesheet,
+                                scope,
+                                inherited.extend(&style),
+                                slots,
                             ));
                         }
                         if stylesheet.reading_direction()
@@ -1952,7 +1991,11 @@ impl PanelNode {
                         }
                         for child in children {
                             column = column.child(child.view_as_scoped_with_slots::<Message>(
-                                images, stylesheet, scope, slots,
+                                images,
+                                stylesheet,
+                                scope,
+                                inherited.extend(&style),
+                                slots,
                             ));
                         }
                         AnyView::new(column)
@@ -1997,10 +2040,13 @@ impl PanelNode {
                 let style = stylesheet.resolve("box", None, class_name.as_deref());
                 let mut column = Column::new().fill_width();
                 for child in children {
-                    column = column
-                        .child(child.view_as_scoped_with_slots::<Message>(
-                            images, stylesheet, scope, slots,
-                        ));
+                    column = column.child(child.view_as_scoped_with_slots::<Message>(
+                        images,
+                        stylesheet,
+                        scope,
+                        inherited.extend(&style),
+                        slots,
+                    ));
                 }
                 let container = Container::new()
                     .position(Point {
@@ -2038,7 +2084,11 @@ impl PanelNode {
                 for child in children {
                     if !matches!(child, Self::Dialog { .. }) {
                         layer = layer.child(child.view_as_scoped_with_slots::<Message>(
-                            images, stylesheet, scope, slots,
+                            images,
+                            stylesheet,
+                            scope,
+                            inherited.extend(&style),
+                            slots,
                         ));
                     }
                 }
@@ -2086,10 +2136,13 @@ impl PanelNode {
                     row = row.justify_content(justify);
                 }
                 for child in children {
-                    row = row
-                        .child(child.view_as_scoped_with_slots::<Message>(
-                            images, stylesheet, scope, slots,
-                        ));
+                    row = row.child(child.view_as_scoped_with_slots::<Message>(
+                        images,
+                        stylesheet,
+                        scope,
+                        inherited.extend(&style),
+                        slots,
+                    ));
                 }
                 if stylesheet.reading_direction() == nickel_ui::ReadingDirection::RightToLeft {
                     row = row.reverse();
@@ -2125,10 +2178,13 @@ impl PanelNode {
                     column = column.justify_content(justify);
                 }
                 for child in children {
-                    column = column
-                        .child(child.view_as_scoped_with_slots::<Message>(
-                            images, stylesheet, scope, slots,
-                        ));
+                    column = column.child(child.view_as_scoped_with_slots::<Message>(
+                        images,
+                        stylesheet,
+                        scope,
+                        inherited.extend(&style),
+                        slots,
+                    ));
                 }
                 if style == ControlStyle::default() {
                     AnyView::new(column)
@@ -2155,10 +2211,13 @@ impl PanelNode {
                     column = column.gap(gap);
                 }
                 for child in children {
-                    column = column
-                        .child(child.view_as_scoped_with_slots::<Message>(
-                            images, stylesheet, scope, slots,
-                        ));
+                    column = column.child(child.view_as_scoped_with_slots::<Message>(
+                        images,
+                        stylesheet,
+                        scope,
+                        inherited.extend(&style),
+                        slots,
+                    ));
                 }
                 let scroll = VerticalScroll::new(
                     Message::from_plugin_scoped(PluginMessage::Scroll, scope),
@@ -2190,12 +2249,19 @@ impl PanelNode {
                 wrap,
             } => {
                 let style = stylesheet.resolve("text", None, class_name.as_deref());
+                let text_style = inherited.apply(style.clone());
                 let text = styled_text(
                     Text::new(value)
-                        .color(style.color.unwrap_or(*color))
+                        .color(
+                            style
+                                .color
+                                .or(*color)
+                                .or(inherited.color)
+                                .unwrap_or(0xfff4f6fa),
+                        )
                         .scale(1.0)
                         .wrap(*wrap),
-                    &style,
+                    &text_style,
                 );
                 let container = Container::new()
                     .semantic_role(SemanticRole::Text)
@@ -2544,6 +2610,7 @@ impl PanelNode {
                 blur_action,
             } => {
                 let style = stylesheet.resolve("text-field", Some(id), class_name.as_deref());
+                let text_style = inherited.apply(style.clone());
                 let focus_message = focus_action
                     .map(|action| Message::from_plugin_scoped(PluginMessage::Click(action), scope));
                 let blur_message = blur_action
@@ -2586,13 +2653,13 @@ impl PanelNode {
                 if let Some(message) = blur_message {
                     field = field.blur_message(message);
                 }
-                if let Some(size) = style.font_size {
+                if let Some(size) = text_style.font_size {
                     field = field.font_size(size);
                 }
-                if let Some(height) = style.line_height {
+                if let Some(height) = text_style.line_height {
                     field = field.line_height(height);
                 }
-                if let Some(color) = style.color {
+                if let Some(color) = text_style.color {
                     field = field.color(color);
                 }
                 if let Some(background) = stylesheet.resolve_interaction_background(
@@ -2626,25 +2693,24 @@ impl PanelNode {
                 blur_action,
             } => {
                 let style = stylesheet.resolve("button", Some(id), class_name.as_deref());
-                let visual = icon
-                    .as_ref()
-                    .and_then(|asset| images.get(asset))
-                    .map_or_else(
-                        || AnyView::new(styled_text(Text::new(label).wrap(true), &style)),
-                        |(id, image)| {
-                            let icon = Image::new(*id, Arc::clone(image)).width(32.0).height(32.0);
-                            if *show_label {
-                                AnyView::new(
-                                    Row::new()
-                                        .gap(8.0)
-                                        .child(icon)
-                                        .child(styled_text(Text::new(label).wrap(true), &style)),
-                                )
-                            } else {
-                                AnyView::new(icon)
-                            }
-                        },
-                    );
+                let text_style = inherited.apply(style.clone());
+                let visual =
+                    icon.as_ref()
+                        .and_then(|asset| images.get(asset))
+                        .map_or_else(
+                            || AnyView::new(styled_text(Text::new(label).wrap(true), &text_style)),
+                            |(id, image)| {
+                                let icon =
+                                    Image::new(*id, Arc::clone(image)).width(32.0).height(32.0);
+                                if *show_label {
+                                    AnyView::new(Row::new().gap(8.0).child(icon).child(
+                                        styled_text(Text::new(label).wrap(true), &text_style),
+                                    ))
+                                } else {
+                                    AnyView::new(icon)
+                                }
+                            },
+                        );
                 let mut container = Container::new()
                     .id(id.clone())
                     .accessibility_label(accessibility_label)

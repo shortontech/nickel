@@ -39,6 +39,9 @@ The component vocabulary includes `Window`, `FixedWindow`, `Row`, `Column`, `Tex
 `ImageButton`, `Button`, `Badge`, `Action`, `Widget`, `Section`, `TextField`, `Progress`, `Dialog`, `Menu`, and `MenuItem`. The
 host owns image bytes and exposes them by asset name to JSX. The desktop,
 lock screen, screenshot tool, file manager, and Codex remain Rust UI.
+Plugin CSS scopes `color`, `font-size`, and `line-height` to a surface tree and
+inherits them through layout elements into text, buttons, and text fields.
+Styles on a child override inherited values.
 Use `secure={true}` on a `TextField` for passwords or other private input. The
 host masks its paint and blocks remote semantic inspection of that surface.
 The [task badge example](example-task-badge/) shows a surface-free extension
