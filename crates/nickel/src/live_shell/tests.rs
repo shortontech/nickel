@@ -3,8 +3,8 @@ fn ordinary_package_runtime(
     id: &str,
 ) -> std::rc::Rc<std::cell::RefCell<nickel_plugin_runtime::JsxRuntime>> {
     match &shell.package_runtimes[id] {
-        RetainedPackageRuntime::Ordinary(runtime) => runtime.clone(),
-        RetainedPackageRuntime::Composed(_) => {
+        crate::live_shell::RetainedPackageRuntime::Ordinary(runtime) => runtime.clone(),
+        crate::live_shell::RetainedPackageRuntime::Composed(_) => {
             panic!("ordinary package unexpectedly uses composition")
         }
     }
