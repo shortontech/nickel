@@ -3342,16 +3342,27 @@ mod tests {
     #[test]
     fn bundled_launcher_visual_snapshot() {
         let launcher = Launcher::default();
-        let host = nickel_ui::UiHost::new(
-            PluginPanelApplication::bundled_with_data(
-                launcher_manifest(),
-                "main.js",
-                LauncherPluginProjection::from_launcher(&launcher).to_json(),
-            )
-            .unwrap(),
-            620,
-            548,
+        let projection = LauncherPluginProjection::from_launcher(&launcher);
+        let mut application = PluginPanelApplication::bundled_with_data(
+            launcher_manifest(),
+            "main.js",
+            projection.to_json(),
+        )
+        .unwrap();
+        let placeholder = crate::live_shell::launcher_placeholder_icon();
+        application.sync_images(
+            projection
+                .dashboard
+                .iter()
+                .map(|item| {
+                    (
+                        format!("dashboard:{}", item.index),
+                        (placeholder.0, Arc::clone(&placeholder.1)),
+                    )
+                })
+                .collect(),
         );
+        let host = nickel_ui::UiHost::new(application, 620, 548);
         assert_eq!(host.application().title(), "Nickel Launcher");
         let firefox = host
             .query_unique(&nickel_ui::SemanticSelector::RoleAndName {

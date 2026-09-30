@@ -38,6 +38,27 @@ fn safe_mode_suppresses_installed_autostart_without_discarding_saved_choice() {
 }
 
 #[test]
+fn launcher_icon_slots_have_an_image_while_application_icons_load() {
+    let launcher = crate::launcher::Launcher::default();
+    let projection = crate::plugin_panel::LauncherPluginProjection::from_launcher(&launcher);
+    let mut cache = crate::launcher_icon_cache::LauncherIconCache::new();
+    let images = super::launcher_plugin_images(&launcher, &mut cache, &projection);
+    for (slot, items) in [
+        ("search", projection.results.as_slice()),
+        ("dashboard", projection.dashboard.as_slice()),
+        ("place", projection.places.as_slice()),
+    ] {
+        for item in items {
+            assert!(images.contains_key(&format!("{slot}:{}", item.index)));
+        }
+    }
+    let (_, placeholder) = super::launcher_placeholder_icon();
+    assert_eq!(placeholder.dimensions(), (32, 32));
+    assert!(placeholder.pixels().any(|pixel| pixel.0[3] == 0));
+    assert!(placeholder.pixels().any(|pixel| pixel.0[3] != 0));
+}
+
+#[test]
 fn settings_status_is_idle_until_the_separate_process_reports_memory() {
     let shell = LiveShell::new().unwrap();
     let snapshot = shell.plugin_status_snapshot();

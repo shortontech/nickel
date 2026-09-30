@@ -860,6 +860,23 @@ fn taskbar_plugin_control_bounds(
     matches.next().is_none().then_some(bounds)
 }
 
+pub(crate) fn launcher_placeholder_icon() -> (u16, Arc<image::RgbaImage>) {
+    static ICON: OnceLock<Arc<image::RgbaImage>> = OnceLock::new();
+    // The asynchronous app icon cache starts at 0x4000.
+    (
+        0x3fff,
+        Arc::clone(ICON.get_or_init(|| {
+            Arc::new(
+                crate::icons::load_svg_bytes(
+                    include_bytes!("../../../assets/icons/start-menu/applications.svg"),
+                    32,
+                )
+                .expect("bundled application placeholder must render"),
+            )
+        })),
+    )
+}
+
 fn launcher_plugin_images(
     launcher: &Launcher,
     icons: &mut LauncherIconCache,
@@ -877,11 +894,11 @@ fn launcher_plugin_images(
             } else {
                 launcher.result_at(item.index)
             };
-            if let Some(application) = application.filter(|application| application.id() == item.id)
-                && let Some(icon) = icons.resolve(application)
-            {
-                images.insert(format!("{slot}:{}", item.index), icon);
-            }
+            let icon = application
+                .filter(|application| application.id() == item.id)
+                .and_then(|application| icons.resolve(application))
+                .unwrap_or_else(launcher_placeholder_icon);
+            images.insert(format!("{slot}:{}", item.index), icon);
         }
     }
     images

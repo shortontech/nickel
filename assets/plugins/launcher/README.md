@@ -38,8 +38,9 @@ requests from any plugin with `applications-pin` are checked against Nickel's
 current application catalog before changing favorites; they do not depend on
 which launcher page is open.
 Application buttons use icon slots from Nickel's existing asynchronous icon
-cache. The host owns the image buffers; JSX keeps the app name visible and
-uses the same name for accessibility.
+cache. Until an application icon loads, the host supplies Nickel's bundled
+application glyph in the same slot. The host owns the image buffers; JSX keeps
+the app name visible and uses the same name for accessibility.
 Search and dashboard application lists request bounded pages from the host.
 Search result activation includes the current catalog index and ID, which the
 host checks against the visible page before launching. Pinning uses a stable
