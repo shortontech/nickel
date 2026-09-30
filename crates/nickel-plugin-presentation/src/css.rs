@@ -1,6 +1,6 @@
-//! Bounded CSS subset for plugin presentation. Palette tokens may recompile on theme changes.
+//! Bounded CSS subset with inherited custom properties and typed native styles.
 
-use std::borrow::Cow;
+use std::collections::{HashMap, HashSet};
 
 use cssparser::{
     AtRuleParser, CowRcStr, DeclarationParser, ParseError, Parser, ParserState,
@@ -52,10 +52,12 @@ pub struct ControlStyle {
     pub gap: Option<f32>,
     pub bottom: Option<f32>,
     pub top: Option<f32>,
+    pub(crate) custom_properties: HashMap<String, String>,
 }
 
 #[derive(Clone, Debug)]
 struct Selector {
+    root: bool,
     kind: Option<String>,
     id: Option<String>,
     classes: Vec<String>,
@@ -73,6 +75,7 @@ impl Selector {
     fn parse(source: &str) -> Result<Self, String> {
         let mut parser = Parser::new(source);
         let mut selector = Self {
+            root: false,
             kind: None,
             id: None,
             classes: Vec::new(),
@@ -93,7 +96,16 @@ impl Selector {
                     selector.classes.push(name.to_string());
                 }
                 cssparser::Token::Colon if selector.state.is_none() => {
-                    selector.state = Some(match parser.expect_ident() {
+                    let pseudo = parser.expect_ident();
+                    if matches!(&pseudo, Ok(name) if name.eq_ignore_ascii_case("root"))
+                        && selector.kind.is_none()
+                        && selector.id.is_none()
+                        && selector.classes.is_empty()
+                    {
+                        selector.root = true;
+                        continue;
+                    }
+                    selector.state = Some(match pseudo {
                         Ok(name) if name.eq_ignore_ascii_case("hover") => InteractionState::Hover,
                         Ok(name) if name.eq_ignore_ascii_case("active") => InteractionState::Active,
                         Ok(name) if name.eq_ignore_ascii_case("focus") => InteractionState::Focus,
@@ -103,7 +115,19 @@ impl Selector {
                 _ => return Err("unsupported plugin CSS selector".into()),
             }
         }
-        if selector.kind.is_none() && selector.id.is_none() && selector.classes.is_empty() {
+        if selector.root
+            && (selector.kind.is_some()
+                || selector.id.is_some()
+                || !selector.classes.is_empty()
+                || selector.state.is_some())
+        {
+            return Err(":root must be a standalone selector".into());
+        }
+        if !selector.root
+            && selector.kind.is_none()
+            && selector.id.is_none()
+            && selector.classes.is_empty()
+        {
             return Err("empty plugin CSS selector".into());
         }
         Ok(selector)
@@ -116,7 +140,8 @@ impl Selector {
         class_name: Option<&str>,
         state: Option<InteractionState>,
     ) -> bool {
-        self.state == state
+        !self.root
+            && self.state == state
             && self.kind.as_deref().is_none_or(|selector| selector == kind)
             && self
                 .id
@@ -132,7 +157,13 @@ impl Selector {
 #[derive(Clone, Debug)]
 struct Rule {
     selectors: Vec<Selector>,
-    declarations: Vec<Declaration>,
+    declarations: Vec<ParsedDeclaration>,
+}
+
+#[derive(Clone, Debug)]
+enum ParsedDeclaration {
+    Custom(String, String),
+    Property(String, String),
 }
 
 #[derive(Clone, Debug)]
@@ -550,9 +581,11 @@ impl<'i> QualifiedRuleParser<'i> for CssRuleParser {
                     "plugin CSS state selectors require button, or text-field:focus",
                 ));
             }
-            if declarations.iter().any(
-                |declaration| !matches!(declaration, Declaration::Background(color) if *color != 0),
-            ) {
+            if declarations.iter().any(|declaration| {
+                !matches!(declaration, ParsedDeclaration::Property(name, value)
+                    if matches!(name.as_str(), "background" | "background-color")
+                        && (value.contains("var(") || color(value).is_ok_and(|color| color != 0)))
+            }) {
                 return Err(ParseError::custom(
                     "plugin CSS state selectors require a nontransparent background",
                 ));
@@ -560,7 +593,7 @@ impl<'i> QualifiedRuleParser<'i> for CssRuleParser {
         }
         if declarations
             .iter()
-            .any(|declaration| matches!(declaration, Declaration::Bottom(_) | Declaration::Top(_)))
+            .any(|declaration| matches!(declaration, ParsedDeclaration::Property(name, _) if name == "bottom" || name == "top"))
             && selectors
                 .iter()
                 .any(|selector| selector.kind.as_deref() != Some("window"))
@@ -579,11 +612,11 @@ impl<'i> QualifiedRuleParser<'i> for CssRuleParser {
 struct CssDeclarationParser;
 impl<'i> AtRuleParser<'i> for CssDeclarationParser {
     type Prelude = ();
-    type AtRule = Declaration;
+    type AtRule = ParsedDeclaration;
     type Error = String;
 }
 impl<'i> DeclarationParser<'i> for CssDeclarationParser {
-    type Declaration = Declaration;
+    type Declaration = ParsedDeclaration;
     type Error = String;
     fn parse_value(
         &mut self,
@@ -593,15 +626,30 @@ impl<'i> DeclarationParser<'i> for CssDeclarationParser {
     ) -> Result<Self::Declaration, ParseError<Self::Error>> {
         let start = input.position();
         while input.next_including_whitespace_and_comments().is_ok() {}
-        declaration(&name, input.slice_from(start)).map_err(ParseError::custom)
+        let name = name.to_string();
+        let value = input.slice_from(start).trim().to_owned();
+        if name.starts_with("--") {
+            if name.len() <= 2 || name.len() > 128 || value.is_empty() || value.len() > 4096 {
+                return Err(ParseError::custom("invalid CSS custom property"));
+            }
+            validate_var_syntax(&value).map_err(ParseError::custom)?;
+            Ok(ParsedDeclaration::Custom(name, value))
+        } else {
+            let name = name.to_ascii_lowercase();
+            validate_var_syntax(&value).map_err(ParseError::custom)?;
+            if !value.contains("var(") {
+                declaration(&name, &value).map_err(ParseError::custom)?;
+            }
+            Ok(ParsedDeclaration::Property(name, value))
+        }
     }
 }
 impl<'i> QualifiedRuleParser<'i> for CssDeclarationParser {
     type Prelude = ();
-    type QualifiedRule = Declaration;
+    type QualifiedRule = ParsedDeclaration;
     type Error = String;
 }
-impl<'i> RuleBodyItemParser<'i, Declaration, String> for CssDeclarationParser {
+impl<'i> RuleBodyItemParser<'i, ParsedDeclaration, String> for CssDeclarationParser {
     fn parse_declarations(&self) -> bool {
         true
     }
@@ -610,8 +658,8 @@ impl<'i> RuleBodyItemParser<'i, Declaration, String> for CssDeclarationParser {
     }
 }
 
-fn expand_palette_colors(source: &str, palette: ThemePalette) -> String {
-    let mut expanded = source.to_owned();
+fn palette_properties(palette: ThemePalette) -> HashMap<String, String> {
+    let mut properties = HashMap::new();
     let blend = |base: u32, foreground: u32, foreground_percent: u32| -> u32 {
         let channel = |shift: u32| {
             let base = (base >> shift) & 0xff;
@@ -648,19 +696,122 @@ fn expand_palette_colors(source: &str, palette: ThemePalette) -> String {
         ("selected", blend(control, palette.accent, 25)),
         ("selected-border", blend(palette.accent, palette.text, 35)),
     ] {
-        expanded = expanded.replace(
-            &format!("var(--nickel-{name})"),
-            &format!("#{:06x}", color & 0x00ff_ffff),
+        properties.insert(
+            format!("--nickel-{name}"),
+            format!("#{:06x}", color & 0x00ff_ffff),
         );
     }
-    expanded
+    for (name, value) in [
+        ("surface-raised", format!("#{:06x}", raised & 0x00ff_ffff)),
+        (
+            "text-muted",
+            format!("#{:06x}", palette.muted & 0x00ff_ffff),
+        ),
+        ("radius-control", "8px".into()),
+        ("radius-card", "12px".into()),
+        ("spacing-control", "8px".into()),
+        ("font-size", "14px".into()),
+        ("line-height", "20px".into()),
+    ] {
+        properties.insert(format!("--nickel-{name}"), value);
+    }
+    properties
+}
+
+fn var_call(source: &str, offset: usize) -> Result<(usize, &str, Option<&str>), String> {
+    let arguments_start = offset + 4;
+    let mut depth = 1_u8;
+    let mut comma = None;
+    for (relative, character) in source[arguments_start..].char_indices() {
+        match character {
+            '(' => {
+                depth = depth
+                    .checked_add(1)
+                    .ok_or("CSS function nesting is too deep")?
+            }
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    let end = arguments_start + relative;
+                    let split = comma.unwrap_or(end);
+                    let name = source[arguments_start..split].trim();
+                    if !name.starts_with("--") || name.len() <= 2 {
+                        return Err("var() needs a custom property name".into());
+                    }
+                    let fallback = comma.map(|comma| source[comma + 1..end].trim());
+                    if fallback.is_some_and(str::is_empty) {
+                        return Err("var() fallback cannot be empty".into());
+                    }
+                    return Ok((end + 1, name, fallback));
+                }
+            }
+            ',' if depth == 1 && comma.is_none() => comma = Some(arguments_start + relative),
+            _ => {}
+        }
+        if depth > 8 {
+            return Err("CSS function nesting is too deep".into());
+        }
+    }
+    Err("unclosed var()".into())
+}
+
+fn validate_var_syntax(source: &str) -> Result<(), String> {
+    let mut cursor = 0;
+    while let Some(relative) = source[cursor..].find("var(") {
+        let offset = cursor + relative;
+        let (end, _, fallback) = var_call(source, offset)?;
+        if let Some(fallback) = fallback {
+            validate_var_syntax(fallback)?;
+        }
+        cursor = end;
+    }
+    Ok(())
+}
+
+fn resolve_value(
+    source: &str,
+    properties: &HashMap<String, String>,
+    resolving: &mut HashSet<String>,
+) -> Result<String, String> {
+    if resolving.len() >= 32 {
+        return Err("CSS custom property chain is too deep".into());
+    }
+    let mut output = String::with_capacity(source.len());
+    let mut cursor = 0;
+    while let Some(relative) = source[cursor..].find("var(") {
+        let offset = cursor + relative;
+        output.push_str(&source[cursor..offset]);
+        let (end, name, fallback) = var_call(source, offset)?;
+        let replacement = if let Some(value) = properties.get(name) {
+            if !resolving.insert(name.to_owned()) {
+                return Err(format!("cyclic CSS custom property {name}"));
+            }
+            let result = resolve_value(value, properties, resolving);
+            resolving.remove(name);
+            result?
+        } else if let Some(fallback) = fallback {
+            resolve_value(fallback, properties, resolving)?
+        } else {
+            return Err(format!("undefined CSS custom property {name}"));
+        };
+        output.push_str(&replacement);
+        if output.len() > 16 * 1024 {
+            return Err("resolved CSS value is too large".into());
+        }
+        cursor = end;
+    }
+    output.push_str(&source[cursor..]);
+    if output.len() > 16 * 1024 {
+        return Err("resolved CSS value is too large".into());
+    }
+    Ok(output)
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct StyleSheet {
     rules: Vec<Rule>,
-    source_with_palette_tokens: Option<String>,
     palette: Option<ThemePalette>,
+    uses_palette: bool,
     reading_direction: ReadingDirection,
 }
 
@@ -673,12 +824,7 @@ impl StyleSheet {
         if source.len() > nickel_core::plugins::MAX_PLUGIN_CSS_BYTES {
             return Err("plugin stylesheet exceeds 256 KiB".into());
         }
-        let expanded = if source.contains("var(--nickel-") {
-            Cow::Owned(expand_palette_colors(source, palette))
-        } else {
-            Cow::Borrowed(source)
-        };
-        let mut parser = Parser::new(&expanded);
+        let mut parser = Parser::new(source);
         let mut rule_parser = CssRuleParser;
         let mut rules = Vec::new();
         for result in StyleSheetParser::new(&mut parser, &mut rule_parser) {
@@ -693,12 +839,14 @@ impl StyleSheet {
                 return Err("plugin stylesheet has more than 256 rules".into());
             }
         }
-        Ok(Self {
+        let sheet = Self {
             rules,
-            source_with_palette_tokens: source.contains("var(--nickel-").then(|| source.to_owned()),
             palette: Some(palette),
+            uses_palette: source.contains("--nickel-"),
             reading_direction: ReadingDirection::LeftToRight,
-        })
+        };
+        sheet.validate()?;
+        Ok(sheet)
     }
 
     pub fn reading_direction(&self) -> ReadingDirection {
@@ -715,18 +863,91 @@ impl StyleSheet {
         if self.palette == Some(palette) {
             return Ok(false);
         }
-        let Some(source) = &self.source_with_palette_tokens else {
-            self.palette = Some(palette);
-            return Ok(false);
-        };
-        let mut updated = Self::compile_with_palette(source, palette)?;
-        updated.reading_direction = self.reading_direction;
-        *self = updated;
-        Ok(true)
+        self.palette = Some(palette);
+        Ok(self.uses_palette)
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        let palette = self
+            .palette
+            .unwrap_or_else(|| ThemePalette::from_appearance(Appearance::default()));
+        let mut root_properties = palette_properties(palette);
+        let mut declared = HashSet::new();
+        for rule in &self.rules {
+            for parsed in &rule.declarations {
+                if let ParsedDeclaration::Custom(name, value) = parsed {
+                    declared.insert(name.clone());
+                    if rule.selectors.iter().any(|selector| selector.root) {
+                        root_properties.insert(name.clone(), value.clone());
+                    }
+                }
+            }
+        }
+        for rule in &self.rules {
+            if rule.selectors.iter().any(|selector| selector.root)
+                && rule
+                    .declarations
+                    .iter()
+                    .any(|value| !matches!(value, ParsedDeclaration::Custom(..)))
+            {
+                return Err(":root accepts only CSS custom properties".into());
+            }
+            let mut properties = root_properties.clone();
+            for parsed in &rule.declarations {
+                if let ParsedDeclaration::Custom(name, value) = parsed {
+                    properties.insert(name.clone(), value.clone());
+                }
+            }
+            for parsed in &rule.declarations {
+                let (name, value) = match parsed {
+                    ParsedDeclaration::Custom(name, _) => (None, format!("var({name})")),
+                    ParsedDeclaration::Property(name, value) => (Some(name), value.clone()),
+                };
+                match resolve_value(&value, &properties, &mut HashSet::new()) {
+                    Ok(value) => {
+                        if let Some(name) = name {
+                            declaration(name, &value)?;
+                        }
+                    }
+                    // A variable supplied by a matching ancestor is checked and typed
+                    // when the real component tree resolves this declaration.
+                    Err(error)
+                        if error
+                            .strip_prefix("undefined CSS custom property ")
+                            .is_some_and(|name| declared.contains(name)) => {}
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+        Ok(())
     }
 
     pub fn resolve(&self, kind: &str, id: Option<&str>, class_name: Option<&str>) -> ControlStyle {
+        self.resolve_with_custom_properties(kind, id, class_name, &HashMap::new())
+    }
+
+    pub(crate) fn resolve_with_custom_properties(
+        &self,
+        kind: &str,
+        id: Option<&str>,
+        class_name: Option<&str>,
+        inherited: &HashMap<String, String>,
+    ) -> ControlStyle {
         let mut style = ControlStyle::default();
+        let mut properties = palette_properties(
+            self.palette
+                .unwrap_or_else(|| ThemePalette::from_appearance(Appearance::default())),
+        );
+        for rule in &self.rules {
+            if rule.selectors.iter().any(|selector| selector.root) {
+                for declaration in &rule.declarations {
+                    if let ParsedDeclaration::Custom(name, value) = declaration {
+                        properties.insert(name.clone(), value.clone());
+                    }
+                }
+            }
+        }
+        properties.extend(inherited.clone());
         for rule in &self.rules {
             if rule
                 .selectors
@@ -734,10 +955,36 @@ impl StyleSheet {
                 .any(|selector| selector.matches(kind, id, class_name, None))
             {
                 for declaration in &rule.declarations {
-                    declaration.apply(&mut style);
+                    if let ParsedDeclaration::Custom(name, value) = declaration {
+                        properties.insert(name.clone(), value.clone());
+                    }
                 }
             }
         }
+        for rule in &self.rules {
+            if rule
+                .selectors
+                .iter()
+                .any(|selector| selector.matches(kind, id, class_name, None))
+            {
+                for parsed in &rule.declarations {
+                    if let ParsedDeclaration::Property(name, value) = parsed
+                        && let Ok(value) = resolve_value(value, &properties, &mut HashSet::new())
+                        && let Ok(declaration) = declaration(name, &value)
+                    {
+                        declaration.apply(&mut style);
+                    }
+                }
+            }
+        }
+        style.custom_properties = properties
+            .iter()
+            .filter_map(|(name, value)| {
+                resolve_value(value, &properties, &mut HashSet::new())
+                    .ok()
+                    .map(|value| (name.clone(), value))
+            })
+            .collect();
         style
     }
 
@@ -748,6 +995,23 @@ impl StyleSheet {
         class_name: Option<&str>,
         state: InteractionState,
     ) -> Option<u32> {
+        self.resolve_interaction_background_with_properties(
+            kind,
+            id,
+            class_name,
+            state,
+            &self.resolve(kind, id, class_name).custom_properties,
+        )
+    }
+
+    pub(crate) fn resolve_interaction_background_with_properties(
+        &self,
+        kind: &str,
+        id: Option<&str>,
+        class_name: Option<&str>,
+        state: InteractionState,
+        properties: &HashMap<String, String>,
+    ) -> Option<u32> {
         let mut background = None;
         for rule in &self.rules {
             if rule
@@ -755,9 +1019,14 @@ impl StyleSheet {
                 .iter()
                 .any(|selector| selector.matches(kind, id, class_name, Some(state)))
             {
-                for declaration in &rule.declarations {
-                    if let Declaration::Background(color) = declaration {
-                        background = Some(*color);
+                for parsed in &rule.declarations {
+                    if let ParsedDeclaration::Property(name, value) = parsed
+                        && matches!(name.as_str(), "background" | "background-color")
+                        && let Ok(value) = resolve_value(value, properties, &mut HashSet::new())
+                        && let Ok(Declaration::Background(color)) = declaration(name, &value)
+                        && color != 0
+                    {
+                        background = Some(color);
                     }
                 }
             }
@@ -766,19 +1035,22 @@ impl StyleSheet {
     }
 
     pub fn estimated_retained_bytes(&self) -> u64 {
-        let mut bytes = self.rules.capacity() * std::mem::size_of::<Rule>()
-            + self
-                .source_with_palette_tokens
-                .as_ref()
-                .map_or(0, String::capacity);
+        let mut bytes = self.rules.capacity() * std::mem::size_of::<Rule>();
         for rule in &self.rules {
             bytes += rule.selectors.capacity() * std::mem::size_of::<Selector>();
-            bytes += rule.declarations.capacity() * std::mem::size_of::<Declaration>();
+            bytes += rule.declarations.capacity() * std::mem::size_of::<ParsedDeclaration>();
             for selector in &rule.selectors {
                 bytes += selector.kind.as_ref().map_or(0, String::capacity);
                 bytes += selector.id.as_ref().map_or(0, String::capacity);
                 bytes += selector.classes.capacity() * std::mem::size_of::<String>();
                 bytes += selector.classes.iter().map(String::capacity).sum::<usize>();
+            }
+            for declaration in &rule.declarations {
+                let (name, value) = match declaration {
+                    ParsedDeclaration::Custom(name, value)
+                    | ParsedDeclaration::Property(name, value) => (name, value),
+                };
+                bytes += name.capacity() + value.capacity();
             }
         }
         bytes as u64
@@ -822,6 +1094,112 @@ mod tests {
         );
         assert!(!sheet.set_palette(light).unwrap());
         assert!(StyleSheet::compile("text { color: var(--unknown); }").is_err());
+    }
+
+    #[test]
+    fn custom_properties_cascade_and_inherit_into_typed_declarations() {
+        let css = StyleSheet::compile(
+            ":root { --theme-text: #112233; --space: 4px; }
+             div.parent { --theme-text: #445566; --space: 12px; }
+             text { color: var(--theme-text); padding: var(--space); }
+             text.local { --theme-text: #778899; }",
+        )
+        .unwrap();
+
+        let root_text = css.resolve("text", None, None);
+        assert_eq!(root_text.color, Some(0xff11_2233));
+        assert_eq!(root_text.padding, Some(Insets::all(4.0)));
+
+        let parent = css.resolve("div", None, Some("parent"));
+        let child =
+            css.resolve_with_custom_properties("text", None, None, &parent.custom_properties);
+        assert_eq!(child.color, Some(0xff44_5566));
+        assert_eq!(child.padding, Some(Insets::all(12.0)));
+
+        let local = css.resolve_with_custom_properties(
+            "text",
+            None,
+            Some("local"),
+            &parent.custom_properties,
+        );
+        assert_eq!(local.color, Some(0xff77_8899));
+    }
+
+    #[test]
+    fn var_fallbacks_nest_and_semantic_defaults_remain_overridable() {
+        let default =
+            StyleSheet::compile("text { color: var(--missing, var(--nickel-text)); }").unwrap();
+        assert_eq!(
+            default.resolve("text", None, None).color,
+            Some(
+                0xff00_0000
+                    | ThemePalette::from_appearance(Appearance::default()).text & 0x00ff_ffff
+            )
+        );
+
+        let overridden = StyleSheet::compile(
+            ":root { --nickel-text: #abcdef; }
+             text { color: var(--missing, var(--nickel-text)); }",
+        )
+        .unwrap();
+        assert_eq!(
+            overridden.resolve("text", None, None).color,
+            Some(0xffab_cdef)
+        );
+    }
+
+    #[test]
+    fn computed_variables_and_interaction_colors_inherit_without_sibling_leaks() {
+        let css = StyleSheet::compile(
+            "div { --base: #112233; --alias: var(--base); }
+             div.other { --base: 12px; }
+             button { --base: #445566; color: var(--alias); }
+             button:hover { background: var(--alias); }",
+        )
+        .unwrap();
+        let parent = css.resolve("div", None, None);
+        let child =
+            css.resolve_with_custom_properties("button", None, None, &parent.custom_properties);
+        assert_eq!(child.color, Some(0xff11_2233));
+        assert_eq!(
+            css.resolve_interaction_background_with_properties(
+                "button",
+                None,
+                None,
+                InteractionState::Hover,
+                &child.custom_properties,
+            ),
+            Some(0xff11_2233)
+        );
+    }
+
+    #[test]
+    fn semantic_metrics_and_variable_chain_limits_are_available() {
+        let css = StyleSheet::compile(
+            "text { font-size: var(--nickel-font-size); line-height: var(--nickel-line-height); }
+             button { padding: var(--nickel-spacing-control); border-radius: var(--nickel-radius-control); }",
+        ).unwrap();
+        assert_eq!(css.resolve("text", None, None).font_size, Some(14.0));
+        assert_eq!(css.resolve("button", None, None).radius, Some(8.0));
+        let mut source = String::from(":root { --v0: #112233;");
+        for index in 1..40 {
+            source.push_str(&format!("--v{index}: var(--v{});", index - 1));
+        }
+        source.push_str("} text { color: var(--v39); }");
+        assert!(StyleSheet::compile(&source).is_err());
+    }
+
+    #[test]
+    fn invalid_custom_property_resolution_is_rejected() {
+        for css in [
+            ":root { --a: var(--b); --b: var(--a); } text { color: var(--a); }",
+            ":root { --size: 9000px; } div { width: var(--size); }",
+            ":root { --color: 12px; } text { color: var(--color); }",
+            "text { color: var(--missing); }",
+            "text { color: var(--missing, var(--also-missing)); }",
+        ] {
+            assert!(StyleSheet::compile(css).is_err(), "{css}");
+        }
     }
 
     #[test]

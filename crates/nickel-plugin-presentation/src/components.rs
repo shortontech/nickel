@@ -511,27 +511,39 @@ fn styled_text<Message>(mut text: Text<Message>, style: &ControlStyle) -> Text<M
     text
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Default)]
 struct InheritedTextStyle {
     color: Option<u32>,
     font_size: Option<f32>,
     line_height: Option<f32>,
+    custom_properties: std::collections::HashMap<String, String>,
 }
 
 impl InheritedTextStyle {
-    fn extend(self, style: &ControlStyle) -> Self {
+    fn extend(&self, style: &ControlStyle) -> Self {
         Self {
             color: style.color.or(self.color),
             font_size: style.font_size.or(self.font_size),
             line_height: style.line_height.or(self.line_height),
+            custom_properties: style.custom_properties.clone(),
         }
     }
 
-    fn apply(self, mut style: ControlStyle) -> ControlStyle {
+    fn apply(&self, mut style: ControlStyle) -> ControlStyle {
         style.color = style.color.or(self.color);
         style.font_size = style.font_size.or(self.font_size);
         style.line_height = style.line_height.or(self.line_height);
         style
+    }
+
+    fn resolve(
+        &self,
+        stylesheet: &StyleSheet,
+        kind: &str,
+        id: Option<&str>,
+        class_name: Option<&str>,
+    ) -> ControlStyle {
+        stylesheet.resolve_with_custom_properties(kind, id, class_name, &self.custom_properties)
     }
 }
 
@@ -1928,7 +1940,7 @@ impl PanelNode {
                 class_name,
                 ..
             } => {
-                let style = stylesheet.resolve("badge", None, class_name.as_deref());
+                let style = inherited.resolve(stylesheet, "badge", None, class_name.as_deref());
                 let text = styled_text(
                     Text::new(count.to_string()).color(0xffffffff).scale(0.72),
                     &inherited.apply(style.clone()),
@@ -1963,7 +1975,8 @@ impl PanelNode {
                 accessibility_state,
                 disabled,
             } => {
-                let style = stylesheet.resolve("div", id.as_deref(), class_name.as_deref());
+                let style =
+                    inherited.resolve(stylesheet, "div", id.as_deref(), class_name.as_deref());
                 let content: AnyView<Message> = match style.display.unwrap_or_default() {
                     Display::Grid => {
                         let mut grid = style
@@ -2097,7 +2110,7 @@ impl PanelNode {
                 background,
                 radius,
             } => {
-                let style = stylesheet.resolve("box", None, class_name.as_deref());
+                let style = inherited.resolve(stylesheet, "box", None, class_name.as_deref());
                 let mut column = Column::new().fill_width();
                 for child in children {
                     column = column.child(child.view_as_scoped_with_slots::<Message>(
@@ -2132,7 +2145,8 @@ impl PanelNode {
                 children,
                 class_name,
             } => {
-                let style = stylesheet.resolve("layer", id.as_deref(), class_name.as_deref());
+                let style =
+                    inherited.resolve(stylesheet, "layer", id.as_deref(), class_name.as_deref());
                 let mut layer = Layer::new();
                 if let Some(width) = style.width {
                     layer = layer.width_length(width);
@@ -2164,7 +2178,8 @@ impl PanelNode {
                 height,
                 ..
             } => {
-                let style = stylesheet.resolve("window", id.as_deref(), class_name.as_deref());
+                let style =
+                    inherited.resolve(stylesheet, "window", id.as_deref(), class_name.as_deref());
                 let width = style.width.unwrap_or(*width);
                 let height = style.height.unwrap_or(*height);
                 let mut layer = Layer::new().width_length(width).height_length(height);
@@ -2205,7 +2220,7 @@ impl PanelNode {
                 children,
                 class_name,
             } => {
-                let style = stylesheet.resolve("row", None, class_name.as_deref());
+                let style = inherited.resolve(stylesheet, "row", None, class_name.as_deref());
                 let mut row = Row::new();
                 if let Some(width) = style.width {
                     row = row.width_length(width);
@@ -2247,7 +2262,7 @@ impl PanelNode {
                 children,
                 class_name,
             } => {
-                let style = stylesheet.resolve("column", None, class_name.as_deref());
+                let style = inherited.resolve(stylesheet, "column", None, class_name.as_deref());
                 let mut column = Column::new();
                 if let Some(width) = style.width {
                     column = column.width_length(width);
@@ -2292,7 +2307,8 @@ impl PanelNode {
                 grow,
                 children,
             } => {
-                let style = stylesheet.resolve("scroll-view", Some(id), class_name.as_deref());
+                let style =
+                    inherited.resolve(stylesheet, "scroll-view", Some(id), class_name.as_deref());
                 let mut column = Column::new().fill_width();
                 if let Some(gap) = style.gap {
                     column = column.gap(gap);
@@ -2335,7 +2351,7 @@ impl PanelNode {
                 class_name,
                 wrap,
             } => {
-                let style = stylesheet.resolve("text", None, class_name.as_deref());
+                let style = inherited.resolve(stylesheet, "text", None, class_name.as_deref());
                 let text_style = inherited.apply(style.clone());
                 let text = styled_text(
                     Text::new(value)
@@ -2375,7 +2391,8 @@ impl PanelNode {
                 } else {
                     "image"
                 };
-                let style = stylesheet.resolve(kind, id.as_deref(), class_name.as_deref());
+                let style =
+                    inherited.resolve(stylesheet, kind, id.as_deref(), class_name.as_deref());
                 let visual = images.get(asset).map_or_else(
                     || {
                         AnyView::new(
@@ -2435,7 +2452,7 @@ impl PanelNode {
                 width,
                 height,
             } => {
-                let style = stylesheet.resolve("progress", None, class_name.as_deref());
+                let style = inherited.resolve(stylesheet, "progress", None, class_name.as_deref());
                 let mut fill = Container::new()
                     .width(*width as f32 * f32::from(*percent) / 100.0)
                     .height(*height as f32);
@@ -2469,7 +2486,7 @@ impl PanelNode {
                 with_margin(AnyView::new(track), &style)
             }
             Self::Spacer { class_name } => {
-                let style = stylesheet.resolve("spacer", None, class_name.as_deref());
+                let style = inherited.resolve(stylesheet, "spacer", None, class_name.as_deref());
                 let grow = style
                     .grow
                     .unwrap_or(if style.width.is_some() { 0.0 } else { 1.0 });
@@ -2483,7 +2500,7 @@ impl PanelNode {
                 }
             }
             Self::Slot { id, class_name } => {
-                let style = stylesheet.resolve("slot", Some(id), class_name.as_deref());
+                let style = inherited.resolve(stylesheet, "slot", Some(id), class_name.as_deref());
                 let mut container = Container::new().id(id.clone()).fill_width().fill_height();
                 if let Some(content) = slots(id) {
                     container = container.child(content);
@@ -2500,7 +2517,8 @@ impl PanelNode {
                 label,
                 action,
             } => {
-                let style = stylesheet.resolve("slider", Some(id), class_name.as_deref());
+                let style =
+                    inherited.resolve(stylesheet, "slider", Some(id), class_name.as_deref());
                 let slider = Slider::on_change_with(
                     Message::from_plugin_scoped(PluginMessage::Value(*action, *value), scope),
                     Message::value,
@@ -2537,7 +2555,8 @@ impl PanelNode {
                 label,
                 action,
             } => {
-                let style = stylesheet.resolve("switch", Some(id), class_name.as_deref());
+                let style =
+                    inherited.resolve(stylesheet, "switch", Some(id), class_name.as_deref());
                 let on = matches!(state.as_str(), "on" | "mixed" | "disabled-on");
                 let mixed = matches!(state.as_str(), "mixed" | "mixed-unavailable");
                 let track = Container::new()
@@ -2604,7 +2623,8 @@ impl PanelNode {
                 action,
                 options,
             } => {
-                let style = stylesheet.resolve("select", Some(id), class_name.as_deref());
+                let style =
+                    inherited.resolve(stylesheet, "select", Some(id), class_name.as_deref());
                 let select = Dropdown::new(
                     Message::from_plugin_scoped(PluginMessage::Click(*action), scope),
                     value,
@@ -2638,7 +2658,8 @@ impl PanelNode {
                 label,
                 action,
             } => {
-                let style = stylesheet.resolve("color-swatch", Some(id), class_name.as_deref());
+                let style =
+                    inherited.resolve(stylesheet, "color-swatch", Some(id), class_name.as_deref());
                 let inner = if let Some(color) = color {
                     let mut fill = Container::new().width(32.0).height(32.0).radius(16.0);
                     fill = if *color == 0 {
@@ -2696,7 +2717,8 @@ impl PanelNode {
                 focus_action,
                 blur_action,
             } => {
-                let style = stylesheet.resolve("text-field", Some(id), class_name.as_deref());
+                let style =
+                    inherited.resolve(stylesheet, "text-field", Some(id), class_name.as_deref());
                 let text_style = inherited.apply(style.clone());
                 let focus_message = focus_action
                     .map(|action| Message::from_plugin_scoped(PluginMessage::Click(action), scope));
@@ -2749,11 +2771,12 @@ impl PanelNode {
                 if let Some(color) = text_style.color {
                     field = field.color(color);
                 }
-                if let Some(background) = stylesheet.resolve_interaction_background(
+                if let Some(background) = stylesheet.resolve_interaction_background_with_properties(
                     "text-field",
                     Some(id),
                     class_name.as_deref(),
                     InteractionState::Focus,
+                    &style.custom_properties,
                 ) {
                     field = field.focus_background(background);
                 }
@@ -2780,7 +2803,8 @@ impl PanelNode {
                 focus_action,
                 blur_action,
             } => {
-                let style = stylesheet.resolve("button", Some(id), class_name.as_deref());
+                let style =
+                    inherited.resolve(stylesheet, "button", Some(id), class_name.as_deref());
                 let text_style = inherited.apply(style.clone());
                 let visual =
                     icon.as_ref()
@@ -2857,27 +2881,30 @@ impl PanelNode {
                         scope,
                     ));
                 }
-                if let Some(background) = stylesheet.resolve_interaction_background(
+                if let Some(background) = stylesheet.resolve_interaction_background_with_properties(
                     "button",
                     Some(id),
                     class_name.as_deref(),
                     InteractionState::Hover,
+                    &style.custom_properties,
                 ) {
                     container = container.hover_background(background);
                 }
-                if let Some(background) = stylesheet.resolve_interaction_background(
+                if let Some(background) = stylesheet.resolve_interaction_background_with_properties(
                     "button",
                     Some(id),
                     class_name.as_deref(),
                     InteractionState::Active,
+                    &style.custom_properties,
                 ) {
                     container = container.pressed_background(background);
                 }
-                if let Some(background) = stylesheet.resolve_interaction_background(
+                if let Some(background) = stylesheet.resolve_interaction_background_with_properties(
                     "button",
                     Some(id),
                     class_name.as_deref(),
                     InteractionState::Focus,
+                    &style.custom_properties,
                 ) {
                     container = container.focus_background(background);
                 }
