@@ -718,7 +718,7 @@
         let mut shell = LiveShell::new_with_session_host(host.clone()).unwrap();
         shell.control_visible = true;
         assert!(
-            shell.plugin_control_host.is_some(),
+            shell.control_plugin_host_ref().is_some(),
             "{:?}",
             shell.plugin_registry()
                 .get(&crate::plugin_panel::control_center_manifest().id)
@@ -731,9 +731,7 @@
             .memory
             .native_ui_bytes
             .is_some());
-        let button = shell
-            .plugin_control_host
-            .as_ref()
+        let button = shell.control_plugin_host_ref()
             .unwrap()
             .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
                 role: nickel_ui::SemanticRole::Button,
@@ -782,9 +780,7 @@
             > 0);
         shell.control_visible = true;
         shell.scene(SurfaceRole::ControlCenter, 420, 720);
-        let button = shell
-            .plugin_control_host
-            .as_ref()
+        let button = shell.control_plugin_host_ref()
             .unwrap()
             .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
                 role: nickel_ui::SemanticRole::Button,
@@ -832,7 +828,7 @@
         let mut shell = LiveShell::new().unwrap();
         let id = &crate::plugin_panel::control_center_manifest().id;
         let key = crate::plugin_panel::control_center_surface_key();
-        assert!(shell.plugin_control_host.is_some());
+        assert!(shell.control_plugin_host_ref().is_some());
         shell.apply_control_visibility(true);
         assert!(shell.native_surface_visible(SurfaceRole::Panel, Some(&key)));
         assert!(!shell.native_surface_visible(SurfaceRole::ControlCenter, None));
@@ -841,7 +837,7 @@
             .is_some());
         assert!(shell.plugin_surface_change_token(&key).is_some());
         assert!(shell.set_plugin_enabled(id, false).unwrap());
-        assert!(shell.plugin_control_host.is_none());
+        assert!(shell.control_plugin_host_ref().is_none());
         assert!(!shell.plugin_surface_matches(&key));
         assert!(!shell.surface_visible(SurfaceRole::ControlCenter));
         assert_eq!(
@@ -850,7 +846,7 @@
         );
         assert!(shell.scene(SurfaceRole::ControlCenter, 420, 720).is_empty());
         assert!(shell.set_plugin_enabled(id, true).unwrap());
-        assert!(shell.plugin_control_host.is_some());
+        assert!(shell.control_plugin_host_ref().is_some());
     }
 
     #[test]
@@ -862,11 +858,15 @@
             &data,
         )
         .unwrap();
-        shell.plugin_control_host = Some(nickel_ui::UiHost::new(application, 420, 720));
+        shell.plugin_panel_extra_hosts.insert(
+            crate::plugin_panel::control_center_surface_key(),
+            (
+                crate::plugin_panel::control_center_surface().clone(),
+                nickel_ui::UiHost::new(application, 420, 720),
+            ),
+        );
         shell.apply_control_visibility(true);
-        let target = shell
-            .plugin_control_host
-            .as_ref()
+        let target = shell.control_plugin_host_ref()
             .unwrap()
             .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
                 role: nickel_ui::SemanticRole::Button,
@@ -890,7 +890,7 @@
         assert!(shell.scene(SurfaceRole::ControlCenter, 420, 720).is_empty());
         assert!(shell.set_plugin_enabled(id, false).unwrap());
         assert!(shell.set_plugin_enabled(id, true).unwrap());
-        assert!(shell.plugin_control_host.is_some());
+        assert!(shell.control_plugin_host_ref().is_some());
     }
 
     #[test]
@@ -902,9 +902,17 @@
             &data,
         )
         .unwrap();
-        shell.plugin_control_host = Some(nickel_ui::UiHost::new(application, 420, 720));
+        shell.plugin_panel_extra_hosts.insert(
+            crate::plugin_panel::control_center_surface_key(),
+            (
+                crate::plugin_panel::control_center_surface().clone(),
+                nickel_ui::UiHost::new(application, 420, 720),
+            ),
+        );
         shell.apply_control_visibility(true);
-        assert!(shell.control_plugin_scene(420, 600).is_empty());
+        assert!(shell
+            .plugin_panel_scene(&crate::plugin_panel::control_center_surface_key(), 420, 600)
+            .is_none());
         let entry = shell
             .plugin_registry()
             .get(&crate::plugin_panel::control_center_manifest().id)
@@ -1109,9 +1117,7 @@
         let mut shell = LiveShell::new_with_session_host(host.clone()).unwrap();
         shell.control_visible = true;
         shell.scene(SurfaceRole::ControlCenter, 420, 720);
-        let suspend = shell
-            .plugin_control_host
-            .as_ref()
+        let suspend = shell.control_plugin_host_ref()
             .unwrap()
             .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
                 role: nickel_ui::SemanticRole::Button,
@@ -1136,9 +1142,7 @@
             Some(crate::platform::SessionAction::Suspend)
         );
         shell.scene(SurfaceRole::ControlCenter, 420, 720);
-        let confirm = shell
-            .plugin_control_host
-            .as_ref()
+        let confirm = shell.control_plugin_host_ref()
             .unwrap()
             .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
                 role: nickel_ui::SemanticRole::Button,
@@ -1160,7 +1164,7 @@
             )
         )), "command count: {}; pending: {:?}; plugin error: {:?}", commands.len(),
             shell.control_host.application().view_state().pending_session_action,
-            shell.plugin_control_host.as_ref().unwrap().application().last_error());
+            shell.control_plugin_host_ref().unwrap().application().last_error());
     }
 
     #[test]
@@ -2808,10 +2812,10 @@
         shell.control_visible = true;
 
         assert!(shell.control_key(Some(KeyCode::ArrowDown), 420, 600));
-        assert!(shell.plugin_control_host.as_ref().unwrap().inspect().controller_target.is_some());
+        assert!(shell.control_plugin_host_ref().unwrap().inspect().controller_target.is_some());
         assert!(shell.control_key(Some(KeyCode::ArrowDown), 420, 600));
         assert!(shell.control_key(Some(KeyCode::ArrowUp), 420, 600));
-        assert!(shell.plugin_control_host.as_ref().unwrap().inspect().controller_target.is_some());
+        assert!(shell.control_plugin_host_ref().unwrap().inspect().controller_target.is_some());
         assert!(shell.control_key(Some(KeyCode::Escape), 420, 600));
         assert!(!shell.control_visible);
     }
@@ -2826,8 +2830,7 @@
         assert!(controller.control_controller(nickel_ui::ControllerAction::Down, 420, 600));
         assert!(
             controller
-                .plugin_control_host
-                .as_ref()
+                .control_plugin_host_ref()
                 .unwrap()
                 .inspect()
                 .controller_target
@@ -2859,9 +2862,7 @@
         let mut shell = LiveShell::new().unwrap();
         shell.control_visible = true;
         let _ = shell.scene(SurfaceRole::ControlCenter, 420, 600);
-        let target = shell
-            .plugin_control_host
-            .as_ref()
+        let target = shell.control_plugin_host_ref()
             .unwrap()
             .query(&nickel_ui::SemanticSelector::Role(
                 nickel_ui::SemanticRole::Button,

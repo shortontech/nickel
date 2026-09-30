@@ -561,7 +561,6 @@ pub struct LiveShell {
     panel_origin_x: i32,
     panel_origin_y: i32,
     control_host: ControlCenterHost,
-    plugin_control_host: Option<nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>>,
     control_change_token: HostChangeToken,
     control_deadline: Option<Instant>,
     projection_chooser: nickel_core::display_projection::ProjectionChooser,
@@ -1642,7 +1641,6 @@ impl LiveShell {
             panel_origin_x: 0,
             panel_origin_y: 0,
             control_host,
-            plugin_control_host: None,
             control_change_token: HostChangeToken::default(),
             control_deadline: Some(Instant::now()),
             projection_chooser: Default::default(),
@@ -1719,7 +1717,14 @@ impl LiveShell {
                 data.to_string(),
             ) {
                 Ok(application) => {
-                    shell.plugin_control_host = Some(nickel_ui::UiHost::new(application, 420, 720));
+                    let surface = crate::plugin_panel::control_center_surface().clone();
+                    shell.plugin_panel_extra_hosts.insert(
+                        crate::plugin_panel::control_center_surface_key(),
+                        (
+                            surface.clone(),
+                            nickel_ui::UiHost::new(application, surface.width, surface.height),
+                        ),
+                    );
                     shell.plugin_registry.mark_running(id)?;
                 }
                 Err(error) => {
@@ -2444,8 +2449,7 @@ impl LiveShell {
             SurfaceRole::ControlCenter => self
                 .control_plugin_active()
                 .then(|| {
-                    self.plugin_control_host
-                        .as_ref()
+                    self.control_plugin_host_ref()
                         .unwrap()
                         .remote_access_protected()
                 })
@@ -2517,8 +2521,7 @@ impl LiveShell {
             }
             SurfaceRole::Launcher => self.launcher_host_ref().map(|host| host.layout_snapshot()),
             SurfaceRole::ControlCenter => self
-                .plugin_control_host
-                .as_ref()
+                .control_plugin_host_ref()
                 .map(|host| host.layout_snapshot())
                 .or_else(|| Some(self.control_host.layout_snapshot())),
             SurfaceRole::Notification => self
@@ -2565,7 +2568,12 @@ impl LiveShell {
                 .unwrap_or_default(),
             SurfaceRole::ControlCenter => {
                 if self.control_plugin_active() {
-                    self.control_plugin_scene(width, height)
+                    self.plugin_panel_scene(
+                        &crate::plugin_panel::control_center_surface_key(),
+                        width,
+                        height,
+                    )
+                    .unwrap_or_default()
                 } else if self.control_host.application().view_state().projection_only {
                     self.sync_control_host(width, height);
                     self.control_host.commands().to_vec()
@@ -3064,7 +3072,7 @@ impl LiveShell {
                     || self.plugin_panel_host.is_some()
                     || !self.plugin_panel_extra_hosts.is_empty()
                     || self.plugin_notification_host.is_some()
-                    || self.plugin_control_host.is_some()
+                    || self.control_plugin_host_ref().is_some()
             }
             SurfaceRole::Launcher => self.launcher_visible,
             SurfaceRole::ControlCenter => self.control_visible && self.control_surface_available(),
@@ -3225,6 +3233,7 @@ impl LiveShell {
                         && **key != crate::plugin_panel::volume_osd_surface_key()
                         && **key != crate::plugin_panel::run_surface_key()
                         && **key != crate::plugin_panel::launcher_surface_key()
+                        && **key != crate::plugin_panel::control_center_surface_key()
                 })
                 .map(|(key, (surface, _))| (key.clone(), surface.clone())),
         );
@@ -3267,7 +3276,7 @@ impl LiveShell {
                 crate::plugin_panel::notification_surface().clone(),
             ));
         }
-        if self.plugin_control_host.is_some() {
+        if self.control_plugin_host_ref().is_some() {
             panels.push((
                 crate::plugin_panel::control_center_surface_key(),
                 crate::plugin_panel::control_center_surface().clone(),
@@ -3384,7 +3393,7 @@ impl LiveShell {
             if !self.control_plugin_active() {
                 return None;
             }
-            let inspection = self.plugin_control_host.as_ref()?.inspect();
+            let inspection = self.control_plugin_host_ref()?.inspect();
             return Some(HostChangeToken {
                 frame_generation: inspection
                     .frame_generation
@@ -3749,6 +3758,8 @@ impl LiveShell {
         } else {
             false
         };
+        let control_data = (*key == crate::plugin_panel::control_center_surface_key())
+            .then(|| self.control_plugin_data(height));
         let slots = self.plugin_slot_projection(&key.plugin_id);
         let windows = self.external_plugin_windows(&key.plugin_id);
         let applications = self.external_plugin_applications(&key.plugin_id);
@@ -3759,6 +3770,11 @@ impl LiveShell {
         let result = (|| {
             let host = self.plugin_panel_host_for(key)?;
             let projected = (|| -> Result<bool, String> {
+                let control_changed = control_data
+                    .as_ref()
+                    .map(|data| host.application_mut().sync_data(data))
+                    .transpose()?
+                    .unwrap_or(false);
                 let keyboard_changed = keyboard_data
                     .as_ref()
                     .map(|data| host.application_mut().sync_data(data))
@@ -3775,7 +3791,7 @@ impl LiveShell {
                 .filter_map(|(field, value)| value.map(|value| (field, value)))
                 .collect::<Vec<_>>();
                 let resource_changed = host.application_mut().sync_host_data_fields(&fields)?;
-                Ok(keyboard_changed || resource_changed)
+                Ok(control_changed || keyboard_changed || resource_changed)
             })();
             let projected = match projected {
                 Ok(changed) => changed,
@@ -4596,6 +4612,8 @@ impl LiveShell {
             Self::retire_run_plugin_state
         } else if id == crate::plugin_panel::launcher_manifest().id {
             Self::retire_launcher_plugin_state
+        } else if id == crate::plugin_panel::control_center_manifest().id {
+            Self::retire_control_plugin_state
         } else {
             return self.fail_installed_plugin_runtime(id, error);
         };
@@ -4637,7 +4655,7 @@ impl LiveShell {
     }
 
     fn retire_control_plugin_state(&mut self) {
-        self.plugin_control_host = None;
+        self.retire_extra_panel_plugin_state(&crate::plugin_panel::control_center_manifest().id);
         if self.control_visible && !self.control_surface_available() {
             self.set_control_visible(false);
         }
@@ -5018,7 +5036,14 @@ impl LiveShell {
                 data.to_string(),
             )
             .map(|application| {
-                self.plugin_control_host = Some(nickel_ui::UiHost::new(application, 420, 720));
+                let surface = crate::plugin_panel::control_center_surface().clone();
+                self.plugin_panel_extra_hosts.insert(
+                    crate::plugin_panel::control_center_surface_key(),
+                    (
+                        surface.clone(),
+                        nickel_ui::UiHost::new(application, surface.width, surface.height),
+                    ),
+                );
             })
         } else if id == crate::plugin_panel::codex_projects_manifest().id {
             let projection = nickel_codex_ui::ProjectMenuProjection::from_state(
@@ -5165,8 +5190,7 @@ impl LiveShell {
         push(
             "control",
             self.control_deadline.or_else(|| {
-                self.plugin_control_host
-                    .as_ref()
+                self.control_plugin_host_ref()
                     .and_then(|host| host.next_deadline())
             }),
         );
@@ -5209,7 +5233,7 @@ impl LiveShell {
                 .map(|host| host_token(host.inspect())),
             SurfaceRole::ControlCenter => self
                 .control_plugin_active()
-                .then(|| host_token(self.plugin_control_host.as_ref().unwrap().inspect()))
+                .then(|| host_token(self.control_plugin_host_ref().unwrap().inspect()))
                 .or(Some(self.control_change_token)),
             SurfaceRole::Notification => {
                 let trusted = self.trusted_notification_visible();
@@ -5803,6 +5827,18 @@ impl LiveShell {
         self.plugin_panel_host_for(&crate::plugin_panel::launcher_surface_key())
     }
 
+    fn control_plugin_host_ref(
+        &self,
+    ) -> Option<&nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>> {
+        self.plugin_panel_host_ref(&crate::plugin_panel::control_center_surface_key())
+    }
+
+    fn control_plugin_host_mut(
+        &mut self,
+    ) -> Option<&mut nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>> {
+        self.plugin_panel_host_for(&crate::plugin_panel::control_center_surface_key())
+    }
+
     fn reconcile_plugin_surface_root(
         &mut self,
         key: &nickel_core::plugins::PluginSurfaceKey,
@@ -5902,7 +5938,7 @@ impl LiveShell {
             if !self.native_surface_visible(SurfaceRole::Panel, Some(key)) {
                 return false;
             }
-            let host = self.plugin_control_host.as_ref().unwrap();
+            let host = self.control_plugin_host_ref().unwrap();
             let (event, authority) =
                 internal_normalized_ingress(input, None, "control-center", host.inspect(), None);
             return self
@@ -6695,7 +6731,7 @@ impl LiveShell {
             SurfaceRole::Launcher => self.launcher_host_ref()?.inspect(),
             SurfaceRole::ControlCenter => self
                 .control_plugin_active()
-                .then(|| self.plugin_control_host.as_ref().unwrap().inspect())
+                .then(|| self.control_plugin_host_ref().unwrap().inspect())
                 .or_else(|| {
                     self.control_host
                         .application()
@@ -7200,10 +7236,7 @@ impl LiveShell {
                     return None;
                 }
                 let bounds = if self.control_plugin_active() {
-                    taskbar_plugin_control_bounds(
-                        self.plugin_control_host.as_ref()?,
-                        "session-lock",
-                    )?
+                    taskbar_plugin_control_bounds(self.control_plugin_host_ref()?, "session-lock")?
                 } else {
                     self.control_host
                         .semantic_targets_for_message(&ControlAction::SessionAction(
@@ -8729,8 +8762,7 @@ impl LiveShell {
                 .is_some_and(|host| host.pointer_interaction_active())
             || self.control_host.pointer_interaction_active()
             || self
-                .plugin_control_host
-                .as_ref()
+                .control_plugin_host_ref()
                 .is_some_and(|host| host.pointer_interaction_active())
             || self.keyboard_host.pointer_interaction_active()
             || self.keyboard_resize.is_some()
@@ -11138,7 +11170,7 @@ impl LiveShell {
     }
 
     fn control_plugin_action_allowed(&self, action: &ControlAction) -> bool {
-        if !self.control_visible || self.plugin_control_host.is_none() {
+        if !self.control_visible || self.control_plugin_host_ref().is_none() {
             return false;
         }
         match action {
@@ -11280,43 +11312,13 @@ impl LiveShell {
     }
 
     fn control_plugin_active(&self) -> bool {
-        self.plugin_control_host.is_some()
+        self.control_plugin_host_ref().is_some()
             && !self.control_host.application().view_state().projection_only
     }
 
     pub(crate) fn control_surface_available(&self) -> bool {
-        self.plugin_control_host.is_some()
+        self.control_plugin_host_ref().is_some()
             || self.control_host.application().view_state().projection_only
-    }
-
-    fn control_plugin_scene(&mut self, width: u32, height: u32) -> Vec<PaintCommand> {
-        let data = self.control_plugin_data(height);
-        let Some(host) = self.plugin_control_host.as_mut() else {
-            return Vec::new();
-        };
-        let (commands, bytes) = match render_plugin_host(
-            host,
-            Some(data.to_string()),
-            HostBatch {
-                surface_size: Some((width, height)),
-                events: vec![HostEvent::Poll],
-                ..HostBatch::default()
-            },
-        ) {
-            Ok(frame) => frame,
-            Err(error) => {
-                self.fail_control_plugin_runtime(error);
-                return Vec::new();
-            }
-        };
-        let _ = self.plugin_registry.record_memory(
-            &crate::plugin_panel::control_center_manifest().id,
-            nickel_core::plugins::PluginMemory {
-                native_ui_bytes: Some(bytes),
-                ..nickel_core::plugins::PluginMemory::default()
-            },
-        );
-        commands
     }
 
     fn control_plugin_event(
@@ -11327,7 +11329,7 @@ impl LiveShell {
         authority: Option<nickel_ui::NormalizedIngressAuthority>,
     ) -> nickel_ui::HostEventOutcome {
         let data = self.control_plugin_data(size.1);
-        let Some(host) = self.plugin_control_host.as_mut() else {
+        let Some(host) = self.control_plugin_host_mut() else {
             return nickel_ui::HostEventOutcome::default();
         };
         let changed = match host.application_mut().sync_data(&data) {

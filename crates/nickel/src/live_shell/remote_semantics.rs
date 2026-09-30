@@ -186,7 +186,7 @@ impl LiveShell {
             SurfaceRole::ControlCenter => {
                 if self.control_plugin_active() {
                     Ok(observe_only(plugin_projection(
-                        self.plugin_control_host.as_ref().unwrap(),
+                        self.control_plugin_host_ref().unwrap(),
                         |_, _| false,
                     )?))
                 } else if self.control_host.application().view_state().projection_only {
