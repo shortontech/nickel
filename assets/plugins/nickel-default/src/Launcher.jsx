@@ -5,8 +5,8 @@ export function Launcher(props) {
     const data = {...{query:'',results:[],dashboard:[],places:[],projects:[],dashboardVisible:false,view:'applications',resultPage:0,resultPageCount:1,dashboardPage:0,dashboardPageCount:1,accountName:'',logoutAvailable:false,codexAvailable:false}, ...props?.data};
     const [logoutOpen, setLogoutOpen] = useState(false);
     const [menuTarget, setMenuTarget] = useState(null);
-    const openAppMenu = (item, kind, anchor) => {
-        setMenuTarget({id: item.id, index: item.index, pinned: item.pinned, kind, anchor});
+    const openAppMenu = (item, anchor) => {
+        setMenuTarget({id: item.id, pinned: item.pinned, anchor});
         nickel.openMenu("launcher-app-actions");
     };
     const escape = () => data.query
@@ -14,7 +14,7 @@ export function Launcher(props) {
         : nickel.request({type: "dismiss-launcher"});
     const submit = () => {
         const first = !data.dashboardVisible && data.results[0];
-        if (first) nickel.request({type: "launcher-activate-result", index: first.index, id: first.id});
+        if (first) nickel.applications.launch(first.id);
     };
     return <Window id="launcher" title="Nickel Launcher" className="launcher-window"
         onEscape={escape} onSubmit={!data.dashboardVisible && data.results.length ? submit : undefined}>
@@ -28,12 +28,12 @@ export function Launcher(props) {
                 <Button id={"launcher-place-" + place.index}
                     className="launcher-app-button"
                     icon={"place:" + place.index} showLabel={true}
-                    onContextMenu={() => openAppMenu(place, "dashboard", "launcher-place-" + place.index)}
-                    onClick={() => nickel.request({type: "applications.launch", id: place.id})}>
+                    onContextMenu={() => openAppMenu(place, "launcher-place-" + place.index)}
+                    onClick={() => nickel.applications.launch(place.id)}>
                     {place.name}
                 </Button>
                 <Button id={"launcher-pin-place-" + place.index} className="launcher-pin-button"
-                    onClick={() => nickel.request({type: "applications.togglePin", id: place.id})}>
+                    onClick={() => nickel.applications.togglePin(place.id)}>
                     {place.pinned ? "Unpin" : "Pin"}
                 </Button>
             </Row>)}
@@ -67,8 +67,8 @@ export function Launcher(props) {
                 <Button id={"launcher-dashboard-" + app.index}
                     className="launcher-icon-button"
                     icon={"dashboard:" + app.index} accessibilityLabel={app.name}
-                    onContextMenu={() => openAppMenu(app, "dashboard", "launcher-dashboard-" + app.index)}
-                    onClick={() => nickel.request({type: "applications.launch", id: app.id})}>
+                    onContextMenu={() => openAppMenu(app, "launcher-dashboard-" + app.index)}
+                    onClick={() => nickel.applications.launch(app.id)}>
                     {app.name.charAt(0).toUpperCase()}
                 </Button>
                 <Text className="launcher-app-name" wrap={true}>{app.name}</Text>
@@ -91,13 +91,13 @@ export function Launcher(props) {
                 <Button id={"launcher-result-" + result.index}
                     className="launcher-app-button"
                     icon={"search:" + result.index} showLabel={true}
-                    onContextMenu={() => openAppMenu(result, "search", "launcher-result-" + result.index)}
-                    onClick={() => nickel.request({type: "launcher-activate-result", index: result.index, id: result.id})}>
+                    onContextMenu={() => openAppMenu(result, "launcher-result-" + result.index)}
+                    onClick={() => nickel.applications.launch(result.id)}>
                     {result.name}
                 </Button>
                 <Button id={"launcher-pin-result-" + result.index} className="launcher-pin-button"
                     accessibilityLabel={(result.pinned ? "Unpin " : "Pin ") + result.name}
-                    onClick={() => nickel.request({type: "applications.togglePin", id: result.id})}>
+                    onClick={() => nickel.applications.togglePin(result.id)}>
                     {result.pinned ? "Unpin" : "Pin"}
                 </Button>
             </Row>)}
@@ -135,13 +135,10 @@ export function Launcher(props) {
         </Dialog>
         {menuTarget ? <Menu id="launcher-app-actions" anchor={menuTarget.anchor} open={true}>
             <MenuItem id="launch" onClick={() => {
-                if (menuTarget.kind === "search") {
-                    nickel.request({type: "launcher-activate-result", index: menuTarget.index, id: menuTarget.id});
-                } else {
-                    nickel.request({type: "applications.launch", id: menuTarget.id});
-                }
+                nickel.applications.launch(menuTarget.id);
+                setMenuTarget(null);
             }}>Launch</MenuItem>
-            <MenuItem id="toggle-pin" onClick={() => nickel.request({type: "applications.togglePin", id: menuTarget.id})}>
+            <MenuItem id="toggle-pin" onClick={() => nickel.applications.togglePin(menuTarget.id)}>
                 {menuTarget.pinned ? "Unpin from Nickel Bar" : "Pin to Nickel Bar"}
             </MenuItem>
             {data.pinSaveFailed ? <MenuItem id="retry-pin-save" onClick={() => nickel.request({type: "applications-retry-pin-save"})}>
