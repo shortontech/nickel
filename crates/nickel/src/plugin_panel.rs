@@ -3279,6 +3279,45 @@ mod tests {
     use nickel_ui::Application;
 
     #[test]
+    fn one_package_entry_renders_sibling_windows_with_shared_modules() {
+        let mut package = PluginPackage::load(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/plugins/example-two-windows"
+        ))
+        .unwrap();
+        package.source = "export default function App() { return [h(Window, {id:'home',width:400,height:240}, h(Text, {}, 'Home')), h(Window, {id:'details',width:450,height:260}, h(Text, {}, 'Details'))]; }".into();
+        PluginPanelApplication::validate_package(&package).unwrap();
+        let runtime = PluginPanelApplication::shared_package_runtime(
+            &package,
+            &Default::default(),
+            &package.manifest.surfaces[0],
+        )
+        .unwrap();
+        for surface in &package.manifest.surfaces {
+            let app = PluginPanelApplication::from_package_surface_with_runtime(
+                &package,
+                &Default::default(),
+                surface,
+                PluginImages::new(),
+                Some(runtime.clone()),
+            )
+            .unwrap();
+            assert_eq!(app.resolved_surface(surface).unwrap().id, surface.id);
+            assert!(std::rc::Rc::ptr_eq(&app.shared_runtime(), &runtime));
+        }
+        package.source = package.source.replace("id:'details'", "id:'home'");
+        assert!(
+            PluginPanelApplication::validate_package(&package)
+                .unwrap_err()
+                .contains("duplicate")
+        );
+        package.source = package
+            .source
+            .replace("id:'home',width:450", "id:'ungranted',width:450");
+        assert!(PluginPanelApplication::validate_package(&package).is_err());
+    }
+
+    #[test]
     fn package_host_loads_shared_modules_and_imported_css() {
         let mut package = PluginPackage::load(concat!(
             env!("CARGO_MANIFEST_DIR"),

@@ -344,6 +344,8 @@ pub struct PluginActivationSettings {
 
 #[derive(Serialize)]
 struct PluginApproval {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    composition: Option<crate::package_composition::ShellPackageComposition>,
     author: Option<String>,
     version: Option<String>,
     entry: String,
@@ -361,6 +363,7 @@ struct PluginApproval {
 impl PluginApproval {
     fn from_manifest(manifest: &PluginManifest, source_digest: &str) -> Self {
         Self {
+            composition: manifest.composition.clone(),
             author: manifest.author.clone(),
             version: manifest.version.clone(),
             entry: manifest.entry.clone(),
@@ -629,6 +632,8 @@ impl Default for PluginPreferences {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct PluginManifest {
+    #[serde(default)]
+    pub composition: Option<crate::package_composition::ShellPackageComposition>,
     pub api_version: u16,
     pub id: String,
     pub name: String,
@@ -1018,6 +1023,14 @@ impl PluginManifest {
     }
 
     pub fn validate(&self) -> Result<(), String> {
+        if let Some(composition) = &self.composition {
+            composition
+                .validate()
+                .map_err(|error| format!("invalid composition: {error:?}"))?;
+            if composition.id != self.id || self.version.as_deref() != Some(&composition.version) {
+                return Err("composition identity must match its package manifest".into());
+            }
+        }
         if self.api_version != PLUGIN_API_VERSION {
             return Err(format!(
                 "unsupported plugin API version {}",
@@ -1630,6 +1643,29 @@ mod tests {
         )
         .unwrap();
         assert!(PluginPackage::load(directory.path()).is_err());
+    }
+
+    #[test]
+    fn composition_is_bound_to_package_identity_and_approval() {
+        let mut manifest = PluginManifest::from_json(VALID).unwrap();
+        manifest.version = Some("0.2.0".into());
+        let mut composition: crate::package_composition::ShellPackageComposition = serde_json::from_value(serde_json::json!({
+            "api_version":1,"id":manifest.id,"version":"0.2.0","exports":{"shell.taskbar":"./taskbar.js#Taskbar"}
+        })).unwrap();
+        manifest.composition = Some(composition.clone());
+        manifest.validate().unwrap();
+        let approved = PluginApproval::fingerprint(&manifest, &digest_source("source"));
+        composition
+            .exports
+            .insert("shell.taskbar".into(), "./replacement.js#Taskbar".into());
+        manifest.composition = Some(composition.clone());
+        assert_ne!(
+            approved,
+            PluginApproval::fingerprint(&manifest, &digest_source("source"))
+        );
+        composition.id = "other-shell".into();
+        manifest.composition = Some(composition);
+        assert!(manifest.validate().unwrap_err().contains("identity"));
     }
 
     #[test]

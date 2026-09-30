@@ -67,6 +67,8 @@ fn compile_jsx_modules(
             "react",
             "--jsxFactory",
             "h",
+            "--jsxFragmentFactory",
+            "Fragment",
             "--target",
             "ES2020",
             "--lib",

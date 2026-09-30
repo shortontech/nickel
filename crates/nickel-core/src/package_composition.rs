@@ -511,6 +511,20 @@ fn valid_local_id(value: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
 }
 fn valid_module_path(value: &str) -> bool {
+    let (path, export) = value
+        .split_once('#')
+        .map_or((value, None), |(path, export)| (path, Some(export)));
+    if export.is_some_and(|name| {
+        name.is_empty()
+            || name.len() > 128
+            || !name.bytes().enumerate().all(|(index, byte)| {
+                byte.is_ascii_alphabetic()
+                    || matches!(byte, b'_' | b'$')
+                    || (index > 0 && byte.is_ascii_digit())
+            })
+    }) {
+        return false;
+    }
     value.len() <= 512
         && !value.chars().any(char::is_control)
         && value.starts_with("./")
@@ -519,7 +533,7 @@ fn valid_module_path(value: &str) -> bool {
         && value[2..]
             .split('/')
             .all(|part| !matches!(part, "" | "." | ".."))
-        && (value.ends_with(".js") || value.ends_with(".jsx"))
+        && (path.ends_with(".js") || path.ends_with(".jsx"))
 }
 
 #[cfg(test)]

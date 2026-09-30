@@ -3245,6 +3245,33 @@ fn parse_panel_for_manifest(
     manifest: &PluginManifest,
     expected_surface_id: Option<&str>,
 ) -> Result<PanelNode, String> {
+    if let Some(roots) = value.as_array() {
+        if roots.len() > 32 {
+            return Err("package render exceeds 32 top-level windows".into());
+        }
+        let mut identities = std::collections::HashSet::new();
+        let mut selected = None;
+        for root in roots {
+            if root.is_null() || root == &Value::Bool(false) {
+                continue;
+            }
+            if root.get("kind").and_then(Value::as_str) != Some("window") {
+                return Err("package fragments may contain only top-level windows".into());
+            }
+            let id = root
+                .get("id")
+                .and_then(Value::as_str)
+                .ok_or("windows in a package fragment need distinct surface identities")?;
+            if !identities.insert(id) {
+                return Err(format!("duplicate top-level window {id:?}"));
+            }
+            let node = parse_panel_for_manifest(root, manifest, Some(id))?;
+            if expected_surface_id == Some(id) {
+                selected = Some(node);
+            }
+        }
+        return selected.ok_or_else(|| "package fragment did not render its host window".into());
+    }
     let mut root = value.clone();
     if root.get("kind").and_then(Value::as_str) == Some("window") && root.get("id").is_none() {
         let id = expected_surface_id
