@@ -224,7 +224,26 @@ function __nickelConnectivityEffect(resource, operation, value, identity = false
     effect[identity ? 'id' : 'value'] = value;
     __effects.push(effect);
 }
+function __nickelAppearanceEffect(resource, change) {
+    const snapshot = nickel[resource].get();
+    if (!snapshot.available || !Number.isSafeInteger(snapshot.generation) || snapshot.generation < 1) throw Error(resource + ' capability is unavailable');
+    if (snapshot.writable !== true) throw Error(resource + ' control capability is unavailable');
+    const transaction = {generation:snapshot.generation, prior:snapshot.configured};
+    transaction[resource === 'appearance' ? 'requested' : 'change'] = JSON.parse(JSON.stringify(change));
+    __effects.push({type:resource === 'appearance' ? 'appearance.set' : 'wallpaper.change', transaction});
+}
 const nickel = Object.freeze({
+    appearance: Object.freeze({
+        get() { return __nickelResource('appearance', {available:false,reason:'Appearance read capability is unavailable'}); },
+        set(preferences) { __nickelAppearanceEffect('appearance', preferences); }
+    }),
+    wallpaper: Object.freeze({
+        get() { return __nickelResource('wallpaper', {available:false,reason:'Wallpaper read capability is unavailable',images:[]}); },
+        listImages() { return this.get().images; },
+        setPosition(position) { __nickelAppearanceEffect('wallpaper', {kind:'set_position',position}); },
+        resetCustomImage() { __nickelAppearanceEffect('wallpaper', {kind:'reset_custom_image'}); },
+        selectImage(id) { __nickelAppearanceEffect('wallpaper', {kind:'select_approved_image',image_id:__nickelIdentity(id)}); }
+    }),
     audio: Object.freeze({
         get() { return __nickelResource('audio', {available:false,muted:false,percent:0,devices:[]}); },
         outputs() { return this.get().devices; },

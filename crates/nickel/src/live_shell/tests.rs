@@ -3277,7 +3277,9 @@ fn settings_transition_reprojects_light_and_dark_appearance() {
     let light = shell.palette;
     assert_eq!(
         light,
-        ThemePalette::from_appearance(settings.resolve_appearance(Default::default()))
+        ThemePalette::from_appearance(
+            settings.resolve_appearance(crate::appearance_capabilities::system_appearance())
+        )
     );
 
     settings.theme = ThemePreference::Dark;
@@ -3285,7 +3287,9 @@ fn settings_transition_reprojects_light_and_dark_appearance() {
     assert_ne!(shell.palette, light);
     assert_eq!(
         shell.palette,
-        ThemePalette::from_appearance(settings.resolve_appearance(Default::default()))
+        ThemePalette::from_appearance(
+            settings.resolve_appearance(crate::appearance_capabilities::system_appearance())
+        )
     );
 }
 

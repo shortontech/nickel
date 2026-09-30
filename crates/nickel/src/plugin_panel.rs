@@ -402,6 +402,10 @@ pub enum PluginEffect {
         plugin_id: String,
         effect: crate::associations_capabilities::AssociationsEffect,
     },
+    Appearance {
+        plugin_id: String,
+        effect: crate::appearance_capabilities::AppearanceEffect,
+    },
     Connectivity {
         plugin_id: String,
         effect: crate::connectivity_capabilities::ConnectivityEffect,
@@ -1873,6 +1877,8 @@ impl PluginPanelApplication {
                     | "wifi"
                     | "bluetooth"
                     | "associations"
+                    | "appearance"
+                    | "wallpaper"
             )
         }) {
             return Err("unknown host data field".into());
@@ -1926,6 +1932,8 @@ impl PluginPanelApplication {
             return Err("display data requires display-control".into());
         }
         for (field, capability) in [
+            ("appearance", PluginCapability::AppearanceRead),
+            ("wallpaper", PluginCapability::WallpaperRead),
             ("wifi", PluginCapability::NetworkRead),
             ("bluetooth", PluginCapability::BluetoothRead),
             ("associations", PluginCapability::AssociationsRead),
@@ -2897,6 +2905,49 @@ impl nickel_ui::Application for PluginPanelApplication {
                             });
                             match request {
                                 Ok(effect) => approved.push(PluginEffect::Associations {
+                                    plugin_id: self.manifest.id.clone(),
+                                    effect,
+                                }),
+                                Err(error) => {
+                                    self.last_error = Some(error);
+                                    return;
+                                }
+                            }
+                        }
+                        _ if effect.get("type").and_then(Value::as_str).is_some_and(
+                            |operation| {
+                                operation.starts_with("appearance.")
+                                    || operation.starts_with("wallpaper.")
+                            },
+                        ) =>
+                        {
+                            let request =
+                                crate::appearance_capabilities::AppearanceEffect::parse(&effect)
+                                    .and_then(|request| {
+                                        if !self
+                                            .manifest
+                                            .capabilities
+                                            .contains(&request.capability())
+                                            || !self
+                                                .manifest
+                                                .capabilities
+                                                .contains(&request.read_capability())
+                                        {
+                                            return Err(
+                                                "appearance or wallpaper control is not granted"
+                                                    .into(),
+                                            );
+                                        }
+                                        let data: Value = self
+                                            .projection_data
+                                            .as_deref()
+                                            .and_then(|data| serde_json::from_str(data).ok())
+                                            .ok_or("appearance snapshot is unavailable")?;
+                                        request.validate(&data[request.resource()])?;
+                                        Ok(request)
+                                    });
+                            match request {
+                                Ok(effect) => approved.push(PluginEffect::Appearance {
                                     plugin_id: self.manifest.id.clone(),
                                     effect,
                                 }),
@@ -5789,6 +5840,69 @@ mod tests {
         .unwrap();
         assert!(app.sync_host_data_field("audio", &next).unwrap());
         assert!(format!("{:?}", app.node).contains("65"));
+    }
+
+    #[test]
+    fn appearance_clients_require_domain_read_and_control_grants() {
+        let mut manifest = PluginPackage::load(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/plugins/example-window"
+        ))
+        .unwrap()
+        .manifest;
+        for (resource, read, control, snapshot, call) in [
+            (
+                "appearance",
+                PluginCapability::AppearanceRead,
+                PluginCapability::AppearanceControl,
+                serde_json::json!({"available":true,"writable":true,"generation":1,"configured":{"theme":"system","accent_hue":null,"accent_intensity":null,"reduce_transparency":false,"animations":"normal"}}),
+                "nickel.appearance.set({theme:'dark',accent_hue:271,accent_intensity:63,reduce_transparency:true,animations:'reduced'})",
+            ),
+            (
+                "wallpaper",
+                PluginCapability::WallpaperRead,
+                PluginCapability::WallpaperControl,
+                serde_json::json!({"available":true,"writable":true,"generation":1,"configured":{"custom_image_configured":false,"position":"fill"},"images":[{"id":"approved"}]}),
+                "nickel.wallpaper.selectImage('approved')",
+            ),
+        ] {
+            let source = format!(
+                "function App() {{ return h(Window, {{id:'main',width:520,height:340}}, h(Button, {{id:'apply',onClick:()=>{call}}}, 'Apply')); }}"
+            );
+            let mut data = serde_json::json!({});
+            data[resource] = snapshot.clone();
+            for grants in [vec![], vec![read], vec![control], vec![read, control]] {
+                manifest.capabilities = grants.clone();
+                let mut app = PluginPanelApplication::new_with_manifest(
+                    &source,
+                    &manifest,
+                    Some(data.to_string()),
+                )
+                .unwrap();
+                assert_eq!(
+                    app.sync_host_data_field(resource, &snapshot).is_ok(),
+                    grants.contains(&read)
+                );
+                app.update(app.button_message("apply").unwrap());
+                assert_eq!(
+                    matches!(
+                        app.take_effects().as_slice(),
+                        [PluginEffect::Appearance { .. }]
+                    ),
+                    grants.contains(&read) && grants.contains(&control)
+                );
+            }
+            manifest.capabilities = vec![read, control];
+            let stale_source = "function App() { return h(Window, {id:'main',width:520,height:340}, h(Button, {id:'apply',onClick:()=>nickel.request({type:'wallpaper.change',transaction:{generation:0,prior:{custom_image_configured:false,position:'fill'},change:{kind:'reset_custom_image'}}})}, 'Apply')); }";
+            let mut app = PluginPanelApplication::new_with_manifest(
+                stale_source,
+                &manifest,
+                Some(data.to_string()),
+            )
+            .unwrap();
+            app.update(app.button_message("apply").unwrap());
+            assert!(app.take_effects().is_empty());
+        }
     }
 
     #[test]

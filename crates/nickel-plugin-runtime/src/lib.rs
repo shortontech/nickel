@@ -142,6 +142,42 @@ impl JsxRuntime {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn appearance_clients_copy_preferences_and_capture_observed_transactions() {
+        let mut runtime = super::JsxRuntime::new("", Some(r#"{"appearance":{"available":true,"writable":true,"generation":7,"configured":{"theme":"system","accent_hue":null,"accent_intensity":null,"reduce_transparency":false,"animations":"normal"}},"wallpaper":{"available":true,"writable":true,"generation":8,"configured":{"custom_image_configured":false,"position":"fill"},"images":[{"id":"approved"}]}}"#)).unwrap();
+        runtime.eval("let preferences = nickel.appearance.get().configured; preferences.accent_hue = 271; preferences.accent_intensity = 63; nickel.appearance.set(preferences); preferences.accent_hue = 0; nickel.wallpaper.selectImage('approved'); nickel.wallpaper.setPosition('fit'); nickel.wallpaper.resetCustomImage();").unwrap();
+        let effects = runtime.take_effects().unwrap();
+        assert_eq!(effects[0]["type"], "appearance.set");
+        assert_eq!(effects[0]["transaction"]["generation"], 7);
+        assert!(effects[0]["transaction"]["prior"]["accent_hue"].is_null());
+        assert_eq!(effects[0]["transaction"]["requested"]["accent_hue"], 271);
+        assert_eq!(
+            effects[0]["transaction"]["requested"]["accent_intensity"],
+            63
+        );
+        assert_eq!(effects[1]["transaction"]["change"]["image_id"], "approved");
+        assert_eq!(effects[2]["transaction"]["change"]["position"], "fit");
+        assert_eq!(
+            effects[3]["transaction"]["change"]["kind"],
+            "reset_custom_image"
+        );
+        assert_eq!(
+            runtime
+                .eval_json::<serde_json::Value>(
+                    "JSON.stringify(nickel.appearance.get().configured.accent_hue)"
+                )
+                .unwrap(),
+            serde_json::Value::Null
+        );
+        runtime.set_data(r#"{}"#).unwrap();
+        assert!(runtime.eval("nickel.appearance.set({})").is_err());
+        assert!(
+            runtime
+                .eval("nickel.wallpaper.selectImage('approved')")
+                .is_err()
+        );
+    }
+
+    #[test]
     fn desktop_clients_copy_snapshots_and_emit_stable_identity_actions() {
         let mut runtime = super::JsxRuntime::new(
             "",

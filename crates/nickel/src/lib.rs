@@ -1,3 +1,4 @@
+pub mod appearance_capabilities;
 pub mod appearance_service;
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 mod remote_default_associations;

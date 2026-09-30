@@ -543,6 +543,7 @@ fn validate_plugin_display_layout(
 }
 
 pub struct LiveShell {
+    appearance_capabilities: crate::appearance_capabilities::AppearanceCapabilities,
     session_host: Arc<dyn SessionHost>,
     screenshot_capture_pending: bool,
     pub(crate) screenshot_output: Option<String>,
@@ -1339,8 +1340,9 @@ impl LiveShell {
             .and_then(wallpaper_source_fingerprint);
         let wallpaper_loaded_source_fingerprint =
             wallpaper.as_ref().and(wallpaper_source_fingerprint.clone());
-        let palette =
-            ThemePalette::from_appearance(shell_settings.resolve_appearance(Appearance::default()));
+        let palette = ThemePalette::from_appearance(
+            shell_settings.resolve_appearance(crate::appearance_capabilities::system_appearance()),
+        );
         let panel_icon = crate::icons::load_svg_bytes(
             include_bytes!("../../../assets/icons/nickel-start.svg"),
             96,
@@ -1652,6 +1654,7 @@ impl LiveShell {
         };
         let launcher_icon_revision = launcher_icons.revision();
         let mut shell = Self {
+            appearance_capabilities: Default::default(),
             session_host: session_host.clone(),
             screenshot_capture_pending: false,
             screenshot_output: None,
@@ -2265,6 +2268,7 @@ impl LiveShell {
         let mut changed = self.refresh_secure_storage();
         #[cfg(not(target_os = "linux"))]
         let mut changed = false;
+        changed |= self.appearance_capabilities.refresh_observed();
         let shell_settings = ShellSettings::load_default();
         let wallpaper_settings = WallpaperSettings::load_default();
         if self.refresh_configured_wallpaper(wallpaper_settings.image) {
@@ -2348,8 +2352,9 @@ impl LiveShell {
                 changed = true;
             }
         }
-        let palette =
-            ThemePalette::from_appearance(shell_settings.resolve_appearance(Appearance::default()));
+        let palette = ThemePalette::from_appearance(
+            shell_settings.resolve_appearance(crate::appearance_capabilities::system_appearance()),
+        );
         if palette != self.palette {
             self.palette = palette;
             self.lock_host.application_mut().palette = palette;
@@ -3561,6 +3566,40 @@ impl LiveShell {
         ))
     }
 
+    fn plugin_appearance(&mut self, plugin_id: &str, wallpaper: bool) -> Option<serde_json::Value> {
+        use nickel_core::plugins::PluginCapability;
+        let manifest = self
+            .external_plugin_packages
+            .get(plugin_id)
+            .map(|package| &package.manifest)
+            .or_else(|| {
+                self.plugin_registry
+                    .get(plugin_id)
+                    .map(|entry| &entry.manifest)
+            })?;
+        let read = if wallpaper {
+            PluginCapability::WallpaperRead
+        } else {
+            PluginCapability::AppearanceRead
+        };
+        let control = if wallpaper {
+            PluginCapability::WallpaperControl
+        } else {
+            PluginCapability::AppearanceControl
+        };
+        if !manifest.capabilities.contains(&read) {
+            return None;
+        }
+        let can_write = manifest.capabilities.contains(&control) && !self.locked;
+        let mut snapshot = self.appearance_capabilities.snapshot(if wallpaper {
+            "wallpaper"
+        } else {
+            "appearance"
+        });
+        snapshot["writable"] = can_write.into();
+        Some(snapshot)
+    }
+
     fn plugin_connectivity(&self, plugin_id: &str, wifi: bool) -> Option<serde_json::Value> {
         let manifest = self
             .external_plugin_packages
@@ -3899,6 +3938,8 @@ impl LiveShell {
             .map(|_| serde_json::Value::Array(self.tray.iter().take(128).map(|item| serde_json::json!({"id":item.id,"title":item.title,"icon":false})).collect()));
         let audio = self.plugin_audio(&key.plugin_id);
         let associations = self.plugin_associations(&key.plugin_id);
+        let appearance = self.plugin_appearance(&key.plugin_id, false);
+        let wallpaper = self.plugin_appearance(&key.plugin_id, true);
         let wifi = self.plugin_connectivity(&key.plugin_id, true);
         let bluetooth = self.plugin_connectivity(&key.plugin_id, false);
         let displays = self.plugin_displays(&key.plugin_id);
@@ -3937,6 +3978,8 @@ impl LiveShell {
                     ("audio", audio.as_ref()),
                     ("tray", tray.as_ref()),
                     ("associations", associations.as_ref()),
+                    ("appearance", appearance.as_ref()),
+                    ("wallpaper", wallpaper.as_ref()),
                     ("wifi", wifi.as_ref()),
                     ("bluetooth", bluetooth.as_ref()),
                     ("displays", displays.as_ref()),
@@ -6960,6 +7003,47 @@ impl LiveShell {
                         let result = effect.execute_native().unwrap_or_else(|error| serde_json::json!({"status":"rejected","detail":error.chars().take(512).collect::<String>()}));
                         self.associations_results.insert(plugin_id, result);
                         changed = true;
+                    }
+                }
+                crate::plugin_panel::PluginEffect::Appearance { plugin_id, effect } => {
+                    let granted = self
+                        .external_plugin_packages
+                        .get(&plugin_id)
+                        .map(|package| &package.manifest)
+                        .or_else(|| {
+                            self.plugin_registry
+                                .get(&plugin_id)
+                                .map(|entry| &entry.manifest)
+                        })
+                        .is_some_and(|manifest| {
+                            manifest.capabilities.contains(&effect.capability())
+                                && manifest.capabilities.contains(&effect.read_capability())
+                        });
+                    if granted && !self.locked {
+                        match self.appearance_capabilities.execute(&effect, || {
+                            if granted {
+                                Ok(())
+                            } else {
+                                Err("appearance grant was retired".into())
+                            }
+                        }) {
+                            Ok(
+                                crate::appearance_capabilities::CommittedAppearance::Appearance(
+                                    settings,
+                                ),
+                            ) => {
+                                changed |= self.apply_shell_settings(settings);
+                            }
+                            Ok(crate::appearance_capabilities::CommittedAppearance::Wallpaper(
+                                settings,
+                            )) => {
+                                self.refresh_configured_wallpaper(settings.image);
+                                self.desktop_application_dirty = true;
+                                self.appearance_capabilities.wallpaper_reconciled();
+                                changed = true;
+                            }
+                            Err(error) => tracing::warn!(%error, "appearance capability rejected"),
+                        }
                     }
                 }
                 crate::plugin_panel::PluginEffect::Connectivity { plugin_id, effect } => {
@@ -11418,6 +11502,14 @@ impl LiveShell {
                 Some(&visible_items),
             )
             .unwrap_or_else(|| serde_json::json!({}));
+        if let Some(key) = self.taskbar_surface_key() {
+            if let Some(snapshot) = self.plugin_appearance(&key.plugin_id, false) {
+                data["appearance"] = snapshot;
+            }
+            if let Some(snapshot) = self.plugin_appearance(&key.plugin_id, true) {
+                data["wallpaper"] = snapshot;
+            }
+        }
         (data.to_string(), images)
     }
 }
