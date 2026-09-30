@@ -37,6 +37,30 @@ div.appearance-mode.selected {
     border: 2px solid @accent@;
 }
 
+div.appearance-mode-footer {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 8px;
+}
+
+div.appearance-mode-indicator {
+    width: 16px;
+    height: 16px;
+    padding: 3px;
+    border: 2px solid @secondary@;
+}
+
+div.appearance-mode-indicator.selected {
+    border: 2px solid @accent@;
+}
+
+div.appearance-mode-indicator-fill {
+    width: 6px;
+    height: 6px;
+    background: @accent@;
+}
+
 div.appearance-mode-preview {
     display: flex;
     flex-direction: row;

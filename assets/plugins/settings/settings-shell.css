@@ -95,7 +95,7 @@ row.settings-heading {
     align-items: center;
     gap: 10px;
     width: 100%;
-    min-height: 88px;
+    min-height: 70px;
     flex-shrink: 0;
     padding: @content@px;
 }

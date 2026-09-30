@@ -556,6 +556,14 @@ mod visual_tests {
             900,
         );
         save(&jsx, "settings-appearance-shared.png");
+        assert!(
+            jsx.application()
+                .appearance_page
+                .borrow()
+                .as_ref()
+                .is_some_and(Result::is_ok),
+            "the reference image must render the JSX Appearance page"
+        );
         let mut native = SettingsApp::with_initial_page(SettingsPage::Appearance);
         native.settings_jsx_enabled = false;
         let native = nickel_ui::UiHost::new(native, 1000, 900);
