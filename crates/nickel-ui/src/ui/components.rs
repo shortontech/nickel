@@ -270,6 +270,12 @@ impl<Message> VerticalScroll<Message> {
         self
     }
 
+    /// Supply CSS track and thumb without replacing native scrolling behavior.
+    pub fn scrollbar_parts(mut self, track: DropdownPartStyle, thumb: DropdownPartStyle) -> Self {
+        self.0.style.scrollbar_parts = Some(Box::new([track.bounded(), thumb.bounded()]));
+        self
+    }
+
     /// Paint this shared scrollbar from the application's live semantic theme.
     pub fn theme(mut self, theme: crate::SemanticTheme) -> Self {
         self.0.style.scrollbar_palette = theme.scrollbar_palette();

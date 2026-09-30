@@ -8,12 +8,12 @@ mod selection;
 use emission::emit_element;
 use layout::{apply_transient_state, explicit_px, layout_element, resolve_grid_columns};
 pub use scrollbar::ScrollExtent;
+#[cfg(test)]
+use scrollbar::{SCROLLBAR_GUTTER, SCROLLBAR_HIT_THICKNESS, SCROLLBAR_INSET};
 use scrollbar::{
-    SCROLLBAR_GUTTER, SCROLLBAR_THICKNESS, ScrollRegion, ScrollbarAxis, configure_scroll_semantics,
+    SCROLLBAR_THICKNESS, ScrollRegion, ScrollbarAxis, configure_scroll_semantics,
     scrollbar_geometry, scrollbar_hit_rect, scrollbar_id, scrollbar_thumb_hit_rect,
 };
-#[cfg(test)]
-use scrollbar::{SCROLLBAR_HIT_THICKNESS, SCROLLBAR_INSET};
 use selection::{
     SelectionGlyph, SelectionRegionBuilder, SelectionRegionLayout, SelectionRunGeometry,
     document_selection_generation, selection_document_generation,
@@ -2777,16 +2777,42 @@ impl<Message: Clone> UiFrame<Message> {
                     }
                 });
                 self.commands.push(PaintCommand::PushClip(scroll.clip));
-                self.commands.push(PaintCommand::RoundedFill {
-                    rect: track,
-                    color: colors.track,
-                    radius: SCROLLBAR_THICKNESS / 2.0,
-                });
-                self.commands.push(PaintCommand::RoundedFill {
-                    rect: thumb,
-                    color: colors.thumb,
-                    radius: SCROLLBAR_THICKNESS / 2.0,
-                });
+                if let Some(parts) = &scroll.parts {
+                    let index = state.and_then(|state| {
+                        if state.pressed() == Some(&id) || state.captured() == Some(&id) {
+                            Some(1)
+                        } else if state.hovered() == Some(&id) {
+                            Some(0)
+                        } else if state.focused() == Some(&scroll.id)
+                            || state.navigation().controller_selected() == Some(&scroll.id)
+                        {
+                            Some(2)
+                        } else {
+                            None
+                        }
+                    });
+                    for (rect, part) in [(track, parts[0]), (thumb, parts[1])] {
+                        let part = index.map_or(part, |index| part.with_interaction(index));
+                        emission::paint_dropdown_part(
+                            &mut self.commands,
+                            rect,
+                            &part,
+                            "",
+                            TextAlign::Start,
+                        );
+                    }
+                } else {
+                    self.commands.push(PaintCommand::RoundedFill {
+                        rect: track,
+                        color: colors.track,
+                        radius: SCROLLBAR_THICKNESS / 2.0,
+                    });
+                    self.commands.push(PaintCommand::RoundedFill {
+                        rect: thumb,
+                        color: colors.thumb,
+                        radius: SCROLLBAR_THICKNESS / 2.0,
+                    });
+                }
                 self.commands.push(PaintCommand::PopClip);
             }
         }
@@ -5876,8 +5902,10 @@ pub(super) fn measure_element<Message>(
         _ => content.width + horizontal_padding,
     };
     let horizontal_scrollbar_gutter = match element.style.overflow_x {
-        Overflow::Scroll => SCROLLBAR_GUTTER,
-        Overflow::Auto if content.width > child_max.width + 0.01 => SCROLLBAR_GUTTER,
+        Overflow::Scroll => scrollbar::scrollbar_gutter(&element.style),
+        Overflow::Auto if content.width > child_max.width + 0.01 => {
+            scrollbar::scrollbar_gutter(&element.style)
+        }
         _ => 0.0,
     };
     let intrinsic = Size::new(

@@ -2910,11 +2910,21 @@ impl PanelNode {
                         slots,
                     ));
                 }
+                let inherited_parts = inherited.extend(&style);
+                let part = |kind: &str| {
+                    let style =
+                        inherited_parts.resolve(stylesheet, kind, Some(id), class_name.as_deref());
+                    let mut part = dropdown_part(&style);
+                    part.interaction_paints =
+                        interaction_paints(stylesheet, kind, id, class_name.as_deref(), &style);
+                    part
+                };
                 let scroll = VerticalScroll::new(
                     Message::from_plugin_scoped(PluginMessage::Scroll, scope),
                     0.0,
                 )
                 .id(id.clone())
+                .scrollbar_parts(part("scrollbar-track"), part("scrollbar-thumb"))
                 .child(column);
                 let scroll = if *grow {
                     scroll.grow(1.0)
@@ -4027,6 +4037,56 @@ fn child_text(children: &[Value]) -> Result<String, String> {
 mod compound_css_tests {
     use super::*;
     use nickel_ui::{Rect, UiFrame, backend::PaintCommand};
+
+    #[test]
+    fn scroll_view_scrollbar_parts_control_native_paint_geometry_and_states() {
+        let node = PanelNode::parse(&serde_json::json!({"kind":"scroll-view", "id":"feed", "className":"custom", "height":100, "children":[{"kind":"div", "className":"tall", "children":[]}]})).unwrap();
+        let sheet = StyleSheet::compile(".tall { height: 400px; } scroll-view { --track: #123456; } scrollbar-track.custom { width: 14px; margin: 4px; background: var(--track); border-radius: 7px; } scrollbar-thumb#feed { height: 45px; background: #abcdef; border-radius: 6px; } scrollbar-thumb:hover { background: transparent; border: 2px solid #112233; border-radius: 8px; } scrollbar-track:active { background: #778899; } scrollbar-thumb:focus { background: #fedcba; }").unwrap();
+        let mut state = nickel_ui::UiStateStore::default();
+        let build = |state: &mut nickel_ui::UiStateStore| {
+            UiFrame::layout_with_state(
+                node.view(&PluginImages::new(), &sheet),
+                Rect::new(0.0, 0.0, 200.0, 100.0),
+                state,
+            )
+        };
+        let first = build(&mut state);
+        assert!(first.commands().iter().any(|command| matches!(command, PaintCommand::RoundedFill { rect, color, radius } if *color == 0xff123456 && rect.size.width == 14.0 && rect.origin.x == 182.0 && *radius == 7.0)));
+        assert!(first.commands().iter().any(|command| matches!(command, PaintCommand::RoundedFill { rect, color, .. } if *color == 0xffabcdef && rect.size.height == 45.0)));
+        let at = Point { x: 190.0, y: 20.0 };
+        first.handle_event(&mut state, nickel_ui::UiEvent::PointerMoved(at));
+        let hover = build(&mut state);
+        assert!(hover.commands().iter().any(|command| matches!(command, PaintCommand::RoundedStroke { color,width,radius,.. } if *color == 0xff112233 && *width == 2.0 && *radius == 8.0)));
+        hover.handle_event(&mut state, nickel_ui::UiEvent::PointerPressed(at));
+        let active = build(&mut state);
+        assert!(active.commands().iter().any(|command| matches!(command,PaintCommand::RoundedFill { color,.. } if *color == 0xff778899)));
+        active.handle_event(
+            &mut state,
+            nickel_ui::UiEvent::PointerMoved(Point { x: 190.0, y: 75.0 }),
+        );
+        let moved = build(&mut state);
+        assert!(moved.commands().iter().any(|command| matches!(command, PaintCommand::RoundedFill { rect,color,.. } if *color == 0xffabcdef && rect.origin.y > 4.0)));
+        moved.handle_event(&mut state, nickel_ui::UiEvent::PointerReleased(at));
+        moved.handle_event(
+            &mut state,
+            nickel_ui::UiEvent::PointerMoved(Point { x: 20.0, y: 20.0 }),
+        );
+        moved.handle_event(&mut state, nickel_ui::UiEvent::FocusNext);
+        let focus = build(&mut state);
+        assert!(focus.commands().iter().any(|command| matches!(command, PaintCommand::RoundedFill { color,.. } if *color == 0xfffedcba)));
+        let dry = UiFrame::layout(
+            node.view(
+                &PluginImages::new(),
+                &StyleSheet::compile(".tall { height: 400px; }").unwrap(),
+            ),
+            Rect::new(0.0, 0.0, 200.0, 100.0),
+        );
+        assert!(
+            !dry.commands()
+                .iter()
+                .any(|command| matches!(command, PaintCommand::RoundedFill { .. }))
+        );
+    }
 
     #[test]
     fn slider_frame_and_parts_use_css_states_and_padded_value_geometry() {

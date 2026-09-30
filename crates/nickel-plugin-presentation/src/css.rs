@@ -627,6 +627,8 @@ impl<'i> QualifiedRuleParser<'i> for CssRuleParser {
                             | "slider-track"
                             | "slider-fill"
                             | "slider-thumb"
+                            | "scrollbar-track"
+                            | "scrollbar-thumb"
                     )
                 )
             }) {

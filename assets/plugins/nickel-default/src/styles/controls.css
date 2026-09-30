@@ -86,3 +86,10 @@ menu-item.disabled, text-field-menu-item.disabled { color: var(--nickel-muted); 
 menu-shortcut, text-field-menu-shortcut { width: 100px; padding: 8px; font-size: 8px; color: var(--nickel-muted); }
 menu-indicator, text-field-menu-indicator { width: 20px; padding: 8px 4px; font-size: 8px; color: var(--nickel-text); }
 switch:focus, checkbox:focus { background: var(--nickel-selected); }
+
+/* Scrollbar width sets thickness; right margin sets its edge inset.
+ * Thumb height is its minimum length; the native viewport ratio sizes it. */
+scrollbar-track { width: 10px; margin: 3px; border-radius: 5px; background: var(--nickel-border); }
+scrollbar-thumb { height: 32px; border-radius: 5px; background: var(--nickel-muted); }
+scrollbar-thumb:hover { background: var(--nickel-text); }
+scrollbar-thumb:active, scrollbar-thumb:focus { background: var(--nickel-accent); }

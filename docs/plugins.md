@@ -260,11 +260,21 @@ Native compound controls expose ordinary element selectors for their parts:
 | Switch | `switch-track`, `switch-thumb` |
 | Checkbox | `checkbox-box`, `checkbox-mark` |
 | Slider | `slider-track`, `slider-fill`, `slider-thumb` |
+| ScrollView | `scrollbar-track`, `scrollbar-thumb` |
 | Select | `select-header`, `option`, `select-indicator` |
 | Progress | `progress-fill` |
 | Color swatch | `color-swatch-fill`, `color-swatch-label` |
 | Menu | `menu`, `menu-item`, `menu-shortcut`, `menu-indicator` |
 | Text field | `text-field-caret`, `text-field-selection`, `text-field-menu`, `text-field-menu-item`, `text-field-menu-shortcut`, `text-field-menu-indicator` |
+
+For ScrollView scrollbar parts, `scrollbar-track` width sets thickness and
+the right component of `margin` sets the edge inset in pixels.
+`scrollbar-thumb` height sets the minimum thumb length; native
+viewport/content proportions and scroll position
+control its actual length and position. Background, border, rounding and
+`:hover`, `:active`, `:focus` paint are CSS controlled. Parts share the owning
+ScrollView's ID, classes and variables. Native pointer acquisition keeps a
+minimum target size; CSS thickness also enlarges it. Scroll semantics are unchanged.
 
 Parts inherit their owner's classes and custom properties and can match its ID.
 Select options can also have their own IDs.

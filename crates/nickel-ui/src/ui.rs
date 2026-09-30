@@ -982,6 +982,8 @@ pub struct Style {
     pub controller_focus_background_tint: Option<Color>,
     /// Shared semantic scrollbar chrome for this element's viewport.
     pub scrollbar_palette: crate::ScrollbarPalette,
+    /// Optional CSS track and thumb; native callers retain semantic defaults.
+    pub scrollbar_parts: Option<Box<[DropdownPartStyle; 2]>>,
     /// Semantic background applied to a selected or entered controller scope.
     pub controller_scope_background: Option<Background>,
     pub text_align: TextAlign,
@@ -1056,6 +1058,7 @@ impl Default for Style {
             editing_menu: None,
             controller_focus_background_tint: None,
             scrollbar_palette: crate::theme::FALLBACK_SCROLLBAR_PALETTE,
+            scrollbar_parts: None,
             controller_scope_background: None,
             text_align: TextAlign::Start,
             padding: Insets::default(),

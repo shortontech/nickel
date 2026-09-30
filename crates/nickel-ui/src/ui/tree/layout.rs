@@ -293,9 +293,9 @@ pub(super) fn layout_element<Message: Clone>(
                 scroll_rect.size.width
             };
             let horizontal_scrollbar_gutter = match element.style.overflow_x {
-                Overflow::Scroll => SCROLLBAR_GUTTER,
+                Overflow::Scroll => scrollbar::scrollbar_gutter(&element.style),
                 Overflow::Auto if intrinsic_content_width > scroll_rect.size.width + 0.01 => {
-                    SCROLLBAR_GUTTER
+                    scrollbar::scrollbar_gutter(&element.style)
                 }
                 _ => 0.0,
             }
@@ -394,6 +394,7 @@ pub(super) fn layout_element<Message: Clone>(
                     clip: descendant_clip.unwrap_or(scroll_rect),
                     extent,
                     scrollbar: element.style.scrollbar_palette,
+                    parts: element.style.scrollbar_parts.clone(),
                 });
                 clamped
             } else {
@@ -417,6 +418,7 @@ pub(super) fn layout_element<Message: Clone>(
                     clip: descendant_clip.unwrap_or(scroll_rect),
                     extent,
                     scrollbar: element.style.scrollbar_palette,
+                    parts: element.style.scrollbar_parts.clone(),
                 });
             }
             let layout_content = Rect::new(
@@ -464,7 +466,7 @@ pub(super) fn layout_element<Message: Clone>(
                 viewport.origin.y,
                 (viewport.size.width
                     - if reserves_scrollbar {
-                        SCROLLBAR_GUTTER
+                        scrollbar::scrollbar_gutter(&element.style)
                     } else {
                         0.0
                     })
@@ -515,6 +517,7 @@ pub(super) fn layout_element<Message: Clone>(
                         clip: viewport_clip,
                         extent,
                         scrollbar: element.style.scrollbar_palette,
+                        parts: element.style.scrollbar_parts.clone(),
                     });
                 }
                 child_indices.push(layout_element(
@@ -536,7 +539,7 @@ pub(super) fn layout_element<Message: Clone>(
             let scroll_rect = rect.inset(element.style.padding);
             let horizontal_scrollbar_gutter =
                 if matches!(element.style.overflow_x, Overflow::Scroll | Overflow::Auto) {
-                    SCROLLBAR_GUTTER.min(scroll_rect.size.height)
+                    scrollbar::scrollbar_gutter(&element.style).min(scroll_rect.size.height)
                 } else {
                     0.0
                 };
@@ -651,6 +654,7 @@ pub(super) fn layout_element<Message: Clone>(
                     clip: descendant_clip.unwrap_or(scroll_rect),
                     extent,
                     scrollbar: element.style.scrollbar_palette,
+                    parts: element.style.scrollbar_parts.clone(),
                 });
             }
             for (index, child) in element.children.iter().enumerate() {

@@ -24,6 +24,7 @@ pub(super) struct ScrollRegion<Message> {
     pub(super) clip: Rect,
     pub(super) extent: ScrollExtent,
     pub(super) scrollbar: crate::ScrollbarPalette,
+    pub(super) parts: Option<Box<[DropdownPartStyle; 2]>>,
 }
 
 impl<Message> ScrollRegion<Message> {
@@ -64,18 +65,28 @@ pub(super) fn scrollbar_geometry<Message>(
     scroll: &ScrollRegion<Message>,
     axis: ScrollbarAxis,
 ) -> Option<(Rect, Rect)> {
+    let thickness = scroll
+        .parts
+        .as_ref()
+        .map_or(SCROLLBAR_THICKNESS, |parts| parts[0].width);
+    let inset = scroll
+        .parts
+        .as_ref()
+        .map_or(SCROLLBAR_INSET, |parts| parts[0].margin.right);
+    let minimum = scroll
+        .parts
+        .as_ref()
+        .map_or(SCROLLBAR_MIN_THUMB, |parts| parts[1].height);
     let (viewport, content, offset, track) = match axis {
         ScrollbarAxis::Horizontal => (
             scroll.extent.viewport.width,
             scroll.extent.content.width,
             scroll.extent.offset_x,
             Rect::new(
-                scroll.rect.origin.x + SCROLLBAR_INSET,
-                scroll.rect.origin.y + scroll.rect.size.height
-                    - SCROLLBAR_THICKNESS
-                    - SCROLLBAR_INSET,
-                (scroll.rect.size.width - SCROLLBAR_INSET * 2.0).max(0.0),
-                SCROLLBAR_THICKNESS,
+                scroll.rect.origin.x + inset,
+                scroll.rect.origin.y + scroll.rect.size.height - thickness - inset,
+                (scroll.rect.size.width - inset * 2.0).max(0.0),
+                thickness,
             ),
         ),
         ScrollbarAxis::Vertical => (
@@ -83,24 +94,22 @@ pub(super) fn scrollbar_geometry<Message>(
             scroll.extent.content.height,
             scroll.extent.offset,
             Rect::new(
-                scroll.rect.origin.x + scroll.rect.size.width
-                    - SCROLLBAR_THICKNESS
-                    - SCROLLBAR_INSET,
-                scroll.rect.origin.y + SCROLLBAR_INSET,
-                SCROLLBAR_THICKNESS,
-                (scroll.rect.size.height - SCROLLBAR_INSET * 2.0).max(0.0),
+                scroll.rect.origin.x + scroll.rect.size.width - thickness - inset,
+                scroll.rect.origin.y + inset,
+                thickness,
+                (scroll.rect.size.height - inset * 2.0).max(0.0),
             ),
         ),
     };
-    if content <= viewport || viewport <= 0.0 {
+    if content <= viewport || viewport <= 0.0 || thickness <= 0.0 {
         return None;
     }
     let track_length = match axis {
         ScrollbarAxis::Horizontal => track.size.width,
         ScrollbarAxis::Vertical => track.size.height,
     };
-    let thumb_length = (track_length * viewport / content)
-        .clamp(SCROLLBAR_MIN_THUMB.min(track_length), track_length);
+    let thumb_length =
+        (track_length * viewport / content).clamp(minimum.min(track_length), track_length);
     let travel = (track_length - thumb_length).max(0.0);
     let maximum = content - viewport;
     let position = if maximum > 0.0 {
@@ -130,17 +139,23 @@ pub(super) fn scrollbar_hit_rect<Message>(
     axis: ScrollbarAxis,
 ) -> Option<Rect> {
     let (track, _) = scrollbar_geometry(scroll, axis)?;
+    let hit_thickness = SCROLLBAR_HIT_THICKNESS.max(match axis {
+        ScrollbarAxis::Horizontal => {
+            scroll.rect.origin.y + scroll.rect.size.height - track.origin.y
+        }
+        ScrollbarAxis::Vertical => scroll.rect.origin.x + scroll.rect.size.width - track.origin.x,
+    });
     let hit = match axis {
         ScrollbarAxis::Horizontal => Rect::new(
             track.origin.x,
-            scroll.rect.origin.y + scroll.rect.size.height - SCROLLBAR_HIT_THICKNESS,
+            scroll.rect.origin.y + scroll.rect.size.height - hit_thickness,
             track.size.width,
-            SCROLLBAR_HIT_THICKNESS,
+            hit_thickness,
         ),
         ScrollbarAxis::Vertical => Rect::new(
-            scroll.rect.origin.x + scroll.rect.size.width - SCROLLBAR_HIT_THICKNESS,
+            scroll.rect.origin.x + scroll.rect.size.width - hit_thickness,
             track.origin.y,
-            SCROLLBAR_HIT_THICKNESS,
+            hit_thickness,
             track.size.height,
         ),
     };
@@ -151,18 +166,24 @@ pub(super) fn scrollbar_thumb_hit_rect<Message>(
     scroll: &ScrollRegion<Message>,
     axis: ScrollbarAxis,
 ) -> Option<Rect> {
-    let (_, thumb) = scrollbar_geometry(scroll, axis)?;
+    let (track, thumb) = scrollbar_geometry(scroll, axis)?;
+    let hit_thickness = SCROLLBAR_HIT_THICKNESS.max(match axis {
+        ScrollbarAxis::Horizontal => {
+            scroll.rect.origin.y + scroll.rect.size.height - track.origin.y
+        }
+        ScrollbarAxis::Vertical => scroll.rect.origin.x + scroll.rect.size.width - track.origin.x,
+    });
     let hit = match axis {
         ScrollbarAxis::Horizontal => Rect::new(
             thumb.origin.x,
-            scroll.rect.origin.y + scroll.rect.size.height - SCROLLBAR_HIT_THICKNESS,
+            scroll.rect.origin.y + scroll.rect.size.height - hit_thickness,
             thumb.size.width,
-            SCROLLBAR_HIT_THICKNESS,
+            hit_thickness,
         ),
         ScrollbarAxis::Vertical => Rect::new(
-            scroll.rect.origin.x + scroll.rect.size.width - SCROLLBAR_HIT_THICKNESS,
+            scroll.rect.origin.x + scroll.rect.size.width - hit_thickness,
             thumb.origin.y,
-            SCROLLBAR_HIT_THICKNESS,
+            hit_thickness,
             thumb.size.height,
         ),
     };
@@ -203,4 +224,14 @@ pub(super) fn configure_scroll_semantics(node: &mut ResolvedNode, extent: Scroll
         maximum: f64::from(maximum),
         step: f64::from((maximum * 0.1).max(1.0)),
     });
+}
+
+/// CSS width is scrollbar thickness; right margin is the edge inset.
+pub(super) fn scrollbar_gutter(style: &Style) -> f32 {
+    style
+        .scrollbar_parts
+        .as_ref()
+        .map_or(SCROLLBAR_GUTTER, |parts| {
+            parts[0].width + parts[0].margin.right * 2.0
+        })
 }
