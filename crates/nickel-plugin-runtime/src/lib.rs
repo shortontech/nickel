@@ -7,9 +7,11 @@ use boa_engine::{Context, Source};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
+mod composition;
 mod modules;
 pub mod settings;
 
+pub use composition::ComposedShellGraph;
 pub use modules::{JsxModuleGraph, ModuleSource};
 
 const BOOTSTRAP: &str = include_str!("../../../assets/plugin-runtime/bootstrap.js");

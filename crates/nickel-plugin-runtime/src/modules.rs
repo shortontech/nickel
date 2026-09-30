@@ -298,7 +298,7 @@ fn transform_import(importer: &str, line: &str) -> Result<String, String> {
     Ok(format!("const {binding} = {require}.default;"))
 }
 
-fn import_specifiers(source: &str) -> Result<Vec<String>, String> {
+pub(crate) fn import_specifiers(source: &str) -> Result<Vec<String>, String> {
     source
         .lines()
         .map(str::trim)
@@ -334,7 +334,7 @@ fn declaration_name(source: &str) -> Option<&str> {
         .filter(|name| !name.is_empty())
 }
 
-fn resolve(importer: &str, specifier: &str) -> Result<String, String> {
+pub(crate) fn resolve(importer: &str, specifier: &str) -> Result<String, String> {
     if !specifier.starts_with("./") && !specifier.starts_with("../") {
         return Err(format!(
             "module import must be package-relative: {specifier:?}"
@@ -349,7 +349,7 @@ fn resolve(importer: &str, specifier: &str) -> Result<String, String> {
     normalize_path(&joined)
 }
 
-fn normalize_path(path: &str) -> Result<String, String> {
+pub(crate) fn normalize_path(path: &str) -> Result<String, String> {
     if path.is_empty() || path.contains('\\') || path.contains(':') || path.starts_with('/') {
         return Err(format!("invalid module path {path:?}"));
     }
