@@ -107,6 +107,7 @@ pub(super) fn load_package(directory: &Path) -> Result<PluginPackage, String> {
     let manifest = PluginManifest::from_json(manifest_source)?;
     if let Some(source) = jsx_source(&directory, &manifest.entry)? {
         Ok(PluginPackage {
+            modules: PluginPackage::load_module_sources(&directory)?,
             source: compile_jsx(&directory, &manifest.entry, &source)?,
             stylesheet: PluginPackage::load_stylesheet(&directory, &manifest)?,
             images: PluginPackage::load_images(&directory, &manifest)?,

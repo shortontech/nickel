@@ -15,7 +15,7 @@ pub use nickel_plugin_presentation::components::{
     PluginActionContribution, PluginImages, PluginMessage, PluginSectionContribution,
     PluginWidgetContribution,
 };
-use nickel_plugin_runtime::JsxRuntime;
+use nickel_plugin_runtime::{JsxModuleGraph, JsxRuntime, ModuleSource};
 use nickel_ui::{
     AnyView, Column, DragPhase, FrameOverlay, OverlayAnchor, OverlayId, OverlayMenu, OverlayStyle,
     Row, Shortcut, Size, Spacer, TransientSurface, UiId, ViewContext,
@@ -1077,6 +1077,45 @@ fn initial_notifications_data(manifest: &PluginManifest) -> Value {
     }
 }
 
+fn package_module_graph(package: &PluginPackage) -> Result<Option<JsxModuleGraph>, String> {
+    let is_module = package.source.lines().any(|line| {
+        let line = line.trim_start();
+        line.starts_with("import ") || line.starts_with("export ")
+    });
+    if !is_module {
+        return Ok(None);
+    }
+    let mut sources = package
+        .modules
+        .iter()
+        .filter(|module| module.path != package.manifest.entry)
+        .map(|module| ModuleSource {
+            path: &module.path,
+            source: &module.source,
+        })
+        .collect::<Vec<_>>();
+    sources.push(ModuleSource {
+        path: &package.manifest.entry,
+        source: &package.source,
+    });
+    JsxModuleGraph::new(&package.manifest.entry, sources).map(Some)
+}
+
+fn package_runtime(package: &PluginPackage, data: Option<&str>) -> Result<JsxRuntime, String> {
+    match package_module_graph(package)? {
+        Some(graph) => JsxRuntime::new_modules(&graph, data),
+        None => JsxRuntime::new(&package.source, data),
+    }
+}
+
+fn package_stylesheet(package: &PluginPackage) -> Result<StyleSheet, String> {
+    let imported = package_module_graph(package)?
+        .map(|graph| graph.stylesheet())
+        .transpose()?
+        .unwrap_or_default();
+    StyleSheet::compile(&format!("{}\n{}", package.stylesheet, imported))
+}
+
 impl PluginPanelApplication {
     pub fn resolved_surface(&self, grant: &PluginSurface) -> Result<PluginSurface, String> {
         self.node
@@ -1222,8 +1261,16 @@ impl PluginPanelApplication {
     }
 
     pub fn from_package(package: &PluginPackage) -> Result<Self, String> {
-        let mut application = Self::new_with_manifest(&package.source, &package.manifest, None)?;
-        application.stylesheet = StyleSheet::compile(&package.stylesheet)?;
+        let mut application = Self::new_with_manifest_for_surface(
+            &package.source,
+            &package.manifest,
+            None,
+            None,
+            Some(std::rc::Rc::new(std::cell::RefCell::new(package_runtime(
+                package, None,
+            )?))),
+        )?;
+        application.stylesheet = package_stylesheet(package)?;
         if let [surface] = package.manifest.surfaces.as_slice() {
             application.resolved_surface(surface)?;
         }
@@ -1237,9 +1284,17 @@ impl PluginPanelApplication {
     ) -> Result<Self, String> {
         let data =
             serde_json::json!({ "settings": settings, "slots": {}, "windows": [] }).to_string();
-        let mut application =
-            Self::new_with_manifest(&package.source, &package.manifest, Some(data))?;
-        application.stylesheet = StyleSheet::compile(&package.stylesheet)?;
+        let mut application = Self::new_with_manifest_for_surface(
+            &package.source,
+            &package.manifest,
+            Some(data.clone()),
+            None,
+            Some(std::rc::Rc::new(std::cell::RefCell::new(package_runtime(
+                package,
+                Some(&data),
+            )?))),
+        )?;
+        application.stylesheet = package_stylesheet(package)?;
         if let [surface] = package.manifest.surfaces.as_slice() {
             application.resolved_surface(surface)?;
         }
@@ -1292,8 +1347,8 @@ impl PluginPanelApplication {
         first_surface: &PluginSurface,
     ) -> Result<std::rc::Rc<std::cell::RefCell<JsxRuntime>>, String> {
         let data = Self::package_surface_data(package, settings, first_surface);
-        Ok(std::rc::Rc::new(std::cell::RefCell::new(JsxRuntime::new(
-            &package.source,
+        Ok(std::rc::Rc::new(std::cell::RefCell::new(package_runtime(
+            package,
             Some(&data),
         )?)))
     }
@@ -1316,21 +1371,28 @@ impl PluginPanelApplication {
         runtime: Option<std::rc::Rc<std::cell::RefCell<JsxRuntime>>>,
     ) -> Result<Self, String> {
         let data = Self::package_surface_data(package, settings, surface);
+        let runtime = match runtime {
+            Some(runtime) => runtime,
+            None => std::rc::Rc::new(std::cell::RefCell::new(package_runtime(
+                package,
+                Some(&data),
+            )?)),
+        };
         let mut application = Self::new_with_manifest_for_surface(
             &package.source,
             &package.manifest,
             Some(data),
             Some(&surface.id),
-            runtime,
+            Some(runtime),
         )?;
-        application.stylesheet = StyleSheet::compile(&package.stylesheet)?;
+        application.stylesheet = package_stylesheet(package)?;
         application.resolved_surface(surface)?;
         application.sync_images(images);
         Ok(application)
     }
 
     pub fn validate_package(package: &PluginPackage) -> Result<(), String> {
-        StyleSheet::compile(&package.stylesheet)?;
+        package_stylesheet(package)?;
         package_images(package)?;
         let settings: std::collections::BTreeMap<_, _> = package
             .manifest
@@ -1373,10 +1435,13 @@ impl PluginPanelApplication {
                     &package.manifest,
                     Some(data.to_string()),
                     Some(&surface.id),
-                    None,
+                    Some(std::rc::Rc::new(std::cell::RefCell::new(package_runtime(
+                        package,
+                        Some(&data.to_string()),
+                    )?))),
                 )
                 .map_err(|error| format!("surface {:?}: {error}", surface.id))?;
-                application.stylesheet = StyleSheet::compile(&package.stylesheet)?;
+                application.stylesheet = package_stylesheet(package)?;
                 application
                     .resolved_surface(surface)
                     .map_err(|error| format!("surface {:?}: {error}", surface.id))?;
@@ -3214,6 +3279,42 @@ mod tests {
     use nickel_ui::Application;
 
     #[test]
+    fn package_host_loads_shared_modules_and_imported_css() {
+        let mut package = PluginPackage::load(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/plugins/example-window"
+        ))
+        .unwrap();
+        package.source = "import { title } from './state.js';\nimport './module.css';\nexport default function App() { return h(Window, {id:'main',width:520,height:340}, h(Text, {}, title)); }".into();
+        package.modules = vec![
+            nickel_core::plugins::PluginSourceFile {
+                path: "state.js".into(),
+                source: "export const title = 'Module window';".into(),
+            },
+            nickel_core::plugins::PluginSourceFile {
+                path: "module.css".into(),
+                source: "text { color: #123456; }".into(),
+            },
+        ];
+        PluginPanelApplication::validate_package(&package).unwrap();
+        let app = PluginPanelApplication::from_package(&package).unwrap();
+        let title: String = app
+            .runtime
+            .borrow_mut()
+            .eval_json("JSON.stringify(__nickelRequireModule('state.js').title)")
+            .unwrap();
+        assert_eq!(title, "Module window");
+        assert!(
+            package_module_graph(&package)
+                .unwrap()
+                .unwrap()
+                .stylesheet()
+                .unwrap()
+                .contains("#123456")
+        );
+    }
+
+    #[test]
     fn display_layout_effect_requires_capability_and_valid_shape() {
         let mut manifest = PluginPackage::load(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -4396,6 +4497,7 @@ mod tests {
         external_manifest.id = "org.example.tall-panel".into();
         external_manifest.surfaces[0].height = 400;
         let package = PluginPackage {
+            modules: Vec::new(),
             manifest: external_manifest,
             images: Default::default(),
             stylesheet: String::new(),
@@ -4462,6 +4564,7 @@ mod tests {
         let mut external_manifest = manifest().clone();
         external_manifest.id = "org.example.css-controls".into();
         let package = PluginPackage {
+            modules: Vec::new(),
             manifest: external_manifest,
             images: Default::default(),
             stylesheet: "button.primary { background-color: #345678; padding: 8px; border: 2px solid #abc; border-radius: 6px; color: #fff; font-size: 18px; } button.primary:focus { background-color: #123abc; } text-field.entry { background-color: rgba(10, 20, 30, 0.5); padding: 4px; line-height: 24px; } text-field.entry:focus { background-color: #3479ab; }".into(),
@@ -4537,6 +4640,7 @@ mod tests {
     #[test]
     fn plugin_css_inherits_text_properties_through_layout_nodes() {
         let package = PluginPackage {
+            modules: Vec::new(),
             manifest: manifest().clone(),
             images: Default::default(),
             stylesheet: "window.parent { color: #123456; font-size: 20px; line-height: 28px; } div.nested { color: #abcdef; } button.override { color: #fedcba; } text.own { color: #aabbcc; }".into(),
@@ -4612,6 +4716,7 @@ mod tests {
         let mut external_manifest = manifest().clone();
         external_manifest.id = "org.example.css-grid".into();
         let package = PluginPackage {
+            modules: Vec::new(),
             manifest: external_manifest,
             images: Default::default(),
             stylesheet: ".grid { display: grid; grid-template-columns: 100px 100px; gap: 10px; width: 210px; } button { width: 100px; }".into(),
@@ -4642,6 +4747,7 @@ mod tests {
     #[test]
     fn generic_div_grid_applies_css_justification_and_alignment() {
         let package = PluginPackage {
+            modules: Vec::new(),
             manifest: manifest().clone(),
             images: Default::default(),
             stylesheet: ".grid { display: grid; grid-template-columns: 40px 60px; width: 200px; height: 80px; justify-content: center; align-items: center; } button#short { height: 20px; } button#tall { height: 40px; }".into(),
@@ -4670,6 +4776,7 @@ mod tests {
     #[test]
     fn generic_div_flex_uses_explicit_css_dimensions_for_alignment() {
         let package = PluginPackage {
+            modules: Vec::new(),
             manifest: manifest().clone(),
             images: Default::default(),
             stylesheet: "div.toolbar { display: flex; width: 100%; height: 80px; align-items: center; justify-content: space-between; } button { width: 50px; height: 20px; }".into(),
@@ -4698,6 +4805,7 @@ mod tests {
     fn spacer_css_width_stays_fixed_and_unstyled_spacer_grows() {
         let host = |spacer_class: &str, stylesheet: &str| {
             let package = PluginPackage {
+                modules: Vec::new(),
                 manifest: manifest().clone(),
                 images: Default::default(),
                 stylesheet: stylesheet.into(),
@@ -4744,6 +4852,7 @@ mod tests {
     #[test]
     fn row_and_column_classes_apply_css_flex_alignment() {
         let package = PluginPackage {
+            modules: Vec::new(),
             manifest: manifest().clone(),
             images: Default::default(),
             stylesheet: "row.toolbar { width: 100%; height: 80px; align-items: center; justify-content: space-between; } column.stack { width: 100%; height: 100px; align-items: flex-end; justify-content: space-between; } button { width: 50px; height: 20px; }".into(),
@@ -4792,6 +4901,7 @@ mod tests {
         granted.id = "org.example.fixed-window".into();
         let source = "function App() { return h(FixedWindow, {id: 'main', width: '100%', height: 56, output: 'all', edge: 'bottom', reserveWorkArea: true, className: 'bar'}, h(Button, {id: 'open', onClick: () => nickel.request('show-launcher')}, 'Open')); }";
         let mut package = PluginPackage {
+            modules: Vec::new(),
             manifest: granted,
             images: Default::default(),
             stylesheet: "window.bar { width: 100%; background: rgba(20, 30, 40, 0.8); }".into(),
@@ -5160,6 +5270,7 @@ mod tests {
         let mut external_manifest = manifest().clone();
         external_manifest.id = "org.example.window-resize".into();
         let package = PluginPackage {
+            modules: Vec::new(),
             manifest: external_manifest,
             images: Default::default(),
             stylesheet: "window { background: #112233; } div.content { width: 100%; height: 100%; padding: 20px; }".into(),
@@ -6235,6 +6346,7 @@ mod tests {
     #[test]
     fn host_dismissal_calls_dialog_on_close_and_allows_reopen() {
         let package = PluginPackage {
+            modules: Vec::new(),
             manifest: manifest().clone(),
             images: Default::default(),
             stylesheet: String::new(),
@@ -6294,6 +6406,7 @@ mod tests {
         let mut external_manifest = manifest().clone();
         external_manifest.id = "org.example.settings-panel".into();
         let package = PluginPackage {
+            modules: Vec::new(),
             manifest: external_manifest,
             images: Default::default(),
             stylesheet: String::new(),
@@ -6403,6 +6516,7 @@ mod tests {
         let mut external_manifest = manifest().clone();
         external_manifest.id = "org.example.window-shortcuts".into();
         let package = PluginPackage {
+            modules: Vec::new(),
             manifest: external_manifest,
             images: Default::default(),
             stylesheet: String::new(),
@@ -6424,6 +6538,7 @@ mod tests {
         external_manifest.id = "org.example.launcher-dismiss".into();
         external_manifest.capabilities.clear();
         let mut package = PluginPackage {
+            modules: Vec::new(),
             manifest: external_manifest,
             images: Default::default(),
             stylesheet: String::new(),
@@ -6447,6 +6562,7 @@ mod tests {
         external_manifest.id = "org.example.control-toggle".into();
         let source = "function App() { return h(FixedWindow, {width: '100%', height: '100%', onEscape: () => nickel.request({type: 'toggle-control-center'})}); }";
         let mut package = PluginPackage {
+            modules: Vec::new(),
             manifest: external_manifest,
             images: Default::default(),
             stylesheet: String::new(),
@@ -6495,6 +6611,7 @@ mod tests {
             external_manifest.id = format!("org.example.{action}");
             external_manifest.capabilities.clear();
             let mut package = PluginPackage {
+                modules: Vec::new(),
                 manifest: external_manifest,
                 images: Default::default(),
                 stylesheet: String::new(),
@@ -6530,6 +6647,7 @@ mod tests {
             external_manifest.id = "org.example.desktop-controls".into();
             external_manifest.capabilities.clear();
             let mut package = PluginPackage {
+                modules: Vec::new(),
                 manifest: external_manifest,
                 images: Default::default(),
                 stylesheet: String::new(),
@@ -6654,6 +6772,7 @@ mod tests {
         external_manifest.id = "org.example.pin-retry".into();
         external_manifest.capabilities.clear();
         let mut package = PluginPackage {
+            modules: Vec::new(),
             manifest: external_manifest,
             images: Default::default(),
             stylesheet: String::new(),
@@ -6677,6 +6796,7 @@ mod tests {
     #[test]
     fn plugin_stylesheet_tracks_host_palette_without_restarting_js() {
         let package = PluginPackage {
+            modules: Vec::new(),
             manifest: manifest().clone(),
             images: Default::default(),
             stylesheet: "window { background: var(--nickel-panel); } text { color: var(--nickel-text); }".into(),
@@ -6706,6 +6826,7 @@ mod tests {
     #[test]
     fn plugin_rows_and_grids_mirror_for_right_to_left_layout() {
         let package = PluginPackage {
+            modules: Vec::new(),
             manifest: manifest().clone(),
             images: Default::default(),
             stylesheet: ".grid { display: grid; grid-template-columns: 80px 80px; } button { width: 70px; height: 30px; }".into(),
@@ -6794,6 +6915,7 @@ mod tests {
             external_manifest.id = format!("org.example.launcher-action-{name}");
             external_manifest.capabilities.clear();
             let mut package = PluginPackage {
+                modules: Vec::new(),
                 manifest: external_manifest,
                 images: Default::default(),
                 stylesheet: String::new(),

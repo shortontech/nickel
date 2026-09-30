@@ -26,14 +26,25 @@ fn digest_source(source: &str) -> String {
     format!("{:x}", Sha256::digest(source.as_bytes()))
 }
 
-fn digest_package(source: &str, stylesheet: &str, images: &BTreeMap<String, Vec<u8>>) -> String {
-    if images.is_empty() && stylesheet.is_empty() {
+fn digest_package(
+    source: &str,
+    stylesheet: &str,
+    modules: &[PluginSourceFile],
+    images: &BTreeMap<String, Vec<u8>>,
+) -> String {
+    if images.is_empty() && stylesheet.is_empty() && modules.is_empty() {
         return digest_source(source);
     }
     let mut digest = Sha256::new();
     digest.update(source.as_bytes());
     digest.update((stylesheet.len() as u64).to_le_bytes());
     digest.update(stylesheet.as_bytes());
+    for module in modules {
+        digest.update((module.path.len() as u64).to_le_bytes());
+        digest.update(module.path.as_bytes());
+        digest.update((module.source.len() as u64).to_le_bytes());
+        digest.update(module.source.as_bytes());
+    }
     for (id, bytes) in images {
         digest.update((id.len() as u64).to_le_bytes());
         digest.update(id.as_bytes());
@@ -149,6 +160,9 @@ pub struct PluginPackage {
     pub manifest: PluginManifest,
     pub source: String,
     pub stylesheet: String,
+    /// All ordinary JavaScript, JSX source, and CSS modules in the package.
+    /// The host selects only the entry's reachable graph for evaluation.
+    pub modules: Vec<PluginSourceFile>,
     pub images: BTreeMap<String, Vec<u8>>,
 }
 
@@ -162,7 +176,7 @@ pub struct PluginSourceFile {
 
 impl PluginPackage {
     pub fn source_digest(&self) -> String {
-        digest_package(&self.source, &self.stylesheet, &self.images)
+        digest_package(&self.source, &self.stylesheet, &self.modules, &self.images)
     }
 
     pub fn load(directory: impl AsRef<Path>) -> Result<Self, String> {
@@ -191,10 +205,12 @@ impl PluginPackage {
             .map_err(|error| format!("plugin entry is not UTF-8: {error}"))?;
         let stylesheet = Self::load_stylesheet(&directory, &manifest)?;
         let images = Self::load_images(&directory, &manifest)?;
+        let modules = Self::load_module_sources(&directory)?;
         Ok(Self {
             manifest,
             source,
             stylesheet,
+            modules,
             images,
         })
     }
@@ -1614,6 +1630,21 @@ mod tests {
         )
         .unwrap();
         assert!(PluginPackage::load(directory.path()).is_err());
+    }
+
+    #[test]
+    fn discovered_package_rejects_changed_dependency_content() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("org.nickel.hello-panel");
+        std::fs::create_dir(&directory).unwrap();
+        std::fs::write(directory.join("plugin.json"), VALID).unwrap();
+        std::fs::write(directory.join("main.js"), "import './card.js';").unwrap();
+        std::fs::write(directory.join("card.js"), "export const value = 1;").unwrap();
+        let catalog = PluginCatalog::discover(root.path()).unwrap();
+        let descriptor = &catalog.packages["org.nickel.hello-panel"];
+        assert!(descriptor.load().is_ok());
+        std::fs::write(directory.join("card.js"), "export const value = 2;").unwrap();
+        assert!(descriptor.load().unwrap_err().contains("content changed"));
     }
 
     #[test]
