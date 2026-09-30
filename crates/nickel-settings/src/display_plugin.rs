@@ -49,7 +49,7 @@ impl DisplayPage {
         &mut self,
         data: &Value,
         theme: SemanticTheme,
-    ) -> Result<(Vec<DisplayCardView>, [AnyView<SettingsMessage>; 7]), String> {
+    ) -> Result<(Vec<DisplayCardView>, [AnyView<SettingsMessage>; 8]), String> {
         let (root, stylesheet) = self.page.render(
             data,
             theme,
@@ -124,6 +124,7 @@ impl DisplayPage {
             "display-scale",
             "display-actions",
             "display-confirmation",
+            "display-application-policy",
             "display-application-scale",
         ]
         .map(|class| {
@@ -202,6 +203,10 @@ enum DisplayRequest {
     ApplicationScaleValue {
         connector: String,
         fraction: f32,
+    },
+    ApplicationScalePolicy {
+        connector: String,
+        policy: String,
     },
     Identify {
         connector: String,
@@ -293,6 +298,32 @@ fn validate_request(request: DisplayRequest, data: &Value) -> Result<SettingsMes
             }
             (connector, crate::application_scale_message(fraction))
         }
+        DisplayRequest::ApplicationScalePolicy { connector, policy } => {
+            let available = data["applicationPolicies"]
+                .as_array()
+                .is_some_and(|policies| {
+                    policies
+                        .iter()
+                        .any(|entry| entry["id"].as_str() == Some(policy.as_str()))
+                });
+            if !available {
+                return Err(STALE_STATUS.into());
+            }
+            let message = match policy.as_str() {
+                "follow" => SettingsMessage::ApplicationScaleFollow,
+                "unchanged" => SettingsMessage::ApplicationScaleUnchanged,
+                "custom" => {
+                    let step = data["customScaleStep"]
+                        .as_u64()
+                        .and_then(|step| u32::try_from(step).ok())
+                        .filter(|step| *step <= 14)
+                        .ok_or(STALE_STATUS)?;
+                    SettingsMessage::SetApplicationScale(step)
+                }
+                _ => return Err(STALE_STATUS.into()),
+            };
+            (connector, message)
+        }
         DisplayRequest::Identify { connector } => (connector, SettingsMessage::DisplayIdentify),
         DisplayRequest::Primary { connector } => (connector, SettingsMessage::DisplayPrimary),
         DisplayRequest::Apply { connector } => (connector, SettingsMessage::DisplayApply),
@@ -379,6 +410,12 @@ pub(super) fn projection(app: &SettingsApp) -> Value {
         "customScaleLabel": "Custom application scale",
         "customScaleValue": format!("{}%", custom_scale_units * 100 / 120),
         "customScalePercent": (custom_scale_units.saturating_sub(60) as f32 / 420.0).clamp(0.0, 1.0),
+        "customScaleStep": custom_scale_units.saturating_sub(60).min(420) / 30,
+        "applicationPolicies": [
+            {"id":"follow", "label":"Follow Nickel", "selected":app.application_scale_policy == crate::ApplicationScalePolicy::FollowNickel},
+            {"id":"unchanged", "label":"Leave unchanged", "selected":app.application_scale_policy == crate::ApplicationScalePolicy::Unchanged},
+            {"id":"custom", "label":"Custom", "selected":matches!(app.application_scale_policy, crate::ApplicationScalePolicy::Custom(_))},
+        ],
         "enabledLabel": "Display enabled",
         "identifyLabel": app.localizer.text("settings-display-identify"),
         "primaryLabel": app.localizer.text("settings-display-make-primary"),
@@ -455,14 +492,19 @@ mod tests {
     }
 
     #[test]
-    fn failed_display_jsx_restores_native_actions() {
+    fn failed_display_jsx_shows_recovery_without_native_actions() {
         let app = SettingsApp::with_initial_page(SettingsPage::Display);
         *app.display_page.borrow_mut() = Some(Err("JSX failed".into()));
         let tree = app.build_ui_with_diagnostics(1280.0, 720.0);
         assert_eq!(
             tree.semantic_targets_for_message(&SettingsMessage::DisplayIdentify)
                 .len(),
-            1
+            0
+        );
+        assert!(
+            !tree
+                .semantic_targets_for_message(&SettingsMessage::Navigate(SettingsPage::Plugins))
+                .is_empty()
         );
     }
 
@@ -498,6 +540,13 @@ mod tests {
         assert!(matches!(
             page.dispatch(application_scale, json!(0.5), &data),
             Ok(SettingsMessage::SetApplicationScale(7))
+        ));
+        let unchanged = page
+            .action_for_id("application-scale-policy-unchanged")
+            .unwrap();
+        assert!(matches!(
+            page.dispatch(unchanged, Value::Null, &data),
+            Ok(SettingsMessage::ApplicationScaleUnchanged)
         ));
         assert!(
             validate_request(

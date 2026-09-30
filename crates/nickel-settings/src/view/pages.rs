@@ -1,7 +1,7 @@
 use super::*;
 use nickel_ui::{
     Collection, CollectionPresentation, CollectionState, Column, ComponentBuilderExt, Container,
-    Grid, Layer, NavigationScope, Point, RadioGroup, RadioOption, Row, Text, Track,
+    Layer, NavigationScope, Point, Row, Text,
 };
 
 pub(crate) fn codex_switch_state(state: &FeatureState) -> SwitchState {
@@ -559,161 +559,10 @@ impl SettingsApp {
             .collect()
     }
 
-    pub(super) fn display_components(
-        &self,
-        content_width: f32,
-    ) -> impl nickel_ui::Component<SettingsMessage> {
+    pub(super) fn display_components(&self, content_width: f32) -> AnyView<SettingsMessage> {
         let palette = self.palette();
         let theme = self.ui_theme();
         let selected = &self.displays[self.selected];
-        let identify = Button::semantic(
-            theme,
-            SettingsMessage::DisplayIdentify,
-            self.localizer.text("settings-display-identify"),
-            ButtonPresentation::Secondary,
-        )
-        .max_lines(3);
-        let make_primary = Button::semantic(
-            theme,
-            SettingsMessage::DisplayPrimary,
-            self.localizer.text("settings-display-make-primary"),
-            ButtonPresentation::Secondary,
-        )
-        .max_lines(3);
-        let enabled = SettingsRow::new(theme, "Display enabled", "")
-            .trailing(
-                Switch::new(selected.enabled, SettingsMessage::DisplayEnabled, theme)
-                    .id("display-enabled")
-                    .accessibility_label("Display enabled"),
-            )
-            .compact();
-        let scale = SliderField::new(
-            theme,
-            "Scale",
-            "",
-            format!("{}%", selected.scale.units() * 100 / 120),
-            (selected.scale.units().saturating_sub(60) as f32 / 420.0).clamp(0.0, 1.0),
-            display_scale_message,
-        )
-        .id("display-scale")
-        .compact();
-        let mut resolutions = selected
-            .modes
-            .iter()
-            .map(|mode| (mode.width, mode.height))
-            .collect::<Vec<_>>();
-        resolutions.sort_unstable_by(|left, right| right.cmp(left));
-        resolutions.dedup();
-        let resolution = SelectField::new(
-            theme,
-            "Resolution",
-            "",
-            SettingsMessage::ToggleDisplayResolutionSelect,
-            format!("{} × {}", selected.mode.width, selected.mode.height),
-            resolutions.into_iter().map(|(width, height)| {
-                (
-                    format!("{width} × {height}"),
-                    SettingsMessage::SetDisplayResolution { width, height },
-                )
-            }),
-            self.display_resolution_select_expanded,
-        )
-        .id("display-resolution")
-        .compact();
-        let mut refresh_rates = selected
-            .modes
-            .iter()
-            .filter(|mode| mode.width == selected.mode.width && mode.height == selected.mode.height)
-            .map(|mode| mode.refresh_millihz)
-            .collect::<Vec<_>>();
-        refresh_rates.sort_unstable_by(|left, right| right.cmp(left));
-        refresh_rates.dedup();
-        let refresh_rate = SelectField::new(
-            theme,
-            "Refresh rate",
-            "",
-            SettingsMessage::ToggleDisplayRefreshSelect,
-            format!(
-                "{:.2} Hz",
-                f64::from(selected.mode.refresh_millihz) / 1000.0
-            ),
-            refresh_rates.into_iter().map(|refresh| {
-                (
-                    format!("{:.2} Hz", f64::from(refresh) / 1000.0),
-                    SettingsMessage::SetDisplayRefresh(refresh),
-                )
-            }),
-            self.display_refresh_select_expanded,
-        )
-        .id("display-refresh-rate")
-        .compact();
-        let app_scale_units = match self.application_scale_policy {
-            ApplicationScalePolicy::Custom(scale) => scale.units(),
-            _ => 120,
-        };
-        let application_scale_policy_choices = RadioGroup::new([
-            RadioOption::new(
-                theme,
-                SettingsMessage::ApplicationScaleFollow,
-                "Follow Nickel",
-                self.application_scale_policy == ApplicationScalePolicy::FollowNickel,
-            )
-            .compact(),
-            RadioOption::new(
-                theme,
-                SettingsMessage::ApplicationScaleUnchanged,
-                "Leave unchanged",
-                self.application_scale_policy == ApplicationScalePolicy::Unchanged,
-            )
-            .compact(),
-            RadioOption::new(
-                theme,
-                SettingsMessage::SetApplicationScale(
-                    app_scale_units.saturating_sub(60).min(420) / 30,
-                ),
-                "Custom",
-                matches!(
-                    self.application_scale_policy,
-                    ApplicationScalePolicy::Custom(_)
-                ),
-            )
-            .compact(),
-        ])
-        .id("application-scale-policy");
-        let apply = Button::semantic(
-            theme,
-            SettingsMessage::DisplayApply,
-            self.localizer.text("settings-display-apply"),
-            ButtonPresentation::Primary,
-        )
-        .max_lines(3);
-        let confirmation: AnyView<SettingsMessage> = if self.pending_display_revert.is_some() {
-            AnyView::new(
-                Row::new()
-                    .gap(8.0)
-                    .child(Button::semantic(
-                        theme,
-                        SettingsMessage::DisplayKeep,
-                        "Keep",
-                        ButtonPresentation::Primary,
-                    ))
-                    .child(Button::semantic(
-                        theme,
-                        SettingsMessage::DisplayRevert,
-                        "Revert",
-                        ButtonPresentation::Secondary,
-                    )),
-            )
-        } else {
-            AnyView::new(nickel_ui::Container::new())
-        };
-        let native_actions: AnyView<SettingsMessage> = AnyView::new(
-            Grid::auto_fit(Track::minmax(Track::px(120.0), Track::fr(1.0)))
-                .gap(12.0)
-                .child(identify)
-                .child(make_primary)
-                .child(apply),
-        );
         let plugin_view = if self.settings_jsx_enabled {
             let data = crate::display_plugin::projection(self);
             self.display_page
@@ -725,15 +574,20 @@ impl SettingsApp {
                 .as_mut()
                 .map_err(|error| error.clone())
                 .and_then(|page| page.render(&data, theme))
-                .ok()
         } else {
-            None
+            Err("Settings plugin is disabled".into())
         };
         let (plugin_cards, plugin_actions) = match plugin_view {
-            Some((cards, actions)) => (Some(cards), Some(actions)),
-            None => (None, None),
+            Ok(view) => view,
+            Err(error) => {
+                return self.settings_plugin_recovery(
+                    "Display settings are unavailable",
+                    error,
+                    None,
+                );
+            }
         };
-        let (
+        let [
             enabled,
             resolution,
             refresh_rate,
@@ -742,51 +596,7 @@ impl SettingsApp {
             confirmation,
             application_policy,
             application_scale_slider,
-        ) = if let Some(
-            [
-                enabled,
-                resolution,
-                refresh_rate,
-                scale,
-                actions,
-                confirmation,
-                application_scale_slider,
-            ],
-        ) = plugin_actions
-        {
-            (
-                enabled,
-                resolution,
-                refresh_rate,
-                scale,
-                actions,
-                confirmation,
-                AnyView::new(application_scale_policy_choices),
-                application_scale_slider,
-            )
-        } else {
-            (
-                AnyView::new(enabled),
-                AnyView::new(resolution),
-                AnyView::new(refresh_rate),
-                AnyView::new(scale),
-                native_actions,
-                confirmation,
-                AnyView::new(application_scale_policy_choices),
-                AnyView::new(
-                    SliderField::new(
-                        theme,
-                        "Custom application scale",
-                        "",
-                        format!("{}%", app_scale_units * 100 / 120),
-                        (app_scale_units.saturating_sub(60) as f32 / 420.0).clamp(0.0, 1.0),
-                        application_scale_message,
-                    )
-                    .id("application-custom-scale")
-                    .compact(),
-                ),
-            )
-        };
+        ] = plugin_actions;
         let app_scale = SettingsCard::titled(
             theme,
             self.localizer.text("ui-pages-application-compatibility-scale"),
@@ -797,26 +607,18 @@ impl SettingsApp {
         .child(application_scale_slider)
         .child(nickel_ui::Text::new(&self.toolkit_scale_status).color(palette.muted));
         let compact_cards = content_width < 520.0;
-        let mut display_order = plugin_cards.as_ref().map_or_else(
-            || (0..self.displays.len()).collect::<Vec<_>>(),
-            |cards| cards.iter().map(|card| card.index).collect::<Vec<_>>(),
-        );
-        if plugin_cards.is_none() {
-            display_order.sort_by_key(|index| (*index == self.selected) as u8);
-        }
+        let display_order = plugin_cards
+            .iter()
+            .map(|card| card.index)
+            .collect::<Vec<_>>();
         let display_cards = display_order.into_iter().map(|index| {
             let display = &self.displays[index];
             let selected = index == self.selected;
-            let plugin_card = plugin_cards.as_ref().and_then(|cards| cards.iter().find(|card| card.index == index));
-            let name = plugin_card.map_or_else(|| display.name.clone(), |card| card.name.clone());
-            let detail = plugin_card.map_or_else(
-                || if display.enabled { display.detail.clone() } else { format!("{}  DISABLED", display.detail) },
-                |card| card.detail.clone(),
-            );
-            let primary_label = plugin_card.map_or_else(
-                || if display.primary { "PRIMARY".to_owned() } else { String::new() },
-                |card| card.primary_label.clone(),
-            );
+            let plugin_card = plugin_cards.iter().find(|card| card.index == index)
+                .expect("projected display order contains its card");
+            let name = &plugin_card.name;
+            let detail = &plugin_card.detail;
+            let primary_label = &plugin_card.primary_label;
             let border_color = if !display.enabled {
                 palette.muted
             } else if display.primary {
@@ -844,10 +646,10 @@ impl SettingsApp {
                     accessibility_label={format!("{} display, {}", name, detail)}
                     accessibility_state={if selected { "selected" } else { "not selected" }}>
                     <Column gap={4.0}>
-                        <Text color={palette.text} wrap={true}>{&name}</Text>
-                        <Text scale={0.9} color={palette.muted} wrap={true}>{detail}</Text>
+                        <Text color={palette.text} wrap={true}>{name.as_str()}</Text>
+                        <Text scale={0.9} color={palette.muted} wrap={true}>{detail.as_str()}</Text>
                         <Text scale={0.9} bold={true} color={palette.accent}>
-                            {&primary_label}
+                            {primary_label.as_str()}
                         </Text>
                     </Column>
                 </Container>
@@ -871,7 +673,7 @@ impl SettingsApp {
                     .children(display_cards),
             )
         };
-        ui! {
+        AnyView::new(ui! {
             <Column grow={1.0} padding={Insets {
                 top: 20.0, right: 32.0, bottom: 20.0, left: 20.0,
             }}>
@@ -916,7 +718,7 @@ impl SettingsApp {
                     </Column>
                 </VerticalScroll>
             </Column>
-        }
+        })
     }
 
     pub(super) fn network_components(&self) -> AnyView<SettingsMessage> {

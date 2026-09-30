@@ -20,6 +20,28 @@ div.display-actions {
     gap: 12px;
 }
 
+div.display-application-policy {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    width: 100%;
+    gap: 8px;
+}
+
+div.application-policy {
+    min-height: 40px;
+    padding: 8px 12px;
+    background: @card@;
+    border: 1px solid @border@;
+    border-radius: @radius@px;
+    color: @primary@;
+    font-size: 13px;
+}
+
+div.application-policy.selected {
+    background: @accent-soft@;
+    border: 1px solid @accent@;
+}
+
 button {
     min-height: 40px;
     padding: 8px 12px;

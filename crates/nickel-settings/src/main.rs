@@ -70,10 +70,10 @@ use nickel_ui::{
     ButtonPresentation, DragGesture, DragPhase, FrameOverlay, GlobalAction, HostAdapter,
     HostServices, Image, ImageFit, InputModality, Insets, NavigationItem, OverlayAnchor, OverlayId,
     OverlayStyle, PageHeader, Popover, ReadingDirection, ResponsiveNavigation,
-    ResponsiveNavigationDestination, SelectField, SemanticControllerAction, SemanticRole,
-    SemanticSelector, SemanticTheme, SettingsCard, SettingsNavigation, SettingsRow,
-    SettingsSearchField, SettingsStatus, SettingsStatusKind, Size, SliderField, Switch,
-    SwitchState, UiHost, UiId, ViewContext, search_settings, ui,
+    ResponsiveNavigationDestination, SemanticControllerAction, SemanticRole, SemanticSelector,
+    SemanticTheme, SettingsCard, SettingsNavigation, SettingsRow, SettingsSearchField,
+    SettingsStatus, SettingsStatusKind, Size, SwitchState, UiHost, UiId, ViewContext,
+    search_settings, ui,
 };
 use winit::{dpi::LogicalSize, event::WindowEvent};
 
@@ -5665,6 +5665,20 @@ mod tests {
             );
             renderer.render(tree.commands());
             assert!(renderer.pixels().iter().any(|pixel| pixel.a > 0));
+            if locale == "de-DE" {
+                let image = image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_fn(
+                    physical_width,
+                    physical_height,
+                    |x, y| {
+                        let pixel = renderer.pixels()[(y * physical_width + x) as usize];
+                        image::Rgba([pixel.r, pixel.g, pixel.b, pixel.a])
+                    },
+                );
+                let output = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../target/nickel-ui-snapshots/settings-display-shared.png");
+                std::fs::create_dir_all(output.parent().unwrap()).unwrap();
+                image.save(output).unwrap();
+            }
         }
     }
 

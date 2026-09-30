@@ -48,6 +48,15 @@ function App() {
             {data.pendingRevert ? <Button id="display-keep" onClick={() => request('keep')}>{data.keepLabel}</Button> : null}
             {data.pendingRevert ? <Button id="display-revert" onClick={() => request('revert')}>{data.revertLabel}</Button> : null}
         </div>
+        <div className="display-application-policy" role="radiogroup" aria-label="Application scale policy">
+            {data.applicationPolicies.map(policy => <div key={policy.id}
+                id={`application-scale-policy-${policy.id}`}
+                className={policy.selected ? 'application-policy selected' : 'application-policy'}
+                role="radio" aria-label={policy.label} aria-checked={policy.selected}
+                onClick={() => request('application-scale-policy', {policy: policy.id})}>
+                <Text wrap={true}>{policy.label}</Text>
+            </div>)}
+        </div>
         <div className="display-application-scale">
             <Text>{data.customScaleLabel}</Text><Text>{data.customScaleValue}</Text>
             <Slider id="application-custom-scale" value={data.customScalePercent}
