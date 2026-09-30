@@ -130,7 +130,19 @@ export function Settings() {
     const settings = readPluginSettings().settings;
     const pages = readPluginSettingsPages().pages;
     const entries = [...settings, ...pages];
-    const [activeId, setActiveId] = useState(entries.length ? entries[0].providerPackage + "/" + entries[0].id : null);
+    const navigation = nickel.data.navigation || {};
+    const revision = String(navigation.revision || "");
+    const requested = entries.find(entry => entry.providerPackage + "/" + entry.id === navigation.destination)
+        || entries.find(entry => entry.id === navigation.destination);
+    const requestedId = requested ? requested.providerPackage + "/" + requested.id : null;
+    const [selection, setSelection] = useState({revision, id:requestedId || (entries.length ? entries[0].providerPackage + "/" + entries[0].id : null)});
+    const acceptedNavigation = useRef({revision, id:selection.id});
+    if (acceptedNavigation.current.revision !== revision) {
+        const previous = selection.revision === acceptedNavigation.current.revision ? selection.id : acceptedNavigation.current.id;
+        acceptedNavigation.current = {revision, id:requestedId || previous};
+    }
+    const activeId = selection.revision === revision ? selection.id : acceptedNavigation.current.id;
+    const setActiveId = id => setSelection({revision, id});
     const active = entries.find(entry => entry.providerPackage + "/" + entry.id === activeId) || entries[0];
     const ActivePage = active && typeof active.component === "function" ? active.component : null;
     const groups = groupEntries(settings, pages);

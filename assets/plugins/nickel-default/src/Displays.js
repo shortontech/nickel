@@ -25,7 +25,11 @@ function ApplicationScaleControls() {
 export function Displays() {
     const snapshot = nickel.displays.get() || { available: false, outputs: [], reason: "Display capability is unavailable." };
     const outputs = snapshot.outputs || [];
-    const [selectedName, select] = useState(null);
+    const navigation = nickel.data.navigation || {};
+    const navigationRevision = String(navigation.revision || "");
+    const [selection, setSelection] = useState({ revision: navigationRevision, name: navigation.output || null });
+    const selectedName = selection.revision === navigationRevision ? selection.name : navigation.output || selection.name;
+    const select = name => setSelection({ revision: navigationRevision, name });
     const draftState = useRef(null);
     const setDraft = next => { draftState.current = next; };
     const drag = useRef(null);
