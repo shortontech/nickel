@@ -689,6 +689,170 @@ mod platform {
         use super::*;
 
         #[test]
+        fn connectivity_settings_use_native_controls_and_revision_bound_public_clients() {
+            // Boa evaluation plus native view construction needs more than the test thread default.
+            std::thread::Builder::new().stack_size(16 * 1024 * 1024).spawn(|| {
+            use nickel_plugin_runtime::{JsxModuleGraph, ModuleSource};
+            use nickel_ui::SemanticRole;
+            use nickel_ui::{SemanticAction, SemanticSelector, UiHost};
+            let directory = tempfile::tempdir().unwrap();
+            std::fs::create_dir(directory.path().join("styles")).unwrap();
+            std::fs::write(
+                directory.path().join("Wifi.jsx"),
+                include_str!("../../../../assets/plugins/nickel-default/src/Wifi.jsx"),
+            )
+            .unwrap();
+            std::fs::write(
+                directory.path().join("Bluetooth.jsx"),
+                include_str!("../../../../assets/plugins/nickel-default/src/Bluetooth.jsx"),
+            )
+            .unwrap();
+            std::fs::write(
+                directory.path().join("styles/connectivity.css"),
+                include_str!(
+                    "../../../../assets/plugins/nickel-default/src/styles/connectivity.css"
+                ),
+            )
+            .unwrap();
+            std::fs::write(directory.path().join("main.jsx"), "import {Wifi} from './Wifi.js'; import {Bluetooth} from './Bluetooth.js'; export default function App() { return <Window id='main' width={520} height={340}><Column><Wifi/><Bluetooth/></Column></Window>; }").unwrap();
+            let (source, modules) = super::super::compile_jsx_modules(
+                directory.path(),
+                "main.js",
+                Path::new("main.jsx"),
+            )
+            .unwrap();
+            let graph = JsxModuleGraph::new(
+                "main.js",
+                modules.iter().map(|module| ModuleSource {
+                    path: &module.path,
+                    source: &module.source,
+                }),
+            )
+            .unwrap();
+            let mut manifest = PluginManifest::from_json(include_str!(
+                "../../../../assets/plugins/example-window/plugin.json"
+            ))
+            .unwrap();
+            manifest.capabilities.extend([
+                nickel_core::plugins::PluginCapability::NetworkRead,
+                nickel_core::plugins::PluginCapability::NetworkControl,
+                nickel_core::plugins::PluginCapability::BluetoothRead,
+                nickel_core::plugins::PluginCapability::BluetoothControl,
+            ]);
+            let data = serde_json::json!({
+                "wifi":{"available":true,"enabled":true,"revision":"0123456789abcdef","operations":{"connect":true,"setEnabled":true},"networks":[
+                    {"id":"profile-stable","name":"Cafe","signalPercent":80,"saved":true,"connected":false,"canConnect":true},
+                    {"id":"profile-unsaved","name":"Cafe","signalPercent":60,"saved":false,"connected":false,"canConnect":false}]},
+                "bluetooth":{"available":true,"powered":true,"discovering":false,"revision":"fedcba9876543210","operations":{"setPowered":true,"pair":true,"connect":false,"disconnect":false,"setDiscovery":false},"devices":[{"id":"device-stable","name":"Headset","paired":false,"connected":false}]}
+            });
+            let mut runtime =
+                nickel_plugin_runtime::JsxRuntime::new_modules(&graph, Some(&data.to_string()))
+                    .unwrap();
+            let metadata: serde_json::Value =
+                runtime.eval_json("__nickelSettingsMetadata()").unwrap();
+            assert!(
+                metadata["pages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|page| page["id"] == "wifi")
+            );
+            assert!(
+                metadata["pages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|page| page["id"] == "bluetooth")
+            );
+            let package = PluginPackage {
+                manifest: manifest.clone(),
+                source: source.clone(),
+                stylesheet: String::new(),
+                modules: modules.clone(),
+                images: Default::default(),
+            };
+            let mut app = PluginPanelApplication::from_package(&package).unwrap();
+            app.sync_data(&data).unwrap();
+            let mut host = UiHost::new(app, 520, 340);
+            let connect = host
+                .query_unique(&SemanticSelector::RoleAndName {
+                    role: SemanticRole::Button,
+                    name: "Connect".into(),
+                })
+                .unwrap();
+            host.perform_semantic_action(
+                connect.id,
+                SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
+            );
+            assert!(matches!(
+                host.application_mut().take_effects().as_slice(),
+                [nickel_shell::plugin_panel::PluginEffect::Connectivity { .. }]
+            ));
+            // Capture the actual public handler effect: the profile ID and observed revision survive rendering.
+            let tree = runtime
+                .render("__nickelRender()", |node| Ok(node.clone()))
+                .unwrap();
+            fn find_action(node: &serde_json::Value, label: &str) -> Option<u64> {
+                if node["kind"] == "button"
+                    && node["children"].as_array().is_some_and(|children| {
+                        children.iter().any(|child| {
+                            child.as_str() == Some(label) || child["text"].as_str() == Some(label)
+                        })
+                    })
+                {
+                    return node["action"].as_u64();
+                }
+                node["children"]
+                    .as_array()?
+                    .iter()
+                    .find_map(|child| find_action(child, label))
+            }
+            let action = find_action(&tree, "Connect").unwrap();
+            runtime
+                .eval(&format!("__nickelDispatch({action})"))
+                .unwrap();
+            let effects = runtime.take_effects().unwrap();
+            assert_eq!(
+                effects[0],
+                serde_json::json!({"type":"wifi.connect","id":"profile-stable","revision":"0123456789abcdef"})
+            );
+            runtime.eval("__nickelCommitRender()").unwrap();
+            runtime.finish_event(true).unwrap();
+            let tree = runtime
+                .render("__nickelRender()", |node| Ok(node.clone()))
+                .unwrap();
+            let pair = find_action(&tree, "Pair").unwrap();
+            runtime.eval(&format!("__nickelDispatch({pair})")).unwrap();
+            assert_eq!(
+                runtime.take_effects().unwrap()[0],
+                serde_json::json!({"type":"bluetooth.pair","id":"device-stable","revision":"fedcba9876543210"})
+            );
+            let unsupported = serde_json::json!({"wifi":{"available":false,"reason":"Adapter absent","networks":[],"operations":{}},"bluetooth":{"available":true,"powered":true,"devices":[{"id":"paired","name":"Headset","paired":true,"connected":false}],"operations":{}}});
+            let mut app = PluginPanelApplication::from_package(&package).unwrap();
+            app.sync_data(&unsupported).unwrap();
+            let host = UiHost::new(app, 520, 340);
+            assert!(
+                host.query_unique(&SemanticSelector::RoleAndName {
+                    role: SemanticRole::Button,
+                    name: "Connect".into()
+                })
+                .is_err()
+            );
+            assert!(
+                host.query_unique(&SemanticSelector::RoleAndName {
+                    role: SemanticRole::Button,
+                    name: "Pair".into()
+                })
+                .is_err()
+            );
+            nickel_plugin_presentation::css::StyleSheet::compile(include_str!(
+                "../../../../assets/plugins/nickel-default/src/styles/connectivity.css"
+            ))
+            .unwrap();
+            }).unwrap().join().unwrap();
+        }
+
+        #[test]
         fn development_compiles_and_stages_imported_jsx_modules() {
             if Command::new(tsc_executable())
                 .arg("--version")

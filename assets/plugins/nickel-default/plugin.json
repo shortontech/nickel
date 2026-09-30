@@ -21,7 +21,9 @@
       "shell.settings.colorPicker": "./src/ColorPicker.js#ColorPicker",
       "shell.settings.appearance": "./src/Appearance.js#Appearance",
       "shell.settings.defaultApps": "./src/DefaultApps.js#DefaultApps",
-      "shell.settings.displays": "./src/Displays.js#Displays"
+      "shell.settings.displays": "./src/Displays.js#Displays",
+      "shell.settings.wifi": "./src/Wifi.js#Wifi",
+      "shell.settings.bluetooth": "./src/Bluetooth.js#Bluetooth"
     }
   },
   "capabilities": [

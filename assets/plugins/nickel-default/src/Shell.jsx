@@ -2,6 +2,8 @@ import "./styles/controls.css";
 import "./Appearance.js";
 import "./DefaultApps.js";
 import "./Displays.js";
+import "./Wifi.js";
+import "./Bluetooth.js";
 // @jsx h
 import { Taskbar } from "./Taskbar.js";
 import { Launcher } from "./Launcher.js";

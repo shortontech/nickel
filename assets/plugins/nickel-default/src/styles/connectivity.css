@@ -1,0 +1,24 @@
+column.connectivity-page {
+    width: 100%;
+    gap: 16px;
+}
+row.connectivity-toolbar {
+    gap: 16px;
+    align-items: center;
+}
+column.connectivity-card {
+    width: 100%;
+    gap: 8px;
+    padding: 16px;
+    background: var(--nickel-surface);
+    border: 1px solid var(--nickel-border);
+    border-radius: var(--nickel-radius-control);
+}
+.connectivity-title, .connectivity-name {
+    color: var(--nickel-text);
+    font-size: 18px;
+    line-height: 26px;
+}
+.connectivity-description {
+    color: var(--nickel-text-muted);
+}
