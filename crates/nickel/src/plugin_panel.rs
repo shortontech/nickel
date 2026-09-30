@@ -354,6 +354,7 @@ pub struct PluginPanelApplication {
     runtime_failure: Option<String>,
     manifest: PluginManifest,
     expected_surface_id: Option<String>,
+    runtime_surface_id: String,
     projection_data: Option<String>,
     overlay_open: bool,
     dispatch_removed_focus: bool,
@@ -1075,9 +1076,18 @@ impl PluginPanelApplication {
         source: &'static str,
         stylesheet: Option<&'static str>,
         data: String,
+        runtime: Option<std::rc::Rc<std::cell::RefCell<JsxRuntime>>>,
+        runtime_surface_id: &str,
     ) -> Result<Self, String> {
         let source = bundled_source(manifest, entry, source)?;
-        let mut application = Self::new_with_manifest(source.as_ref(), manifest, Some(data))?;
+        let mut application = Self::new_with_manifest_for_surface_and_scope(
+            source.as_ref(),
+            manifest,
+            Some(data),
+            None,
+            runtime,
+            runtime_surface_id,
+        )?;
         if let Some(stylesheet) = stylesheet {
             application.stylesheet = bundled_stylesheet(manifest, stylesheet)?;
         }
@@ -1095,7 +1105,34 @@ impl PluginPanelApplication {
         data: String,
     ) -> Result<Self, String> {
         let (source, stylesheet) = crate::bundled_plugin_assets::resolve(&manifest.id, entry)?;
-        Self::bundled_application(manifest, entry, source, Some(stylesheet), data)
+        Self::bundled_application(
+            manifest,
+            entry,
+            source,
+            Some(stylesheet),
+            data,
+            None,
+            "default",
+        )
+    }
+
+    pub(crate) fn bundled_with_shared_runtime(
+        manifest: &PluginManifest,
+        entry: &str,
+        data: String,
+        runtime_surface_id: &str,
+        runtime: std::rc::Rc<std::cell::RefCell<JsxRuntime>>,
+    ) -> Result<Self, String> {
+        let (source, stylesheet) = crate::bundled_plugin_assets::resolve(&manifest.id, entry)?;
+        Self::bundled_application(
+            manifest,
+            entry,
+            source,
+            Some(stylesheet),
+            data,
+            Some(runtime),
+            runtime_surface_id,
+        )
     }
 
     pub(crate) fn button_message(&self, id: &str) -> Option<PluginMessage> {
@@ -1211,8 +1248,10 @@ impl PluginPanelApplication {
         self.runtime.clone()
     }
 
-    pub(crate) fn retire_surface(&self, id: &str) -> Result<(), String> {
-        self.runtime.borrow_mut().drop_surface(id)
+    pub(crate) fn retire_surface(&self) -> Result<(), String> {
+        self.runtime
+            .borrow_mut()
+            .drop_surface(&self.runtime_surface_id)
     }
 
     pub(crate) fn from_package_surface_with_runtime(
@@ -1471,7 +1510,7 @@ impl PluginPanelApplication {
         let mut validation_rejected = false;
         let node = {
             let mut runtime = self.runtime.borrow_mut();
-            runtime.select_surface(self.expected_surface_id.as_deref().unwrap_or("default"))?;
+            runtime.select_surface(&self.runtime_surface_id)?;
             runtime.set_data(&serialized)?;
             let result = render_panel_validated(
                 &mut runtime,
@@ -1531,6 +1570,24 @@ impl PluginPanelApplication {
         expected_surface_id: Option<&str>,
         shared_runtime: Option<std::rc::Rc<std::cell::RefCell<JsxRuntime>>>,
     ) -> Result<Self, String> {
+        Self::new_with_manifest_for_surface_and_scope(
+            source,
+            manifest,
+            data,
+            expected_surface_id,
+            shared_runtime,
+            expected_surface_id.unwrap_or("default"),
+        )
+    }
+
+    fn new_with_manifest_for_surface_and_scope(
+        source: &str,
+        manifest: &PluginManifest,
+        data: Option<String>,
+        expected_surface_id: Option<&str>,
+        shared_runtime: Option<std::rc::Rc<std::cell::RefCell<JsxRuntime>>>,
+        runtime_surface_id: &str,
+    ) -> Result<Self, String> {
         let runtime = if let Some(runtime) = shared_runtime {
             runtime
         } else {
@@ -1541,7 +1598,7 @@ impl PluginPanelApplication {
         };
         let node = {
             let mut runtime_ref = runtime.borrow_mut();
-            runtime_ref.select_surface(expected_surface_id.unwrap_or("default"))?;
+            runtime_ref.select_surface(runtime_surface_id)?;
             if let Some(data) = data.as_deref() {
                 runtime_ref.set_data(data)?;
             }
@@ -1561,6 +1618,7 @@ impl PluginPanelApplication {
             runtime_failure: None,
             manifest: manifest.clone(),
             expected_surface_id: expected_surface_id.map(str::to_owned),
+            runtime_surface_id: runtime_surface_id.to_owned(),
             projection_data: data,
             overlay_open: false,
             dispatch_removed_focus: false,
@@ -1778,9 +1836,7 @@ impl nickel_ui::Application for PluginPanelApplication {
         let mut validation_rejected = false;
         let (rendered, effects) = {
             let mut runtime = self.runtime.borrow_mut();
-            if let Err(error) =
-                runtime.select_surface(self.expected_surface_id.as_deref().unwrap_or("default"))
-            {
+            if let Err(error) = runtime.select_surface(&self.runtime_surface_id) {
                 self.runtime_failure = Some(error.clone());
                 self.last_error = Some(error);
                 return;
@@ -3137,6 +3193,42 @@ mod tests {
         denied.update(denied.button_message("activate").unwrap());
         assert!(denied.take_effects().is_empty());
         assert!(denied.last_error().is_some());
+    }
+
+    #[test]
+    fn output_copies_share_one_runtime_with_independent_hook_state() {
+        let source = "function App() { const [count, setCount] = useState(0); return h(FixedWindow, {width: '100%', height: 56, output: 'all', edge: 'bottom', reserveWorkArea: true}, h(Button, {id: 'advance', onClick: () => setCount(count + 1)}, `${nickel.data.label}:${count}`)); }";
+        let mut left = PluginPanelApplication::new_with_manifest_for_surface_and_scope(
+            source,
+            taskbar_manifest(),
+            Some(serde_json::json!({"label": "left"}).to_string()),
+            None,
+            None,
+            "taskbar-output:left",
+        )
+        .unwrap();
+        let mut right = PluginPanelApplication::new_with_manifest_for_surface_and_scope(
+            source,
+            taskbar_manifest(),
+            Some(serde_json::json!({"label": "right"}).to_string()),
+            None,
+            Some(left.shared_runtime()),
+            "taskbar-output:right",
+        )
+        .unwrap();
+        assert!(std::rc::Rc::ptr_eq(
+            &left.shared_runtime(),
+            &right.shared_runtime()
+        ));
+        left.update(left.button_message("advance").unwrap());
+        right
+            .sync_data(&serde_json::json!({"label": "right refreshed"}))
+            .unwrap();
+        assert!(format!("{:?}", left.node).contains("left:1"));
+        assert!(format!("{:?}", right.node).contains("right refreshed:0"));
+        left.retire_surface().unwrap();
+        right.update(right.button_message("advance").unwrap());
+        assert!(format!("{:?}", right.node).contains("right refreshed:1"));
     }
 
     #[test]

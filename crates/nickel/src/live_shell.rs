@@ -3933,7 +3933,7 @@ impl LiveShell {
             return self.set_plugin_enabled(&key.plugin_id, false);
         }
         if let Some(host) = self.plugin_panel_host_for(key) {
-            host.application().retire_surface(&key.surface_id)?;
+            host.application().retire_surface()?;
         }
         if self.primary_panel_key == *key {
             self.plugin_surface_hosts.remove(key);
@@ -7379,16 +7379,23 @@ impl LiveShell {
         }
         let previous_output = std::mem::replace(&mut self.panel_output, output);
         if let Some(current) = self.plugin_taskbar_host.take() {
+            let runtime = current.application().shared_runtime();
             let next = self
                 .plugin_taskbar_hosts
                 .remove(&self.panel_output)
                 .or_else(|| {
                     let (clock, _) = panel_clock_text();
                     let (data, images) = self.taskbar_plugin_render_data(&clock);
-                    match crate::plugin_panel::PluginPanelApplication::bundled_with_data(
+                    let runtime_surface_id = format!(
+                        "taskbar-output:{}",
+                        self.panel_output.as_deref().unwrap_or("default")
+                    );
+                    match crate::plugin_panel::PluginPanelApplication::bundled_with_shared_runtime(
                         crate::plugin_panel::taskbar_manifest(),
                         "main.js",
                         data,
+                        &runtime_surface_id,
+                        runtime,
                     ) {
                         Ok(mut application) => {
                             application.sync_images(images);
@@ -7405,6 +7412,9 @@ impl LiveShell {
                 });
             if next.is_some() {
                 if self.plugin_taskbar_hosts.len() >= 32 {
+                    for host in self.plugin_taskbar_hosts.values() {
+                        let _ = host.application().retire_surface();
+                    }
                     self.plugin_taskbar_hosts.clear();
                 }
                 self.plugin_taskbar_hosts.insert(previous_output, current);
@@ -10919,10 +10929,14 @@ impl LiveShell {
                 .as_ref()
                 .is_none_or(|name| outputs.iter().any(|output| &output.name == name))
         });
-        self.plugin_taskbar_hosts.retain(|output, _| {
-            output
+        self.plugin_taskbar_hosts.retain(|output, host| {
+            let keep = output
                 .as_ref()
-                .is_none_or(|name| outputs.iter().any(|output| &output.name == name))
+                .is_none_or(|name| outputs.iter().any(|output| &output.name == name));
+            if !keep {
+                let _ = host.application().retire_surface();
+            }
+            keep
         });
         self.plugin_taskbar_memory.retain(|output, _| {
             output

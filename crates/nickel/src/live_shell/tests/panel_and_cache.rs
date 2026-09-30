@@ -133,6 +133,17 @@
         shell.panel_host_ui(UiEvent::PointerPressed(point), 1280);
         let before = shell.plugin_taskbar_host.as_ref().unwrap().inspect();
         shell.panel_scene_for_output(Some("right"), 800, 56);
+        assert!(std::rc::Rc::ptr_eq(
+            &shell
+                .plugin_taskbar_host
+                .as_ref()
+                .unwrap()
+                .application()
+                .shared_runtime(),
+            &shell.plugin_taskbar_hosts[&Some("right".into())]
+                .application()
+                .shared_runtime(),
+        ));
         let after = shell.plugin_taskbar_host.as_ref().unwrap().inspect();
         assert_eq!(before.pointer_capture, after.pointer_capture);
         assert_eq!(before.pointer_hover, after.pointer_hover);
@@ -335,6 +346,16 @@
 
         #[cfg(target_os = "linux")]
         {
+            let runtime = shell
+                .plugin_taskbar_host
+                .as_ref()
+                .unwrap()
+                .application()
+                .shared_runtime();
+            assert!(runtime
+                .borrow_mut()
+                .eval_json::<bool>("__activeSurface === 'taskbar-output:right' || __surfaceStates.has('taskbar-output:right')")
+                .unwrap());
             shell.retain_panel_outputs(&[crate::internal_shell::InternalOutput {
                 x: 0,
                 y: 0,
@@ -344,6 +365,14 @@
                 scale: 1.0,
             }]);
             assert!(!shell.plugin_taskbar_hosts.contains_key(&Some("right".into())));
+            assert!(!runtime
+                .borrow_mut()
+                .eval_json::<bool>("__surfaceStates.has('taskbar-output:right')")
+                .unwrap());
+            assert!(runtime
+                .borrow_mut()
+                .eval_json::<bool>("__activeSurface !== 'taskbar-output:right' || __componentHooks.size === 0")
+                .unwrap());
             assert_eq!(
                 shell
                     .plugin_registry()
