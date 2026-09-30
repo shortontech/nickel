@@ -221,3 +221,31 @@ attaches native thumbnails to that window and Linux routes native preview focus,
 highlight, and task-switch placement through it. Its content uses the ordinary
 shared package runtime. The same declaration is excluded from generic panel
 presentation, so only the preview bridge presents its content.
+
+## Guarded shell selection
+
+The ordinary Plugins page uses `nickel.plugins.get()` for inventory, grants,
+operation results, and the current shell preview. **Preview shell** starts a
+bounded preview with `nickel.plugins.selectShell(id, revision)`. Disabled packages
+first show their requested capabilities, surfaces, and composition changes; the
+review action is **Enable and preview shell**.
+
+While a preview is active, the page shows the candidate and previous shell,
+**Keep this shell**, and **Restore previous shell**, even when the inventory search
+hides the candidate. Activation and additional selection controls stay disabled
+until the preview finishes. Confirmation is presented from native snapshot state,
+so it does not depend on local review state surviving a shell change.
+
+`plugins.get().shellPreview` is either `null` or
+`{token, previousShell, selectedShell, deadlineUnixMilliseconds, canConfirm, canRevert}`.
+`plugins.confirmShell(token, revision)` and `plugins.revertShell(token, revision)`
+carry the opaque preview token and current inventory revision. The page respects
+the native operation flags; native code checks grants, package lifetime, lock
+state, token, and revision again. Only confirmation saves the shell selection.
+Expired, failed, or reverted previews restore the previous shell.
+
+The native recovery timer and trusted recovery controls remain usable when the
+candidate omits Settings or its package fails. The ordinary Plugins page displays
+confirmation whenever it is available in the selected shell; it does not own the
+recovery timer or provide a Rust page host. This selector manages already known
+packages and does not install packages.

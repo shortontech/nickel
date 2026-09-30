@@ -22,6 +22,9 @@ function PluginSetting({plugin, setting, revision, writable}) {
 
 export function Plugins() {
     const catalog = nickel.plugins.get();
+    const preview = catalog.shellPreview;
+    const canManage = catalog.available && catalog.writable && !preview;
+    const shellName = id => catalog.plugins.find(plugin => plugin.id === id)?.name || id;
     const [query, setQuery] = useState("");
     const [review, setReview] = useState(null);
     const candidate = review && catalog.plugins.find(plugin => plugin.id === review.id);
@@ -33,7 +36,19 @@ export function Plugins() {
         {!catalog.available ? <Text wrap={true}>{catalog.reason || "Plugin inventory unavailable."}</Text> : null}
         {catalog.available && !catalog.writable ? <Text>Plugin management is read only.</Text> : null}
         {catalog.truncated ? <Text wrap={true}>This inventory is incomplete.</Text> : null}
-        {catalog.lastResult ? <Text wrap={true}>{catalog.lastResult.status === "applied" ? "Plugin state updated." : catalog.lastResult.detail || "Plugin change rejected."}</Text> : null}
+        {catalog.lastResult ? <Text wrap={true}>{catalog.lastResult.detail || ({applied:"Plugin state updated.",preview:"Shell preview started.",confirmed:"Shell selection saved.",reverted:"Previous shell restored.",rejected:"Plugin change rejected."}[catalog.lastResult.status] || "Plugin operation: " + catalog.lastResult.status)}</Text> : null}
+        {preview ? <Column className="plugin-card">
+            <Text className="plugin-title">Temporary shell preview</Text>
+            <Text wrap={true}>{"Previewing " + shellName(preview.selectedShell) + ". Previous shell: " + shellName(preview.previousShell) + "."}</Text>
+            <Text wrap={true}>Keep this shell before the recovery timer expires, or restore the previous shell. Unconfirmed previews revert automatically.</Text>
+            <Row>
+                <Button id="plugin-shell-confirm" disabled={!catalog.available || !catalog.writable || !preview.canConfirm}
+                    onClick={() => nickel.plugins.confirmShell(preview.token, catalog.revision)}>Keep this shell</Button>
+                <Button id="plugin-shell-revert" disabled={!catalog.available || !catalog.writable || !preview.canRevert}
+                    onClick={() => nickel.plugins.revertShell(preview.token, catalog.revision)}>Restore previous shell</Button>
+            </Row>
+            <Text wrap={true}>Finish this preview before changing plugin activation or selecting another shell.</Text>
+        </Column> : null}
         {review ? <Column className="plugin-card">
             <Text className="plugin-title">Review plugin access</Text>
             {candidate ? <Column>
@@ -45,20 +60,20 @@ export function Plugins() {
             </Column> : null}
             {!reviewCurrent ? <Text wrap={true}>Plugin access changed. Cancel and review it again before enabling.</Text> : null}
             <Row><Button id="plugin-review-cancel" onClick={() => setReview(null)}>Cancel</Button>
-                <Button id="plugin-review-confirm" disabled={!catalog.writable || !reviewCurrent}
-                    onClick={() => { review.selectShell ? nickel.plugins.selectShell(candidate.id, review.revision) : nickel.plugins.enable(candidate.id, review.revision); setReview(null); }}>Enable plugin</Button></Row>
+                <Button id="plugin-review-confirm" disabled={!canManage || !reviewCurrent}
+                    onClick={() => { review.selectShell ? nickel.plugins.selectShell(candidate.id, review.revision) : nickel.plugins.enable(candidate.id, review.revision); setReview(null); }}>{review.selectShell ? "Enable and preview shell" : "Enable plugin"}</Button></Row>
         </Column> : null}
         {catalog.available && !plugins.length ? <Text>No matching plugins.</Text> : null}
         {plugins.map((plugin, index) => <Column key={plugin.id} className="plugin-card">
             <Row><Text className="plugin-title">{plugin.name}</Text><Spacer />
-                <Button id={"plugin-toggle-" + index} disabled={!catalog.writable}
+                <Button id={"plugin-toggle-" + index} disabled={!canManage}
                     accessibilityLabel={(plugin.enabled ? "Disable " : "Enable ") + plugin.name}
                     onClick={() => plugin.enabled ? nickel.plugins.disable(plugin.id, catalog.revision) : setReview({id:plugin.id,revision:catalog.revision})}>
                     {plugin.enabled ? "Disable" : "Enable"}
                 </Button>
             </Row>
-            {plugin.shell ? plugin.selected ? <Text>Selected shell</Text> : <Button id={"plugin-select-shell-" + index}
-                disabled={!catalog.writable} onClick={() => plugin.enabled ? nickel.plugins.selectShell(plugin.id, catalog.revision) : setReview({id:plugin.id,revision:catalog.revision,selectShell:true})}>Select shell</Button> : null}
+            {plugin.shell ? plugin.selected ? <Text>Selected shell</Text> : <Button id={"plugin-preview-shell-" + index}
+                disabled={!canManage} onClick={() => plugin.enabled ? nickel.plugins.selectShell(plugin.id, catalog.revision) : setReview({id:plugin.id,revision:catalog.revision,selectShell:true})}>Preview shell</Button> : null}
             <Text wrap={true}>{plugin.id + (plugin.version ? " · " + plugin.version : "") + (plugin.author ? " · " + plugin.author : "")}</Text>
             <Text wrap={true}>{"Status: " + plugin.health.state + (plugin.health.reason ? " · " + plugin.health.reason : "")}</Text>
             <Text wrap={true}>{"Authorized capabilities: " + (plugin.grants.length ? plugin.grants.join(", ") : "None")}</Text>
