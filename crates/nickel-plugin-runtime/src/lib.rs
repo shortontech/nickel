@@ -7,6 +7,10 @@ use boa_engine::{Context, Source};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
+mod modules;
+
+pub use modules::{JsxModuleGraph, ModuleSource};
+
 const BOOTSTRAP: &str = include_str!("../../../assets/plugin-runtime/bootstrap.js");
 // Boa enforces this per JavaScript call frame. It bounds accidental infinite
 // loops in plugin code without retaining an event or frame history.
@@ -31,6 +35,12 @@ impl JsxRuntime {
         }
         runtime.eval(source)?;
         Ok(runtime)
+    }
+
+    /// Starts one package in one JavaScript context. Every module is evaluated
+    /// at most once and shares the bootstrap, hooks, effects, and surface state.
+    pub fn new_modules(graph: &JsxModuleGraph, data: Option<&str>) -> Result<Self, String> {
+        Self::new(&graph.compile()?, data)
     }
 
     pub fn eval(&mut self, source: &str) -> Result<(), String> {

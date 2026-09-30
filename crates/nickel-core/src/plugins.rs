@@ -13,6 +13,9 @@ pub const PLUGIN_API_VERSION: u16 = 1;
 pub const MAX_MANIFEST_BYTES: usize = 64 * 1024;
 pub const MAX_PLUGIN_ENTRY_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_PLUGIN_CSS_BYTES: usize = 256 * 1024;
+pub const MAX_PLUGIN_MODULE_BYTES: usize = 2 * 1024 * 1024;
+pub const MAX_PLUGIN_MODULE_TOTAL_BYTES: usize = 4 * 1024 * 1024;
+pub const MAX_PLUGIN_MODULES: usize = 128;
 pub const MAX_PLUGIN_IMAGE_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_PLUGIN_IMAGE_TOTAL_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_PLUGIN_DIRECTORIES: usize = 64;
@@ -149,6 +152,14 @@ pub struct PluginPackage {
     pub images: BTreeMap<String, Vec<u8>>,
 }
 
+/// One package-relative JavaScript, JSX, or CSS source file. Hosts pass these
+/// to `nickel-plugin-runtime` as a single module graph.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PluginSourceFile {
+    pub path: String,
+    pub source: String,
+}
+
 impl PluginPackage {
     pub fn source_digest(&self) -> String {
         digest_package(&self.source, &self.stylesheet, &self.images)
@@ -186,6 +197,73 @@ impl PluginPackage {
             stylesheet,
             images,
         })
+    }
+
+    /// Loads the ordinary source module files in an installed package.
+    /// Asset files and package metadata are intentionally excluded.
+    pub fn load_module_sources(
+        directory: impl AsRef<Path>,
+    ) -> Result<Vec<PluginSourceFile>, String> {
+        let directory = std::fs::canonicalize(directory.as_ref())
+            .map_err(|error| format!("could not open plugin directory: {error}"))?;
+        if !directory.is_dir() {
+            return Err("plugin path is not a directory".into());
+        }
+        let mut files = Vec::new();
+        let mut pending = vec![directory.clone()];
+        let mut total = 0_usize;
+        while let Some(current) = pending.pop() {
+            let mut entries = std::fs::read_dir(&current)
+                .map_err(|error| format!("could not enumerate plugin modules: {error}"))?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| format!("could not enumerate plugin modules: {error}"))?;
+            entries.sort_by_key(|entry| entry.file_name());
+            for entry in entries.into_iter().rev() {
+                let kind = entry
+                    .file_type()
+                    .map_err(|error| format!("could not inspect plugin module: {error}"))?;
+                if kind.is_symlink() {
+                    return Err("plugin modules cannot contain symbolic links".into());
+                }
+                if kind.is_dir() {
+                    pending.push(entry.path());
+                    continue;
+                }
+                if !kind.is_file() {
+                    continue;
+                }
+                let path = entry.path();
+                let extension = path.extension().and_then(|value| value.to_str());
+                if !matches!(extension, Some("js" | "jsx" | "css")) {
+                    continue;
+                }
+                if files.len() >= MAX_PLUGIN_MODULES {
+                    return Err(format!(
+                        "plugin exceeds {MAX_PLUGIN_MODULES} source modules"
+                    ));
+                }
+                let bytes = nickel_storage::read_regular_file(&path, MAX_PLUGIN_MODULE_BYTES)
+                    .map_err(|error| format!("could not read plugin module: {error}"))?
+                    .ok_or("plugin module is missing")?;
+                total = total.saturating_add(bytes.len());
+                if total > MAX_PLUGIN_MODULE_TOTAL_BYTES {
+                    return Err("plugin source modules exceed 4 MiB in total".into());
+                }
+                let source = String::from_utf8(bytes)
+                    .map_err(|error| format!("plugin module is not UTF-8: {error}"))?;
+                let relative = path
+                    .strip_prefix(&directory)
+                    .expect("enumerated path remains in package");
+                let path = relative
+                    .components()
+                    .map(|part| part.as_os_str().to_string_lossy())
+                    .collect::<Vec<_>>()
+                    .join("/");
+                files.push(PluginSourceFile { path, source });
+            }
+        }
+        files.sort_by(|left, right| left.path.cmp(&right.path));
+        Ok(files)
     }
 
     pub fn load_stylesheet(
@@ -1536,6 +1614,31 @@ mod tests {
         )
         .unwrap();
         assert!(PluginPackage::load(directory.path()).is_err());
+    }
+
+    #[test]
+    fn loads_bounded_package_module_sources_in_stable_order() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::create_dir(directory.path().join("ui")).unwrap();
+        std::fs::write(directory.path().join("plugin.json"), VALID).unwrap();
+        std::fs::write(directory.path().join("main.js"), "import './ui/card.js';").unwrap();
+        std::fs::write(
+            directory.path().join("ui/card.js"),
+            "export const Card = 1;",
+        )
+        .unwrap();
+        std::fs::write(directory.path().join("ui/card.css"), ".card {}").unwrap();
+        std::fs::write(directory.path().join("ui/icon.png"), b"ignored").unwrap();
+
+        let modules = PluginPackage::load_module_sources(directory.path()).unwrap();
+        assert_eq!(
+            modules
+                .iter()
+                .map(|module| module.path.as_str())
+                .collect::<Vec<_>>(),
+            ["main.js", "ui/card.css", "ui/card.js"]
+        );
+        assert_eq!(modules[2].source, "export const Card = 1;");
     }
 
     #[cfg(unix)]
