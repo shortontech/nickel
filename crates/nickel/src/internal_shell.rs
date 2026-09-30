@@ -1615,6 +1615,13 @@ impl InternalShellCoordinator {
         self.shell.plugin_panel_placement(key)
     }
 
+    pub(crate) fn plugin_window_title(
+        &self,
+        key: &nickel_core::plugins::PluginSurfaceKey,
+    ) -> Option<&str> {
+        self.shell.plugin_panel_title(key)
+    }
+
     pub(crate) fn plugin_name(&self, id: &str) -> Option<&str> {
         self.shell
             .plugin_registry()

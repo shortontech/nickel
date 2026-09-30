@@ -5798,7 +5798,7 @@ impl NickelSession {
         let title = if let Some(plugin) = plugin {
             self.internal_shell
                 .as_ref()
-                .and_then(|shell| shell.plugin_name(&plugin.plugin_id))
+                .and_then(|shell| shell.plugin_window_title(plugin).or_else(|| shell.plugin_name(&plugin.plugin_id)))
                 .unwrap_or(&plugin.plugin_id)
                 .to_owned()
         } else {
