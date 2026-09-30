@@ -3769,6 +3769,9 @@ mod tests {
 
     #[test]
     fn embedded_default_shell_surfaces_share_runtime_and_settings_registry() {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
         let package = crate::bundled_plugin_assets::load_package("nickel-default").unwrap();
         assert_eq!(package.manifest.entry, "src/Shell.js");
         assert!(
@@ -3847,6 +3850,10 @@ mod tests {
             .publish_settings(&mut registry, &package.manifest.id)
             .unwrap();
         assert_eq!(registry.settings_pages_snapshot().pages, pages.pages);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]
