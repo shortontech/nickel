@@ -1,6 +1,6 @@
 // Nickel's global JSX API. This file is for editors and the development
 // compiler; the installed plugin still contains plain JavaScript. Components
-// are declared callable for JSX checking; their runtime values are tag strings.
+// and public component references are callable in JSX. Children are ordinary JSX values.
 declare namespace JSX {
     interface Element {}
     interface ElementChildrenAttribute { children: {} }
@@ -9,7 +9,10 @@ declare namespace JSX {
     }
 }
 
-type NickelChild = JSX.Element | string | number | null | false | NickelChild[];
+type NickelChild = JSX.Element | string | number | null | undefined | boolean | ReadonlyArray<NickelChild>;
+type NickelComponent<P = NickelProps> = (props: P) => JSX.Element | null;
+type NickelAnchor = "center" | "top-left" | "top-center" | "top-right" | "bottom-left" | "bottom-center" | "bottom-right";
+type NickelJson = null | boolean | number | string | ReadonlyArray<NickelJson> | { readonly [key: string]: NickelJson };
 type NickelColor = number; // 0xAARRGGBB
 type NickelClick = () => void;
 interface NickelDragGesture {
@@ -80,7 +83,7 @@ interface NickelBoxProps extends NickelProps {
     background?: NickelColor;
     radius?: number;
 }
-interface NickelTextProps extends NickelProps { color?: NickelColor }
+interface NickelTextProps extends NickelProps { color?: NickelColor; wrap?: boolean; maxLines?: number }
 interface NickelButtonProps extends NickelProps {
     id?: string;
     width?: number;
@@ -88,6 +91,8 @@ interface NickelButtonProps extends NickelProps {
     accessibilityLabel?: string;
     icon?: string;
     showLabel?: boolean;
+    disabled?: boolean;
+    state?: "selected" | "unselected" | "disabled";
     onClick: NickelClick;
     onFocus?: NickelClick;
     onBlur?: NickelClick;
@@ -98,6 +103,8 @@ interface NickelButtonProps extends NickelProps {
 interface NickelTextFieldProps extends NickelProps {
     id?: string;
     value?: string;
+    accessibilityLabel?: string;
+    disabled?: boolean;
     placeholder?: string;
     /** Mask the displayed value and protect the surface from remote inspection. */
     secure?: boolean;
@@ -109,7 +116,11 @@ interface NickelSliderProps extends NickelProps {
     id?: string;
     value: number;
     accessibilityLabel: string;
-    onChange: (fraction: number) => void;
+    /** Defaults to 0..1; onChange receives a value in this numeric range. */
+    min?: number;
+    max?: number;
+    step?: number;
+    onChange: (value: number) => void;
 }
 interface NickelSwitchProps extends NickelProps {
     id: string;
@@ -200,6 +211,7 @@ interface NickelProgressProps extends NickelProps {
     width: number;
     height: number;
 }
+declare function Fragment(props:NickelProps):JSX.Element;
 declare function h(kind: unknown, props?: object | null, ...children: NickelChild[]): JSX.Element;
 /** @deprecated Compatibility helper; use Window or FixedWindow for new surfaces. */
 declare function Panel(props: NickelPanelProps): JSX.Element;
@@ -225,6 +237,7 @@ declare function Image(props: NickelImageProps): JSX.Element;
 declare function ImageButton(props: NickelImageButtonProps): JSX.Element;
 declare function Progress(props: NickelProgressProps): JSX.Element;
 declare function TextField(props: NickelTextFieldProps): JSX.Element;
+declare function Checkbox(props: NickelProps & { id?: string; checked?: boolean; indeterminate?: boolean; disabled?: boolean; label?: string; accessibilityLabel?: string; onChange?: (checked: boolean) => void; onClick?: NickelClick }): JSX.Element;
 declare function Slider(props: NickelSliderProps): JSX.Element;
 declare function Switch(props: NickelSwitchProps): JSX.Element;
 declare function ColorSwatch(props: NickelColorSwatchProps): JSX.Element;
@@ -262,7 +275,9 @@ interface NickelDisplayLayout {
         y: number;
         enabled: boolean;
         /** Fractional scale units; 120 is 100%. */
-        scale_120: number;
+        scale_120?: number;
+        /** Omit to preserve the current native orientation. */
+        transform?: NickelDisplayTransform;
         mode?: Readonly<{
             width: number;
             height: number;
@@ -278,7 +293,15 @@ interface NickelDisplayMode {
     refresh_millihz: number;
 }
 
+type NickelDisplayTransform = "normal" | "rotate90" | "rotate180" | "rotate270" | "flipped" | "flipped90" | "flipped180" | "flipped270";
 interface NickelDisplaySnapshot {
+    revision?: string;
+    operations?: Readonly<{setOrientation?: boolean; setApplicationScale?: boolean; identify?: boolean}>;
+    transforms?: ReadonlyArray<NickelDisplayTransform>;
+    pending_confirmation?: boolean;
+    can_confirm?: boolean;
+    can_revert?: boolean;
+    application_scale?: NickelApplicationScaleSnapshot;
     available: boolean;
     reason?: string;
     outputs: ReadonlyArray<Readonly<{
@@ -287,8 +310,7 @@ interface NickelDisplaySnapshot {
         geometry: Readonly<{ x: number; y: number; width: number; height: number }>;
         work_area: Readonly<{ x: number; y: number; width: number; height: number }>;
         scale_120: number;
-        transform: "normal" | "rotate90" | "rotate180" | "rotate270"
-            | "flipped" | "flipped90" | "flipped180" | "flipped270";
+        transform: NickelDisplayTransform;
         physical_width_mm: number;
         physical_height_mm: number;
         primary: boolean;
@@ -314,9 +336,109 @@ interface NickelPluginStatus {
     readonly memory:Readonly<{jsHeapBytes:number | null;nativeUiBytes:number | null;textureBytes:number | null;trackedPeakBytes:number | null;timers:number;subscriptions:number;componentBreakdownAvailable:false}>;
 }
 
+/** Read clients return copies; missing grants produce empty or unavailable snapshots. */
+interface NickelContribution {readonly id:string;readonly provider:string;readonly version:string;readonly key:string;readonly component:NickelComponent}
+interface NickelAvailability { available: boolean; reason?: string | null }
+interface NickelWritable extends NickelAvailability { writable?: boolean; revision?: string }
+interface NickelAppearancePreferences {
+    theme: "system" | "light" | "dark";
+    /** Hue 0..359, or null to follow the native system accent. */
+    accent_hue: number | null;
+    /** Intensity 0..100, or null to follow the native system accent. */
+    accent_intensity: number | null;
+    reduce_transparency: boolean;
+    animations: "off" | "reduced" | "normal";
+}
+interface NickelAppearanceSnapshot extends NickelAvailability {
+    writable?: boolean; generation?: number; observed_at_us?: number;
+    configured?: Readonly<NickelAppearancePreferences>;
+    resolved?: Readonly<{theme:"light"|"dark"; hue:number; intensity:number; accent:NickelColor}>;
+}
+type NickelWallpaperPosition = "center" | "tile" | "stretch" | "fit" | "span" | "fill";
+interface NickelWallpaperImage { id:string; configured:boolean; label?:string; previewAsset?:string }
+interface NickelWallpaperSnapshot extends NickelAvailability {
+    writable?: boolean; generation?:number; observed_at_us?:number;
+    configured?:Readonly<{custom_image_configured:boolean; position:NickelWallpaperPosition}>;
+    images?:ReadonlyArray<Readonly<NickelWallpaperImage>>;
+    selected_image_decoded?:boolean; runtime_reload_requested?:boolean;
+    chooser?:Readonly<{available:boolean; pending:boolean; result:Readonly<{status:string;detail?:string}>|null}>;
+}
+type NickelApplicationScalePolicy = Readonly<{policy:"follow"|"unchanged"}> | Readonly<{policy:"custom";scale_120:number}>;
+interface NickelApplicationScaleSnapshot extends NickelAvailability {
+    revision?:string; configured?:NickelApplicationScalePolicy; supported_scales?:ReadonlyArray<number>;
+    native_per_monitor?:boolean; uncertain?:boolean;
+    toolkits?:ReadonlyArray<Readonly<{family:"gtk"|"qt";available:boolean;live:boolean;restart_required:boolean;owned:boolean;pending:boolean}>>;
+    last_result?:Readonly<{rejected?:boolean;uncertain?:boolean;refresh_required?:boolean;outcomes?:ReadonlyArray<Readonly<{family:"gtk"|"qt";kind:"unchanged"|"confirmed"|"external_conflict"|"unavailable"|"failed"|"uncertain";restart_required:boolean}>>}>;
+}
+interface NickelApplication { id:string;name:string;icon:string;pinned:boolean;pinOrder:number|null;recentOrder:number|null;kind:"place"|"application";launchClass:"graphical"|"terminal" }
+interface NickelApplicationSearch extends NickelAvailability {query:string;results:ReadonlyArray<Readonly<NickelApplication>>;total:number;truncated?:boolean;catalogTruncated?:boolean;nativeProjectsAvailable?:boolean;status?:string|null;pinSaveFailed?:boolean}
+interface NickelNativeWindow {id:string;applicationId:string|null;title:string;active:boolean;minimized:boolean;workspace:number|null;output:string|null;canActivate:boolean;canClose:boolean}
+interface NickelTrayItem {id:string;title:string;icon:boolean}
+interface NickelNotification {id:number;appName:string;summary:string;body:string;actions:ReadonlyArray<Readonly<{key:string;label:string}>>}
+interface NickelNotificationSnapshot {notification:Readonly<NickelNotification>|null;history:ReadonlyArray<Readonly<NickelNotification>>}
+interface NickelAudioSnapshot extends NickelAvailability {muted:boolean;percent:number;label?:string;outputName?:string|null;devices?:ReadonlyArray<Readonly<{id:string;name:string;isDefault:boolean}>>}
+interface NickelSessionSnapshot {revision:string;account:Readonly<{displayName:string;username:string}>|null;locked:boolean;support:Readonly<{lock:boolean;logout:boolean;suspend:boolean;reboot:boolean;powerOff:boolean;restartShell:boolean}>}
+interface NickelPreferences {
+    barOnAllDisplays:boolean;allWindowsOnEveryBar:boolean;desktopCount:number;
+    preferredTerminal:string|null;preferredFileManager:string|null;fileIconProvider:"nickel"|"system";fileIconTheme:string|null;
+    idleDimSeconds:number|null;idleLockSeconds:number|null;idleSuspendSeconds:number|null;
+}
+interface NickelPreferencesSnapshot extends NickelWritable {configured?:Readonly<NickelPreferences>;applications?:ReadonlyArray<Readonly<{id:string}>>;iconThemes?:ReadonlyArray<string>;unavailableSelections?:Readonly<{preferredTerminal:boolean;preferredFileManager:boolean;fileIconTheme:boolean}>}
+interface NickelWifiNetwork {id:string;name:string;signalPercent:number;connected:boolean;saved:boolean;canConnect:boolean}
+interface NickelWifiSnapshot extends NickelAvailability {revision?:string;enabled?:boolean;connected?:boolean;networks:ReadonlyArray<Readonly<NickelWifiNetwork>>;operations:Readonly<{setEnabled?:boolean;connect?:boolean}>}
+interface NickelBluetoothDevice {id:string;name:string;paired:boolean;connected:boolean}
+interface NickelBluetoothSnapshot extends NickelAvailability {revision?:string;powered?:boolean;discovering?:boolean;devices:ReadonlyArray<Readonly<NickelBluetoothDevice>>;operations:Readonly<{setPowered?:boolean;setDiscovery?:boolean;connect?:boolean;disconnect?:boolean;pair?:boolean}>}
+interface NickelAssociationHandler {id:string;name:string;icon:string|null;source:string;protected:boolean}
+interface NickelAssociationTarget {id:string;family:string;capability:"directUserChange"|"nativeConsent"|"readOnly"|"unsupported";scope:"user"|"system"|"policy";detail:string;protected:boolean;effectiveHandlerId:string|null;canSetDefault:boolean;handlersTruncated:boolean;handlers:ReadonlyArray<Readonly<NickelAssociationHandler>>}
+interface NickelAssociationsSnapshot extends NickelWritable {targets:ReadonlyArray<Readonly<NickelAssociationTarget>>;truncated?:boolean;operations:Readonly<{setDefault?:boolean;openSystemSettings?:boolean}>;lastResult?:Readonly<{status:string;revision?:string;targetId?:string;handlerId?:string|null;detail?:string}>|null}
+
+/** Local registrations retain their component and callback functions. */
+interface NickelSettingMetadata {id:string;group:string;label:string;description?:string;order?:number;groupOrder?:number;requiredCapabilities?:ReadonlyArray<string>}
+type NickelSettingControl =
+    | {type:"switch";defaultValue:boolean}
+    | {type:"slider"|"number";defaultValue:number;min:number;max:number;step?:number}
+    | {type:"select";defaultValue:string;options:ReadonlyArray<Readonly<{value:string;label:string}>>}
+    | {type:"color";defaultValue:string;allowAlpha?:boolean}
+    | {type:"text";defaultValue:string;maxLength?:number;multiline?:boolean}
+    | {type:"shortcut";defaultValue?:ReadonlyArray<string>}
+    | {type:"action"}
+    | {type:"group";fields:ReadonlyArray<NickelSettingField>}
+    | {type:"repeated";fields:ReadonlyArray<NickelSettingField>;defaultValue?:ReadonlyArray<Readonly<Record<string,NickelJson>>>;minItems?:number;maxItems:number};
+type NickelSettingField = {id:string;label:string;description?:string;order?:number} & NickelSettingControl;
+type NickelSettingValue<C extends NickelSettingControl> = C extends {type:"switch"} ? boolean
+    : C extends {type:"slider"|"number"} ? number
+    : C extends {type:"select"|"color"|"text"} ? string
+    : C extends {type:"shortcut"} ? ReadonlyArray<string>
+    : C extends {type:"group"} ? Readonly<Record<string,NickelJson>>
+    : C extends {type:"repeated"} ? ReadonlyArray<Readonly<Record<string,NickelJson>>> : NickelJson;
+type NickelSettingRegistrationFor<C extends NickelSettingControl> = C extends NickelSettingControl
+    ? NickelSettingMetadata & C & {value?:()=>NickelSettingValue<C>;onChange?:(value:NickelSettingValue<C>)=>void} : never;
+type NickelSettingRegistration = NickelSettingRegistrationFor<NickelSettingControl>;
+interface NickelSettingsPageRegistration extends NickelSettingMetadata {component:NickelComponent}
+type NickelPublishedSetting = NickelSettingRegistration & {providerPackage:string};
+type NickelPublishedSettingsPage = NickelSettingMetadata & {providerPackage:string;component:NickelComponent | Readonly<{module:string;export:string}>};
+declare function registerSetting(definition:NickelSettingRegistration):void;
+declare function registerSettingsPage(definition:NickelSettingsPageRegistration):void;
+declare function readPluginSettings():Readonly<{generation:number;settings:ReadonlyArray<NickelPublishedSetting>}>;
+declare function readSettingsPages():Readonly<{generation:number;pages:ReadonlyArray<NickelPublishedSettingsPage>}>;
+/** Compatibility alias of readSettingsPages. */
+declare function readPluginSettingsPages():ReturnType<typeof readSettingsPages>;
+
 declare const nickel: Readonly<{
     readonly data: Readonly<Record<string, unknown> & {
         displays?: NickelDisplaySnapshot;
+        appearance?:NickelAppearanceSnapshot;
+        wallpaper?:NickelWallpaperSnapshot;
+        preferences?:NickelPreferencesSnapshot;
+        session?:NickelSessionSnapshot;
+        audio?:NickelAudioSnapshot;
+        windows?:ReadonlyArray<Readonly<NickelNativeWindow>>;
+        applications?:ReadonlyArray<Readonly<NickelApplication>>;
+        applicationSearch?:NickelApplicationSearch;
+        notifications?:NickelNotificationSnapshot|null;
+        tray?:ReadonlyArray<Readonly<NickelTrayItem>>;
+        wifi?:NickelWifiSnapshot;
+        bluetooth?:NickelBluetoothSnapshot;
         settings?: Readonly<Record<string, boolean | number | string>>;
         surface?: Readonly<{
             id: string;
@@ -329,12 +451,45 @@ declare const nickel: Readonly<{
     request(effect: string | Readonly<{ type: string; [key: string]: unknown }>): void;
     openDialog(id: string): void;
     openMenu(id: string): void;
+    /** Resolve a public callable component. Unknown contracts throw. Render it with ordinary JSX children. */
+    component<P = NickelProps>(contract:string):NickelComponent<P>;
+    /** Each entry supplies a callable component. An uncomposed package returns an empty collection. */
+    contributions(collection:string):ReadonlyArray<NickelContribution>;
+    registerSetting:typeof registerSetting;
+    registerSettingsPage:typeof registerSettingsPage;
+    readPluginSettings:typeof readPluginSettings;
+    readSettingsPages:typeof readSettingsPages;
+    readPluginSettingsPages:typeof readPluginSettingsPages;
+    surfaces:Readonly<{show(id:string):void;hide(id:string):void;focus(id:string):void;setPlacement(id:string,placement:Readonly<{anchor:NickelAnchor;offsetX?:number;offsetY?:number}>):void}>;
+    /** Requires appearance-read; set also requires appearance-control and a current observation. */
+    appearance:Readonly<{get():NickelAppearanceSnapshot;/** Complete preferences, rather than a partial patch. */set(preferences:NickelAppearancePreferences):void}>;
+    /** Requires wallpaper-read; mutations also require wallpaper-control. Image identities are opaque. */
+    wallpaper:Readonly<{get():NickelWallpaperSnapshot;listImages():NickelWallpaperSnapshot["images"];setPosition(position:NickelWallpaperPosition):void;resetCustomImage():void;/** Opens the native picker; no paths or arguments are accepted. */chooseImage():void;selectImage(id:string):void}>;
+    /** Requires windows-read; activation requires windows-focus, closing requires windows-context. */
+    windows:Readonly<{list():ReadonlyArray<Readonly<NickelNativeWindow>>;activate(id:string):void;close(id:string):void}>;
+    /** Requires applications-read; launch requires applications-launch; pin operations require applications-pin. */
+    applications:Readonly<{list():ReadonlyArray<Readonly<NickelApplication>>;search(query:string):void;searchResults():NickelApplicationSearch;launch(id:string):void;togglePin(id:string):void;movePin(id:string,direction:-1|1):void;retryPinSave():void}>;
+    /** Requires audio-read; native controls require audio-control. */
+    audio:Readonly<{get():NickelAudioSnapshot;outputs():NickelAudioSnapshot["devices"];setVolume(percent:number):void;setMuted(muted:boolean):void;selectOutput(id:string):void}>;
+    /** Requires notifications.read; invoke/dismiss also require notifications.act. */
+    notifications:Readonly<{get():NickelNotificationSnapshot|null;invoke(id:number,key:string):void;dismiss(id:number):void}>;
+    /** Requires tray-read; activation requires tray-activate; context menus require tray-context. */
+    tray:Readonly<{list():ReadonlyArray<Readonly<NickelTrayItem>>;activate(id:string):void;contextMenu(id:string):void}>;
+    session:Readonly<{get():NickelSessionSnapshot;lock():void;logout():void;suspend():void;reboot():void;powerOff():void;restartShell():void}>;
+    /** Requires preferences-read; set requires preferences-control. Unavailable choices are preserved until explicitly changed. */
+    preferences:Readonly<{get():NickelPreferencesSnapshot;set(patch:Partial<NickelPreferences>):void}>;
+    /** Requires network-read; controls require network-control and an available operation. */
+    wifi:Readonly<{get():NickelWifiSnapshot;listNetworks():ReadonlyArray<Readonly<NickelWifiNetwork>>;setEnabled(enabled:boolean):void;connect(id:string):void}>;
+    /** Requires bluetooth-read; controls require bluetooth-control and an available operation. */
+    bluetooth:Readonly<{get():NickelBluetoothSnapshot;listDevices():ReadonlyArray<Readonly<NickelBluetoothDevice>>;setPowered(powered:boolean):void;setDiscovery(discovering:boolean):void;connect(id:string):void;disconnect(id:string):void;pair(id:string):void}>;
+    /** Requires associations-read; controls require associations-control and explicit current revision. */
+    associations:Readonly<{get():NickelAssociationsSnapshot;list():ReadonlyArray<Readonly<NickelAssociationTarget>>;getHandlers(targetId:string):Readonly<{revision:string|undefined;target:Readonly<NickelAssociationTarget>;handlers:ReadonlyArray<Readonly<NickelAssociationHandler>>}>;setDefault(targetId:string,handlerId:string,expectedRevision:string):void;openSystemSettings():void}>;
     system: Readonly<{
         get():Readonly<{available:boolean;version:string|null;platform:string|null;architecture:string|null}>;
     }>;
     plugins: Readonly<{
         /** Requires plugins-read; unavailable memory counters are null. */
-        get(): Readonly<{available:boolean; writable:boolean; revision?:string; selectedShell?:string; plugins:ReadonlyArray<NickelPluginStatus>; lastResult?:Readonly<{status:string;detail?:string}> | null}>;
+        get(): Readonly<{available:boolean; writable:boolean; revision?:string; truncated?:boolean; reason?:string; selectedShell?:string; plugins:ReadonlyArray<NickelPluginStatus>; lastResult?:Readonly<{status:string;detail?:string}> | null}>;
         list(): ReadonlyArray<NickelPluginStatus>;
         /** Requires plugins-read and plugins-control and a current inventory revision. */
         enable(id:string, revision:string):void;
@@ -358,7 +513,11 @@ declare const nickel: Readonly<{
         /** Read a copy of the current host supplied display snapshot. */
         get(): NickelDisplaySnapshot | undefined;
         /** Preview a complete display layout; it automatically reverts after 15 seconds unless confirmed. */
-        setLayout(layout: Readonly<NickelDisplayLayout>): void;
+        setLayout(layout: Readonly<NickelDisplayLayout>, expectedRevision?: string): void;
+        getApplicationScale(): NickelApplicationScaleSnapshot;
+        setApplicationScale(policy: NickelApplicationScalePolicy, expectedRevision?: string): void;
+        /** Requires operations.identify; unsupported platforms reject the operation. */
+        identify(expectedRevision?: string): void;
         /** Keep the previewed layout. */
         confirm(): void;
         /** Restore the layout from before the preview. */
