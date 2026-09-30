@@ -547,6 +547,44 @@ fn validate_plugin_display_layout(
     Ok(())
 }
 
+#[derive(Clone)]
+enum RetainedPackageRuntime {
+    Ordinary(std::rc::Rc<std::cell::RefCell<nickel_plugin_runtime::JsxRuntime>>),
+    Composed(
+        std::rc::Rc<
+            std::cell::RefCell<nickel_plugin_runtime::composition_runtime::ShellCompositionRuntime>,
+        >,
+    ),
+}
+
+impl RetainedPackageRuntime {
+    fn contexts(
+        &self,
+        active: &str,
+    ) -> std::collections::BTreeMap<
+        String,
+        std::rc::Rc<std::cell::RefCell<nickel_plugin_runtime::JsxRuntime>>,
+    > {
+        match self {
+            Self::Ordinary(runtime) => {
+                std::collections::BTreeMap::from([(active.to_owned(), runtime.clone())])
+            }
+            Self::Composed(host) => {
+                let host = host.borrow();
+                host.resolution()
+                    .inheritance_chain
+                    .iter()
+                    .filter_map(|owner| {
+                        host.shared_owner_runtime(owner)
+                            .ok()
+                            .map(|runtime| (owner.id.clone(), runtime))
+                    })
+                    .collect()
+            }
+        }
+    }
+}
+
 pub struct LiveShell {
     appearance_capabilities: crate::appearance_capabilities::AppearanceCapabilities,
     preferences_capabilities: crate::preferences_capabilities::PreferencesCapabilities,
@@ -653,10 +691,7 @@ pub struct LiveShell {
         String,
         std::rc::Rc<std::cell::RefCell<nickel_plugin_runtime::JsxRuntime>>,
     >,
-    package_runtimes: std::collections::BTreeMap<
-        String,
-        std::rc::Rc<std::cell::RefCell<nickel_plugin_runtime::JsxRuntime>>,
-    >,
+    package_runtimes: std::collections::BTreeMap<String, RetainedPackageRuntime>,
     package_settings_generation: u64,
     package_settings_values: nickel_plugin_runtime::settings::SettingsValueSnapshot,
     package_settings_value_revisions: std::collections::BTreeMap<String, u64>,
@@ -4482,14 +4517,28 @@ impl LiveShell {
             .get(id)
             .cloned()
             .ok_or_else(|| format!("plugin {id:?} has no live package runtime"))?;
-        let application =
-            crate::plugin_panel::PluginPanelApplication::from_package_surface_with_runtime(
-                &package,
-                &settings,
-                &surface,
-                crate::plugin_panel::package_images(&package)?,
-                Some(runtime),
-            )?;
+        let application = match runtime {
+            RetainedPackageRuntime::Ordinary(runtime) => {
+                crate::plugin_panel::PluginPanelApplication::from_package_surface_with_runtime(
+                    &package,
+                    &settings,
+                    &surface,
+                    crate::plugin_panel::package_images(&package)?,
+                    Some(runtime),
+                )?
+            }
+            RetainedPackageRuntime::Composed(host) => {
+                let catalog = self.composition_catalog(id, &package)?;
+                let snapshots = self.composition_snapshots(&catalog, &surface);
+                crate::plugin_panel::PluginPanelApplication::from_composed_surface(
+                    &catalog,
+                    id,
+                    &snapshots,
+                    &surface,
+                    Some(host),
+                )?
+            }
+        };
         let surface = application.resolved_surface(&surface)?;
         let host = nickel_ui::UiHost::new(application, surface.width, surface.height);
         if self.primary_panel_host_ref().is_none() {
@@ -4680,8 +4729,8 @@ impl LiveShell {
             .load()?;
         let runtime = self
             .package_runtimes
-            .get(provider)
-            .cloned()
+            .values()
+            .find_map(|runtime| runtime.contexts(provider).remove(provider))
             .ok_or("Settings provider runtime is unavailable")?;
         let surface = package
             .manifest
@@ -4722,7 +4771,10 @@ impl LiveShell {
                 }
             }
         }
-        let mut runtimes = self.package_runtimes.clone();
+        let mut runtimes = std::collections::BTreeMap::new();
+        for (id, retained) in &self.package_runtimes {
+            runtimes.extend(retained.contexts(id));
+        }
         for (key, (_, host)) in &self.plugin_surface_hosts {
             runtimes.insert(key.plugin_id.clone(), host.application().shared_runtime());
         }
@@ -4952,7 +5004,8 @@ impl LiveShell {
             .map_err(|error| format!("could not save plugin setting: {error}"))?;
         self.plugin_settings.insert(id.to_owned(), values);
         if let Some(runtime) = replacement_runtime {
-            self.package_runtimes.insert(id.to_owned(), runtime);
+            self.package_runtimes
+                .insert(id.to_owned(), RetainedPackageRuntime::Ordinary(runtime));
         }
         let mut replaced_panels = false;
         if let Some(replacements) = replacement {
@@ -5284,6 +5337,86 @@ impl LiveShell {
     }
 
     /// Starts or retires a plugin instance after Settings has shown its grants.
+    fn composition_catalog(
+        &self,
+        active: &str,
+        package: &nickel_core::plugins::PluginPackage,
+    ) -> Result<std::collections::BTreeMap<String, nickel_core::plugins::PluginPackage>, String>
+    {
+        let mut catalog = std::collections::BTreeMap::from([(active.to_owned(), package.clone())]);
+        let mut next = package
+            .manifest
+            .composition
+            .as_ref()
+            .and_then(|composition| composition.extends.clone());
+        while let Some(base) = next {
+            if catalog.contains_key(&base) {
+                return Err("shell inheritance cycle".into());
+            }
+            if catalog.len() >= nickel_core::package_composition::MAX_COMPOSITION_DEPTH {
+                return Err("shell inheritance exceeds package limit".into());
+            }
+            let entry = self
+                .plugin_registry
+                .get(&base)
+                .ok_or("shell base package is not installed")?;
+            if !entry.desired_enabled {
+                return Err(format!("shell base package {base:?} is disabled"));
+            }
+            let dependency = self
+                .external_plugin_packages
+                .get(&base)
+                .ok_or("shell base package is not an installed Twinkle package")?
+                .load()?;
+            next = dependency
+                .manifest
+                .composition
+                .as_ref()
+                .and_then(|composition| composition.extends.clone());
+            catalog.insert(base, dependency);
+        }
+        Ok(catalog)
+    }
+
+    fn composition_snapshots(
+        &self,
+        catalog: &std::collections::BTreeMap<String, nickel_core::plugins::PluginPackage>,
+        surface: &nickel_core::plugins::PluginSurface,
+    ) -> std::collections::BTreeMap<
+        nickel_core::package_composition::PackageIdentity,
+        serde_json::Value,
+    > {
+        catalog
+            .values()
+            .filter_map(|package| {
+                let composition = package.manifest.composition.as_ref()?;
+                let owner = nickel_core::package_composition::PackageIdentity {
+                    id: composition.id.clone(),
+                    version: composition.version.parse().ok()?,
+                };
+                let values = self
+                    .plugin_settings
+                    .get(&package.manifest.id)
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        package
+                            .manifest
+                            .settings
+                            .iter()
+                            .map(|setting| (setting.id.clone(), setting.kind.default_value()))
+                            .collect()
+                    });
+                let data = crate::plugin_panel::PluginPanelApplication::package_surface_data(
+                    package, &values, surface,
+                );
+                Some((
+                    owner,
+                    serde_json::from_str(&data).expect("package surface data is JSON"),
+                ))
+            })
+            .collect()
+    }
+
     pub fn set_plugin_enabled(&mut self, id: &str, enabled: bool) -> Result<bool, String> {
         let Some(entry) = self.plugin_registry.get(id) else {
             return Err(format!("unknown plugin {id:?}"));
@@ -5345,35 +5478,19 @@ impl LiveShell {
                     {
                         descriptor.load().and_then(|package| {
                             if package.manifest.composition.as_ref().is_some_and(|composition| composition.extends.is_some()) {
-                                let mut catalog = std::collections::BTreeMap::from([(id.to_owned(), package.clone())]);
-                                let mut next = package.manifest.composition.as_ref().and_then(|composition| composition.extends.clone());
-                                while let Some(base) = next {
-                                    if catalog.contains_key(&base) { return Err("shell inheritance cycle".into()); }
-                                    if catalog.len() >= nickel_core::package_composition::MAX_COMPOSITION_DEPTH { return Err("shell inheritance exceeds package limit".into()); }
-                                    let entry = self.plugin_registry.get(&base).ok_or("shell base package is not installed")?;
-                                    if !entry.desired_enabled { return Err(format!("shell base package {base:?} is disabled")); }
-                                    let dependency = self.external_plugin_packages.get(&base).ok_or("shell base package is not an installed Twinkle package")?.load()?;
-                                    next = dependency.manifest.composition.as_ref().and_then(|composition| composition.extends.clone());
-                                    catalog.insert(base, dependency);
-                                }
-                                let mut shared = None;
+                                let catalog = self.composition_catalog(id, &package)?;
+                                let first = surfaces.iter().find(|surface| !matches!(surface.kind, nickel_core::plugins::PluginSurfaceKind::Dialog | nickel_core::plugins::PluginSurfaceKind::Overlay)).ok_or("composed package has no ordinary surface")?;
+                                let snapshots = self.composition_snapshots(&catalog, first);
+                                let shared = std::rc::Rc::new(std::cell::RefCell::new(nickel_plugin_runtime::composition_runtime::ShellCompositionRuntime::new(&catalog, id, &snapshots)?));
                                 let mut applications = Vec::new();
-                                for surface in surfaces.iter().filter(|surface| !matches!(surface.kind,
+                                for surface in surfaces.iter().filter(|surface| surface.initially_open && !matches!(surface.kind,
                                     nickel_core::plugins::PluginSurfaceKind::Dialog | nickel_core::plugins::PluginSurfaceKind::Overlay)) {
-                                    let mut snapshots = std::collections::BTreeMap::new();
-                                    for dependency in catalog.values() {
-                                        let composition = dependency.manifest.composition.as_ref().ok_or("shell dependency lacks composition")?;
-                                        let identity = nickel_core::package_composition::PackageIdentity { id: composition.id.clone(), version: composition.version.parse().map_err(|_| "invalid shell dependency version")? };
-                                        let values = self.plugin_settings.get(&dependency.manifest.id).cloned().unwrap_or_else(|| dependency.manifest.settings.iter().map(|setting| (setting.id.clone(), setting.kind.default_value())).collect());
-                                        let data = crate::plugin_panel::PluginPanelApplication::package_surface_data(dependency, &values, surface);
-                                        snapshots.insert(identity, serde_json::from_str(&data).map_err(|error| error.to_string())?);
-                                    }
-                                    let application = crate::plugin_panel::PluginPanelApplication::from_composed_surface(&catalog, id, &snapshots, surface, shared.clone())?;
-                                    shared = application.shared_composition_runtime();
+                                    let snapshots = self.composition_snapshots(&catalog, surface);
+                                    let application = crate::plugin_panel::PluginPanelApplication::from_composed_surface(&catalog, id, &snapshots, surface, Some(shared.clone()))?;
                                     let resolved = application.resolved_surface(surface)?;
                                     applications.push((application, resolved));
                                 }
-                                return Ok(applications);
+                                return Ok((RetainedPackageRuntime::Composed(shared), applications));
                             }
                             crate::plugin_panel::PluginPanelApplication::validate_package(
                                 &package,
@@ -5416,7 +5533,7 @@ impl LiveShell {
                                     })
                                 })
                                 .collect::<Result<Vec<_>, _>>()?;
-                            Ok((runtime, panels))
+                            Ok((RetainedPackageRuntime::Ordinary(runtime), panels))
                         })
                     } else {
                         Err("installed plugin needs a panel, dock, or window to open its declared transient surfaces".into())
