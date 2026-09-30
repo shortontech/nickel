@@ -2562,29 +2562,26 @@ impl LiveShell {
                         return Vec::new();
                     }
                 };
-                let host = self
-                    .plugin_panel_host
-                    .as_mut()
-                    .expect("panel host remains active");
-                let outcome = host.step(HostBatch {
-                    application_changed: data_changed,
-                    surface_size: Some((width, height)),
-                    ..HostBatch::default()
-                });
-                if let Some(error) = host.application_mut().take_runtime_failure() {
-                    self.fail_plugin_panel_runtime(&owner, error);
-                    return Vec::new();
-                }
-                let commands = host.commands().to_vec();
-                let image_bytes = host.application_mut().retained_image_bytes();
+                let (commands, bytes) = match render_plugin_host(
+                    host,
+                    None,
+                    HostBatch {
+                        application_changed: data_changed,
+                        surface_size: Some((width, height)),
+                        ..HostBatch::default()
+                    },
+                ) {
+                    Ok(frame) => frame,
+                    Err(error) => {
+                        self.fail_plugin_panel_runtime(&owner, error);
+                        return Vec::new();
+                    }
+                };
                 let key = nickel_core::plugins::PluginSurfaceKey {
                     plugin_id: self.plugin_panel_owner.clone(),
                     surface_id: self.plugin_panel_surface.id.clone(),
                 };
-                self.record_plugin_panel_memory(
-                    &key,
-                    (outcome.telemetry.retained_frame_bytes as u64).saturating_add(image_bytes),
-                );
+                self.record_plugin_panel_memory(&key, bytes);
                 if let Err(error) = self.reconcile_plugin_surface_root(&key) {
                     self.fail_plugin_panel_runtime(&key.plugin_id, error);
                     return Vec::new();
@@ -5835,6 +5832,32 @@ impl LiveShell {
         Ok(true)
     }
 
+    fn step_generic_plugin_surface(
+        &mut self,
+        key: &nickel_core::plugins::PluginSurfaceKey,
+        batch: HostBatch,
+        keyboard_epoch: Option<u64>,
+    ) -> bool {
+        let result = {
+            let Some(host) = self.plugin_panel_host_for(key) else {
+                return false;
+            };
+            step_plugin_host(host, None, batch)
+                .map(|(outcome, _)| (outcome.changed, host.application_mut().take_effects()))
+        };
+        let (changed, effects) = match result {
+            Ok(result) => result,
+            Err(error) => return self.fail_plugin_panel_runtime(&key.plugin_id, error),
+        };
+        let root_changed = match self.reconcile_plugin_surface_root(key) {
+            Ok(changed) => changed,
+            Err(error) => return self.fail_plugin_panel_runtime(&key.plugin_id, error),
+        };
+        changed
+            | root_changed
+            | self.apply_plugin_effects_with_keyboard_epoch(effects, keyboard_epoch)
+    }
+
     pub(crate) fn plugin_panel_host_input_for(
         &mut self,
         key: &nickel_core::plugins::PluginSurfaceKey,
@@ -5883,39 +5906,22 @@ impl LiveShell {
                 )
                 .is_some_and(|outcome| outcome.changed);
         }
-        let (changed, effects, failure) = {
+        let (event, authority) = {
             let Some(host) = self.plugin_panel_host_for(key) else {
                 return false;
             };
-            let (event, authority) =
-                internal_normalized_ingress(input, None, "plugin-panel", host.inspect(), None);
-            let changed = host
-                .step(HostBatch {
-                    surface_size: Some((width, height)),
-                    events: vec![event],
-                    normalized_authorities: vec![authority],
-                    ..HostBatch::default()
-                })
-                .changed;
-            let application = host.application_mut();
-            (
-                changed,
-                application.take_effects(),
-                application.take_runtime_failure(),
-            )
+            internal_normalized_ingress(input, None, "plugin-panel", host.inspect(), None)
         };
-        if let Some(error) = failure
-            && self.fail_plugin_panel_runtime(&key.plugin_id, error)
-        {
-            return true;
-        }
-        let root_changed = match self.reconcile_plugin_surface_root(key) {
-            Ok(changed) => changed,
-            Err(error) => return self.fail_plugin_panel_runtime(&key.plugin_id, error),
-        };
-        changed
-            | root_changed
-            | self.apply_plugin_effects_with_keyboard_epoch(effects, keyboard_epoch)
+        self.step_generic_plugin_surface(
+            key,
+            HostBatch {
+                surface_size: Some((width, height)),
+                events: vec![event],
+                normalized_authorities: vec![authority],
+                ..HostBatch::default()
+            },
+            keyboard_epoch,
+        )
     }
 
     pub(crate) fn plugin_panel_host_controller_for(
@@ -5957,36 +5963,15 @@ impl LiveShell {
                 )
                 .is_some_and(|outcome| outcome.changed);
         }
-        let (changed, effects, failure) = {
-            let Some(host) = self.plugin_panel_host_for(key) else {
-                return false;
-            };
-            let changed = host
-                .step(HostBatch {
-                    surface_size: Some((width, height)),
-                    events: vec![HostEvent::Controller(action)],
-                    ..HostBatch::default()
-                })
-                .changed;
-            let application = host.application_mut();
-            (
-                changed,
-                application.take_effects(),
-                application.take_runtime_failure(),
-            )
-        };
-        if let Some(error) = failure
-            && self.fail_plugin_panel_runtime(&key.plugin_id, error)
-        {
-            return true;
-        }
-        let root_changed = match self.reconcile_plugin_surface_root(key) {
-            Ok(changed) => changed,
-            Err(error) => return self.fail_plugin_panel_runtime(&key.plugin_id, error),
-        };
-        changed
-            | root_changed
-            | self.apply_plugin_effects_with_keyboard_epoch(effects, keyboard_epoch)
+        self.step_generic_plugin_surface(
+            key,
+            HostBatch {
+                surface_size: Some((width, height)),
+                events: vec![HostEvent::Controller(action)],
+                ..HostBatch::default()
+            },
+            keyboard_epoch,
+        )
     }
 
     #[cfg(any(test, target_os = "linux"))]
@@ -6025,36 +6010,15 @@ impl LiveShell {
                 )
                 .is_some_and(|outcome| outcome.changed);
         }
-        let (changed, effects, failure) = {
-            let Some(host) = self.plugin_panel_host_for(key) else {
-                return false;
-            };
-            let changed = host
-                .step(HostBatch {
-                    surface_size: Some((width, height)),
-                    events: vec![HostEvent::Ui(event)],
-                    ..HostBatch::default()
-                })
-                .changed;
-            let application = host.application_mut();
-            (
-                changed,
-                application.take_effects(),
-                application.take_runtime_failure(),
-            )
-        };
-        if let Some(error) = failure
-            && self.fail_plugin_panel_runtime(&key.plugin_id, error)
-        {
-            return true;
-        }
-        let root_changed = match self.reconcile_plugin_surface_root(key) {
-            Ok(changed) => changed,
-            Err(error) => return self.fail_plugin_panel_runtime(&key.plugin_id, error),
-        };
-        changed
-            | root_changed
-            | self.apply_plugin_effects_with_keyboard_epoch(effects, keyboard_epoch)
+        self.step_generic_plugin_surface(
+            key,
+            HostBatch {
+                surface_size: Some((width, height)),
+                events: vec![HostEvent::Ui(event)],
+                ..HostBatch::default()
+            },
+            keyboard_epoch,
+        )
     }
 
     fn apply_plugin_effects(&mut self, effects: Vec<crate::plugin_panel::PluginEffect>) -> bool {
