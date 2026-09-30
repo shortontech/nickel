@@ -1220,7 +1220,13 @@ impl PluginPanelApplication {
         };
         let host = state.host.borrow();
         for (owner, data) in &mut state.snapshots {
+            let surface = data.get("surface").cloned();
             *data = host.snapshot(owner)?.clone();
+            if let Some(surface) = surface {
+                data.as_object_mut()
+                    .ok_or("package snapshot must be an object")?
+                    .insert("surface".into(), surface);
+            }
         }
         let active = host.resolution().active.clone();
         let serialized =

@@ -107,6 +107,7 @@ struct MountState {
     reference: ComponentReference,
     generation: u64,
     props: Value,
+    surface: Option<Value>,
 }
 
 /// One generic composition host, one context/module cache per package.
@@ -396,6 +397,7 @@ impl ShellCompositionRuntime {
                 reference: reference.clone(),
                 generation: 0,
                 props: serde_json::json!({}),
+                surface: package.data.get("surface").cloned(),
             },
         );
         Ok(ComponentMount {
@@ -479,6 +481,16 @@ impl ShellCompositionRuntime {
         props: &Value,
         validate: impl FnOnce(&Value) -> Result<(), String>,
     ) -> Result<RenderedComponent, String> {
+        self.validate_mount(mount)?;
+        if let Some(surface) = self.mounts[&mount.id].surface.clone() {
+            for package in self.packages.values_mut() {
+                package
+                    .data
+                    .as_object_mut()
+                    .ok_or("package snapshot must be an object")?
+                    .insert("surface".into(), surface.clone());
+            }
+        }
         let result = self
             .render(mount, props)
             .and_then(|rendered| self.expand_rendered(mount.id, rendered, validate));
@@ -936,6 +948,9 @@ impl ShellCompositionRuntime {
         let object = data
             .as_object_mut()
             .ok_or("package snapshot must be an object")?;
+        if let Some(surface) = &state.surface {
+            object.insert("surface".into(), surface.clone());
+        }
         object.insert("__componentProps".into(), state.props.clone());
         runtime.set_data(&data.to_string())?;
         let expression = event.as_ref().map_or_else(

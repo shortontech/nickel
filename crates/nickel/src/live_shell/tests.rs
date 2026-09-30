@@ -3849,3 +3849,63 @@ fn public_notification_actions_recheck_feed_identity_grants_lock_and_provider_li
     ]));
     assert!(!shell.notification_action_granted(plugin_id, id));
 }
+
+#[test]
+fn composed_shell_keeps_each_host_identity_when_launcher_opens_settings() {
+    with_package_runtime_stack(|| {
+        let mut shell = LiveShell::new().unwrap();
+        shell.global_shortcut(crate::platform::GlobalShortcut::ShowLauncher);
+        let launcher = LiveShell::default_shell_surface_key("launcher");
+        let (width, height) = {
+            let surface = &shell.plugin_surface_hosts[&launcher].0;
+            (surface.width, surface.height)
+        };
+        shell.plugin_panel_scene(&launcher, width, height).unwrap();
+        let button = shell
+            .plugin_panel_host_for(&launcher)
+            .unwrap()
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: nickel_ui::SemanticRole::Button,
+                name: "Settings".into(),
+            })
+            .unwrap();
+        assert!(shell.plugin_panel_host_ui_for(
+            &launcher,
+            nickel_ui::UiEvent::AccessibilityActivate(button.id),
+            width,
+            height
+        ));
+        assert!(shell.default_shell_surface_visible("settings"));
+        for id in ["taskbar", "settings", "launcher", "settings", "taskbar"] {
+            let key = LiveShell::default_shell_surface_key(id);
+            let (width, height) = {
+                let surface = &shell.plugin_surface_hosts[&key].0;
+                (surface.width, surface.height)
+            };
+            assert!(
+                shell.plugin_panel_scene(&key, width, height).is_some(),
+                "{id} scene disappeared"
+            );
+            assert!(
+                shell
+                    .plugin_panel_host_for(&key)
+                    .unwrap()
+                    .application()
+                    .last_error()
+                    .is_none()
+            );
+        }
+        shell.close_plugin_window(&launcher).unwrap();
+        let settings = LiveShell::default_shell_surface_key("settings");
+        assert!(shell.plugin_panel_scene(&settings, 1100, 800).is_some());
+        assert!(
+            shell
+                .plugin_panel_scene(&LiveShell::default_shell_surface_key("taskbar"), 1920, 56)
+                .is_some()
+        );
+        assert_eq!(
+            shell.plugin_registry.get("nickel-default").unwrap().health,
+            nickel_core::plugins::PluginHealth::Running
+        );
+    });
+}
