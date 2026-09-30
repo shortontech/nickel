@@ -479,6 +479,28 @@
     }
 
     #[test]
+    fn public_menu_blur_dismissal_invalidates_intent_without_restoring_application_focus() {
+        let host = Arc::new(crate::session_host::StagedSessionHost::new(crate::session_host::default_session_host()));
+        let mut shell = LiveShell::new_with_session_host(host.clone()).unwrap();
+        shell.windows = vec![OpenWindow { id: WindowId(73), application_id: Some(ApplicationId::new("org.example.Editor")), active: true, title: "Document".into(), state: Default::default() }];
+        assert!(shell.open_window_menu_at(73, 120, 200));
+        let generation = shell.window_menu_generation().unwrap();
+        shell.windows[0].active = false;
+        shell.windows.push(OpenWindow { id: WindowId(74), application_id: Some(ApplicationId::new("org.example.Terminal")), active: true, title: "Terminal".into(), state: Default::default() });
+        host.take_commands();
+        assert!(shell.apply_plugin_effects(vec![crate::plugin_panel::PluginEffect::WindowOperation {
+            plugin_id: "nickel-default".into(), operation: "windows.dismissMenu".into(), restore_focus: false, destination: None, window: None,
+        }]));
+        assert!(shell.window_menu.is_none());
+        assert!(shell.window_menu_snapshot.is_none());
+        assert!(shell.window_menu_generation().is_none());
+        assert!(!shell.retire_window_menu(generation));
+        assert_eq!(shell.windows.iter().find(|window| window.active).unwrap().id, WindowId(74));
+        assert!(!shell.default_shell_surface_visible("window-menu"));
+        assert!(!host.take_commands().iter().any(|command| matches!(command, crate::platform::ShellCommand::RestoreApplicationFocus)));
+    }
+
+    #[test]
     fn lock_application_transfers_password_to_a_typed_authentication_effect() {
         let mut application = super::LockApplication {
             password: zeroize::Zeroizing::new(String::new()),

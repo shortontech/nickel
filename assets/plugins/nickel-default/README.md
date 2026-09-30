@@ -195,7 +195,9 @@ inherited shell components address the selected package's corresponding surface.
 shell's optional `window-menu` surface. `shell.windowMenu` is an ordinary
 composition export. Omission makes the frontend unavailable. `windows.menu()`
 reports the current target identity; `dismissMenu()` dismisses and restores native
-application focus. These requests require `windows-context`; facts require
+application focus. `dismissMenu({restoreFocus:false})` clears the captured menu
+intent and hides its surface without moving focus, suitable for `Window.onBlur`.
+The option must be a boolean. These requests require `windows-context`; facts require
 `windows-read`.
 
 Public operations include `minimize`, `maximize`, `restore`, `toggleMaximize`,

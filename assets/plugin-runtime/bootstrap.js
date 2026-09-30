@@ -366,7 +366,7 @@ const nickel = Object.freeze({
         activate(id) { __effects.push({type:'windows.focus',id:__nickelIdentity(id)}); },
         close(id) { __effects.push({type:'windows.close',id:__nickelIdentity(id)}); },
         menu() { return __nickelResource('windowMenu', {targetId:null}); },
-        dismissMenu() { __effects.push({type:'windows.dismissMenu'}); },
+        dismissMenu(options) { __effects.push({type:'windows.dismissMenu', restoreFocus: options?.restoreFocus ?? true}); },
         showMenu(id) { __effects.push({type:'windows.showMenu',id:__nickelIdentity(id)}); },
         minimize(id) { __effects.push({type:'windows.minimize',id:__nickelIdentity(id)}); },
         maximize(id) { __effects.push({type:'windows.maximize',id:__nickelIdentity(id)}); },

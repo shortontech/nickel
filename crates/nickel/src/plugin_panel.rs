@@ -280,6 +280,7 @@ pub enum PluginEffect {
     WindowOperation {
         plugin_id: String,
         operation: String,
+        restore_focus: bool,
         destination: Option<String>,
         window: Option<crate::model::WindowId>,
     },
@@ -1916,6 +1917,14 @@ impl PluginPanelApplication {
                             }) =>
                         {
                             let operation = effect["type"].as_str().unwrap();
+                            let restore_focus = match effect.get("restoreFocus") {
+                                None => true,
+                                Some(Value::Bool(value)) => *value,
+                                _ => {
+                                    self.last_error = Some("restoreFocus must be a boolean".into());
+                                    return;
+                                }
+                            };
                             let destination = effect
                                 .get("destination")
                                 .and_then(Value::as_str)
@@ -1943,6 +1952,7 @@ impl PluginPanelApplication {
                             approved.push(PluginEffect::WindowOperation {
                                 plugin_id: effect_manifest.id.clone(),
                                 operation: operation.into(),
+                                restore_focus,
                                 destination,
                                 window,
                             });
@@ -5291,6 +5301,36 @@ mod tests {
         assert!(
             matches!(granted.take_effects().as_slice(), [PluginEffect::WindowOperation { operation, window: Some(crate::model::WindowId(71)), destination: Some(destination), .. }] if operation == "windows.moveToWorkspace" && destination == "18446744073709551615")
         );
+    }
+
+    #[test]
+    fn public_window_menu_dismissal_validates_focus_option_and_grant() {
+        for (options, permitted, expected) in [
+            ("", true, Some(true)),
+            ("{restoreFocus:false}", true, Some(false)),
+            ("{restoreFocus:'false'}", true, None),
+            ("{restoreFocus:false}", false, None),
+        ] {
+            let mut manifest = manifest().clone();
+            manifest.capabilities.clear();
+            if permitted {
+                manifest.capabilities.push(PluginCapability::WindowsContext);
+            }
+            let source = format!(
+                "function App(){{return h(Panel,{{}},h(Button,{{id:'dismiss',onClick:()=>nickel.windows.dismissMenu({options})}},'Dismiss'));}}"
+            );
+            let mut application =
+                PluginPanelApplication::new_with_manifest(&source, &manifest, Some("{}".into()))
+                    .unwrap();
+            application.update(application.button_message("dismiss").unwrap());
+            let effects = application.take_effects();
+            match expected {
+                Some(expected) => assert!(
+                    matches!(effects.as_slice(), [PluginEffect::WindowOperation{operation,restore_focus,..}] if operation == "windows.dismissMenu" && *restore_focus == expected)
+                ),
+                None => assert!(effects.is_empty()),
+            }
+        }
     }
 
     #[test]

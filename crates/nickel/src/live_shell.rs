@@ -6149,6 +6149,7 @@ impl LiveShell {
                 crate::plugin_panel::PluginEffect::WindowOperation {
                     plugin_id,
                     operation,
+                    restore_focus,
                     destination,
                     window,
                 } => {
@@ -6156,8 +6157,13 @@ impl LiveShell {
                         &plugin_id,
                         nickel_core::plugins::PluginCapability::WindowsContext,
                     ) {
-                        changed |=
-                            self.apply_public_window_operation(&operation, window, destination);
+                        if operation == "windows.dismissMenu" && !self.locked {
+                            self.dismiss_window_menu_with_focus(restore_focus);
+                            changed = true;
+                        } else {
+                            changed |=
+                                self.apply_public_window_operation(&operation, window, destination);
+                        }
                     }
                 }
                 crate::plugin_panel::PluginEffect::ToggleOnScreenKeyboard { plugin_id } => {
@@ -7650,10 +7656,14 @@ impl LiveShell {
     }
 
     fn dismiss_window_menu(&mut self) {
+        self.dismiss_window_menu_with_focus(true);
+    }
+
+    fn dismiss_window_menu_with_focus(&mut self, restore_focus: bool) {
         self.set_default_shell_surface_visible("window-menu", false);
         let focused_menu = self.window_menu.is_some();
         self.close_window_preview();
-        if focused_menu {
+        if focused_menu && restore_focus {
             #[cfg(target_os = "linux")]
             let _ = self.send_session_command(
                 "restore-window-menu-focus",

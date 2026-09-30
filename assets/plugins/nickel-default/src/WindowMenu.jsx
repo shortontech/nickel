@@ -8,7 +8,7 @@ export function WindowMenu() {
     const destinations = nickel.windows.destinations();
     const dismiss = () => nickel.windows.dismissMenu();
     const act = operation => { operation(window.id); dismiss(); };
-    return <FixedWindow id="window-menu" width={320} height={400} className="window-menu" onEscape={dismiss} onBlur={() => nickel.surfaces.hide("window-menu")}>
+    return <FixedWindow id="window-menu" width={320} height={400} className="window-menu" onEscape={dismiss} onBlur={() => nickel.windows.dismissMenu({restoreFocus: false})}>
         <ScrollView id="window-menu-scroll" height={368}><Column>
             <Text className="window-menu-title">{window?.title || "Window unavailable"}</Text>
             {window ? <Column>
