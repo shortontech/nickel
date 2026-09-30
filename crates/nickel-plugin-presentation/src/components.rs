@@ -255,6 +255,11 @@ pub enum PanelNode {
         background: u32,
         radius: u32,
     },
+    Layer {
+        id: Option<String>,
+        children: Vec<Self>,
+        class_name: Option<String>,
+    },
     Div {
         id: Option<String>,
         class_name: Option<String>,
@@ -554,6 +559,7 @@ impl PanelNode {
     pub fn container_children(&self) -> Option<&Vec<Self>> {
         match self {
             Self::Box { children, .. }
+            | Self::Layer { children, .. }
             | Self::Div { children, .. }
             | Self::Surface { children, .. }
             | Self::Row { children, .. }
@@ -568,6 +574,7 @@ impl PanelNode {
         let mut matches = children.iter().filter(|child| {
             let class_name = match child {
                 Self::Box { class_name, .. }
+                | Self::Layer { class_name, .. }
                 | Self::Div { class_name, .. }
                 | Self::Surface { class_name, .. }
                 | Self::Row { class_name, .. }
@@ -764,6 +771,9 @@ impl PanelNode {
                 Self::Box { class_name, .. }
                 | Self::Row { class_name, .. }
                 | Self::Column { class_name, .. } => class_name.as_ref().map_or(0, capacity),
+                Self::Layer { id, class_name, .. } => {
+                    id.as_ref().map_or(0, capacity) + class_name.as_ref().map_or(0, capacity)
+                }
                 Self::ScrollView { id, class_name, .. } => {
                     capacity(id) + class_name.as_ref().map_or(0, capacity)
                 }
@@ -823,6 +833,7 @@ impl PanelNode {
             && !matches!(
                 kind,
                 "box"
+                    | "layer"
                     | "div"
                     | "window"
                     | "row"
@@ -1092,6 +1103,17 @@ impl PanelNode {
                         .unwrap_or(0) as u32,
                 })
             }
+            "layer" => Ok(Self::Layer {
+                id: match value.get("id") {
+                    None | Some(Value::Null) => None,
+                    Some(Value::String(id)) if !id.is_empty() && id.len() <= 128 => {
+                        Some(id.clone())
+                    }
+                    _ => return Err("layer id must contain 1 to 128 bytes".into()),
+                },
+                children: Self::parse_flow_children(children)?,
+                class_name,
+            }),
             "window" => {
                 let dimension = |name| match value.get(name) {
                     Some(Value::Number(size)) => size
@@ -2079,6 +2101,33 @@ impl PanelNode {
                     &style,
                 )
             }
+            Self::Layer {
+                id,
+                children,
+                class_name,
+            } => {
+                let style = stylesheet.resolve("layer", id.as_deref(), class_name.as_deref());
+                let mut layer = Layer::new();
+                if let Some(width) = style.width {
+                    layer = layer.width_length(width);
+                }
+                if let Some(height) = style.height {
+                    layer = layer.height_length(height);
+                }
+                if let Some(id) = id {
+                    layer = layer.id(id.clone());
+                }
+                for child in children {
+                    layer = layer.child(child.view_as_scoped_with_slots::<Message>(
+                        images,
+                        stylesheet,
+                        scope,
+                        inherited.extend(&style),
+                        slots,
+                    ));
+                }
+                AnyView::new(layer)
+            }
             Self::Surface {
                 children,
                 id,
@@ -2841,6 +2890,7 @@ impl PanelNode {
         match self {
             Self::Dialog { id, .. } if id == requested_id => Some(self),
             Self::Box { children, .. }
+            | Self::Layer { children, .. }
             | Self::Div { children, .. }
             | Self::Surface { children, .. }
             | Self::Row { children, .. }
@@ -2876,6 +2926,7 @@ impl PanelNode {
         match self {
             Self::Menu { id, .. } if id == requested_id => Some(self),
             Self::Box { children, .. }
+            | Self::Layer { children, .. }
             | Self::Div { children, .. }
             | Self::Surface { children, .. }
             | Self::Row { children, .. }
@@ -2891,6 +2942,7 @@ impl PanelNode {
         match self {
             Self::Dialog { .. } | Self::Menu { .. } => output.push(self),
             Self::Box { children, .. }
+            | Self::Layer { children, .. }
             | Self::Div { children, .. }
             | Self::Surface { children, .. }
             | Self::Row { children, .. }
@@ -2945,6 +2997,7 @@ impl PanelNode {
                 ..
             } if id == requested_id => Some(*action),
             Self::Box { children, .. }
+            | Self::Layer { children, .. }
             | Self::Div { children, .. }
             | Self::Surface { children, .. }
             | Self::Row { children, .. }
@@ -2960,6 +3013,7 @@ impl PanelNode {
         match self {
             Self::TextField { id, action, .. } if id == requested_id => Some(*action),
             Self::Box { children, .. }
+            | Self::Layer { children, .. }
             | Self::Div { children, .. }
             | Self::Surface { children, .. }
             | Self::Row { children, .. }
@@ -2975,6 +3029,7 @@ impl PanelNode {
         match self {
             Self::Slider { id, action, .. } if id == requested_id => Some(*action),
             Self::Box { children, .. }
+            | Self::Layer { children, .. }
             | Self::Div { children, .. }
             | Self::Surface { children, .. }
             | Self::Row { children, .. }
@@ -3192,6 +3247,7 @@ fn parse_panel_for_manifest(
                 children
             }
             PanelNode::Box { children, .. }
+            | PanelNode::Layer { children, .. }
             | PanelNode::Div { children, .. }
             | PanelNode::Row { children, .. }
             | PanelNode::Column { children, .. }

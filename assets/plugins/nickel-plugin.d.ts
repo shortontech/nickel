@@ -199,6 +199,8 @@ declare function Window(props: NickelWindowProps): JSX.Element;
 declare function FixedWindow(props: Omit<NickelWindowProps, "placement">): JSX.Element;
 declare function Viewport(props: NickelViewportProps): JSX.Element;
 declare function Box(props: NickelBoxProps): JSX.Element;
+/** Positions Box children by their x and y coordinates. Size it with CSS. */
+declare function Layer(props: NickelProps & { id?: string }): JSX.Element;
 /** Generic CSS layout box. Defaults to block layout. */
 declare function Div(props: NickelDivProps): JSX.Element;
 declare function Badge(props: NickelBadgeProps): JSX.Element;

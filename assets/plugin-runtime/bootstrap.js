@@ -22,6 +22,7 @@ function Panel(props) {
         content);
 }
 const Box = 'box';
+const Layer = 'layer';
 const Div = 'div';
 const Badge = 'badge';
 const Widget = 'widget';
