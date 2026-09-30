@@ -489,7 +489,6 @@ impl LiveShell {
         )
     }
 
-    #[cfg(target_os = "linux")]
     pub(crate) fn cancel_keyboard_gestures(&mut self) {
         self.keyboard_gesture_leases.clear();
         self.keyboard_resize = None;
