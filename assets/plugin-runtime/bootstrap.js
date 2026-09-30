@@ -310,7 +310,17 @@ const nickel = Object.freeze({
         selectOutput(id) { __effects.push({type:'control-action',action:'audio-device',value:__nickelIdentity(id)}); }
     }),
     notifications: Object.freeze({
-        get() { return __nickelResource('notifications', {notification:null,history:[],historyVisible:false}); }
+        get() { return __nickelResource('notifications', {notification:null,history:[]}); },
+        invoke(id, key) {
+            if (!Number.isSafeInteger(id) || id < 1 || id > 4294967295) throw TypeError('invalid notification identity');
+            key = __nickelIdentity(key);
+            if (key.length > 128) throw TypeError('invalid notification action');
+            __effects.push({type:'notifications.invoke',id,key});
+        },
+        dismiss(id) {
+            if (!Number.isSafeInteger(id) || id < 1 || id > 4294967295) throw TypeError('invalid notification identity');
+            __effects.push({type:'notifications.dismiss',id});
+        }
     }),
     tray: Object.freeze({
         list() { return __nickelResource('tray', []); },

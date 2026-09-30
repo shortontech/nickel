@@ -523,13 +523,14 @@ pub enum PluginEffect {
     },
     ToggleControlCenter,
     InvokeNotification {
+        plugin_id: String,
         id: u32,
         key: String,
     },
     DismissNotification {
+        plugin_id: String,
         id: u32,
     },
-    CloseNotificationHistory,
     Control(ControlAction),
     Preview(PreviewAction),
 }
@@ -832,7 +833,6 @@ fn initial_notifications_data(manifest: &PluginManifest) -> Value {
         serde_json::json!({
             "notification": null,
             "history": [],
-            "historyVisible": false,
         })
     } else {
         Value::Null
@@ -3513,7 +3513,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                         }
 
                         _ if effect.get("type").and_then(Value::as_str)
-                            == Some("notification-invoke")
+                            == Some("notifications.invoke")
                             && effect_manifest
                                 .capabilities
                                 .contains(&PluginCapability::NotificationsAct) =>
@@ -3536,12 +3536,13 @@ impl nickel_ui::Application for PluginPanelApplication {
                                 return;
                             };
                             approved.push(PluginEffect::InvokeNotification {
+                                plugin_id: effect_manifest.id.clone(),
                                 id,
                                 key: key.to_owned(),
                             });
                         }
                         _ if effect.get("type").and_then(Value::as_str)
-                            == Some("notification-dismiss")
+                            == Some("notifications.dismiss")
                             && effect_manifest
                                 .capabilities
                                 .contains(&PluginCapability::NotificationsAct) =>
@@ -3555,16 +3556,12 @@ impl nickel_ui::Application for PluginPanelApplication {
                                 self.last_error = Some("notification ID is invalid".into());
                                 return;
                             };
-                            approved.push(PluginEffect::DismissNotification { id });
+                            approved.push(PluginEffect::DismissNotification {
+                                plugin_id: effect_manifest.id.clone(),
+                                id,
+                            });
                         }
-                        _ if effect.get("type").and_then(Value::as_str)
-                            == Some("notification-close-history")
-                            && effect_manifest
-                                .capabilities
-                                .contains(&PluginCapability::NotificationsAct) =>
-                        {
-                            approved.push(PluginEffect::CloseNotificationHistory);
-                        }
+
                         _ => {
                             self.last_error =
                                 Some(format!("plugin effect {effect:?} is not granted"));
@@ -6873,12 +6870,12 @@ mod tests {
             function App() {
                 return h(Window, {width: 320, height: 180},
                     h(Text, {}, nickel.data.notifications?.notification?.summary || 'None'),
-                    h(Button, {id: 'dismiss', onClick: () => nickel.request({type: 'notification-dismiss', id: 71})}, 'Dismiss'));
+                    h(Button, {id: 'dismiss', onClick: () => nickel.notifications.dismiss(71)}, 'Dismiss'));
             }
         "#;
         let projection = serde_json::json!({
             "notification": {"id":71,"appName":"Mail","summary":"New mail","body":"Hello","actions":[]},
-            "history":[],"historyVisible":false
+            "history":[]
         });
         let mut denied = PluginPanelApplication::new_with_manifest(
             source,
@@ -6924,7 +6921,10 @@ mod tests {
         granted.update(granted.button_message("dismiss").unwrap());
         assert_eq!(
             granted.take_effects(),
-            vec![PluginEffect::DismissNotification { id: 71 }]
+            vec![PluginEffect::DismissNotification {
+                plugin_id: manifest.id.clone(),
+                id: 71
+            }]
         );
     }
 

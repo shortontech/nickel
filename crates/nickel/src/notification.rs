@@ -412,7 +412,6 @@ mod tests {
 pub(crate) fn snapshot(
     notification: Option<&DesktopNotification>,
     history: &[DesktopNotification],
-    history_visible: bool,
 ) -> serde_json::Value {
     let item = |notification: &DesktopNotification| {
         serde_json::json!({
@@ -428,7 +427,6 @@ pub(crate) fn snapshot(
     serde_json::json!({
         "notification": notification.map(item),
         "history": history.iter().take(12).map(item).collect::<Vec<_>>(),
-        "historyVisible": history_visible,
     })
 }
 
@@ -437,7 +435,7 @@ mod snapshot_tests {
     use super::*;
 
     #[test]
-    fn public_snapshot_retains_hidden_history_and_bounds_entries_and_actions() {
+    fn public_snapshot_bounds_history_and_actions_without_presentation_state() {
         let mut store = NotificationStore::default();
         for index in 0..20 {
             store.notify(
@@ -458,12 +456,12 @@ mod snapshot_tests {
             );
         }
         let history = store.history();
-        let value = snapshot(history.first(), &history, false);
+        let value = snapshot(history.first(), &history);
         assert_eq!(value["history"].as_array().unwrap().len(), 12);
         assert_eq!(
             value["notification"]["actions"].as_array().unwrap().len(),
             MAX_NOTIFICATION_ACTIONS
         );
-        assert_eq!(value["historyVisible"], false);
+        assert!(value.get("historyVisible").is_none());
     }
 }

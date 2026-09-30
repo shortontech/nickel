@@ -3557,7 +3557,6 @@ impl LiveShell {
                 .as_ref()
                 .filter(|notification| !self.trusted_notification_id(notification.id)),
             &history,
-            self.notification_history_visible,
         ))
     }
 
@@ -7395,39 +7394,27 @@ impl LiveShell {
                     }
                 }
 
-                crate::plugin_panel::PluginEffect::InvokeNotification { id, key } => {
-                    if !self.notification_history_visible
-                        && !self.trusted_notification_id(id)
-                        && self.notification.as_ref().is_some_and(|item| item.id == id)
+                crate::plugin_panel::PluginEffect::InvokeNotification { plugin_id, id, key } => {
+                    if self.notification_action_granted(&plugin_id, id)
+                        && self.notification_feed.history().iter().any(|item| {
+                            item.id == id && item.actions.iter().any(|action| action.key == key)
+                        })
                     {
-                        self.notification_host.application_mut().request_effect(
-                            NotificationEffect::Invoke {
-                                notification_id: id,
-                                key,
-                            },
-                        );
-                        changed |= self.apply_notification_effects();
+                        self.notification_feed.invoke(id, &key);
+                        self.notification_feed.dismiss(id);
+                        if self.notification.as_ref().is_some_and(|item| item.id == id) {
+                            self.notification = None;
+                        }
+                        changed = true;
                     }
                 }
-                crate::plugin_panel::PluginEffect::DismissNotification { id } => {
-                    if !self.notification_history_visible
-                        && !self.trusted_notification_id(id)
-                        && self.notification.as_ref().is_some_and(|item| item.id == id)
-                    {
-                        self.notification_host.application_mut().request_effect(
-                            NotificationEffect::Dismiss {
-                                notification_id: id,
-                            },
-                        );
-                        changed |= self.apply_notification_effects();
-                    }
-                }
-                crate::plugin_panel::PluginEffect::CloseNotificationHistory => {
-                    if self.notification_history_visible && !self.trusted_notification_visible() {
-                        self.notification_host
-                            .application_mut()
-                            .request_effect(NotificationEffect::CloseHistory);
-                        changed |= self.apply_notification_effects();
+                crate::plugin_panel::PluginEffect::DismissNotification { plugin_id, id } => {
+                    if self.notification_action_granted(&plugin_id, id) {
+                        self.notification_feed.dismiss(id);
+                        if self.notification.as_ref().is_some_and(|item| item.id == id) {
+                            self.notification = None;
+                        }
+                        changed = true;
                     }
                 }
                 crate::plugin_panel::PluginEffect::ShellSelection { plugin_id, effect } => {
@@ -10646,6 +10633,24 @@ impl LiveShell {
             events: vec![HostEvent::Poll],
             ..HostBatch::default()
         });
+    }
+
+    fn notification_action_granted(&self, plugin_id: &str, id: u32) -> bool {
+        !self.locked
+            && !self.trusted_notification_id(id)
+            && self
+                .notification_feed
+                .history()
+                .iter()
+                .any(|item| item.id == id)
+            && self.plugin_registry.get(plugin_id).is_some_and(|entry| {
+                entry.desired_enabled
+                    && entry.health == nickel_core::plugins::PluginHealth::Running
+                    && entry
+                        .manifest
+                        .capabilities
+                        .contains(&nickel_core::plugins::PluginCapability::NotificationsAct)
+            })
     }
 
     fn trusted_notification_id(&self, id: u32) -> bool {

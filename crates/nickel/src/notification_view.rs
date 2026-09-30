@@ -92,10 +92,6 @@ impl NotificationApp {
         std::mem::take(&mut self.effects)
     }
 
-    pub fn request_effect(&mut self, effect: NotificationEffect) {
-        self.effects.push(effect);
-    }
-
     pub fn take_failures(&mut self) -> Vec<NotificationFailure> {
         std::mem::take(&mut self.failures)
     }

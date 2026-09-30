@@ -2,14 +2,15 @@
 import "./styles/notifications.css";
 // Nickel supplies a bounded snapshot and checks every action against its live feed.
 export function Notifications(props) {
-    const data = { ...{ notification: null, history: [], historyVisible: false }, ...nickel.notifications.get(), ...props?.data };
+    const data = { ...{ notification: null, history: [] }, ...nickel.notifications.get() };
+    const [historyVisible, setHistoryVisible] = useState(false);
     const current = data.notification;
     let content;
-    if (data.historyVisible) {
+    if (historyVisible) {
         content = h(Column, null,
             h(Row, null,
                 h(Text, null, "Notifications"),
-                h(Button, { id: "notification-close-history", onClick: () => nickel.request({ type: "notification-close-history" }) }, "Close")),
+                h(Button, { id: "notification-close-history", onClick: () => nickel.surfaces.hide("notifications") }, "Close")),
             h(ScrollView, { id: "notification-history-scroll", height: 140 },
                 data.history.length === 0 ? h(Text, null, "No notifications") : null,
                 data.history.map(item => h(Column, { key: item.id },
@@ -25,11 +26,15 @@ export function Notifications(props) {
             h(ScrollView, { id: "notification-body-scroll", height: 82 },
                 h(Text, null, current.body)),
             h(Row, null,
-                current.actions.map(action => h(Button, { key: action.key, id: "notification-action-" + action.key, onClick: () => nickel.request({ type: "notification-invoke", id: current.id, key: action.key }) }, action.label)),
-                h(Button, { id: "notification-dismiss", onClick: () => nickel.request({ type: "notification-dismiss", id: current.id }) }, "Dismiss")));
+                current.actions.map(action => h(Button, { key: action.key, id: "notification-action-" + action.key, onClick: () => nickel.notifications.invoke(current.id, action.key) }, action.label)),
+                h(Button, { id: "notification-dismiss", onClick: () => nickel.notifications.dismiss(current.id) }, "Dismiss")));
     }
-    return h(Window, { id: "notifications", placement: "fixed", anchor: "top-right", width: 420, height: 180, className: "notification-window", onEscape: data.historyVisible
-            ? () => nickel.request({ type: "notification-close-history" })
-            : current ? () => nickel.request({ type: "notification-dismiss", id: current.id }) : undefined },
-        h("div", { className: "notification-content" }, content));
+    return h(Window, { id: "notifications", placement: "fixed", anchor: "top-right", width: 420, height: 180, className: "notification-window", onEscape: historyVisible
+            ? () => nickel.surfaces.hide("notifications")
+            : current ? () => nickel.notifications.dismiss(current.id) : undefined },
+        h("div", { className: "notification-content" },
+            !historyVisible ? h(Row, null,
+                h(Text, null, "Notifications"),
+                h(Button, { id: "notification-history", onClick: () => setHistoryVisible(true) }, "History")) : null,
+            content));
 }

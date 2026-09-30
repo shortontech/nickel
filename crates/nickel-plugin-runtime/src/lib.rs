@@ -227,6 +227,42 @@ mod tests {
     }
 
     #[test]
+    fn notification_client_uses_stable_ids_and_validates_actions() {
+        let mut runtime = super::JsxRuntime::new(
+            "",
+            Some(r#"{"notifications":{"notification":{"id":7,"summary":"Mail"},"history":[]}}"#),
+        )
+        .unwrap();
+        runtime.eval("nickel.notifications.get().notification.summary = 'changed'; nickel.notifications.invoke(7, 'open'); nickel.notifications.dismiss(7);").unwrap();
+        assert_eq!(
+            runtime
+                .eval_json::<String>(
+                    "JSON.stringify(nickel.notifications.get().notification.summary)"
+                )
+                .unwrap(),
+            "Mail"
+        );
+        let effects = runtime.take_effects().unwrap();
+        assert_eq!(
+            effects[0],
+            serde_json::json!({"type":"notifications.invoke","id":7,"key":"open"})
+        );
+        assert_eq!(
+            effects[1],
+            serde_json::json!({"type":"notifications.dismiss","id":7})
+        );
+        for call in [
+            "nickel.notifications.dismiss(0)",
+            "nickel.notifications.dismiss('7')",
+            "nickel.notifications.dismiss(4294967296)",
+            "nickel.notifications.invoke(7, '')",
+        ] {
+            assert!(runtime.eval(call).is_err());
+        }
+        assert!(runtime.take_effects().unwrap().is_empty());
+    }
+
+    #[test]
     fn desktop_clients_copy_snapshots_and_emit_stable_identity_actions() {
         let mut runtime = super::JsxRuntime::new(
             "",

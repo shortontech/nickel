@@ -1497,6 +1497,7 @@ fn external_notification_projection_requires_read_capability() {
             changes: nickel_session_protocol::RemoteLeaseRequestChanges::default(),
         },
     );
+    assert!(!shell.notification_action_granted("nickel-default", notification_id));
     let protected = shell.external_plugin_notifications(&id).unwrap();
     assert!(protected["notification"].is_null());
     assert!(protected["history"].as_array().unwrap().is_empty());
@@ -3806,4 +3807,45 @@ fn inherited_shell_selection_hides_base_roots_and_honors_omitted_settings() {
         stale["revision"] = serde_json::json!("0");
         assert!(effect.validate(&stale).is_err());
     });
+}
+
+#[test]
+fn public_notification_actions_recheck_feed_identity_grants_lock_and_provider_lifecycle() {
+    let mut shell = LiveShell::new().unwrap();
+    let id = shell
+        .notification_feed
+        .notify_internal(crate::notification::NotificationRequest {
+            app_name: "Mail".into(),
+            summary: "New mail".into(),
+            body: "Body".into(),
+            actions: vec![crate::notification::NotificationAction {
+                key: "open".into(),
+                label: "Open".into(),
+            }],
+            expire_timeout_ms: 0,
+        });
+    let plugin_id = "nickel-default";
+    assert!(shell.notification_action_granted(plugin_id, id));
+    assert!(!shell.apply_plugin_effects(vec![
+        crate::plugin_panel::PluginEffect::InvokeNotification {
+            plugin_id: plugin_id.into(),
+            id,
+            key: "stale".into()
+        }
+    ]));
+    shell.locked = true;
+    assert!(!shell.notification_action_granted(plugin_id, id));
+    shell.locked = false;
+    shell.plugin_registry.set_enabled(plugin_id, false).unwrap();
+    assert!(!shell.notification_action_granted(plugin_id, id));
+    shell.plugin_registry.set_enabled(plugin_id, true).unwrap();
+    assert!(!shell.notification_action_granted(plugin_id, id));
+    shell.plugin_registry.mark_running(plugin_id).unwrap();
+    assert!(shell.apply_plugin_effects(vec![
+        crate::plugin_panel::PluginEffect::DismissNotification {
+            plugin_id: plugin_id.into(),
+            id
+        }
+    ]));
+    assert!(!shell.notification_action_granted(plugin_id, id));
 }
