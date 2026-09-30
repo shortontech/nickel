@@ -1420,28 +1420,6 @@ fn native_keyboard_uses_authority_height_dock_and_output_without_rescaling() {
     assert!(super::internal_keyboard_surface_placement(None, false, 368, &[]).is_none());
 }
 
-#[test]
-fn volume_osd_uses_requested_interaction_output_without_launcher_affinity() {
-    let placement = internal_shell_surface_placement(
-        SurfaceRole::VolumeOsd,
-        Some("right"),
-        (320, 88),
-        &outputs(),
-        Some("left"),
-        PanelEdge::Bottom,
-    );
-    assert_eq!(placement.output.as_deref(), Some("right"));
-    assert_eq!(placement.geometry, (0, 240, 320, 88));
-    let fallback = internal_shell_surface_placement(
-        SurfaceRole::VolumeOsd,
-        Some("removed"),
-        (320, 88),
-        &outputs(),
-        None,
-        PanelEdge::Bottom,
-    );
-    assert_eq!(fallback.output.as_deref(), Some("left"));
-}
 
 #[test]
 fn switching_active_output_relocates_one_launcher_to_negative_origin() {

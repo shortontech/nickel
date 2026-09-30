@@ -6,10 +6,6 @@ pub(crate) fn resolve(
     entry: &str,
 ) -> Result<(&'static str, &'static str), String> {
     let assets = match (plugin_id, entry) {
-        ("org.nickel.volume-osd", "main.js") => (
-            include_str!("../../../assets/plugins/volume-osd/main.js"),
-            include_str!("../../../assets/plugins/volume-osd/ui.css"),
-        ),
         ("org.nickel.codex-projects", "main.js") => (
             include_str!("../../../assets/plugins/codex-projects/main.js"),
             include_str!("../../../assets/plugins/codex-projects/ui.css"),

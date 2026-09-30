@@ -165,15 +165,7 @@ impl LiveShell {
                     Err("Trusted notification is unavailable".into())
                 }
             }
-            SurfaceRole::VolumeOsd => {
-                if let Some(host) =
-                    self.plugin_panel_host_ref(&crate::plugin_panel::volume_osd_surface_key())
-                {
-                    Ok(observe_only(plugin_projection(host, |_, _| false)?))
-                } else {
-                    Err("Volume overlay plugin is unavailable".into())
-                }
-            }
+            SurfaceRole::VolumeOsd => Err("Retired native volume surface is unavailable".into()),
             SurfaceRole::WindowPreview => {
                 if self.preview_plugin_active() {
                     Ok(observe_only(plugin_projection(
@@ -446,24 +438,5 @@ mod tests {
         let shell = LiveShell::new().expect("live shell");
 
         assert_advertised_actions_are_guarded(&shell.control_host, control_activate);
-    }
-
-    #[test]
-    fn volume_overlay_semantics_follow_the_active_jsx_host() {
-        let mut shell = LiveShell::new().expect("live shell");
-        shell.audio.volume_percent = 47;
-        shell.audio.muted = false;
-        shell.volume_osd_until =
-            Some(std::time::Instant::now() + std::time::Duration::from_secs(60));
-        let _ = shell.scene(SurfaceRole::VolumeOsd, 420, 96);
-        let (_, nodes) = shell
-            .bounded_shell_semantics(SurfaceRole::VolumeOsd, None)
-            .expect("volume overlay semantics");
-        assert!(nodes.iter().any(|node| node.name.as_deref() == Some("47%")));
-        assert!(nodes.iter().any(|node| {
-            node.name
-                .as_deref()
-                .is_some_and(|name| name.starts_with("Volume 47%"))
-        }));
     }
 }

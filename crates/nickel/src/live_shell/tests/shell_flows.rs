@@ -288,73 +288,7 @@
         assert!(!shell.preview_plugin_active());
     }
 
-    #[test]
-    fn volume_osd_plugin_retires_without_native_fallback() {
-        let mut shell = LiveShell::new().unwrap();
-        let id = &crate::plugin_panel::volume_osd_manifest().id;
-        let key = crate::plugin_panel::volume_osd_surface_key();
-        assert!(shell.plugin_panel_host_ref(&key).is_some());
-        assert!(shell.plugin_surface_matches(&key));
-        assert!(shell.shell_fixed_surface_keys().contains(&key));
-        assert!(!shell.plugin_panels().iter().any(|(panel, _)| panel == &key));
-        assert!(shell
-            .plugin_surface_scene_for_output(&key, None, 420, 96)
-            .is_some());
-        assert!(shell.plugin_surface_change_token(&key).is_some());
-        assert!(shell.plugin_registry().get(id).unwrap().memory.native_ui_bytes.is_some());
-        assert!(shell.set_plugin_enabled(id, false).unwrap());
-        assert!(shell.plugin_panel_host_ref(&key).is_none());
-        assert!(!shell.plugin_surface_matches(&key));
-        assert!(!shell.shell_fixed_surface_keys().contains(&key));
-        assert!(shell
-            .plugin_surface_scene_for_output(&key, None, 420, 96)
-            .is_none());
-        assert!(shell.plugin_surface_change_token(&key).is_none());
-        assert_eq!(
-            shell.plugin_registry().get(id).unwrap().memory,
-            nickel_core::plugins::PluginMemory::default()
-        );
-        assert!(shell.scene(SurfaceRole::VolumeOsd, 420, 96).is_empty());
-        assert!(!shell.surface_visible(SurfaceRole::VolumeOsd));
-        assert!(shell.set_plugin_enabled(id, true).unwrap());
-        assert!(shell.plugin_panel_host_ref(&key).is_some());
-        assert!(shell.plugin_surface_matches(&key));
-        assert!(shell.plugin_surface_change_token(&key).is_some());
-    }
 
-    #[test]
-    fn volume_osd_projection_failure_retires_its_overlay() {
-        let mut shell = LiveShell::new().unwrap();
-        let mut data = serde_json::json!({"audio": shell.audio_plugin_data()});
-        data["audio"]["label"] = "fixture-label".into();
-        let application = crate::plugin_panel::PluginPanelApplication::volume_osd_with_test_source(
-            "function App() { if (nickel.data.audio.label !== 'fixture-label') throw Error('volume projection exploded'); return h(Panel, {}, h(Text, {}, 'Volume ready')); }",
-            &data,
-        )
-        .unwrap();
-        shell.plugin_surface_hosts.insert(
-            crate::plugin_panel::volume_osd_surface_key(),
-            (
-                crate::plugin_panel::volume_osd_surface().clone(),
-                nickel_ui::UiHost::new(application, 420, 96),
-            ),
-        );
-        shell.volume_osd_until = Some(std::time::Instant::now() + std::time::Duration::from_secs(5));
-        assert!(shell.scene(SurfaceRole::VolumeOsd, 420, 96).is_empty());
-        let id = &crate::plugin_panel::volume_osd_manifest().id;
-        let entry = shell.plugin_registry().get(id).unwrap();
-        assert!(entry.desired_enabled);
-        assert!(matches!(&entry.health, nickel_core::plugins::PluginHealth::Failed(error) if error.contains("volume projection exploded")));
-        assert_eq!(entry.memory, nickel_core::plugins::PluginMemory::default());
-        assert!(shell.volume_osd_until.is_none());
-        assert!(!shell.plugin_surface_matches(&crate::plugin_panel::volume_osd_surface_key()));
-        assert!(!shell.surface_visible(SurfaceRole::VolumeOsd));
-        assert!(shell.set_plugin_enabled(id, false).unwrap());
-        assert!(shell.set_plugin_enabled(id, true).unwrap());
-        assert!(shell
-            .plugin_panel_host_ref(&crate::plugin_panel::volume_osd_surface_key())
-            .is_some());
-    }
 
     #[test]
     fn codex_project_menu_uses_a_plugin_surface_and_retires_on_disable() {

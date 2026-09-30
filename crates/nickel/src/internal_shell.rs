@@ -340,7 +340,6 @@ impl InternalShellCoordinator {
                 SurfaceRole::Launcher,
                 SurfaceRole::ControlCenter,
                 SurfaceRole::Notification,
-                SurfaceRole::VolumeOsd,
                 SurfaceRole::WindowPreview,
                 SurfaceRole::Screenshot,
                 SurfaceRole::OnScreenKeyboard,
@@ -366,7 +365,6 @@ impl InternalShellCoordinator {
                     continue;
                 }
                 let plugin = match role {
-                    SurfaceRole::VolumeOsd => Some(crate::plugin_panel::volume_osd_surface_key()),
                     SurfaceRole::WindowPreview => {
                         Some(crate::plugin_panel::window_preview_surface_key())
                     }
@@ -907,7 +905,7 @@ impl InternalShellCoordinator {
         let roles: Option<&[SurfaceRole]> = match &update {
             crate::platform::SystemStatusUpdate::Audio(_)
             | crate::platform::SystemStatusUpdate::AudioWithActivity { .. } => {
-                Some(&[SurfaceRole::ControlCenter, SurfaceRole::VolumeOsd])
+                Some(&[SurfaceRole::ControlCenter, SurfaceRole::Panel])
             }
             crate::platform::SystemStatusUpdate::Network(_)
             | crate::platform::SystemStatusUpdate::Bluetooth(_) => {
@@ -1075,11 +1073,8 @@ impl InternalShellCoordinator {
                     SurfaceRole::Panel if taskbar_surface => {
                         dependent_roles.extend([SurfaceRole::Taskbar, SurfaceRole::WindowPreview])
                     }
-                    SurfaceRole::ControlCenter => dependent_roles.extend([
-                        SurfaceRole::Taskbar,
-                        SurfaceRole::VolumeOsd,
-                        SurfaceRole::OnScreenKeyboard,
-                    ]),
+                    SurfaceRole::ControlCenter => dependent_roles
+                        .extend([SurfaceRole::Taskbar, SurfaceRole::OnScreenKeyboard]),
                     SurfaceRole::WindowPreview => dependent_roles
                         .extend([SurfaceRole::Taskbar, SurfaceRole::WindowContextMenu]),
 
@@ -1142,11 +1137,7 @@ impl InternalShellCoordinator {
                         normalized_authority,
                     )
                 } else {
-                    dependent_roles.extend([
-                        SurfaceRole::Taskbar,
-                        SurfaceRole::VolumeOsd,
-                        SurfaceRole::OnScreenKeyboard,
-                    ]);
+                    dependent_roles.extend([SurfaceRole::Taskbar, SurfaceRole::OnScreenKeyboard]);
                     self.shell.control_host_event_authorized(
                         event,
                         entry.size,
@@ -1278,11 +1269,9 @@ impl InternalShellCoordinator {
                 SurfaceRole::Panel if taskbar_surface && action => {
                     dependent_roles.extend([SurfaceRole::Taskbar, SurfaceRole::WindowPreview])
                 }
-                SurfaceRole::ControlCenter => dependent_roles.extend([
-                    SurfaceRole::Taskbar,
-                    SurfaceRole::VolumeOsd,
-                    SurfaceRole::OnScreenKeyboard,
-                ]),
+                SurfaceRole::ControlCenter => {
+                    dependent_roles.extend([SurfaceRole::Taskbar, SurfaceRole::OnScreenKeyboard])
+                }
                 SurfaceRole::WindowPreview => {
                     dependent_roles.extend([SurfaceRole::Taskbar, SurfaceRole::WindowContextMenu])
                 }
@@ -1507,6 +1496,22 @@ impl InternalShellCoordinator {
         self.shell.shell_panel_surfaces()
     }
 
+    /// Service transitions can open or retire ordinary package windows between input turns.
+    pub(crate) fn plugin_surface_topology_changed(&self) -> bool {
+        let desired = self
+            .plugin_surfaces()
+            .into_iter()
+            .map(|(key, _)| key)
+            .collect::<HashSet<_>>();
+        let mounted = self
+            .entries
+            .iter()
+            .filter(|surface| surface.role == SurfaceRole::Panel)
+            .filter_map(|surface| surface.plugin.clone())
+            .collect::<HashSet<_>>();
+        desired != mounted
+    }
+
     pub(crate) fn is_taskbar_surface_id(&self, id: InternalSurfaceId) -> bool {
         self.entries
             .iter()
@@ -1657,10 +1662,7 @@ fn role_size(role: SurfaceRole, width: u32, height: u32, panel_edge: PanelEdge) 
         SurfaceRole::Launcher => launcher_size(width, height),
         SurfaceRole::ControlCenter => control_center_size(width, height),
         SurfaceRole::Notification => (420.min(width), 180.min(height)),
-        SurfaceRole::VolumeOsd => (
-            crate::plugin_panel::volume_osd_surface().width.min(width),
-            crate::plugin_panel::volume_osd_surface().height.min(height),
-        ),
+        SurfaceRole::VolumeOsd => (0, 0),
         SurfaceRole::WindowPreview => (760.min(width), 520.min(height)),
         SurfaceRole::WindowContextMenu | SurfaceRole::CodexProjectMenu => {
             (360.min(width), 480.min(height))
@@ -1832,6 +1834,63 @@ mod tests {
                 image: image::RgbaImage::new(4, 4),
             }))
         }
+    }
+
+    #[test]
+    fn audio_service_feedback_mounts_and_retires_an_ordinary_selected_surface() {
+        let mut coordinator = coordinator();
+        let outputs = [InternalOutput {
+            name: "test".into(),
+            x: 0,
+            y: 0,
+            width: 1280,
+            height: 800,
+            scale: 1.0,
+        }];
+        coordinator.set_outputs(&outputs);
+        assert!(!coordinator.plugin_surface_topology_changed());
+        let audio = |percent| {
+            crate::platform::SystemStatusUpdate::Audio(crate::platform::AudioStatus {
+                available: true,
+                volume_percent: percent,
+                muted: false,
+                devices: Vec::new(),
+            })
+        };
+        coordinator.apply_system_status_update(audio(20));
+        coordinator.apply_system_status_update(audio(40));
+        assert!(coordinator.plugin_surface_topology_changed());
+        coordinator.set_outputs(&outputs);
+        assert!(!coordinator.plugin_surface_topology_changed());
+        let surface = coordinator
+            .surfaces()
+            .iter()
+            .find(|surface| {
+                surface.plugin.as_ref().is_some_and(|key| {
+                    key.plugin_id == "nickel-default" && key.surface_id == "volume-osd"
+                })
+            })
+            .expect("ordinary volume surface")
+            .clone();
+        assert_eq!(surface.role, SurfaceRole::Panel);
+        assert!(coordinator.visible(surface.id));
+        assert!(!coordinator.scene(surface.id).unwrap().is_empty());
+        coordinator.apply_system_status_update(crate::platform::SystemStatusUpdate::Audio(
+            crate::platform::AudioStatus {
+                available: false,
+                volume_percent: 0,
+                muted: false,
+                devices: Vec::new(),
+            },
+        ));
+        assert!(coordinator.plugin_surface_topology_changed());
+        coordinator.set_outputs(&outputs);
+        assert!(
+            coordinator
+                .surfaces()
+                .iter()
+                .all(|current| current.id != surface.id)
+        );
     }
 
     fn coordinator() -> InternalShellCoordinator {
@@ -2226,74 +2285,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn native_consumer_controls_use_typed_host_and_only_show_confirmed_limit_values() {
-        use nickel_session_protocol::ConsumerControl;
-        struct MediaHost(std::sync::Mutex<Vec<ConsumerControl>>);
-        impl SessionHost for MediaHost {
-            fn dispatch(&self, _: ShellCommand) -> Result<(), SessionRequestError> {
-                Ok(())
-            }
-            fn consumer_control(&self, control: ConsumerControl) -> bool {
-                self.0.lock().unwrap().push(control);
-                control != ConsumerControl::VolumeDown
-            }
-        }
-        let host = Arc::new(MediaHost(std::sync::Mutex::new(Vec::new())));
-        let mut shell = InternalShellCoordinator::new(host.clone(), PanelEdge::Bottom).unwrap();
-        shell.set_outputs(&[InternalOutput {
-            x: 0,
-            y: 0,
-            name: "test".into(),
-            width: 800,
-            height: 600,
-            scale: 1.0,
-        }]);
-        let osd_surface = shell.surface(SurfaceRole::VolumeOsd, None).unwrap();
-        assert_eq!(
-            osd_surface.plugin,
-            Some(crate::plugin_panel::volume_osd_surface_key())
-        );
-        assert_eq!(osd_surface.size, (420, 96));
-        let osd = osd_surface.id;
-        shell.apply_system_status_update(crate::platform::SystemStatusUpdate::Audio(
-            crate::platform::AudioStatus {
-                available: true,
-                volume_percent: 100,
-                muted: false,
-                devices: Vec::new(),
-            },
-        ));
-        assert!(!shell.visible(osd));
-        assert!(shell.consumer_control(ConsumerControl::VolumeUp));
-        assert!(shell.visible(osd));
-        let changed = shell.poll(Instant::now() + std::time::Duration::from_secs(2));
-        assert!(changed.contains(&osd));
-        assert!(!shell.visible(osd));
-        for control in [
-            ConsumerControl::VolumeDown,
-            ConsumerControl::VolumeMute,
-            ConsumerControl::PlayPause,
-            ConsumerControl::Next,
-        ] {
-            assert!(!shell.consumer_control(control));
-            assert!(
-                !shell.visible(osd),
-                "accepted commands do not fabricate an audio result"
-            );
-        }
-        assert_eq!(
-            *host.0.lock().unwrap(),
-            vec![
-                ConsumerControl::VolumeUp,
-                ConsumerControl::VolumeDown,
-                ConsumerControl::VolumeMute,
-                ConsumerControl::PlayPause,
-                ConsumerControl::Next
-            ]
-        );
-    }
-
     impl SessionHost for StorageHost {
         fn dispatch(&self, _command: ShellCommand) -> Result<(), SessionRequestError> {
             Ok(())
@@ -2432,44 +2423,6 @@ mod tests {
         assert_eq!(retained.plugin, None);
         assert!(coordinator.visible(retained.id));
         assert!(coordinator.scene(retained.id).is_some());
-    }
-
-    #[test]
-    fn bundled_overlay_surfaces_follow_their_plugin_lifetimes() {
-        let mut coordinator = coordinator();
-        let output = InternalOutput {
-            x: 0,
-            y: 0,
-            name: "nested".into(),
-            width: 800,
-            height: 600,
-            scale: 1.0,
-        };
-        coordinator.set_outputs(&[output.clone()]);
-        for (role, plugin_id) in [
-            (
-                SurfaceRole::VolumeOsd,
-                crate::plugin_panel::volume_osd_manifest().id.clone(),
-            ),
-            (
-                SurfaceRole::WindowPreview,
-                crate::plugin_panel::window_preview_manifest().id.clone(),
-            ),
-        ] {
-            let initial = coordinator.surface(role, None).unwrap().id;
-            coordinator
-                .shell_mut()
-                .set_plugin_enabled(&plugin_id, false)
-                .unwrap();
-            coordinator.set_outputs(&[output.clone()]);
-            assert!(coordinator.surface(role, None).is_none());
-            coordinator
-                .shell_mut()
-                .set_plugin_enabled(&plugin_id, true)
-                .unwrap();
-            coordinator.set_outputs(&[output.clone()]);
-            assert_ne!(coordinator.surface(role, None).unwrap().id, initial);
-        }
     }
 
     #[test]

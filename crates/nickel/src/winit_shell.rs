@@ -47,7 +47,6 @@ pub const PANEL_TITLE: &str = "Nickel Taskbar";
 pub const LAUNCHER_TITLE: &str = "Nickel Launcher";
 pub const CONTROL_CENTER_TITLE: &str = "Nickel Control Center";
 pub const NOTIFICATION_TITLE: &str = "Nickel Notification";
-pub const VOLUME_OSD_TITLE: &str = "Nickel Volume";
 pub const WINDOW_PREVIEW_TITLE: &str = "Nickel Window Preview";
 pub const WINDOW_CONTEXT_MENU_TITLE: &str = "Nickel Window Menu";
 pub const CODEX_PROJECT_MENU_TITLE: &str = "Nickel Codex Projects";
@@ -219,7 +218,7 @@ fn desired_plugin_surfaces(
 
 fn fixed_plugin_surface_key(role: SurfaceRole) -> Option<nickel_core::plugins::PluginSurfaceKey> {
     match role {
-        SurfaceRole::VolumeOsd => Some(crate::plugin_panel::volume_osd_surface_key()),
+        SurfaceRole::VolumeOsd => None,
         SurfaceRole::WindowPreview => Some(crate::plugin_panel::window_preview_surface_key()),
         _ => None,
     }
@@ -664,7 +663,6 @@ impl WinitShell {
             active_output_name: None,
             active_fixed_plugins: [
                 crate::plugin_panel::run_surface_key(),
-                crate::plugin_panel::volume_osd_surface_key(),
                 crate::plugin_panel::window_preview_surface_key(),
             ]
             .into_iter()
@@ -857,7 +855,7 @@ impl WinitShell {
         }
         self.create_surface(SurfaceRole::ControlCenter, 0, primary, primary_name)?;
         self.create_surface(SurfaceRole::Notification, 0, primary, primary_name)?;
-        for role in [SurfaceRole::VolumeOsd, SurfaceRole::WindowPreview] {
+        for role in [SurfaceRole::WindowPreview] {
             if fixed_plugin_surface_key(role)
                 .is_some_and(|key| self.active_fixed_plugins.contains(&key))
             {
@@ -947,12 +945,10 @@ impl WinitShell {
             SurfaceRole::Launcher => launcher_available,
             SurfaceRole::OnScreenKeyboard => !keyboard_plugin_active,
             SurfaceRole::Screenshot => true,
-            SurfaceRole::WindowContextMenu => false,
+            SurfaceRole::WindowContextMenu | SurfaceRole::VolumeOsd => false,
             SurfaceRole::Desktop => desired.contains(&(surface.output_name.clone(), surface.role)),
-            SurfaceRole::VolumeOsd | SurfaceRole::WindowPreview => {
-                fixed_plugin_surface_key(surface.role)
-                    .is_some_and(|key| self.active_fixed_plugins.contains(&key))
-            }
+            SurfaceRole::WindowPreview => fixed_plugin_surface_key(surface.role)
+                .is_some_and(|key| self.active_fixed_plugins.contains(&key)),
             SurfaceRole::Panel => panel_expected(surface),
             SurfaceRole::Taskbar => desired.contains(&(surface.output_name.clone(), surface.role)),
             _ => true,
@@ -1102,7 +1098,6 @@ impl WinitShell {
         let primary_name = &output_names[0];
         for role in [
             SurfaceRole::Launcher,
-            SurfaceRole::VolumeOsd,
             SurfaceRole::WindowPreview,
             SurfaceRole::WindowContextMenu,
             SurfaceRole::OnScreenKeyboard,
@@ -2689,9 +2684,7 @@ impl WinitShell {
         let panel = plugin
             .map(|(_, surface)| surface.clone())
             .unwrap_or_else(|| {
-                if role == SurfaceRole::VolumeOsd {
-                    crate::plugin_panel::volume_osd_surface().clone()
-                } else if role == SurfaceRole::WindowPreview {
+                if role == SurfaceRole::WindowPreview {
                     crate::plugin_panel::window_preview_surface().clone()
                 } else {
                     self.plugin_panel_surface.clone()
@@ -2699,7 +2692,7 @@ impl WinitShell {
             });
         let plugin_key = match role {
             SurfaceRole::Taskbar => None,
-            SurfaceRole::VolumeOsd => Some(crate::plugin_panel::volume_osd_surface_key()),
+            SurfaceRole::VolumeOsd => None,
             SurfaceRole::WindowPreview => Some(crate::plugin_panel::window_preview_surface_key()),
             SurfaceRole::Panel => Some(plugin.map_or_else(
                 || nickel_core::plugins::PluginSurfaceKey {
@@ -2893,12 +2886,7 @@ impl WinitShell {
                     tracing::warn!(?role, "failed to configure Windows shell window");
                 }
             }
-            SurfaceRole::VolumeOsd => {
-                let configured = crate::platform::configure_volume_osd_window(&window);
-                if !configured {
-                    tracing::warn!(?role, "failed to configure Windows shell window");
-                }
-            }
+
             _ => {}
         }
         if role == SurfaceRole::Screenshot {
@@ -3091,16 +3079,6 @@ fn surface_geometry_for_panel(
     panel_edge: PanelEdge,
     panel: &nickel_core::plugins::PluginSurface,
 ) -> (&'static str, i32, i32, u32, u32, bool) {
-    if role == SurfaceRole::VolumeOsd {
-        let width = panel.width.min(geometry.width);
-        let height = panel.height.min(geometry.height);
-        let (x, y) = panel.anchor.position(
-            (geometry.x, geometry.y, geometry.width, geometry.height),
-            (width, height),
-            (panel.offset_x, panel.offset_y),
-        );
-        return (VOLUME_OSD_TITLE, x, y, width, height, true);
-    }
     if role == SurfaceRole::Panel {
         let width = panel.width.min(geometry.width);
         let height = panel.height.min(geometry.height);
@@ -3240,14 +3218,7 @@ fn surface_geometry(
                 true,
             )
         }
-        SurfaceRole::VolumeOsd => (
-            VOLUME_OSD_TITLE,
-            geometry.x + (geometry.width.saturating_sub(320) / 2) as i32,
-            geometry.y + geometry.height.saturating_sub(170) as i32,
-            320.min(geometry.width),
-            88.min(geometry.height),
-            true,
-        ),
+        SurfaceRole::VolumeOsd => ("Retired volume surface", 0, 0, 0, 0, true),
         SurfaceRole::WindowPreview => (
             WINDOW_PREVIEW_TITLE,
             geometry.x + geometry.width.saturating_sub(1160.min(geometry.width)) as i32 / 2,
@@ -3517,7 +3488,6 @@ mod tests {
     fn wayland_surface_lifecycle_keeps_only_high_frequency_chrome_warm() {
         for role in [
             SurfaceRole::Notification,
-            SurfaceRole::VolumeOsd,
             SurfaceRole::WindowPreview,
             SurfaceRole::WindowContextMenu,
             SurfaceRole::CodexProjectMenu,
@@ -3766,35 +3736,6 @@ mod tests {
             assert!(desired.contains(&("DP-1".into(), SurfaceRole::Panel)));
             assert!(!desired.contains(&("DP-2".into(), SurfaceRole::Panel)));
         }
-    }
-
-    #[test]
-    fn volume_overlay_uses_bundled_manifest_size_and_bottom_placement() {
-        let geometry = DisplayGeometry {
-            x: 100,
-            y: 200,
-            width: 1920,
-            height: 1080,
-            scale: 1.0,
-        };
-        let (title, x, y, width, height, hidden) = super::surface_geometry_for_panel(
-            SurfaceRole::VolumeOsd,
-            geometry,
-            PanelEdge::Bottom,
-            crate::plugin_panel::volume_osd_surface(),
-        );
-        assert_eq!(title, super::VOLUME_OSD_TITLE);
-        assert_eq!((x, y, width, height), (850, 1102, 420, 96));
-        assert!(hidden);
-        let mut shifted = crate::plugin_panel::volume_osd_surface().clone();
-        shifted.offset_y = -24;
-        let (_, _, y, _, _, _) = super::surface_geometry_for_panel(
-            SurfaceRole::VolumeOsd,
-            geometry,
-            PanelEdge::Bottom,
-            &shifted,
-        );
-        assert_eq!(y, 1160);
     }
 
     #[test]

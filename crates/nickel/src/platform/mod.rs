@@ -1210,7 +1210,7 @@ pub use windows::{
     capture_active_window, capture_active_window_to_file, capture_desktop, capture_pointer,
     configure_context_menu_window, configure_desktop_window, configure_launcher_window,
     configure_notification_window, configure_panel_window, configure_plugin_dialog_window,
-    configure_preview_window, configure_screenshot_window, configure_volume_osd_window,
+    configure_preview_window, configure_screenshot_window,
     configured_primary_output, copy_image_to_clipboard, copy_temp_image_path,
     deliver_on_screen_keyboard_input, disconnect_wifi_network, ensure_panel_tray_host,
     execute_run_command, handle_consumer_control, handle_focused_shortcut, hide_preview_window,
@@ -1230,7 +1230,7 @@ mod unsupported;
 pub use unsupported::{
     NotificationFeed, TrayFeed, WindowFeed, activate_wifi_network, active_display_point,
     application_discovery, application_icon, applications, audio_status, bluetooth_status,
-    capture_pointer, configure_volume_osd_window, configured_primary_output,
+    capture_pointer, configured_primary_output,
     disconnect_wifi_network, execute_run_command, handle_consumer_control, handle_focused_shortcut,
     launch_application, launcher_has_foreground_focus, launcher_hotkey_receiver,
     launcher_visibility_applied, network_status, pair_bluetooth_device, register_session_shell,

@@ -152,31 +152,6 @@ mod shell_surface_identity_tests {
         assert!(!shell_surface_identity_valid(&identity));
     }
 
-    #[test]
-    fn volume_overlay_accepts_its_plugin_placement() {
-        let key = crate::plugin_panel::volume_osd_surface_key();
-        let surface = crate::plugin_panel::volume_osd_surface();
-        let mut identity = ShellSurfaceIdentity {
-            application_id: "io.nickel.shell.surface.42.11".into(),
-            role: ShellRole::VolumeOsd,
-            output: None,
-            plugin_surface: Some(PluginSurfacePlacement {
-                plugin_id: key.plugin_id,
-                surface_id: key.surface_id,
-                kind: PluginSurfacePlacementKind::Overlay,
-                width: surface.width,
-                height: surface.height,
-                bottom_offset: 0,
-                anchor: nickel_session_protocol::PluginSurfaceAnchor::Center,
-                offset_x: 0,
-                offset_y: 0,
-                passive: false,
-            }),
-        };
-        assert!(shell_surface_identity_valid(&identity));
-        identity.plugin_surface.as_mut().unwrap().kind = PluginSurfacePlacementKind::Panel;
-        assert!(!shell_surface_identity_valid(&identity));
-    }
 
     #[test]
     fn preview_accepts_only_overlay_plugin_placement() {

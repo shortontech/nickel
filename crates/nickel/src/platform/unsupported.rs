@@ -87,10 +87,6 @@ pub fn copy_temp_image_path(_image: &image::RgbaImage) -> Result<std::path::Path
 
 pub fn release_pointer() {}
 
-pub fn configure_volume_osd_window(_window: &impl raw_window_handle::HasWindowHandle) -> bool {
-    true
-}
-
 pub fn select_audio_device(_id: &str) -> bool {
     false
 }

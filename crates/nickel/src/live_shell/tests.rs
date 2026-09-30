@@ -1777,17 +1777,12 @@ fn coalesced_audio_feedback_uses_latest_state_and_suppresses_reconnect_only_chan
     let updates = receiver.drain();
     assert_eq!(updates.len(), 1);
     assert!(shell.apply_system_status_update(updates.into_iter().next().unwrap()));
-    assert!(shell.surface_visible(SurfaceRole::VolumeOsd));
-    shell.scene(SurfaceRole::VolumeOsd, 320, 88);
-    assert!(
-        shell.audio_plugin_data()["label"]
-            .as_str()
-            .unwrap()
-            .starts_with("Volume 31%")
-    );
+    assert!(shell.default_shell_surface_visible("volume-osd"));
+    shell.plugin_panel_scene(&shell.active_shell_surface_key("volume-osd"),420,96);
+    assert_eq!(crate::audio_capabilities::snapshot(&shell.audio,shell.locked)["percent"], 31);
     assert!(
         shell
-            .plugin_panel_host_ref(&crate::plugin_panel::volume_osd_surface_key())
+            .plugin_panel_host_ref(&shell.active_shell_surface_key("volume-osd"))
             .unwrap()
             .accessibility_nodes()
             .iter()
@@ -1809,7 +1804,7 @@ fn coalesced_audio_feedback_uses_latest_state_and_suppresses_reconnect_only_chan
     for update in receiver.drain() {
         shell.apply_system_status_update(update);
     }
-    assert!(!shell.surface_visible(SurfaceRole::VolumeOsd));
+    assert!(!shell.default_shell_surface_visible("volume-osd"));
     for snapshot in [status(true, 50, true), status(true, 50, false)] {
         sender
             .send(Arc::new(SystemStatusUpdate::Audio(snapshot)))
@@ -1818,7 +1813,7 @@ fn coalesced_audio_feedback_uses_latest_state_and_suppresses_reconnect_only_chan
     for update in receiver.drain() {
         assert!(shell.apply_system_status_update(update));
     }
-    assert!(shell.surface_visible(SurfaceRole::VolumeOsd));
+    assert!(shell.default_shell_surface_visible("volume-osd"));
     assert!(!shell.audio.muted);
 }
 
@@ -1832,36 +1827,31 @@ fn audio_feedback_ignores_startup_metadata_and_reconnect_but_shows_value_changes
         devices: Vec::new(),
     };
     shell.apply_system_status_update(SystemStatusUpdate::Audio(status.clone()));
-    assert!(!shell.surface_visible(SurfaceRole::VolumeOsd));
+    assert!(!shell.default_shell_surface_visible("volume-osd"));
     status.devices.push(crate::platform::AudioDeviceStatus {
         id: "sink".into(),
         name: "Speaker".into(),
         is_default: true,
     });
     shell.apply_system_status_update(SystemStatusUpdate::Audio(status.clone()));
-    assert!(!shell.surface_visible(SurfaceRole::VolumeOsd));
+    assert!(!shell.default_shell_surface_visible("volume-osd"));
     status.volume_percent = 36;
     assert!(shell.apply_system_status_update(SystemStatusUpdate::Audio(status.clone())));
-    assert!(shell.surface_visible(SurfaceRole::VolumeOsd));
-    shell.scene(SurfaceRole::VolumeOsd, 320, 88);
-    assert!(
-        shell.audio_plugin_data()["label"]
-            .as_str()
-            .unwrap()
-            .starts_with("Volume 36%")
-    );
+    assert!(shell.default_shell_surface_visible("volume-osd"));
+    shell.plugin_panel_scene(&shell.active_shell_surface_key("volume-osd"),420,96);
+    assert_eq!(crate::audio_capabilities::snapshot(&shell.audio,shell.locked)["percent"], 36);
     let first = shell.volume_osd_until.unwrap();
     status.muted = true;
     shell.apply_system_status_update(SystemStatusUpdate::Audio(status.clone()));
     assert!(shell.volume_osd_until.unwrap() >= first);
     let outcome = shell.poll_deadlines(Instant::now() + Duration::from_secs(2));
     assert!(outcome.visibility_changed);
-    assert!(!shell.surface_visible(SurfaceRole::VolumeOsd));
+    assert!(!shell.default_shell_surface_visible("volume-osd"));
     status.available = false;
     shell.apply_system_status_update(SystemStatusUpdate::Audio(status.clone()));
     status.available = true;
     shell.apply_system_status_update(SystemStatusUpdate::Audio(status));
-    assert!(!shell.surface_visible(SurfaceRole::VolumeOsd));
+    assert!(!shell.default_shell_surface_visible("volume-osd"));
 }
 
 #[test]
@@ -2501,4 +2491,21 @@ fn window_menu_hotkey_uses_selected_package_and_native_window_policy() {
         assert!(!shell.default_shell_surface_visible("window-menu"));
         assert!(session.take_commands().is_empty());
     });
+}
+
+#[test]
+fn selected_volume_surface_is_optional_and_hidden_by_lock() {
+    let mut shell = LiveShell::new().unwrap();
+    shell.show_volume_osd();
+    assert!(shell.default_shell_surface_visible("volume-osd"));
+    assert!(!shell.surface_visible(SurfaceRole::VolumeOsd));
+    shell.global_shortcut(crate::platform::GlobalShortcut::LockState { locked: true });
+    assert!(!shell.default_shell_surface_visible("volume-osd"));
+    assert!(shell.volume_osd_until.is_none());
+    shell.show_volume_osd();
+    assert!(shell.volume_osd_until.is_none());
+    shell.locked = false;
+    shell.active_shell_package_id = "theme-without-volume".into();
+    shell.show_volume_osd();
+    assert!(shell.volume_osd_until.is_none());
 }

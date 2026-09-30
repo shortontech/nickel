@@ -380,7 +380,8 @@ interface NickelNativeWindow {id:string;applicationId:string|null;title:string;a
 interface NickelTrayItem {id:string;title:string;icon:boolean}
 interface NickelNotification {id:number;appName:string;summary:string;body:string;actions:ReadonlyArray<Readonly<{key:string;label:string}>>}
 interface NickelNotificationSnapshot {notification:Readonly<NickelNotification>|null;history:ReadonlyArray<Readonly<NickelNotification>>}
-interface NickelAudioSnapshot extends NickelAvailability {muted:boolean;percent:number;label?:string;outputName?:string|null;devices?:ReadonlyArray<Readonly<{id:string;name:string;isDefault:boolean}>>}
+/** Bounded native audio state; device identities/names are redacted while locked. */
+interface NickelAudioSnapshot extends NickelAvailability {muted:boolean;percent:number;devices:ReadonlyArray<Readonly<{id:string;name:string;isDefault:boolean}>>}
 interface NickelSessionSnapshot {revision:string;account:Readonly<{displayName:string;username:string}>|null;locked:boolean;support:Readonly<{lock:boolean;logout:boolean;suspend:boolean;reboot:boolean;powerOff:boolean;restartShell:boolean}>}
 interface NickelPreferences {
     barOnAllDisplays:boolean;allWindowsOnEveryBar:boolean;desktopCount:number;

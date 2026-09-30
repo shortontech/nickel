@@ -7182,6 +7182,13 @@ impl NickelSession {
     /// topology, scale or application replacement). Local service/input updates
     /// carry identities; visibility and placement are reconciled independently.
     fn sync_internal_shell_changes(&mut self, changed: Option<&[nickel_ui::InternalSurfaceId]>) {
+        if self
+            .internal_shell
+            .as_ref()
+            .is_some_and(|shell| shell.plugin_surface_topology_changed())
+        {
+            self.reconcile_internal_shell_outputs();
+        }
         let committed = self
             .internal_shell
             .as_mut()

@@ -1,0 +1,9 @@
+window.volume-osd {
+    background: var(--nickel-surface);
+    border: 1px solid var(--nickel-border);
+    border-radius: 16px;
+    padding: 12px 16px;
+}
+column.volume-content { display: flex; flex-direction: column; gap: 12px; width: 100%; }
+.volume-content text { color: var(--nickel-text); font-size: 15px; line-height: 20px; }
+progress.volume-progress { background: var(--nickel-border); color: var(--nickel-accent); border-radius: 4px; }

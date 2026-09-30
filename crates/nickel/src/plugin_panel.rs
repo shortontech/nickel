@@ -65,30 +65,6 @@ pub fn surface_key() -> nickel_core::plugins::PluginSurfaceKey {
     }
 }
 
-pub fn volume_osd_manifest() -> &'static PluginManifest {
-    static MANIFEST: OnceLock<PluginManifest> = OnceLock::new();
-    MANIFEST.get_or_init(|| {
-        PluginManifest::from_json(include_str!(
-            "../../../assets/plugins/volume-osd/plugin.json"
-        ))
-        .expect("bundled volume OSD plugin manifest must be valid")
-    })
-}
-
-pub fn volume_osd_surface() -> &'static PluginSurface {
-    volume_osd_manifest()
-        .surfaces
-        .first()
-        .expect("bundled volume overlay needs a surface")
-}
-
-pub fn volume_osd_surface_key() -> nickel_core::plugins::PluginSurfaceKey {
-    nickel_core::plugins::PluginSurfaceKey {
-        plugin_id: volume_osd_manifest().id.clone(),
-        surface_id: volume_osd_surface().id.clone(),
-    }
-}
-
 pub fn codex_projects_manifest() -> &'static PluginManifest {
     static MANIFEST: OnceLock<PluginManifest> = OnceLock::new();
     MANIFEST.get_or_init(|| {
@@ -1029,11 +1005,6 @@ impl PluginPanelApplication {
             }
         }
         Ok(())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn volume_osd_with_test_source(source: &str, data: &Value) -> Result<Self, String> {
-        Self::new_with_manifest(source, volume_osd_manifest(), Some(data.to_string()))
     }
 
     #[cfg(test)]
@@ -3844,14 +3815,7 @@ mod tests {
 
     #[test]
     fn bundled_plugin_packages_validate_with_manifest_sample_data() {
-        for name in [
-            "hello-panel",
-            "taskbar",
-            "notification",
-            "run",
-            "window-preview",
-            "volume-osd",
-        ] {
+        for name in ["hello-panel", "run", "window-preview"] {
             let directory = format!("{}/../../assets/plugins/{name}", env!("CARGO_MANIFEST_DIR"));
             let package = PluginPackage::load(directory).unwrap();
             PluginPanelApplication::validate_package(&package)
@@ -3944,42 +3908,6 @@ mod tests {
         left.retire_surface().unwrap();
         right.update(right.button_message("advance").unwrap());
         assert!(format!("{:?}", right.node).contains("right refreshed:1"));
-    }
-
-    #[test]
-    fn bundled_volume_osd_visual_snapshot() {
-        let projection = serde_json::json!({
-            "audio": {"label": "Speakers · 65%", "percent": 65}
-        });
-        let host = nickel_ui::UiHost::new(
-            PluginPanelApplication::bundled_with_data(
-                crate::plugin_panel::volume_osd_manifest(),
-                "main.js",
-                projection.to_string(),
-            )
-            .unwrap(),
-            420,
-            96,
-        );
-        assert!(matches!(
-            host.application().node,
-            PanelNode::Surface {
-                window_request: Some(_),
-                ..
-            }
-        ));
-        let mut renderer = nickel_ui::SoftwareRenderer::new_pixel_buffer(420, 96, 1.0);
-        host.render_software(&mut renderer);
-        let image = image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_fn(420, 96, |x, y| {
-            let pixel = renderer.pixels()[(y * 420 + x) as usize];
-            image::Rgba([pixel.r, pixel.g, pixel.b, pixel.a])
-        });
-        assert_eq!(image.get_pixel(20, 47).0, [123, 166, 255, 255]);
-        assert_eq!(image.get_pixel(300, 47).0, [74, 82, 98, 255]);
-        let output = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../target/nickel-ui-snapshots/volume-osd-shared.png");
-        std::fs::create_dir_all(output.parent().unwrap()).unwrap();
-        image.save(output).unwrap();
     }
 
     #[test]

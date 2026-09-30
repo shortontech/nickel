@@ -4097,39 +4097,6 @@ pub fn show_window_system_menu(window: WindowId) -> bool {
     }
 }
 
-pub fn configure_volume_osd_window(window: &impl raw_window_handle::HasWindowHandle) -> bool {
-    let Some(hwnd) = window_hwnd(window) else {
-        return false;
-    };
-    // SAFETY: style and DWM attributes apply only to Nickel's live indicator window.
-    unsafe {
-        let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
-        SetWindowLongPtrW(
-            hwnd,
-            GWL_EXSTYLE,
-            (style | WS_EX_TOOLWINDOW.0 | WS_EX_NOACTIVATE.0) as isize,
-        );
-        let preference: DWM_WINDOW_CORNER_PREFERENCE = DWMWCP_ROUND;
-        let rounded = DwmSetWindowAttribute(
-            hwnd,
-            DWMWA_WINDOW_CORNER_PREFERENCE,
-            (&raw const preference).cast(),
-            size_of::<DWM_WINDOW_CORNER_PREFERENCE>() as u32,
-        )
-        .is_ok();
-        SetWindowPos(
-            hwnd,
-            Some(HWND_TOPMOST),
-            0,
-            0,
-            0,
-            0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED,
-        )
-        .is_ok()
-            && rounded
-    }
-}
 
 pub fn launcher_has_foreground_focus() -> bool {
     use std::sync::atomic::Ordering;

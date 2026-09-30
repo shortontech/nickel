@@ -7,7 +7,7 @@ paths so the developer compiler can stage the entire graph. Nickel activates thi
 package as its stock shell; optional windows share its runtime.
 
 The package supplies Taskbar, Launcher, Quick Settings, Notifications, and the
-optional Settings window through ordinary JSX components and CSS. Its manifest
+optional Settings window and Volume OSD through ordinary JSX components and CSS. Its manifest
 exports public replacement contracts and declares capabilities and native surfaces.
 A selected derived shell can replace components or omit a surface entirely.
 
@@ -25,6 +25,7 @@ completed.
 - `Launcher` / `shell.launcher`
 - `QuickSettings` / `shell.quickSettings`
 - `Notifications` / `shell.notifications`
+- `VolumeOSD` / `shell.volumeOSD`
 - `Settings` / `shell.settings`
 - `SettingsNavigation` / `shell.settings.navigation`
 - `SettingControl` / `shell.settings.controls`

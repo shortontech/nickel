@@ -14,10 +14,11 @@ import { WindowMenu } from "./WindowMenu.js";
 import { Taskbar } from "./Taskbar.js";
 import { Launcher } from "./Launcher.js";
 import { QuickSettings } from "./QuickSettings.js";
+import { VolumeOSD } from "./VolumeOSD.js";
 import { Notifications } from "./Notifications.js";
 import { Settings, SettingsNavigation, SettingControl } from "./Settings.js";
 
-export { WindowMenu, Taskbar, Launcher, QuickSettings, Notifications, Settings };
+export { WindowMenu, Taskbar, Launcher, QuickSettings, Notifications, VolumeOSD, Settings };
 export { SettingsNavigation, SettingControl };
 
 // The shared package host supplies surface visibility; callers may provide snapshots.
@@ -28,8 +29,9 @@ export function Shell(props) {
     const QuickSettings = nickel.component('shell.quickSettings');
     const Notifications = nickel.component('shell.notifications');
     const Settings = nickel.component('shell.settings');
+    const VolumeOSD = nickel.component('shell.volumeOSD');
     const state = nickel.data.shell || {};
-    const visible = props?.visible || state.visible || {[nickel.data.surface?.id === 'quick-settings' ? 'quickSettings' : nickel.data.surface?.id === 'window-menu' ? 'windowMenu' : nickel.data.surface?.id]: true};
+    const visible = props?.visible || state.visible || {[nickel.data.surface?.id === 'quick-settings' ? 'quickSettings' : nickel.data.surface?.id === 'window-menu' ? 'windowMenu' : nickel.data.surface?.id === 'volume-osd' ? 'volumeOSD' : nickel.data.surface?.id]: true};
     const snapshots = props?.snapshots || state.snapshots || {};
     return <>
         {visible.taskbar ? <Taskbar data={snapshots.taskbar} /> : null}
@@ -37,6 +39,7 @@ export function Shell(props) {
         {visible.quickSettings ? <QuickSettings /> : null}
         {visible.notifications ? <Notifications data={snapshots.notifications} /> : null}
         {visible.windowMenu ? <WindowMenu /> : null}
+        {visible.volumeOSD ? <VolumeOSD /> : null}
         {visible.settings ? <Settings /> : null}
     </>;
 }
