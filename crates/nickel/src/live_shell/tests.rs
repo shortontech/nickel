@@ -623,7 +623,8 @@ fn installed_panel_can_be_enabled_measured_and_disabled() {
     assert!(shell.set_plugin_enabled("org.example.panel", true).unwrap());
     assert!(shell.surface_visible(crate::winit_shell::SurfaceRole::Panel));
     assert_eq!(shell.plugin_panel_surface().width, 360);
-    let commands = shell.scene(crate::winit_shell::SurfaceRole::Panel, 360, 96);
+    let panel_key = shell.plugin_panels()[0].0.clone();
+    let commands = shell.plugin_panel_scene(&panel_key, 360, 96).unwrap();
     assert!(!commands.is_empty());
     assert!(commands.iter().any(|command| matches!(command,
         nickel_ui::backend::PaintCommand::Text { text, .. } if text == "External panel"
@@ -645,7 +646,6 @@ fn installed_panel_can_be_enabled_measured_and_disabled() {
     )));
     assert_eq!(panel.settings.len(), 1);
     assert_eq!(panel.settings[0].value, serde_json::json!(true));
-    let panel_key = shell.plugin_panels()[0].0.clone();
     let token_before_setting = shell.plugin_panel_change_token(&panel_key).unwrap();
 
     let generation = status.activation_generation;
@@ -680,7 +680,7 @@ fn installed_panel_can_be_enabled_measured_and_disabled() {
         Some(token_before_setting)
     );
     assert!(shell.surface_visible(crate::winit_shell::SurfaceRole::Panel));
-    let commands = shell.scene(crate::winit_shell::SurfaceRole::Panel, 360, 96);
+    let commands = shell.plugin_panel_scene(&panel_key, 360, 96).unwrap();
     assert!(commands.iter().any(|command| matches!(command,
         nickel_ui::backend::PaintCommand::Text { text, .. } if text == "Hidden"
     )));
@@ -1661,7 +1661,7 @@ fn installed_dock_uses_declared_offset_and_translucent_panel() {
         nickel_core::plugins::PluginSurfaceKind::Dock
     );
     assert_eq!(shell.plugin_panel_surface().bottom_offset, 32);
-    let commands = shell.scene(crate::winit_shell::SurfaceRole::Panel, 420, 80);
+    let commands = shell.plugin_panel_scene(&dock_key, 420, 80).unwrap();
     assert!(commands.iter().any(|command| matches!(command,
         nickel_ui::backend::PaintCommand::Text { text, .. } if text == "Dock"
     )));

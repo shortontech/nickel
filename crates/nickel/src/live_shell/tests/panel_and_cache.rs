@@ -193,7 +193,11 @@
             grant.height,
         ));
         assert_eq!(shell.plugin_panel_surface.bottom_offset, 24);
-        shell.scene(SurfaceRole::Panel, grant.width, grant.height);
+        let key = nickel_core::plugins::PluginSurfaceKey {
+            plugin_id: shell.plugin_panel_owner.clone(),
+            surface_id: grant.id.clone(),
+        };
+        shell.plugin_panel_scene(&key, grant.width, grant.height);
         assert_eq!(shell.plugin_panel_surface.bottom_offset, 12);
     }
 

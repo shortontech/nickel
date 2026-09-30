@@ -1196,6 +1196,8 @@ fn scene_for_native_surface(
     let surface = shell.surface(id)?;
     let commands = if let Some(key) = surface.plugin_key() {
         state.plugin_surface_scene_for_output(key, Some(surface.output_name()), width, height)
+    } else if surface.role() == SurfaceRole::Panel {
+        return None;
     } else if surface.role() == SurfaceRole::Launcher {
         let key = state.active_launcher_surface_key()?;
         state.plugin_surface_scene_for_output(&key, None, width, height)

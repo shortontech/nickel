@@ -736,6 +736,9 @@ impl InternalShellCoordinator {
                 surface.size.1,
             )?
         } else {
+            if surface.role == SurfaceRole::Panel {
+                return None;
+            }
             self.shell
                 .scene(surface.role, surface.size.0, surface.size.1)
         };

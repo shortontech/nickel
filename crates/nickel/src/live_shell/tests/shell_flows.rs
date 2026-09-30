@@ -21,11 +21,12 @@
         shell.set_plugin_enabled(id, false).unwrap();
         assert!(shell.set_plugin_enabled(id, true).unwrap());
         assert!(shell.plugin_panel_host.is_some());
-        shell.scene(
-            super::SurfaceRole::Panel,
-            crate::plugin_panel::surface().width,
-            crate::plugin_panel::surface().height,
-        );
+        let surface = crate::plugin_panel::surface();
+        let key = nickel_core::plugins::PluginSurfaceKey {
+            plugin_id: id.clone(),
+            surface_id: surface.id.clone(),
+        };
+        shell.plugin_panel_scene(&key, surface.width, surface.height);
         assert!(shell.plugin_registry().get(id).unwrap().memory.native_ui_bytes.is_some());
         assert!(shell.set_plugin_enabled(id, false).unwrap());
         assert!(shell.plugin_panel_host.is_none());
@@ -73,7 +74,13 @@
             surface.width,
             surface.height,
         ));
-        assert!(shell.scene(SurfaceRole::Panel, surface.width, surface.height).is_empty());
+        let key = nickel_core::plugins::PluginSurfaceKey {
+            plugin_id: shell.plugin_panel_owner.clone(),
+            surface_id: surface.id.clone(),
+        };
+        assert!(shell
+            .plugin_panel_scene(&key, surface.width, surface.height)
+            .is_none());
         let entry = shell.plugin_registry().get(&package.manifest.id).unwrap();
         assert!(entry.desired_enabled);
         assert!(matches!(&entry.health, nickel_core::plugins::PluginHealth::Failed(error) if error.contains("provider projection exploded")));

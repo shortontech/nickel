@@ -2554,14 +2554,7 @@ impl LiveShell {
         let commands = match role {
             SurfaceRole::Desktop => self.desktop_scene(width, height),
             SurfaceRole::Taskbar => self.panel_scene(width, height),
-            SurfaceRole::Panel => {
-                let key = nickel_core::plugins::PluginSurfaceKey {
-                    plugin_id: self.plugin_panel_owner.clone(),
-                    surface_id: self.plugin_panel_surface.id.clone(),
-                };
-                self.plugin_panel_scene(&key, width, height)
-                    .unwrap_or_default()
-            }
+            SurfaceRole::Panel => unreachable!("plugin panels render through their surface key"),
             SurfaceRole::Launcher if self.run_visible => self.run_scene(width, height),
             SurfaceRole::Launcher => self.launcher_scene(width, height),
             SurfaceRole::ControlCenter => {
