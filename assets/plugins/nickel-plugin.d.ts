@@ -194,24 +194,6 @@ interface NickelBadgeProps extends NickelProps {
     count: number;
     color?: NickelColor;
 }
-interface NickelWidgetProps extends NickelProps {
-    label: string;
-    value: string;
-    percent: number;
-    color?: NickelColor;
-}
-interface NickelActionProps extends NickelProps {
-    id: string;
-    item?: string;
-    label: string;
-    onClick: (applicationId: string) => void;
-}
-interface NickelSectionProps extends NickelProps {
-    id: string;
-    label: string;
-    value: string;
-    onClick: () => void;
-}
 interface NickelProgressProps extends NickelProps {
     percent: number;
     width: number;
@@ -232,9 +214,6 @@ declare function Layer(props: NickelProps & { id?: string }): JSX.Element;
 /** Generic CSS layout box. Defaults to block layout. */
 declare function Div(props: NickelDivProps): JSX.Element;
 declare function Badge(props: NickelBadgeProps): JSX.Element;
-declare function Widget(props: NickelWidgetProps): JSX.Element;
-declare function Action(props: NickelActionProps): JSX.Element;
-declare function Section(props: NickelSectionProps): JSX.Element;
 declare function Row(props: NickelProps): JSX.Element;
 declare function Column(props: NickelProps): JSX.Element;
 declare function ScrollView(props: NickelProps & { id: string; height?: number; grow?: boolean }): JSX.Element;
@@ -380,7 +359,7 @@ interface NickelApplicationScaleSnapshot extends NickelAvailability {
     toolkits?:ReadonlyArray<Readonly<{family:"gtk"|"qt";available:boolean;live:boolean;restart_required:boolean;owned:boolean;pending:boolean}>>;
     last_result?:Readonly<{rejected?:boolean;uncertain?:boolean;refresh_required?:boolean;outcomes?:ReadonlyArray<Readonly<{family:"gtk"|"qt";kind:"unchanged"|"confirmed"|"external_conflict"|"unavailable"|"failed"|"uncertain";restart_required:boolean}>>}>;
 }
-interface NickelApplication { id:string;name:string;icon:string;pinned:boolean;pinOrder:number|null;recentOrder:number|null;kind:"place"|"application";launchClass:"graphical"|"terminal" }
+interface NickelApplication { id:string;name:string;icon:string;pinned:boolean;pinOrder:number|null;recentOrder:number|null;kind:"place"|"application";launchClass:"graphical"|"terminal"|"running";canLaunch?:boolean;canPin?:boolean }
 interface NickelApplicationSearch extends NickelAvailability {query:string;results:ReadonlyArray<Readonly<NickelApplication>>;total:number;truncated?:boolean;catalogTruncated?:boolean;nativeProjectsAvailable?:boolean;status?:string|null;pinSaveFailed?:boolean}
 interface NickelNativeWindow {
     id:string;applicationId:string|null;title:string;active:boolean;
