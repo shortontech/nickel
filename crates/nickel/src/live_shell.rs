@@ -149,6 +149,37 @@ use nickel_input::KeyCode;
 use zeroize::Zeroize;
 use zeroize::Zeroizing;
 
+fn bundled_surface_host(
+    manifest: &nickel_core::plugins::PluginManifest,
+    data: String,
+    images: crate::plugin_panel::PluginImages,
+) -> Result<
+    (
+        nickel_core::plugins::PluginSurfaceKey,
+        nickel_core::plugins::PluginSurface,
+        nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>,
+    ),
+    String,
+> {
+    let mut application = crate::plugin_panel::PluginPanelApplication::bundled_with_data(
+        manifest,
+        &manifest.entry,
+        data,
+    )?;
+    application.sync_images(images);
+    let surface = manifest
+        .surfaces
+        .first()
+        .ok_or_else(|| format!("bundled plugin {} has no surface", manifest.id))?
+        .clone();
+    let key = nickel_core::plugins::PluginSurfaceKey {
+        plugin_id: manifest.id.clone(),
+        surface_id: surface.id.clone(),
+    };
+    let host = nickel_ui::UiHost::new(application, surface.width, surface.height);
+    Ok((key, surface, host))
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum CodexApprovalOwner {
     // Internal surfaces are owned by the Linux compositor. Windows retains
@@ -1368,20 +1399,14 @@ impl LiveShell {
                 crate::plugin_panel::LauncherPluginProjection::from_launcher(&launcher)
                     .with_status(application_status.clone());
             let images = launcher_plugin_images(&launcher, &mut launcher_icons, &projection);
-            match crate::plugin_panel::PluginPanelApplication::bundled_with_data(
+            match bundled_surface_host(
                 crate::plugin_panel::launcher_manifest(),
-                "main.js",
                 projection.to_json(),
+                images,
             ) {
-                Ok(mut application) => {
-                    application.sync_images(images);
+                Ok(started) => {
                     plugin_registry.mark_running(id)?;
-                    let surface = crate::plugin_panel::launcher_surface();
-                    Some(nickel_ui::UiHost::new(
-                        application,
-                        surface.width,
-                        surface.height,
-                    ))
+                    Some(started)
                 }
                 Err(error) => {
                     tracing::error!(plugin = id, %error, "plugin failed to start");
@@ -1398,19 +1423,14 @@ impl LiveShell {
         ) {
             let id = &crate::plugin_panel::run_manifest().id;
             plugin_registry.set_enabled(id, true)?;
-            match crate::plugin_panel::PluginPanelApplication::bundled_with_data(
+            match bundled_surface_host(
                 crate::plugin_panel::run_manifest(),
-                "main.js",
                 serde_json::json!({ "status": null }).to_string(),
+                crate::plugin_panel::PluginImages::new(),
             ) {
-                Ok(application) => {
+                Ok(started) => {
                     plugin_registry.mark_running(id)?;
-                    let surface = crate::plugin_panel::run_surface();
-                    Some(nickel_ui::UiHost::new(
-                        application,
-                        surface.width,
-                        surface.height,
-                    ))
+                    Some(started)
                 }
                 Err(error) => {
                     tracing::error!(plugin = id, %error, "plugin failed to start");
@@ -1440,15 +1460,14 @@ impl LiveShell {
                 },
                 &clock,
             );
-            match crate::plugin_panel::PluginPanelApplication::bundled_with_data(
+            match bundled_surface_host(
                 crate::plugin_panel::taskbar_manifest(),
-                "main.js",
                 projection.to_json(),
+                images,
             ) {
-                Ok(mut application) => {
-                    application.sync_images(images);
+                Ok((_, _, host)) => {
                     plugin_registry.mark_running(id)?;
-                    Some(nickel_ui::UiHost::new(application, 1920, 56))
+                    Some(host)
                 }
                 Err(error) => {
                     tracing::error!(plugin = id, %error, "plugin failed to start");
@@ -1467,14 +1486,14 @@ impl LiveShell {
             plugin_registry.set_enabled(id, true)?;
             let projection =
                 crate::plugin_panel::NotificationPluginProjection::from_feed(None, &[], false);
-            match crate::plugin_panel::PluginPanelApplication::bundled_with_data(
+            match bundled_surface_host(
                 crate::plugin_panel::notification_manifest(),
-                "main.js",
                 projection.to_json(),
+                crate::plugin_panel::PluginImages::new(),
             ) {
-                Ok(application) => {
+                Ok(started) => {
                     plugin_registry.mark_running(id)?;
-                    Some(nickel_ui::UiHost::new(application, 420, 180))
+                    Some(started)
                 }
                 Err(error) => {
                     tracing::error!(plugin = id, %error, "plugin failed to start");
@@ -1491,14 +1510,14 @@ impl LiveShell {
             let id = &crate::plugin_panel::volume_osd_manifest().id;
             plugin_registry.set_enabled(id, true)?;
             let data = serde_json::json!({"audio": audio_plugin_data(&audio, false)});
-            match crate::plugin_panel::PluginPanelApplication::bundled_with_data(
+            match bundled_surface_host(
                 crate::plugin_panel::volume_osd_manifest(),
-                "main.js",
                 data.to_string(),
+                crate::plugin_panel::PluginImages::new(),
             ) {
-                Ok(application) => {
+                Ok(started) => {
                     plugin_registry.mark_running(id)?;
-                    Some(nickel_ui::UiHost::new(application, 420, 96))
+                    Some(started)
                 }
                 Err(error) => {
                     tracing::error!(plugin = id, %error, "plugin failed to start");
@@ -1687,57 +1706,25 @@ impl LiveShell {
             keyboard_override,
             keyboard_recipient: None,
         };
-        if let Some(host) = plugin_volume_osd_host {
-            shell.plugin_surface_hosts.insert(
-                crate::plugin_panel::volume_osd_surface_key(),
-                (crate::plugin_panel::volume_osd_surface().clone(), host),
-            );
-        }
-        if let Some(host) = plugin_run_host {
-            shell.plugin_surface_hosts.insert(
-                crate::plugin_panel::run_surface_key(),
-                (crate::plugin_panel::run_surface().clone(), host),
-            );
-        }
-        if let Some(host) = plugin_launcher_host {
-            shell.plugin_surface_hosts.insert(
-                crate::plugin_panel::launcher_surface_key(),
-                (crate::plugin_panel::launcher_surface().clone(), host),
-            );
-        }
-        if let Some(host) = plugin_notification_host {
-            shell.plugin_surface_hosts.insert(
-                crate::plugin_panel::notification_surface_key(),
-                (crate::plugin_panel::notification_surface().clone(), host),
-            );
+        for (key, surface, host) in [
+            plugin_volume_osd_host,
+            plugin_run_host,
+            plugin_launcher_host,
+            plugin_notification_host,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            shell.plugin_surface_hosts.insert(key, (surface, host));
         }
         if plugin_activation
             .desired_enabled(&crate::plugin_panel::control_center_manifest().id, true)
         {
-            let id = &crate::plugin_panel::control_center_manifest().id;
-            shell.plugin_registry.set_enabled(id, true)?;
             let data = shell.control_plugin_data(720);
-            match crate::plugin_panel::PluginPanelApplication::bundled_with_data(
+            shell.start_initial_bundled_surface(
                 crate::plugin_panel::control_center_manifest(),
-                "main.js",
                 data.to_string(),
-            ) {
-                Ok(application) => {
-                    let surface = crate::plugin_panel::control_center_surface().clone();
-                    shell.plugin_surface_hosts.insert(
-                        crate::plugin_panel::control_center_surface_key(),
-                        (
-                            surface.clone(),
-                            nickel_ui::UiHost::new(application, surface.width, surface.height),
-                        ),
-                    );
-                    shell.plugin_registry.mark_running(id)?;
-                }
-                Err(error) => {
-                    tracing::error!(plugin = id, %error, "plugin failed to start");
-                    shell.plugin_registry.mark_failed(id, error)?;
-                }
-            }
+            )?;
         }
         if plugin_activation
             .desired_enabled(&crate::plugin_panel::codex_projects_manifest().id, true)
@@ -1750,24 +1737,12 @@ impl LiveShell {
             match serde_json::to_string(&projection)
                 .map_err(|error| error.to_string())
                 .and_then(|data| {
-                    crate::plugin_panel::PluginPanelApplication::bundled_with_data(
+                    shell.start_initial_bundled_surface(
                         crate::plugin_panel::codex_projects_manifest(),
-                        "main.js",
                         data,
                     )
                 }) {
-                Ok(application) => {
-                    let surface =
-                        crate::plugin_panel::codex_projects_manifest().surfaces[0].clone();
-                    shell.plugin_surface_hosts.insert(
-                        crate::plugin_panel::codex_projects_surface_key(),
-                        (
-                            surface.clone(),
-                            nickel_ui::UiHost::new(application, surface.width, surface.height),
-                        ),
-                    );
-                    shell.plugin_registry.mark_running(id)?;
-                }
+                Ok(()) => {}
                 Err(error) => {
                     tracing::error!(plugin = id, %error, "plugin failed to start");
                     shell.plugin_registry.mark_failed(id, error)?;
@@ -1777,59 +1752,20 @@ impl LiveShell {
         if plugin_activation
             .desired_enabled(&crate::plugin_panel::on_screen_keyboard_manifest().id, true)
         {
-            let id = &crate::plugin_panel::on_screen_keyboard_manifest().id;
-            shell.plugin_registry.set_enabled(id, true)?;
             let data = shell.keyboard_plugin_data();
-            match crate::plugin_panel::PluginPanelApplication::bundled_with_data(
+            shell.start_initial_bundled_surface(
                 crate::plugin_panel::on_screen_keyboard_manifest(),
-                "main.js",
                 data.to_string(),
-            ) {
-                Ok(application) => {
-                    let surface =
-                        crate::plugin_panel::on_screen_keyboard_manifest().surfaces[0].clone();
-                    shell.plugin_surface_hosts.insert(
-                        crate::plugin_panel::on_screen_keyboard_surface_key(),
-                        (
-                            surface.clone(),
-                            nickel_ui::UiHost::new(application, surface.width, surface.height),
-                        ),
-                    );
-                    shell.plugin_registry.mark_running(id)?;
-                }
-                Err(error) => {
-                    tracing::error!(plugin = id, %error, "keyboard plugin failed to start");
-                    shell.plugin_registry.mark_failed(id, error)?;
-                }
-            }
+            )?;
         }
         if plugin_activation
             .desired_enabled(&crate::plugin_panel::window_preview_manifest().id, true)
         {
-            let id = &crate::plugin_panel::window_preview_manifest().id;
-            shell.plugin_registry.set_enabled(id, true)?;
             let data = serde_json::json!({"windows": []});
-            match crate::plugin_panel::PluginPanelApplication::bundled_with_data(
+            shell.start_initial_bundled_surface(
                 crate::plugin_panel::window_preview_manifest(),
-                "main.js",
                 data.to_string(),
-            ) {
-                Ok(application) => {
-                    let surface = crate::plugin_panel::window_preview_surface();
-                    shell.plugin_surface_hosts.insert(
-                        crate::plugin_panel::window_preview_surface_key(),
-                        (
-                            surface.clone(),
-                            nickel_ui::UiHost::new(application, surface.width, surface.height),
-                        ),
-                    );
-                    shell.plugin_registry.mark_running(id)?;
-                }
-                Err(error) => {
-                    tracing::error!(plugin = id, %error, "plugin failed to start");
-                    shell.plugin_registry.mark_failed(id, error)?;
-                }
-            }
+            )?;
         }
         #[cfg(not(test))]
         for id in shell
@@ -4922,38 +4858,17 @@ impl LiveShell {
             let projection = self.current_plugin_launcher_projection();
             let images =
                 launcher_plugin_images(&self.launcher, &mut self.launcher_icons, &projection);
-            crate::plugin_panel::PluginPanelApplication::bundled_with_data(
+            self.install_bundled_surface(
                 crate::plugin_panel::launcher_manifest(),
-                "main.js",
                 projection.to_json(),
+                images,
             )
-            .map(|mut application| {
-                application.sync_images(images);
-                let surface = crate::plugin_panel::launcher_surface().clone();
-                self.plugin_surface_hosts.insert(
-                    crate::plugin_panel::launcher_surface_key(),
-                    (
-                        surface.clone(),
-                        nickel_ui::UiHost::new(application, surface.width, surface.height),
-                    ),
-                );
-            })
         } else if id == crate::plugin_panel::run_manifest().id {
-            crate::plugin_panel::PluginPanelApplication::bundled_with_data(
+            self.install_bundled_surface(
                 crate::plugin_panel::run_manifest(),
-                "main.js",
                 serde_json::json!({ "status": null }).to_string(),
+                crate::plugin_panel::PluginImages::new(),
             )
-            .map(|application| {
-                let surface = crate::plugin_panel::run_surface().clone();
-                self.plugin_surface_hosts.insert(
-                    crate::plugin_panel::run_surface_key(),
-                    (
-                        surface.clone(),
-                        nickel_ui::UiHost::new(application, surface.width, surface.height),
-                    ),
-                );
-            })
         } else if id == crate::plugin_panel::taskbar_manifest().id {
             self.plugin_taskbar_hosts.clear();
             self.plugin_taskbar_memory.clear();
@@ -4961,66 +4876,32 @@ impl LiveShell {
             self.panel_pet_deadline = None;
             let (clock, _) = panel_clock_text();
             let (data, images) = self.taskbar_plugin_render_data(&clock);
-            crate::plugin_panel::PluginPanelApplication::bundled_with_data(
-                crate::plugin_panel::taskbar_manifest(),
-                "main.js",
-                data,
+            bundled_surface_host(crate::plugin_panel::taskbar_manifest(), data, images).map(
+                |(_, _, host)| {
+                    self.plugin_taskbar_host = Some(host);
+                },
             )
-            .map(|mut application| {
-                application.sync_images(images);
-                self.plugin_taskbar_host = Some(nickel_ui::UiHost::new(application, 1920, 56));
-            })
         } else if id == crate::plugin_panel::notification_manifest().id {
             let projection = self.notification_plugin_projection();
-            crate::plugin_panel::PluginPanelApplication::bundled_with_data(
+            self.install_bundled_surface(
                 crate::plugin_panel::notification_manifest(),
-                "main.js",
                 projection.to_json(),
+                crate::plugin_panel::PluginImages::new(),
             )
-            .map(|application| {
-                let surface = crate::plugin_panel::notification_surface().clone();
-                self.plugin_surface_hosts.insert(
-                    crate::plugin_panel::notification_surface_key(),
-                    (
-                        surface.clone(),
-                        nickel_ui::UiHost::new(application, surface.width, surface.height),
-                    ),
-                );
-            })
         } else if id == crate::plugin_panel::volume_osd_manifest().id {
             let data = serde_json::json!({"audio": self.audio_plugin_data()});
-            crate::plugin_panel::PluginPanelApplication::bundled_with_data(
+            self.install_bundled_surface(
                 crate::plugin_panel::volume_osd_manifest(),
-                "main.js",
                 data.to_string(),
+                crate::plugin_panel::PluginImages::new(),
             )
-            .map(|application| {
-                let surface = crate::plugin_panel::volume_osd_surface().clone();
-                self.plugin_surface_hosts.insert(
-                    crate::plugin_panel::volume_osd_surface_key(),
-                    (
-                        surface.clone(),
-                        nickel_ui::UiHost::new(application, surface.width, surface.height),
-                    ),
-                );
-            })
         } else if id == crate::plugin_panel::control_center_manifest().id {
             let data = self.control_plugin_data(720);
-            crate::plugin_panel::PluginPanelApplication::bundled_with_data(
+            self.install_bundled_surface(
                 crate::plugin_panel::control_center_manifest(),
-                "main.js",
                 data.to_string(),
+                crate::plugin_panel::PluginImages::new(),
             )
-            .map(|application| {
-                let surface = crate::plugin_panel::control_center_surface().clone();
-                self.plugin_surface_hosts.insert(
-                    crate::plugin_panel::control_center_surface_key(),
-                    (
-                        surface.clone(),
-                        nickel_ui::UiHost::new(application, surface.width, surface.height),
-                    ),
-                );
-            })
         } else if id == crate::plugin_panel::codex_projects_manifest().id {
             let projection = nickel_codex_ui::ProjectMenuProjection::from_state(
                 &nickel_codex_ui::ChatState::default(),
@@ -5028,58 +4909,26 @@ impl LiveShell {
             serde_json::to_string(&projection)
                 .map_err(|error| error.to_string())
                 .and_then(|data| {
-                    crate::plugin_panel::PluginPanelApplication::bundled_with_data(
+                    self.install_bundled_surface(
                         crate::plugin_panel::codex_projects_manifest(),
-                        "main.js",
                         data,
+                        crate::plugin_panel::PluginImages::new(),
                     )
-                })
-                .map(|application| {
-                    let surface =
-                        crate::plugin_panel::codex_projects_manifest().surfaces[0].clone();
-                    self.plugin_surface_hosts.insert(
-                        crate::plugin_panel::codex_projects_surface_key(),
-                        (
-                            surface.clone(),
-                            nickel_ui::UiHost::new(application, surface.width, surface.height),
-                        ),
-                    );
                 })
         } else if id == crate::plugin_panel::on_screen_keyboard_manifest().id {
             let data = self.keyboard_plugin_data();
-            crate::plugin_panel::PluginPanelApplication::bundled_with_data(
+            self.install_bundled_surface(
                 crate::plugin_panel::on_screen_keyboard_manifest(),
-                "main.js",
                 data.to_string(),
+                crate::plugin_panel::PluginImages::new(),
             )
-            .map(|application| {
-                let surface =
-                    crate::plugin_panel::on_screen_keyboard_manifest().surfaces[0].clone();
-                self.plugin_surface_hosts.insert(
-                    crate::plugin_panel::on_screen_keyboard_surface_key(),
-                    (
-                        surface.clone(),
-                        nickel_ui::UiHost::new(application, surface.width, surface.height),
-                    ),
-                );
-            })
         } else if id == crate::plugin_panel::window_preview_manifest().id {
             let data = serde_json::json!({"windows": []});
-            crate::plugin_panel::PluginPanelApplication::bundled_with_data(
+            self.install_bundled_surface(
                 crate::plugin_panel::window_preview_manifest(),
-                "main.js",
                 data.to_string(),
+                crate::plugin_panel::PluginImages::new(),
             )
-            .map(|application| {
-                let surface = crate::plugin_panel::window_preview_surface().clone();
-                self.plugin_surface_hosts.insert(
-                    crate::plugin_panel::window_preview_surface_key(),
-                    (
-                        surface.clone(),
-                        nickel_ui::UiHost::new(application, surface.width, surface.height),
-                    ),
-                );
-            })
         } else {
             Err(format!("plugin {id:?} has no runtime host"))
         };
@@ -5109,6 +4958,34 @@ impl LiveShell {
         }
         self.maybe_publish_plugin_status();
         result
+    }
+
+    fn install_bundled_surface(
+        &mut self,
+        manifest: &nickel_core::plugins::PluginManifest,
+        data: String,
+        images: crate::plugin_panel::PluginImages,
+    ) -> Result<(), String> {
+        let (key, surface, host) = bundled_surface_host(manifest, data, images)?;
+        self.plugin_surface_hosts.insert(key, (surface, host));
+        Ok(())
+    }
+
+    fn start_initial_bundled_surface(
+        &mut self,
+        manifest: &nickel_core::plugins::PluginManifest,
+        data: String,
+    ) -> Result<(), String> {
+        let id = &manifest.id;
+        self.plugin_registry.set_enabled(id, true)?;
+        match self.install_bundled_surface(manifest, data, crate::plugin_panel::PluginImages::new())
+        {
+            Ok(()) => self.plugin_registry.mark_running(id),
+            Err(error) => {
+                tracing::error!(plugin = id, %error, "plugin failed to start");
+                self.plugin_registry.mark_failed(id, error)
+            }
+        }
     }
 
     pub fn launcher_surface_size(&self) -> Option<(u32, u32)> {
