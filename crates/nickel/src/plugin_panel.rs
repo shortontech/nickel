@@ -529,6 +529,10 @@ pub enum PluginEffect {
     },
     LauncherSeeAllProjects,
     LauncherRequestLogout,
+    SessionOperation {
+        plugin_id: String,
+        request: crate::session_capabilities::Request,
+    },
     ActivateTaskbarItem {
         index: usize,
         id: String,
@@ -2044,9 +2048,20 @@ impl PluginPanelApplication {
                     | "preferences"
                     | "appearance"
                     | "wallpaper"
+                    | "session"
             )
         }) {
             return Err("unknown host data field".into());
+        }
+        if fields.iter().any(|(field, _)| *field == "session")
+            && !self.manifest.capabilities.iter().any(|grant| {
+                matches!(
+                    grant,
+                    PluginCapability::SessionControl | PluginCapability::SessionLogoutRequest
+                )
+            })
+        {
+            return Err("session data requires a session capability".into());
         }
         if fields.iter().any(|(field, _)| *field == "notifications")
             && !self
@@ -2377,6 +2392,48 @@ impl nickel_ui::Application for PluginPanelApplication {
                             approved.push(PluginEffect::MoveApplicationPin {
                                 id: id.into(),
                                 direction: direction as i8,
+                            });
+                        }
+                        _ if effect.get("type").and_then(Value::as_str)
+                            == Some("session.perform") =>
+                        {
+                            let mut payload = effect.clone();
+                            payload.as_object_mut().unwrap().remove("type");
+                            let request = match serde_json::from_value::<
+                                crate::session_capabilities::Request,
+                            >(payload)
+                            {
+                                Ok(request) => request,
+                                Err(error) => {
+                                    self.last_error =
+                                        Some(format!("invalid session operation: {error}"));
+                                    return;
+                                }
+                            };
+                            let snapshot = self
+                                .projection_data
+                                .as_deref()
+                                .and_then(|data| serde_json::from_str::<Value>(data).ok())
+                                .and_then(|data| {
+                                    serde_json::from_value::<crate::session_capabilities::Snapshot>(
+                                        data.get("session")?.clone(),
+                                    )
+                                    .ok()
+                                });
+                            if snapshot.as_ref().is_none_or(|snapshot| {
+                                snapshot
+                                    .validate(&request, &self.manifest.capabilities)
+                                    .is_err()
+                            }) {
+                                self.last_error = Some(
+                                    "session operation is stale, unsupported, locked, or ungranted"
+                                        .into(),
+                                );
+                                return;
+                            }
+                            approved.push(PluginEffect::SessionOperation {
+                                plugin_id: self.manifest.id.clone(),
+                                request,
                             });
                         }
                         _ if effect.get("type").and_then(Value::as_str)
@@ -3870,6 +3927,54 @@ impl nickel_ui::Application for PluginPanelApplication {
 mod tests {
     use super::*;
     use nickel_ui::Application;
+
+    #[test]
+    fn public_session_callback_emits_native_operation_and_rejects_ungranted_or_stale_requests() {
+        use nickel_ui::Application;
+        let snapshot = serde_json::json!({"session":{"revision":"current","account":{"displayName":"User","username":"user"},"locked":false,"support":{"lock":true,"logout":true,"suspend":false,"reboot":false,"powerOff":false,"restartShell":false}}});
+        let source = "function App(){return h(FixedWindow,{width:'100%',height:'100%'},h(Button,{onClick:()=>nickel.session.logout()},'Logout'))}";
+        let mut granted_manifest = manifest().clone();
+        granted_manifest
+            .capabilities
+            .push(PluginCapability::SessionControl);
+        let mut granted = PluginPanelApplication::new_with_manifest(
+            source,
+            &granted_manifest,
+            Some(snapshot.to_string()),
+        )
+        .unwrap();
+        granted.update(PluginMessage::Click(0));
+        let effects = granted.take_effects();
+        assert!(
+            matches!(&effects[..],[PluginEffect::SessionOperation { plugin_id, request }] if plugin_id==&granted_manifest.id && request.action==crate::session_capabilities::Action::Logout && request.revision=="current")
+        );
+        let mut ungranted_manifest = granted_manifest.clone();
+        ungranted_manifest.capabilities.retain(|grant| {
+            !matches!(
+                grant,
+                PluginCapability::SessionControl | PluginCapability::SessionLogoutRequest
+            )
+        });
+        let mut ungranted = PluginPanelApplication::new_with_manifest(
+            source,
+            &ungranted_manifest,
+            Some(snapshot.to_string()),
+        )
+        .unwrap();
+        ungranted.update(PluginMessage::Click(0));
+        assert!(ungranted.take_effects().is_empty());
+        assert!(ungranted.last_error.is_some());
+        let source = "function App(){return h(FixedWindow,{width:'100%',height:'100%'},h(Button,{onClick:()=>nickel.request({type:'session.perform',action:'logout',revision:'old'})},'Logout'))}";
+        let mut stale = PluginPanelApplication::new_with_manifest(
+            source,
+            &granted_manifest,
+            Some(snapshot.to_string()),
+        )
+        .unwrap();
+        stale.update(PluginMessage::Click(0));
+        assert!(stale.take_effects().is_empty());
+        assert!(stale.last_error.is_some());
+    }
 
     #[test]
     fn embedded_default_shell_surfaces_share_runtime_and_settings_registry() {

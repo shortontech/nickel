@@ -7,6 +7,56 @@ pub(crate) enum SystemAction {
     PowerOff,
 }
 
+/// Cached native availability; the probe never blocks the compositor. Logind
+/// remains the execution/Polkit authority, including interactive authorization.
+pub(crate) fn power_support() -> [bool; 3] {
+    use std::sync::{
+        Arc, OnceLock,
+        atomic::{AtomicU8, Ordering},
+    };
+    static SUPPORT: OnceLock<Arc<AtomicU8>> = OnceLock::new();
+    let support = SUPPORT.get_or_init(|| {
+        let result = Arc::new(AtomicU8::new(0));
+        let worker = result.clone();
+        let _ = std::thread::Builder::new()
+            .name("nickel-session-support".into())
+            .spawn(move || {
+                let Ok(address) = zbus::Address::system() else {
+                    return;
+                };
+                let Ok(connection) = nickel_platform::bounded_dbus::connect_blocking(
+                    address,
+                    nickel_platform::bounded_dbus::Limits::CONTROL,
+                    std::time::Duration::from_millis(500),
+                ) else {
+                    return;
+                };
+                let Ok(proxy) = zbus::blocking::Proxy::new(
+                    &connection,
+                    "org.freedesktop.login1",
+                    "/org/freedesktop/login1",
+                    "org.freedesktop.login1.Manager",
+                ) else {
+                    return;
+                };
+                let mut bits = 0;
+                for (index, method) in ["CanSuspend", "CanReboot", "CanPowerOff"]
+                    .into_iter()
+                    .enumerate()
+                {
+                    let result: Result<String, _> = proxy.call(method, &());
+                    if matches!(result.as_deref(), Ok("yes" | "challenge")) {
+                        bits |= 1 << index;
+                    }
+                }
+                worker.store(bits, Ordering::Release);
+            });
+        result
+    });
+    let bits = support.load(Ordering::Acquire);
+    [bits & 1 != 0, bits & 2 != 0, bits & 4 != 0]
+}
+
 trait LoginManager {
     fn call(&mut self, method: &'static str, interactive: bool) -> Result<(), String>;
 }

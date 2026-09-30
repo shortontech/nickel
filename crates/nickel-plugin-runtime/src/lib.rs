@@ -143,6 +143,32 @@ impl JsxRuntime {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn session_client_copies_account_and_captures_revision_without_private_ui_requests() {
+        let data = r#"{"session":{"revision":"current","account":{"displayName":"Ada","username":"ada"},"locked":false,"support":{"lock":true,"logout":true,"suspend":true,"reboot":true,"powerOff":true,"restartShell":false}}}"#;
+        let mut runtime = JsxRuntime::new("", Some(data)).unwrap();
+        runtime.eval("nickel.session.get().account.displayName='changed';nickel.session.lock();nickel.session.logout();nickel.session.suspend();nickel.session.reboot();nickel.session.powerOff()").unwrap();
+        assert_eq!(
+            runtime
+                .eval_json::<Value>("JSON.stringify(nickel.session.get().account)")
+                .unwrap()["displayName"],
+            "Ada"
+        );
+        assert!(runtime.eval("nickel.session.restartShell()").is_err());
+        let effects = runtime.take_effects().unwrap();
+        assert_eq!(effects.len(), 5);
+        assert!(
+            effects.iter().all(
+                |effect| effect["type"] == "session.perform" && effect["revision"] == "current"
+            )
+        );
+        runtime.set_data(r#"{"session":{"revision":"locked","account":null,"locked":true,"support":{"lock":true,"logout":true}}}"#).unwrap();
+        assert!(runtime.eval("nickel.session.logout()").is_err());
+        assert!(runtime.take_effects().unwrap().is_empty());
+        let mut absent = JsxRuntime::new("", None).unwrap();
+        assert!(absent.eval("nickel.session.lock()").is_err());
+    }
+
+    #[test]
     fn appearance_clients_copy_preferences_and_capture_observed_transactions() {
         let mut runtime = super::JsxRuntime::new("", Some(r#"{"appearance":{"available":true,"writable":true,"generation":7,"configured":{"theme":"system","accent_hue":null,"accent_intensity":null,"reduce_transparency":false,"animations":"normal"}},"wallpaper":{"available":true,"writable":true,"generation":8,"configured":{"custom_image_configured":false,"position":"fill"},"images":[{"id":"approved"}]}}"#)).unwrap();
         runtime.eval("let preferences = nickel.appearance.get().configured; preferences.accent_hue = 271; preferences.accent_intensity = 63; nickel.appearance.set(preferences); preferences.accent_hue = 0; nickel.wallpaper.selectImage('approved'); nickel.wallpaper.setPosition('fit'); nickel.wallpaper.resetCustomImage();").unwrap();

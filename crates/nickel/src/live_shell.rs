@@ -3683,6 +3683,26 @@ impl LiveShell {
         Some(snapshot)
     }
 
+    fn plugin_session(&self, plugin_id: &str) -> Option<serde_json::Value> {
+        use nickel_core::plugins::PluginCapability;
+        let entry = self.plugin_registry.get(plugin_id)?;
+        if !entry.desired_enabled
+            || !entry.manifest.capabilities.iter().any(|grant| {
+                matches!(
+                    grant,
+                    PluginCapability::SessionControl | PluginCapability::SessionLogoutRequest
+                )
+            })
+        {
+            return None;
+        }
+        serde_json::to_value(crate::session_capabilities::snapshot(
+            self.locked,
+            &entry.manifest.capabilities,
+        ))
+        .ok()
+    }
+
     fn plugin_appearance(&mut self, plugin_id: &str, wallpaper: bool) -> Option<serde_json::Value> {
         use nickel_core::plugins::PluginCapability;
         let manifest = self
@@ -4084,6 +4104,7 @@ impl LiveShell {
         let preferences = self.plugin_preferences(&key.plugin_id);
         let appearance = self.plugin_appearance(&key.plugin_id, false);
         let wallpaper = self.plugin_appearance(&key.plugin_id, true);
+        let session = self.plugin_session(&key.plugin_id);
         let wifi = self.plugin_connectivity(&key.plugin_id, true);
         let bluetooth = self.plugin_connectivity(&key.plugin_id, false);
         let displays = self.plugin_displays(&key.plugin_id);
@@ -4126,6 +4147,7 @@ impl LiveShell {
                     ("preferences", preferences.as_ref()),
                     ("appearance", appearance.as_ref()),
                     ("wallpaper", wallpaper.as_ref()),
+                    ("session", session.as_ref()),
                     ("wifi", wifi.as_ref()),
                     ("bluetooth", bluetooth.as_ref()),
                     ("displays", displays.as_ref()),
@@ -4685,6 +4707,21 @@ impl LiveShell {
     }
 
     fn refresh_package_settings(&mut self) {
+        let sessions = self
+            .plugin_slot_hosts
+            .keys()
+            .filter_map(|id| {
+                self.plugin_session(id)
+                    .map(|snapshot| (id.clone(), snapshot))
+            })
+            .collect::<Vec<_>>();
+        for (id, snapshot) in sessions {
+            if let Some(host) = self.plugin_slot_hosts.get_mut(&id) {
+                if let Err(error) = host.application.sync_host_data_field("session", &snapshot) {
+                    tracing::warn!(plugin_id=%id,%error,"session capability snapshot rejected");
+                }
+            }
+        }
         let mut runtimes = self.package_runtimes.clone();
         for (key, (_, host)) in &self.plugin_surface_hosts {
             runtimes.insert(key.plugin_id.clone(), host.application().shared_runtime());
@@ -7208,6 +7245,31 @@ impl LiveShell {
                     if self.launcher.codex_available() {
                         self.apply_launcher_action(LauncherAction::SeeAllProjects);
                         changed = true;
+                    }
+                }
+                crate::plugin_panel::PluginEffect::SessionOperation { plugin_id, request } => {
+                    let admitted = self
+                        .plugin_registry
+                        .get(&plugin_id)
+                        .filter(|entry| entry.desired_enabled)
+                        .and_then(|entry| {
+                            crate::session_capabilities::snapshot(
+                                self.locked,
+                                &entry.manifest.capabilities,
+                            )
+                            .validate(&request, &entry.manifest.capabilities)
+                            .ok()
+                        });
+                    if let Some(action) = admitted {
+                        if self.task_switcher.session().is_some() {
+                            self.apply_task_switch_action(
+                                nickel_core::hotkeys::HotkeyAction::CancelSwitch,
+                            );
+                        }
+                        changed |= self.send_session_command(
+                            "plugin-session-operation",
+                            ShellCommand::SessionAction(action.native()),
+                        );
                     }
                 }
                 crate::plugin_panel::PluginEffect::LauncherRequestLogout => {
@@ -11806,6 +11868,9 @@ impl LiveShell {
         if let Some(key) = self.taskbar_surface_key() {
             if let Some(snapshot) = self.plugin_preferences(&key.plugin_id) {
                 data["preferences"] = snapshot;
+            }
+            if let Some(snapshot) = self.plugin_session(&key.plugin_id) {
+                data["session"] = snapshot;
             }
             if let Some(snapshot) = self.plugin_appearance(&key.plugin_id, false) {
                 data["appearance"] = snapshot;

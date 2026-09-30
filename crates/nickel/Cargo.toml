@@ -56,6 +56,7 @@ tracing.workspace = true
 winit.workspace = true
 zeroize.workspace = true
 nickel-ui-testkit = { path = "../nickel-ui-testkit", optional = true }
+serde.workspace = true
 serde_json.workspace = true
 tempfile = "3.25.0"
 ctrlc.workspace = true
@@ -69,7 +70,6 @@ freedesktop-desktop-entry.workspace = true
 freedesktop-icons.workspace = true
 shlex.workspace = true
 zbus.workspace = true
-serde = { workspace = true }
 async-io = "2.6.0"
 futures-lite = "2.6.1"
 wayland-scanner = "0.31.11"

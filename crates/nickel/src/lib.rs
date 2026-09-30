@@ -11,6 +11,7 @@ mod remote_policy;
 mod remote_preferred_applications;
 mod remote_surface_authority;
 mod remote_terminal_launch_policy;
+mod session_capabilities;
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 mod settings_plugin_report;
 #[cfg(any(test, target_os = "linux", target_os = "windows"))]

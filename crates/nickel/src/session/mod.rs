@@ -21,7 +21,7 @@ mod recovery_ui;
 mod remote_accessibility;
 mod remote_identity;
 pub(crate) use crate::remote_indicator;
-mod session_services;
+pub(crate) mod session_services;
 mod shell_layout;
 mod state;
 mod task_switcher_render;

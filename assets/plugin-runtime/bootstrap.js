@@ -232,6 +232,13 @@ function __nickelAppearanceEffect(resource, change) {
     transaction[resource === 'appearance' ? 'requested' : 'change'] = JSON.parse(JSON.stringify(change));
     __effects.push({type:resource === 'appearance' ? 'appearance.set' : 'wallpaper.change', transaction});
 }
+function __nickelSessionAction(action) {
+    const snapshot = nickel.session.get();
+    if (snapshot.locked || !snapshot.support[action] || typeof snapshot.revision !== 'string' || !snapshot.revision.length)
+        throw Error('session operation is unavailable');
+    __effects.push({type:'session.perform',revision:snapshot.revision,action});
+}
+
 const nickel = Object.freeze({
     appearance: Object.freeze({
         get() { return __nickelResource('appearance', {available:false,reason:'Appearance read capability is unavailable'}); },
@@ -243,6 +250,15 @@ const nickel = Object.freeze({
         setPosition(position) { __nickelAppearanceEffect('wallpaper', {kind:'set_position',position}); },
         resetCustomImage() { __nickelAppearanceEffect('wallpaper', {kind:'reset_custom_image'}); },
         selectImage(id) { __nickelAppearanceEffect('wallpaper', {kind:'select_approved_image',image_id:__nickelIdentity(id)}); }
+    }),
+    session: Object.freeze({
+        get() { return __nickelResource('session', {revision:'',account:null,locked:false,support:{lock:false,logout:false,suspend:false,reboot:false,powerOff:false,restartShell:false}}); },
+        lock() { __nickelSessionAction('lock'); },
+        logout() { __nickelSessionAction('logout'); },
+        suspend() { __nickelSessionAction('suspend'); },
+        reboot() { __nickelSessionAction('reboot'); },
+        powerOff() { __nickelSessionAction('powerOff'); },
+        restartShell() { __nickelSessionAction('restartShell'); }
     }),
     audio: Object.freeze({
         get() { return __nickelResource('audio', {available:false,muted:false,percent:0,devices:[]}); },
