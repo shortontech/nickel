@@ -645,6 +645,8 @@ pub struct LiveShell {
         std::rc::Rc<std::cell::RefCell<nickel_plugin_runtime::JsxRuntime>>,
     >,
     package_settings_generation: u64,
+    package_settings_values: nickel_plugin_runtime::settings::SettingsValueSnapshot,
+    package_settings_value_revisions: std::collections::BTreeMap<String, u64>,
     package_settings_invoking: bool,
     plugin_settings:
         std::collections::BTreeMap<String, std::collections::BTreeMap<String, serde_json::Value>>,
@@ -1725,6 +1727,8 @@ impl LiveShell {
             package_settings_registry: Default::default(),
             package_settings_runtimes: Default::default(),
             package_settings_generation: 0,
+            package_settings_values: Default::default(),
+            package_settings_value_revisions: Default::default(),
             package_settings_invoking: false,
             plugin_settings,
             external_plugin_packages,
@@ -4453,6 +4457,8 @@ impl LiveShell {
         for id in retired {
             self.package_settings_registry.retire_provider(&id);
             self.package_settings_runtimes.remove(&id);
+            self.package_settings_values.remove(&id);
+            self.package_settings_value_revisions.remove(&id);
         }
         let mut changed_runtime = false;
         for (id, runtime) in &runtimes {
@@ -4471,10 +4477,37 @@ impl LiveShell {
                     self.package_settings_runtimes
                         .insert(id.clone(), runtime.clone());
                     changed_runtime = true;
+                    self.package_settings_value_revisions.remove(id);
+                    self.package_settings_values.remove(id);
                 }
                 Err(error) => {
                     self.package_settings_registry.retire_provider(id);
+                    self.package_settings_values.remove(id);
+                    self.package_settings_value_revisions.remove(id);
                     tracing::warn!(plugin_id = %id, %error, "package Settings registration rejected");
+                }
+            }
+        }
+        let mut values_changed = false;
+        for (id, runtime) in &self.package_settings_runtimes {
+            let revision = runtime.borrow().settings_revision();
+            if self.package_settings_value_revisions.get(id) == Some(&revision) {
+                continue;
+            }
+            self.package_settings_value_revisions
+                .insert(id.clone(), revision);
+            match runtime
+                .borrow_mut()
+                .read_settings_values(&self.package_settings_registry)
+            {
+                Ok(values) => {
+                    if self.package_settings_values.get(id) != Some(&values) {
+                        self.package_settings_values.insert(id.clone(), values);
+                        values_changed = true;
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(plugin_id = %id, %error, "package Settings value snapshot rejected")
                 }
             }
         }
@@ -4482,13 +4515,39 @@ impl LiveShell {
             .package_settings_registry
             .settings_snapshot()
             .generation;
-        if changed_runtime || generation != self.package_settings_generation {
+        if changed_runtime || values_changed || generation != self.package_settings_generation {
             for (id, runtime) in runtimes {
                 if let Err(error) = runtime
                     .borrow_mut()
                     .set_settings_registry(&self.package_settings_registry)
                 {
                     tracing::warn!(plugin_id = %id, %error, "package Settings snapshot failed");
+                }
+            }
+            for runtime in self.package_settings_runtimes.values() {
+                if let Err(error) = runtime
+                    .borrow_mut()
+                    .set_settings_values(&self.package_settings_values)
+                {
+                    tracing::warn!(%error, "package Settings values failed");
+                }
+            }
+            for (_, host) in self.plugin_surface_hosts.values_mut() {
+                match host.application_mut().refresh_settings_render() {
+                    Ok(changed) => {
+                        host.step(HostBatch {
+                            application_changed: changed,
+                            ..HostBatch::default()
+                        });
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "package Settings surface refresh rejected")
+                    }
+                }
+            }
+            for host in self.plugin_slot_hosts.values_mut() {
+                if let Err(error) = host.application.refresh_settings_render() {
+                    tracing::warn!(%error, "package Settings slot refresh rejected");
                 }
             }
             self.package_settings_generation = generation;

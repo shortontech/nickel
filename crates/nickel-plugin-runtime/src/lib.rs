@@ -8,7 +8,7 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 mod modules;
-mod settings;
+pub mod settings;
 
 pub use modules::{JsxModuleGraph, ModuleSource};
 
@@ -20,6 +20,8 @@ const MAX_JS_LOOP_ITERATIONS: u64 = 100_000;
 pub struct JsxRuntime {
     context: Context,
     settings_provider: Option<String>,
+    settings_revision: u64,
+    settings_data: Option<String>,
 }
 
 impl JsxRuntime {
@@ -27,6 +29,8 @@ impl JsxRuntime {
         let mut runtime = Self {
             context: Context::default(),
             settings_provider: None,
+            settings_revision: 0,
+            settings_data: None,
         };
         runtime
             .context
@@ -66,7 +70,19 @@ impl JsxRuntime {
     }
 
     pub fn set_data(&mut self, serialized_json: &str) -> Result<(), String> {
-        self.eval(&format!("__nickelSetData({serialized_json})"))
+        self.eval(&format!("__nickelSetData({serialized_json})"))?;
+        // Surface geometry does not change package setting values.
+        let mut data: Value =
+            serde_json::from_str(serialized_json).map_err(|error| error.to_string())?;
+        if let Some(object) = data.as_object_mut() {
+            object.remove("surface");
+        }
+        let data = data.to_string();
+        if self.settings_data.as_ref() != Some(&data) {
+            self.settings_revision = self.settings_revision.wrapping_add(1);
+            self.settings_data = Some(data);
+        }
+        Ok(())
     }
 
     pub fn select_surface(&mut self, id: &str) -> Result<(), String> {
@@ -109,6 +125,9 @@ impl JsxRuntime {
     }
 
     pub fn finish_event(&mut self, accepted: bool) -> Result<(), String> {
+        if accepted {
+            self.settings_revision = self.settings_revision.wrapping_add(1);
+        }
         self.eval(if accepted {
             "__nickelAcceptEvent()"
         } else {

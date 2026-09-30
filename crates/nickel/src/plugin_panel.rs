@@ -1656,8 +1656,22 @@ impl PluginPanelApplication {
         self.sync_serialized_data(serialized)
     }
 
+    /// Refreshes every sibling surface after shared Settings snapshots change.
+    pub(crate) fn refresh_settings_render(&mut self) -> Result<bool, String> {
+        let serialized = self.projection_data.clone().unwrap_or_else(|| "{}".into());
+        self.sync_serialized_data_inner(serialized, true)
+    }
+
     pub(crate) fn sync_serialized_data(&mut self, serialized: String) -> Result<bool, String> {
-        if self.projection_data.as_deref() == Some(serialized.as_str()) {
+        self.sync_serialized_data_inner(serialized, false)
+    }
+
+    fn sync_serialized_data_inner(
+        &mut self,
+        serialized: String,
+        force: bool,
+    ) -> Result<bool, String> {
+        if !force && self.projection_data.as_deref() == Some(serialized.as_str()) {
             return Ok(false);
         }
         let previous_data = self

@@ -100,6 +100,7 @@ function __nickelRegisterSurfaceApp(id, component) {
 const __settings = new Map();
 const __settingsPages = new Map();
 let __settingsProvider = null;
+let __settingsValues = {};
 let __settingsSnapshot = {generation: 0, settings: []};
 let __settingsPagesSnapshot = {generation: 0, pages: []};
 function __settingMetadata(definition, page) {
@@ -134,6 +135,32 @@ function __registerSettings(definition, page) {
 }
 function registerSetting(definition) { __registerSettings(definition, false); }
 function registerSettingsPage(definition) { __registerSettings(definition, true); }
+function __nickelSetSettingsValues(values) { __settingsValues = values; }
+function __nickelReadSettingsValues() {
+    if (__pendingRender !== null || __pendingEvent !== null) throw Error('cannot read Settings during pending transaction');
+    const effects = __effects;
+    const hooks = new Map(Array.from(__componentHooks, ([path, slots]) => [path, slots.slice()]));
+    const values = Array.from(__componentHooks.values(), slots => slots.map(entry => entry.kind === 'ref' ? entry.value.current : entry.value));
+    __effects = [];
+    try {
+        const snapshot = {};
+        for (const [id, entry] of __settings) {
+            if (!entry.value) continue;
+            const value = entry.value();
+            if (value === undefined) throw TypeError('Settings getter returned undefined');
+            const serialized = JSON.stringify(value);
+            if (serialized === undefined) throw TypeError('Settings getter returned a nonserializable value');
+            snapshot[id] = JSON.parse(serialized);
+        }
+        const json = JSON.stringify(snapshot);
+        if (json.length > 1048576) throw RangeError('Settings values exceed snapshot limit');
+        if (__effects.length) throw Error('Settings getter emitted effects');
+        return json;
+    } finally {
+        __nickelRestoreHooks(hooks, values, 0);
+        __effects = effects;
+    }
+}
 function __nickelSettingsMetadata() {
     return JSON.stringify({settings: Array.from(__settings.values(), entry => entry.metadata), pages: Array.from(__settingsPages.values(), entry => entry.metadata)});
 }
@@ -148,7 +175,7 @@ function __readSettings(snapshot, page) {
     for (const entry of entries) {
         if (entry.providerPackage !== __settingsProvider) {
             if (!page) {
-                entry.value = () => entry.defaultValue;
+                entry.value = () => { const values = __settingsValues[entry.providerPackage]; return values && Object.prototype.hasOwnProperty.call(values, entry.id) ? JSON.parse(JSON.stringify(values[entry.id])) : entry.defaultValue; };
                 entry.onChange = value => nickel.request({type:'settings.invoke',provider:entry.providerPackage,id:entry.id,value});
             }
             continue;
@@ -177,6 +204,7 @@ function __nickelRetireSettings() {
     __settings.clear();
     __settingsPages.clear();
     __settingsProvider = '';
+    __settingsValues = {};
     __settingsSnapshot = {generation: 0, settings: []};
     __settingsPagesSnapshot = {generation: 0, pages: []};
 }
