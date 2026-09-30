@@ -731,21 +731,6 @@ pub struct TaskbarPluginProjection {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TaskbarMenuPluginProjection {
-    pub application_id: Option<String>,
-    pub pinned: bool,
-    pub close_all: bool,
-    pub actions: Vec<TaskbarMenuPluginAction>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TaskbarMenuPluginAction {
-    pub plugin_id: String,
-    pub id: String,
-    pub label: String,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VolumeOsdPluginProjection {
     pub label: String,
     pub percent: u8,
@@ -786,22 +771,6 @@ impl TaskbarWindowMenuPluginProjection {
             "root": entries(&self.root),
             "workspaces": entries(&self.workspaces),
             "displays": entries(&self.displays),
-        })
-        .to_string()
-    }
-}
-
-impl TaskbarMenuPluginProjection {
-    pub(crate) fn to_json(&self) -> String {
-        serde_json::json!({
-            "applicationId": self.application_id,
-            "pinned": self.pinned,
-            "closeAll": self.close_all,
-            "actions": self.actions.iter().map(|action| serde_json::json!({
-                "plugin": action.plugin_id,
-                "id": action.id,
-                "label": action.label,
-            })).collect::<Vec<_>>(),
         })
         .to_string()
     }
@@ -2154,16 +2123,18 @@ impl nickel_ui::Application for PluginPanelApplication {
                                 .and_then(|data| serde_json::from_str::<Value>(data).ok());
                             let projected = projection.as_ref().is_some_and(|data| {
                                 data.get("applicationId").and_then(Value::as_str) == application_id
-                                    && data.get("actions").and_then(Value::as_array).is_some_and(
-                                        |actions| {
+                                    && data
+                                        .get("slots")
+                                        .and_then(|slots| slots.get("task-action"))
+                                        .and_then(Value::as_array)
+                                        .is_some_and(|actions| {
                                             actions.iter().any(|action| {
-                                                action.get("plugin").and_then(Value::as_str)
+                                                action.get("pluginId").and_then(Value::as_str)
                                                     == plugin_id
                                                     && action.get("id").and_then(Value::as_str)
                                                         == id
                                             })
-                                        },
-                                    )
+                                        })
                             });
                             if !projected {
                                 self.last_error = Some("taskbar extension action is stale".into());

@@ -2,6 +2,7 @@
 // Nickel validates every menu request against the captured application group.
 function App() {
     const menu = nickel.data;
+    const actions = (menu.slots && menu.slots["task-action"]) || [];
     return <FixedWindow width="100%" height="100%" className="taskbar-menu">
         <Column>
             {menu.applicationId ? <Button id="taskbar-menu-pin" className="taskbar-menu-button"
@@ -12,10 +13,10 @@ function App() {
                 onClick={() => nickel.request({type: "taskbar-menu-close-all"})}>
                 Close all windows
             </Button> : null}
-            {menu.actions.map((action, index) => <Button key={`${action.plugin}:${action.id}`}
+            {actions.map((action, index) => <Button key={`${action.pluginId}:${action.id}`}
                 id={`taskbar-extension-${index}`} className="taskbar-menu-button"
                 onClick={() => nickel.request({type: "taskbar-extension-action",
-                    plugin: action.plugin, id: action.id, applicationId: menu.applicationId})}>
+                    plugin: action.pluginId, id: action.id, applicationId: menu.applicationId})}>
                 {action.label}
             </Button>)}
         </Column>

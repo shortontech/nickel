@@ -35,8 +35,8 @@ every `nickel.request` against the owning plugin's capabilities.
 
 - The shipped taskbar receives badge contributions through
   `nickel.data.slots["task-badge"]` and maps them into JSX beside each task.
-  The `task-action` slot remains in its separate context menu script and should
-  eventually use the same data-driven composition path.
+  The separate taskbar context menu now reads `nickel.data.slots["task-action"]`.
+  Its activation still uses taskbar-specific host routing.
 - `<Dialog>` and `<Menu>` should own child surfaces through the same generic
   surface lifecycle, with anchor IDs resolved from their parent tree. The
   launcher keeps its existing logout and app menu behavior in the draft.

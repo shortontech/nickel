@@ -966,7 +966,7 @@ fn compose_taskbar_actions(
         ),
     >,
     application_id: Option<&str>,
-) -> Vec<crate::plugin_panel::TaskbarMenuPluginAction> {
+) -> Vec<serde_json::Value> {
     use nickel_core::plugins::PluginContributionMode;
     let mut ordered = extensions.iter().collect::<Vec<_>>();
     ordered.sort_by_key(|(id, (priority, _, _))| (*priority, id.as_str()));
@@ -988,7 +988,7 @@ fn compose_taskbar_actions(
 }
 
 fn append_taskbar_actions(
-    actions: &mut Vec<crate::plugin_panel::TaskbarMenuPluginAction>,
+    actions: &mut Vec<serde_json::Value>,
     plugin_id: &str,
     application: &crate::plugin_panel::PluginPanelApplication,
     application_id: Option<&str>,
@@ -1000,11 +1000,11 @@ fn append_taskbar_actions(
                 .as_deref()
                 .is_none_or(|item| Some(item) == application_id)
             {
-                actions.push(crate::plugin_panel::TaskbarMenuPluginAction {
-                    plugin_id: plugin_id.to_owned(),
-                    id: contribution.id,
-                    label: contribution.label,
-                });
+                actions.push(serde_json::json!({
+                    "pluginId": plugin_id,
+                    "id": contribution.id,
+                    "label": contribution.label,
+                }));
             }
         }
     }
@@ -6283,7 +6283,10 @@ impl LiveShell {
                     let visible =
                         compose_taskbar_actions(&self.plugin_taskbar_action_hosts, target_id)
                             .iter()
-                            .any(|action| action.plugin_id == plugin_id && action.id == id);
+                            .any(|action| {
+                                action["pluginId"].as_str() == Some(plugin_id.as_str())
+                                    && action["id"].as_str() == Some(id.as_str())
+                            });
                     if !visible {
                         continue;
                     }
@@ -10792,20 +10795,18 @@ impl LiveShell {
             let height = (16
                 + 48 * (application_menu_entries(&target, pinned).len() + actions.len()))
                 as u32;
-            let projection = crate::plugin_panel::TaskbarMenuPluginProjection {
-                application_id: target
-                    .application_id
-                    .as_ref()
-                    .map(|id| id.as_str().to_owned()),
-                pinned,
-                close_all: target.all_closeable,
-                actions,
-            };
+            let data = serde_json::json!({
+                "applicationId": target.application_id.as_ref().map(|id| id.as_str()),
+                "pinned": pinned,
+                "closeAll": target.all_closeable,
+                "slots": {"task-action": actions},
+            })
+            .to_string();
             if self.application_menu_plugin_host.is_none() {
                 match crate::plugin_panel::PluginPanelApplication::bundled_with_data(
                     crate::plugin_panel::taskbar_manifest(),
                     "menu.js",
-                    projection.to_json(),
+                    data.clone(),
                 ) {
                     Ok(application) => {
                         self.application_menu_plugin_host = Some(nickel_ui::UiHost::new(
@@ -10820,9 +10821,17 @@ impl LiveShell {
                 }
             }
             if let Some(host) = self.application_menu_plugin_host.as_mut() {
+                let changed = match host.application_mut().sync_serialized_data(data) {
+                    Ok(changed) => changed,
+                    Err(error) => {
+                        tracing::error!(%error, "taskbar JSX menu failed to refresh");
+                        return Vec::new();
+                    }
+                };
                 let outcome = host.step(HostBatch {
                     surface_size: Some((MENU_WIDTH.ceil() as u32, height)),
                     events: vec![HostEvent::Poll],
+                    application_changed: changed,
                     ..HostBatch::default()
                 });
                 let commands = host.commands().to_vec();

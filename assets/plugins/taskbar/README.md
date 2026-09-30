@@ -34,8 +34,9 @@ The taskbar provides a `task-badge` slot. Independent, surface-free plugins can
 return `Badge` components for task IDs; Nickel composes up to three badges per
 task in declared priority and plugin ID order. Disabling a badge plugin removes
 its contribution without restarting the taskbar.
-The host projects their available actions and validates every selected action
-against the captured application or window before dispatching it.
+The context menu reads `nickel.data.slots["task-action"]` and renders contributed
+actions as JSX buttons. The host validates each selected action against the
+captured application before dispatching it.
 
 The image slots reference buffers already owned by the host. Settings' tracked
 native UI figure remains a lower bound and does not charge shared icon buffers
