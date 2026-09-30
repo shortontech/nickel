@@ -491,11 +491,28 @@ mod tests {
                     .keys()
                     .any(|key| key.plugin_id == "preview-empty")
             );
-            shell.control_host.step(HostBatch {
-                surface_size: Some((420, 600)),
-                events: vec![HostEvent::Poll],
-                ..Default::default()
-            });
+            for width in [280, 380, 420] {
+                shell.control_host.step(HostBatch {
+                    surface_size: Some((width, 600)),
+                    events: vec![HostEvent::Poll],
+                    ..Default::default()
+                });
+                for label in ["Restore previous shell", "Keep this shell"] {
+                    let target = shell
+                        .control_host
+                        .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                            role: SemanticRole::Button,
+                            name: label.into(),
+                        })
+                        .unwrap();
+                    assert!(
+                        target.bounds.size.width >= 150.0,
+                        "{label} must remain readable"
+                    );
+                    assert!(target.bounds.origin.x >= 0.0);
+                    assert!(target.bounds.origin.x + target.bounds.size.width <= width as f32);
+                }
+            }
             let button = shell
                 .control_host
                 .query_unique(&nickel_ui::SemanticSelector::RoleAndName {

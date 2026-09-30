@@ -1,4 +1,4 @@
-//! Trusted display recovery chooser, separate from ordinary JSX Quick Settings.
+//! Trusted display and shell recovery, separate from ordinary JSX presentation.
 use crate::control_view::ControlAction;
 use nickel_core::display_projection::ProjectionMode;
 use nickel_core::theme::{Appearance, ThemePalette};
@@ -112,26 +112,37 @@ impl Application for ProjectionRecoveryApp {
                     .child(
                         Column::new()
                             .gap(12.0)
-                            .child(Text::new("Keep the preview shell?").color(self.palette.text))
+                            .child(
+                                Text::new("Keep the preview shell?")
+                                    .color(self.palette.text)
+                                    .wrap(true),
+                            )
                             .child(
                                 Text::new(
                                     "The previous shell returns automatically after 15 seconds.",
                                 )
-                                .color(self.palette.text),
+                                .color(self.palette.text)
+                                .wrap(true),
                             )
                             .child(
-                                Row::new()
+                                Column::new()
                                     .gap(8.0)
-                                    .child(button(
-                                        self.palette,
-                                        ControlAction::RevertShellPreview(token),
-                                        "Restore previous shell",
-                                    ))
-                                    .child(button(
-                                        self.palette,
-                                        ControlAction::ConfirmShellPreview(token),
-                                        "Keep this shell",
-                                    )),
+                                    .child(
+                                        button(
+                                            self.palette,
+                                            ControlAction::RevertShellPreview(token),
+                                            "Restore previous shell",
+                                        )
+                                        .fill_width(),
+                                    )
+                                    .child(
+                                        button(
+                                            self.palette,
+                                            ControlAction::ConfirmShellPreview(token),
+                                            "Keep this shell",
+                                        )
+                                        .fill_width(),
+                                    ),
                             ),
                     ),
             );
