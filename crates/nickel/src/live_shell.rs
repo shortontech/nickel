@@ -2503,20 +2503,9 @@ impl LiveShell {
                 };
                 host.map(|host| host.layout_snapshot())
             }
-            SurfaceRole::Panel => plugin.and_then(|key| {
-                self.plugin_panel_extra_hosts
-                    .get(key)
-                    .map(|(_, host)| host.layout_snapshot())
-                    .or_else(|| {
-                        self.plugin_panel_host
-                            .as_ref()
-                            .filter(|_| {
-                                self.plugin_panel_owner == key.plugin_id
-                                    && self.plugin_panel_surface.id == key.surface_id
-                            })
-                            .map(|host| host.layout_snapshot())
-                    })
-            }),
+            SurfaceRole::Panel => plugin
+                .and_then(|key| self.plugin_panel_host_ref(key))
+                .map(|host| host.layout_snapshot()),
             SurfaceRole::Launcher if self.run_visible => self
                 .plugin_run_host
                 .as_ref()
@@ -2566,57 +2555,12 @@ impl LiveShell {
             SurfaceRole::Desktop => self.desktop_scene(width, height),
             SurfaceRole::Taskbar => self.panel_scene(width, height),
             SurfaceRole::Panel => {
-                let slots = self.plugin_slot_projection(&self.plugin_panel_owner);
-                let windows = self.external_plugin_windows(&self.plugin_panel_owner);
-                let applications = self.external_plugin_applications(&self.plugin_panel_owner);
-                let notifications = self.external_plugin_notifications(&self.plugin_panel_owner);
-                let audio = self.plugin_audio(&self.plugin_panel_owner);
-                let owner = self.plugin_panel_owner.clone();
-                let Some(host) = self.plugin_panel_host.as_mut() else {
-                    return Vec::new();
-                };
-                let fields = [
-                    ("slots", slots.as_ref()),
-                    ("windows", windows.as_ref()),
-                    ("applications", applications.as_ref()),
-                    ("notifications", notifications.as_ref()),
-                    ("audio", audio.as_ref()),
-                ]
-                .into_iter()
-                .filter_map(|(field, value)| value.map(|value| (field, value)))
-                .collect::<Vec<_>>();
-                let data_changed = match host.application_mut().sync_host_data_fields(&fields) {
-                    Ok(changed) => changed,
-                    Err(error) => {
-                        self.fail_plugin_panel_runtime(&owner, error);
-                        return Vec::new();
-                    }
-                };
-                let (commands, bytes) = match render_plugin_host(
-                    host,
-                    None,
-                    HostBatch {
-                        application_changed: data_changed,
-                        surface_size: Some((width, height)),
-                        ..HostBatch::default()
-                    },
-                ) {
-                    Ok(frame) => frame,
-                    Err(error) => {
-                        self.fail_plugin_panel_runtime(&owner, error);
-                        return Vec::new();
-                    }
-                };
                 let key = nickel_core::plugins::PluginSurfaceKey {
                     plugin_id: self.plugin_panel_owner.clone(),
                     surface_id: self.plugin_panel_surface.id.clone(),
                 };
-                self.record_plugin_panel_memory(&key, bytes);
-                if let Err(error) = self.reconcile_plugin_surface_root(&key) {
-                    self.fail_plugin_panel_runtime(&key.plugin_id, error);
-                    return Vec::new();
-                }
-                commands
+                self.plugin_panel_scene(&key, width, height)
+                    .unwrap_or_default()
             }
             SurfaceRole::Launcher if self.run_visible => self.run_scene(width, height),
             SurfaceRole::Launcher => self.launcher_scene(width, height),
@@ -3801,12 +3745,6 @@ impl LiveShell {
         if self.taskbar_surface_key().as_ref() == Some(key) {
             return Some(self.panel_scene(width, height));
         }
-        if self.plugin_panel_host.is_some()
-            && self.plugin_panel_owner == key.plugin_id
-            && self.plugin_panel_surface.id == key.surface_id
-        {
-            return Some(self.scene(SurfaceRole::Panel, width, height));
-        }
         let slots = self.plugin_slot_projection(&key.plugin_id);
         let windows = self.external_plugin_windows(&key.plugin_id);
         let applications = self.external_plugin_applications(&key.plugin_id);
@@ -3815,7 +3753,7 @@ impl LiveShell {
         let keyboard_data = (*key == crate::plugin_panel::on_screen_keyboard_surface_key())
             .then(|| self.keyboard_plugin_data());
         let result = (|| {
-            let (_, host) = self.plugin_panel_extra_hosts.get_mut(key)?;
+            let host = self.plugin_panel_host_for(key)?;
             let projected = (|| -> Result<bool, String> {
                 let keyboard_changed = keyboard_data
                     .as_ref()
