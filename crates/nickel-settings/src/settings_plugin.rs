@@ -168,14 +168,12 @@ impl StyledSettingsPage {
 }
 
 pub(super) struct OrdinaryPages {
-    page: JsxPage,
-    last_theme: Option<SemanticTheme>,
-    stylesheet: StyleSheet,
+    page: StyledSettingsPage,
 }
 
 impl OrdinaryPages {
     pub(super) fn retained_bytes(&self) -> usize {
-        self.page.retained_bytes() + self.stylesheet.estimated_retained_bytes() as usize
+        self.page.retained_bytes()
     }
 
     #[cfg(test)]
@@ -189,9 +187,7 @@ impl OrdinaryPages {
 
     pub(super) fn new_with_page(page: JsxPage) -> Result<Self, String> {
         Ok(Self {
-            page,
-            last_theme: None,
-            stylesheet: StyleSheet::default(),
+            page: StyledSettingsPage::new(page),
         })
     }
 
@@ -200,16 +196,12 @@ impl OrdinaryPages {
         data: Value,
         theme: SemanticTheme,
     ) -> Result<AnyView<SettingsMessage>, String> {
-        self.page.render(&data)?;
-        if self.last_theme != Some(theme) {
-            self.stylesheet = stylesheet_template(
-                include_str!("../../../assets/plugins/settings/settings-pages.css"),
-                theme,
-            )?;
-            self.last_theme = Some(theme);
-        }
-        let node = self.page.node().ok_or("Settings page is unavailable")?;
-        Ok(node.view_as::<SettingsMessage>(&PluginImages::new(), &self.stylesheet))
+        let (node, stylesheet) = self.page.render(
+            &data,
+            theme,
+            include_str!("../../../assets/plugins/settings/settings-pages.css"),
+        )?;
+        Ok(node.view_as::<SettingsMessage>(&PluginImages::new(), stylesheet))
     }
 
     pub(super) fn render_keyboard(
@@ -316,7 +308,8 @@ mod tests {
         ));
         assert_eq!(
             pages
-                .stylesheet
+                .page
+                .stylesheet()
                 .resolve("div", None, Some("settings-card"))
                 .background,
             Some(0xff00_0000 | theme.surfaces.card & 0x00ff_ffff)
@@ -330,7 +323,8 @@ mod tests {
         let light_page = pages.render_keyboard(&localizer, light).unwrap();
         assert_eq!(
             pages
-                .stylesheet
+                .page
+                .stylesheet()
                 .resolve("div", None, Some("settings-card"))
                 .background,
             Some(0xff00_0000 | light.surfaces.card & 0x00ff_ffff)

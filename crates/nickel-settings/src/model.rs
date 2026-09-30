@@ -424,7 +424,7 @@ impl SettingsApp {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nickel_core::theme::ThemeMode;
+    use nickel_core::theme::{Appearance, ThemeMode};
 
     #[test]
     fn initial_page_is_the_active_navigation_destination() {

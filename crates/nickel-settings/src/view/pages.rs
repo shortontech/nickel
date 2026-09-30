@@ -39,6 +39,30 @@ pub(crate) fn codex_switch_state(state: &FeatureState) -> SwitchState {
 }
 
 impl SettingsApp {
+    fn settings_plugin_recovery(
+        &self,
+        title: &str,
+        error: String,
+        extra_action: Option<(SettingsMessage, &str)>,
+    ) -> AnyView<SettingsMessage> {
+        let theme = self.ui_theme();
+        let mut card = SettingsCard::titled(theme, title, error);
+        if let Some((message, label)) = extra_action {
+            card = card.child(Button::semantic(
+                theme,
+                message,
+                label,
+                ButtonPresentation::Secondary,
+            ));
+        }
+        AnyView::new(card.child(Button::semantic(
+            theme,
+            SettingsMessage::Navigate(SettingsPage::Plugins),
+            "Manage plugins",
+            ButtonPresentation::Primary,
+        )))
+    }
+
     pub(super) fn plugins_components(&self) -> impl nickel_ui::Component<SettingsMessage> {
         let theme = self.ui_theme();
         if self.page != SettingsPage::Plugins {
@@ -229,16 +253,7 @@ impl SettingsApp {
             Err("Settings plugin is disabled".into())
         };
         rendered.unwrap_or_else(|error| {
-            AnyView::new(
-                SettingsCard::titled(theme, "Optional Features are unavailable", error).child(
-                    Button::semantic(
-                        theme,
-                        SettingsMessage::Navigate(SettingsPage::Plugins),
-                        "Manage plugins",
-                        ButtonPresentation::Primary,
-                    ),
-                ),
-            )
+            self.settings_plugin_recovery("Optional Features are unavailable", error, None)
         })
     }
 
@@ -1060,15 +1075,7 @@ impl SettingsApp {
             Err("Settings plugin is disabled".into())
         };
         plugin_view.unwrap_or_else(|error| {
-            AnyView::new(
-                SettingsCard::titled(self.ui_theme(), "Network settings are unavailable", error)
-                    .child(Button::semantic(
-                        self.ui_theme(),
-                        SettingsMessage::Navigate(SettingsPage::Plugins),
-                        "Manage plugins",
-                        ButtonPresentation::Primary,
-                    )),
-            )
+            self.settings_plugin_recovery("Network settings are unavailable", error, None)
         })
     }
 
@@ -1088,15 +1095,7 @@ impl SettingsApp {
             Err("Settings plugin is disabled".into())
         };
         rendered.unwrap_or_else(|error| {
-            AnyView::new(
-                SettingsCard::titled(self.ui_theme(), "Bluetooth settings are unavailable", error)
-                    .child(Button::semantic(
-                        self.ui_theme(),
-                        SettingsMessage::Navigate(SettingsPage::Plugins),
-                        "Manage plugins",
-                        ButtonPresentation::Primary,
-                    )),
-            )
+            self.settings_plugin_recovery("Bluetooth settings are unavailable", error, None)
         })
     }
 
@@ -1138,19 +1137,7 @@ impl SettingsApp {
             Err("Settings plugin is disabled".into())
         };
         result.unwrap_or_else(|error| {
-            AnyView::new(
-                SettingsCard::titled(
-                    self.ui_theme(),
-                    "Nickel Bar settings are unavailable",
-                    error,
-                )
-                .child(Button::semantic(
-                    self.ui_theme(),
-                    SettingsMessage::Navigate(SettingsPage::Plugins),
-                    "Manage plugins",
-                    ButtonPresentation::Primary,
-                )),
-            )
+            self.settings_plugin_recovery("Nickel Bar settings are unavailable", error, None)
         })
     }
 
@@ -1201,22 +1188,12 @@ impl SettingsApp {
             Err("Settings plugin is disabled".into())
         };
         let content = rendered.unwrap_or_else(|error| {
-            let mut recovery =
-                SettingsCard::titled(theme, "Appearance settings are unavailable", error);
-            if self.custom_hue_open {
-                recovery = recovery.child(Button::semantic(
-                    theme,
-                    SettingsMessage::CancelCustomHue,
-                    "Close color picker",
-                    ButtonPresentation::Secondary,
-                ));
-            }
-            AnyView::new(recovery.child(Button::semantic(
-                theme,
-                SettingsMessage::Navigate(SettingsPage::Plugins),
-                "Manage plugins",
-                ButtonPresentation::Primary,
-            )))
+            self.settings_plugin_recovery(
+                "Appearance settings are unavailable",
+                error,
+                self.custom_hue_open
+                    .then_some((SettingsMessage::CancelCustomHue, "Close color picker")),
+            )
         });
         self.appearance_frame(theme, content)
     }
@@ -1225,66 +1202,25 @@ impl SettingsApp {
         if self.page != SettingsPage::KeyboardShortcuts {
             return AnyView::new(Container::new());
         }
-        if !self.settings_jsx_enabled {
-            return AnyView::new(
-                SettingsCard::titled(
-                    self.ui_theme(),
-                    self.localizer.text("settings-keyboard-card-title"),
-                    self.localizer.text("settings-keyboard-card-description"),
-                )
-                .child(SettingsRow::new(
-                    self.ui_theme(),
-                    self.localizer.text("settings-keyboard-open-launcher"),
-                    "Super",
-                ))
-                .child(SettingsRow::new(
-                    self.ui_theme(),
-                    self.localizer.text("settings-keyboard-search"),
-                    self.localizer.text("settings-keyboard-search-value"),
-                ))
-                .child(SettingsRow::new(
-                    self.ui_theme(),
-                    self.localizer.text("settings-keyboard-navigate"),
-                    "Arrow keys · Tab · Shift+Tab",
-                ))
-                .child(SettingsRow::new(
-                    self.ui_theme(),
-                    self.localizer.text("settings-keyboard-activate"),
-                    "Enter",
-                ))
-                .child(SettingsRow::new(
-                    self.ui_theme(),
-                    self.localizer.text("settings-keyboard-back"),
-                    "Escape",
-                ))
-                .child(SettingsRow::new(
-                    self.ui_theme(),
-                    self.localizer.text("settings-keyboard-workspaces"),
-                    if cfg!(target_os = "windows") {
-                        self.localizer
-                            .text("settings-keyboard-workspaces-unavailable")
-                    } else {
-                        self.localizer.text("settings-keyboard-workspaces-value")
-                    },
-                )),
-            );
-        }
-        let page = self
-            .ordinary_pages
-            .borrow_mut()
-            .get_or_insert_with(|| {
-                self.shared_settings_page(crate::settings_package::Script::OrdinaryPages)
-                    .and_then(crate::settings_plugin::OrdinaryPages::new_with_page)
-            })
-            .as_mut()
-            .map_err(|error| error.clone())
-            .and_then(|pages| pages.render_keyboard(&self.localizer, self.ui_theme()));
-        page.unwrap_or_else(|error| {
-            AnyView::new(SettingsCard::titled(
-                self.ui_theme(),
-                self.localizer.text("settings-keyboard-page-unavailable"),
+        let rendered = if self.settings_jsx_enabled {
+            self.ordinary_pages
+                .borrow_mut()
+                .get_or_insert_with(|| {
+                    self.shared_settings_page(crate::settings_package::Script::OrdinaryPages)
+                        .and_then(crate::settings_plugin::OrdinaryPages::new_with_page)
+                })
+                .as_mut()
+                .map_err(|error| error.clone())
+                .and_then(|pages| pages.render_keyboard(&self.localizer, self.ui_theme()))
+        } else {
+            Err("Settings plugin is disabled".into())
+        };
+        rendered.unwrap_or_else(|error| {
+            self.settings_plugin_recovery(
+                &self.localizer.text("settings-keyboard-page-unavailable"),
                 error,
-            ))
+                None,
+            )
         })
     }
 
@@ -1292,41 +1228,25 @@ impl SettingsApp {
         if self.page != SettingsPage::About {
             return AnyView::new(Container::new());
         }
-        if !self.settings_jsx_enabled {
-            return AnyView::new(
-                SettingsCard::titled(
-                    self.ui_theme(),
-                    self.localizer.text("settings-about-card-title"),
-                    self.localizer.text("settings-about-card-description"),
-                )
-                .child(SettingsRow::new(
-                    self.ui_theme(),
-                    self.localizer.text("settings-about-version"),
-                    env!("CARGO_PKG_VERSION"),
-                ))
-                .child(SettingsRow::new(
-                    self.ui_theme(),
-                    self.localizer.text("settings-about-platform"),
-                    format!("{} · {}", std::env::consts::OS, std::env::consts::ARCH),
-                )),
-            );
-        }
-        let page = self
-            .ordinary_pages
-            .borrow_mut()
-            .get_or_insert_with(|| {
-                self.shared_settings_page(crate::settings_package::Script::OrdinaryPages)
-                    .and_then(crate::settings_plugin::OrdinaryPages::new_with_page)
-            })
-            .as_mut()
-            .map_err(|error| error.clone())
-            .and_then(|pages| pages.render_about(&self.localizer, self.ui_theme()));
-        page.unwrap_or_else(|error| {
-            AnyView::new(SettingsCard::titled(
-                self.ui_theme(),
-                self.localizer.text("settings-about-page-unavailable"),
+        let rendered = if self.settings_jsx_enabled {
+            self.ordinary_pages
+                .borrow_mut()
+                .get_or_insert_with(|| {
+                    self.shared_settings_page(crate::settings_package::Script::OrdinaryPages)
+                        .and_then(crate::settings_plugin::OrdinaryPages::new_with_page)
+                })
+                .as_mut()
+                .map_err(|error| error.clone())
+                .and_then(|pages| pages.render_about(&self.localizer, self.ui_theme()))
+        } else {
+            Err("Settings plugin is disabled".into())
+        };
+        rendered.unwrap_or_else(|error| {
+            self.settings_plugin_recovery(
+                &self.localizer.text("settings-about-page-unavailable"),
                 error,
-            ))
+                None,
+            )
         })
     }
 }

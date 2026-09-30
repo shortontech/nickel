@@ -4146,6 +4146,26 @@ mod tests {
     }
 
     #[test]
+    fn disabled_settings_plugin_offers_recovery_on_ordinary_pages() {
+        for page in [SettingsPage::KeyboardShortcuts, SettingsPage::About] {
+            let mut app = SettingsApp::with_initial_page(page);
+            app.settings_jsx_enabled = false;
+            let mut host = UiHost::new(app, 850, 580);
+            assert!(host.application().ordinary_pages.borrow().is_none());
+            let recovery = host
+                .semantic_targets_for_message(&SettingsMessage::Navigate(SettingsPage::Plugins))
+                .into_iter()
+                .next()
+                .expect("ordinary Settings page opens plugin management");
+            host.perform_semantic_action(
+                recovery.id,
+                nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
+            );
+            assert_eq!(host.application().page, SettingsPage::Plugins);
+        }
+    }
+
+    #[test]
     fn jsx_bar_slider_reaches_the_desktop_count_reducer() {
         let mut app = SettingsApp::with_initial_page(SettingsPage::Bar);
         app.persistence_enabled = false;
