@@ -47,7 +47,7 @@ export function Plugins() {
                 h(Text, { className: "plugin-title" }, plugin.name),
                 h(Spacer, null),
                 h(Button, { id: "plugin-toggle-" + index, disabled: !catalog.writable, accessibilityLabel: (plugin.enabled ? "Disable " : "Enable ") + plugin.name, onClick: () => plugin.enabled ? nickel.plugins.disable(plugin.id, catalog.revision) : setReview({ id: plugin.id, revision: catalog.revision }) }, plugin.enabled ? "Disable" : "Enable")),
-            plugin.shell ? plugin.selected ? h(Text, null, "Selected shell") : h(Button, { id: "plugin-select-shell-" + index, disabled: !catalog.writable, onClick: () => plugin.enabled ? nickel.plugins.selectShell(plugin.id, catalog.revision) : setReview({id:plugin.id,revision:catalog.revision,selectShell:true}) }, "Select shell") : null,
+            plugin.shell ? plugin.selected ? h(Text, null, "Selected shell") : h(Button, { id: "plugin-select-shell-" + index, disabled: !catalog.writable, onClick: () => plugin.enabled ? nickel.plugins.selectShell(plugin.id, catalog.revision) : setReview({ id: plugin.id, revision: catalog.revision, selectShell: true }) }, "Select shell") : null,
             h(Text, { wrap: true }, plugin.id + (plugin.version ? " · " + plugin.version : "") + (plugin.author ? " · " + plugin.author : "")),
             h(Text, { wrap: true }, "Status: " + plugin.health.state + (plugin.health.reason ? " · " + plugin.health.reason : "")),
             h(Text, { wrap: true }, "Authorized capabilities: " + (plugin.grants.length ? plugin.grants.join(", ") : "None")),
