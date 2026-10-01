@@ -18,6 +18,23 @@ pub(crate) fn icon_asset(id: &str) -> String {
 }
 
 fn item(launcher: &Launcher, application: &Application) -> Value {
+    let place = launcher.is_place_application(application.id());
+    let path = application
+        .launch_command()
+        .and_then(|command| {
+            if place {
+                command.get(1)
+            } else {
+                command.first()
+            }
+        })
+        .filter(|path| std::path::Path::new(path).is_absolute());
+    let last_used = launcher
+        .preferences()
+        .recents()
+        .iter()
+        .find(|id| application.matches_native_id(id))
+        .and_then(|id| launcher.preferences().last_used(id));
     json!({
         "id":application.id(), "name":application.name().chars().take(120).collect::<String>(),
         "icon":icon_asset(application.id()),
@@ -25,6 +42,9 @@ fn item(launcher: &Launcher, application: &Application) -> Value {
         "pinOrder":launcher.preferences().favorites().iter().position(|id| application.matches_native_id(id)),
         "recentOrder":launcher.preferences().recents().iter().position(|id| application.matches_native_id(id)),
         "kind":if launcher.is_place_application(application.id()) { "place" } else { "application" },
+        "path":path.map(|path| path.chars().take(1024).collect::<String>()),
+        "description":application.description(),
+        "lastUsedUnixSeconds":last_used,
         "launchClass":format!("{:?}", application.launch_class()).to_lowercase(),
     })
 }
@@ -120,16 +140,153 @@ impl ApplicationSearch {
             launcher.search(query, usize::MAX)
         };
         let matches = matches.into_iter().filter(valid).collect::<Vec<_>>();
-        json!({"available":true,"query":query,"total":matches.len(),"truncated":matches.len()>APPLICATION_LIMIT,
+        let settings = destination_matches(
+            query,
+            &[
+                (
+                    "appearance",
+                    "Appearance",
+                    "Theme, colors, wallpaper, and transparency",
+                ),
+                (
+                    "display",
+                    "Displays",
+                    "Resolution, scaling, and monitor arrangement",
+                ),
+                (
+                    "network",
+                    "Wi-Fi and network",
+                    "Internet and wireless connections",
+                ),
+                (
+                    "bluetooth",
+                    "Bluetooth",
+                    "Connect and manage Bluetooth devices",
+                ),
+                (
+                    "default-apps",
+                    "Default applications",
+                    "Choose your default browser, terminal, and file manager",
+                ),
+                (
+                    "keyboard-shortcuts",
+                    "Keyboard shortcuts",
+                    "View shell keyboard shortcuts",
+                ),
+                (
+                    "nickel-bar",
+                    "Desktop and taskbar",
+                    "Configure Nickel Bar and desktop behavior",
+                ),
+                ("plugins", "Plugins", "Manage shell plugins"),
+                (
+                    "optional-features",
+                    "Optional features",
+                    "Codex integration and on-screen keyboard",
+                ),
+                (
+                    "about",
+                    "About Nickel",
+                    "System and application information",
+                ),
+            ],
+            "setting",
+        );
+        let actions = destination_matches(
+            query,
+            &[
+                ("run", "Run a command", "Open the command dialog"),
+                ("settings", "Open Settings", "Configure Nickel"),
+            ],
+            "action",
+        );
+        json!({"available":true,"query":query,"settingsResults":settings,"actionResults":actions,"total":matches.len(),"truncated":matches.len()>APPLICATION_LIMIT,
             "catalogTruncated":launcher.applications().count()>APPLICATION_LIMIT,
             "nativeProjectsAvailable":launcher.codex_available(),
             "results":matches.into_iter().take(APPLICATION_LIMIT).map(|application|item(launcher, application)).collect::<Vec<_>>()})
     }
 }
 
+/// Small native destination catalogs share the application's fuzzy matcher.
+fn destination_matches(query: &str, entries: &[(&str, &str, &str)], kind: &str) -> Vec<Value> {
+    use nucleo_matcher::{
+        Config, Matcher,
+        pattern::{AtomKind, CaseMatching, Normalization, Pattern},
+    };
+    if query.is_empty() {
+        return Vec::new();
+    }
+    let pattern = Pattern::new(
+        query,
+        CaseMatching::Ignore,
+        Normalization::Smart,
+        AtomKind::Fuzzy,
+    );
+    let mut matcher = Matcher::new(Config::DEFAULT);
+    let text = entries
+        .iter()
+        .map(|(_, name, description)| format!("{name} {description}"))
+        .collect::<Vec<_>>();
+    pattern
+        .match_list(text.iter().map(String::as_str), &mut matcher)
+        .into_iter()
+        .filter_map(|(matched, _)| text.iter().position(|value| value == matched))
+        .map(|index| {
+            let (destination, name, description) = entries[index];
+            json!({"id":format!("{kind}:{destination}"),"kind":kind,"destination":destination,
+                "name":name,"description":description,"canPin":false})
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn launcher_details_expose_real_metadata_and_destinations_without_fabricated_times() {
+        let path = if cfg!(target_os = "windows") {
+            r"C:\Windows\System32\wt.exe"
+        } else {
+            "/usr/bin/terminal"
+        };
+        let application = Application::new(
+            "terminal".into(),
+            "Terminal".into(),
+            None,
+            None,
+            Some(vec![path.into()]),
+        )
+        .with_description(Some("Run commands and scripts"));
+        let mut launcher = Launcher::new(vec![application]);
+        let before = list(&launcher);
+        assert_eq!(before[0]["description"], "Run commands and scripts");
+        assert_eq!(before[0]["path"], path);
+        assert!(before[0]["lastUsedUnixSeconds"].is_null());
+        launcher.record_launch("terminal");
+        assert!(list(&launcher)[0]["lastUsedUnixSeconds"].as_u64().is_some());
+        let mut search = ApplicationSearch::default();
+        search.set_query("shell", "terminal".into()).unwrap();
+        let results = search.snapshot(&launcher, "shell");
+        assert_eq!(results["results"][0]["id"], "terminal");
+        assert!(
+            results["settingsResults"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item["destination"] == "default-apps" && item["kind"] == "setting")
+        );
+        search.set_query("shell", "command".into()).unwrap();
+        assert_eq!(
+            search.snapshot(&launcher, "shell")["actionResults"][0]["destination"],
+            "run"
+        );
+        search.set_query("shell", String::new()).unwrap();
+        assert_eq!(
+            search.snapshot(&launcher, "shell")["settingsResults"],
+            json!([])
+        );
+    }
     fn app(id: &str, name: &str) -> Application {
         Application::new(id.into(), name.into(), None, None, None)
     }

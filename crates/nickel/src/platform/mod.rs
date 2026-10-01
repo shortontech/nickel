@@ -629,11 +629,8 @@ pub enum SecureStorageState {
     ControlUnavailable,
 }
 
-pub fn application_requires_secure_storage(application: &crate::model::Application) -> bool {
-    let identity = format!("{} {}", application.id(), application.name()).to_ascii_lowercase();
-    ["chrome", "chromium", "signal"]
-        .iter()
-        .any(|marker| identity.contains(marker))
+pub fn secure_storage_allows_application_launch(state: SecureStorageState) -> bool {
+    state == SecureStorageState::Ready
 }
 
 pub trait TraySource {
@@ -909,25 +906,20 @@ mod tests {
         panic!("association worker did not release its admission");
     }
 
-    use crate::model::Application;
-
     #[test]
-    fn credential_dependent_applications_are_identified_for_launch_gating() {
-        let application = |id: &str, name: &str| {
-            Application::new(id.into(), name.into(), None, None, Some(vec![id.into()]))
-        };
-        assert!(super::application_requires_secure_storage(&application(
-            "google-chrome.desktop",
-            "Google Chrome"
-        )));
-        assert!(super::application_requires_secure_storage(&application(
-            "org.signal.Signal.desktop",
-            "Signal"
-        )));
-        assert!(!super::application_requires_secure_storage(&application(
-            "org.nickel.Terminal.desktop",
-            "Nickel Terminal"
-        )));
+    fn application_launches_fail_closed_until_storage_is_ready() {
+        for state in [
+            super::SecureStorageState::Starting,
+            super::SecureStorageState::Locked,
+            super::SecureStorageState::PromptRequired,
+            super::SecureStorageState::Unavailable,
+            super::SecureStorageState::ControlUnavailable,
+        ] {
+            assert!(!super::secure_storage_allows_application_launch(state));
+        }
+        assert!(super::secure_storage_allows_application_launch(
+            super::SecureStorageState::Ready
+        ));
     }
 
     #[test]

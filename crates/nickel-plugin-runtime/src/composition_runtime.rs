@@ -915,6 +915,57 @@ impl ShellCompositionRuntime {
         result
     }
 
+    /// Dispatch every handler emitted by one native UI transition against the
+    /// render generation that produced it, then rebuild the expanded root once.
+    /// Handles retain their package owner and mount, so a transition containing
+    /// both a blur callback and a click cannot cross an ownership boundary.
+    pub fn dispatch_expanded_batch_pending(
+        &mut self,
+        root: &ComponentMount,
+        events: &[(ComponentEventHandle, Value)],
+        validate: impl FnOnce(&Value) -> Result<(), String>,
+    ) -> Result<RenderedComponent, String> {
+        self.begin_transaction()?;
+        let result = (|| {
+            self.validate_mount(root)?;
+            for (handle, value) in events {
+                bounded_json(value)?;
+                let mount = self
+                    .mounts
+                    .get(&handle.mount)
+                    .ok_or("retired component event")?;
+                if handle.runtime != self.id
+                    || mount.generation != handle.generation
+                    || mount.reference.owner != handle.owner
+                {
+                    return Err("foreign or stale component event".into());
+                }
+            }
+
+            let mut offset = 0;
+            while offset < events.len() {
+                let mount = events[offset].0.mount;
+                let mut end = offset + 1;
+                while end < events.len() && events[end].0.mount == mount {
+                    end += 1;
+                }
+                let batch = events[offset..end]
+                    .iter()
+                    .map(|(handle, value)| serde_json::json!([handle.action, value]))
+                    .collect::<Vec<_>>();
+                self.render_mount(mount, Some(Value::Array(batch)), |_| Ok(()))?;
+                offset = end;
+            }
+
+            let props = self.mounts[&root.id].props.clone();
+            self.render_expanded(root, &props, validate)
+        })();
+        if result.is_err() {
+            self.finish_transaction(false)?;
+        }
+        result
+    }
+
     fn expand_rendered(
         &mut self,
         root: u64,
@@ -1392,7 +1443,7 @@ impl ShellCompositionRuntime {
             object.insert("surface".into(), surface.clone());
         }
         object.insert("__componentProps".into(), state.props.clone());
-        runtime.set_data(&data.to_string())?;
+        runtime.set_data_value(data)?;
         let expression = event.as_ref().map_or_else(
             || "__nickelRender()".into(),
             |events| format!("__nickelDispatchBatch({events})"),
@@ -1634,10 +1685,22 @@ fn surface(id: u64) -> String {
     format!("composition-{id}")
 }
 fn bounded_json(value: &Value) -> Result<(), String> {
-    if value.to_string().len() > MAX_JSON_BYTES {
-        return Err("composition JSON exceeds size limit".into());
+    // Count the exact encoded size without allocating a second full snapshot.
+    struct Budget(usize);
+    impl std::io::Write for Budget {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if bytes.len() > self.0 {
+                return Err(std::io::Error::other("composition JSON exceeds size limit"));
+            }
+            self.0 -= bytes.len();
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
     }
-    Ok(())
+    serde_json::to_writer(Budget(MAX_JSON_BYTES), value)
+        .map_err(|_| "composition JSON exceeds size limit".into())
 }
 fn rewrite_events(
     value: &mut Value,

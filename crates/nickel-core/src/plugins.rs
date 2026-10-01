@@ -1014,6 +1014,7 @@ impl PluginSurfaceKind {
 pub enum PluginOutputScope {
     #[default]
     Primary,
+    Active,
     All,
 }
 

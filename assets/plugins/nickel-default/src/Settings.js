@@ -95,10 +95,23 @@ function groupEntries(settings, pages) {
     });
     return groups;
 }
+function centeredWorkAreaSize(outputs) {
+    const output = outputs.find(item => item.primary) || outputs[0];
+    const geometry = output?.geometry;
+    const workArea = output?.work_area;
+    if (!geometry || !workArea)
+        return { width: 900, height: 600 };
+    const centeredLimit = (screenSize, workStart, workSize) => Math.max(320, Math.min(screenSize, screenSize - 2 * workStart, 2 * (workStart + workSize) - screenSize));
+    const width = centeredLimit(geometry.width, workArea.x - geometry.x, workArea.width);
+    const height = centeredLimit(geometry.height, workArea.y - geometry.y, workArea.height);
+    return { width: Math.min(1100, width), height: Math.min(800, height) };
+}
 export function Settings() {
     const SettingsNavigation = nickel.component("shell.settings.navigation");
     const SettingControl = nickel.component("shell.settings.controls");
     const settings = readPluginSettings().settings;
+    const displays = nickel.displays.get();
+    const windowSize = centeredWorkAreaSize(displays?.outputs || []);
     const pages = [...readPluginSettingsPages().pages, ...nickel.contributions("settings.pages").map(entry => ({
             id: "contribution/" + entry.id, providerPackage: entry.provider, label: entry.id,
             group: "Extensions", component: entry.component
@@ -120,10 +133,10 @@ export function Settings() {
     const active = entries.find(entry => entry.providerPackage + "/" + entry.id === activeId) || entries[0];
     const ActivePage = active && typeof active.component === "function" ? active.component : null;
     const groups = groupEntries(settings, pages);
-    return h(Window, { id: "settings", title: "Nickel Settings", width: 1100, height: 800, className: "settings-window" },
+    return h(Window, { id: "settings", title: "Nickel Settings", width: windowSize.width, height: windowSize.height, className: "settings-window" },
         h("div", { className: "settings-shell wide" },
             h("div", { className: "settings-sidebar" },
-                h(ScrollView, { id: "settings-sidebar-scroll", height: 736 },
+                h(ScrollView, { id: "settings-sidebar-scroll", grow: true },
                     h(SettingsNavigation, { groups: groups.map(group => ({ ...group, entries: group.entries.map(entry => ({
                                 id: entry.id, providerPackage: entry.providerPackage, label: entry.label,
                                 description: entry.description, group: entry.group
@@ -133,7 +146,7 @@ export function Settings() {
                     h(Column, null,
                         h(Text, { className: "settings-title" }, active ? active.label : "Settings"),
                         active && active.description ? h(Text, { className: "settings-subtitle", wrap: true }, active.description) : null)),
-                h(ScrollView, { id: "settings-content", className: "settings-content", height: 704 },
+                h(ScrollView, { id: "settings-content", className: "settings-content", grow: true },
                     !active ? h(Text, null, "No settings are registered.") : null,
                     active && active.component && !ActivePage ? h(Text, null, "Settings page component is not resolved.") : null,
                     ActivePage ? h(ActivePage, null) : active && !active.component ? h(Column, { className: "settings-registered-control" },

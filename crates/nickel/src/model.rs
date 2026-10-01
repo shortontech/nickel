@@ -60,6 +60,7 @@ pub struct Application {
     id: ApplicationId,
     identity_aliases: Vec<String>,
     name: String,
+    description: Option<String>,
     icon: Option<String>,
     icon_path: Option<PathBuf>,
     launch_command: Option<Vec<String>>,
@@ -260,6 +261,7 @@ impl Application {
             id: ApplicationId::new(id),
             identity_aliases: Vec::new(),
             name,
+            description: None,
             icon,
             icon_path,
             launch_command,
@@ -303,6 +305,18 @@ impl Application {
         &self.name
     }
 
+    pub fn description(&self) -> Option<&str> {
+        self.description.as_deref()
+    }
+
+    pub fn with_description(mut self, description: Option<&str>) -> Self {
+        self.description = description
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| value.chars().take(512).collect());
+        self
+    }
+
     pub fn icon(&self) -> Option<&str> {
         self.icon.as_deref()
     }
@@ -329,6 +343,7 @@ impl Application {
             .len()
             .saturating_add(self.identity_aliases.iter().map(String::len).sum())
             .saturating_add(self.name.len())
+            .saturating_add(self.description.as_ref().map_or(0, String::len))
             .saturating_add(self.icon.as_ref().map_or(0, String::len))
             .saturating_add(self.icon_path.as_deref().map_or(0, path_bytes))
             .saturating_add(

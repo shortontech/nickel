@@ -2917,3 +2917,56 @@ fn admitted_native_application_windows_reach_granted_public_resources() {
         );
     });
 }
+
+#[test]
+fn launcher_sizes_to_its_named_output_and_expands_again_on_a_larger_output() {
+    with_package_runtime_stack(|| {
+        let mut shell = LiveShell::new().unwrap();
+        shell.set_desktop_outputs(vec![
+            nickel_file::desktop::DesktopOutput {
+                id: "large".into(),
+                primary: true,
+                work_area: nickel_file::desktop::Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 1920.0,
+                    height: 1024.0,
+                },
+                scale: 1.0,
+            },
+            nickel_file::desktop::DesktopOutput {
+                id: "small".into(),
+                primary: false,
+                work_area: nickel_file::desktop::Rect {
+                    x: -376.0,
+                    y: 0.0,
+                    width: 376.0,
+                    height: 436.0,
+                },
+                scale: 2.0,
+            },
+        ]);
+        shell.global_shortcut(crate::platform::GlobalShortcut::ShowLauncher);
+        let key = LiveShell::default_shell_surface_key("launcher");
+        shell
+            .plugin_panel_scene_for_output(&key, Some("small"), 360, 420)
+            .unwrap();
+        assert_eq!(
+            (
+                shell.plugin_surface_hosts[&key].0.width,
+                shell.plugin_surface_hosts[&key].0.height
+            ),
+            (360, 420)
+        );
+        shell
+            .plugin_panel_scene_for_output(&key, Some("large"), 608, 628)
+            .unwrap();
+        assert_eq!(
+            (
+                shell.plugin_surface_hosts[&key].0.width,
+                shell.plugin_surface_hosts[&key].0.height
+            ),
+            (608, 628)
+        );
+    });
+}

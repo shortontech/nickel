@@ -646,59 +646,10 @@ impl Frame {
     }
 
     fn rounded(&mut self, rect: Rect, color: u32, radius: f32, top_only: bool) {
-        let radius = radius
-            .max(0.0)
-            .min(rect.size.width / 2.0)
-            .min(rect.size.height / 2.0);
-        if radius < 0.5 {
-            self.solid(rect, color);
-            return;
-        }
-        let rows = rect.size.height.ceil().max(1.0) as u32;
-        let mut middle = None;
-        let mut middle_end = 0.0;
-        for row in 0..rows {
-            let y = row as f32;
-            let h = (rect.size.height - y).clamp(0.0, 1.0);
-            if h <= 0.0 {
-                continue;
-            }
-            let sample_y = y + h / 2.0;
-            let corner_y = if sample_y < radius {
-                Some(radius - sample_y)
-            } else if !top_only && sample_y > rect.size.height - radius {
-                Some(sample_y - (rect.size.height - radius))
-            } else {
-                None
-            };
-            let inset = corner_y
-                .map(|dy| radius - (radius * radius - dy * dy).max(0.0).sqrt())
-                .unwrap_or(0.0);
-            if inset == 0.0 {
-                middle.get_or_insert(y);
-                middle_end = y + h;
-                continue;
-            }
-            self.solid(
-                Rect::new(
-                    rect.origin.x + inset,
-                    rect.origin.y + y,
-                    (rect.size.width - inset * 2.0).max(0.0),
-                    h,
-                ),
-                color,
-            );
-        }
-        if let Some(y) = middle {
-            self.solid(
-                Rect::new(
-                    rect.origin.x,
-                    rect.origin.y + y,
-                    rect.size.width,
-                    middle_end - y,
-                ),
-                color,
-            );
+        for (span, shaded) in nickel_ui::backend::rounded_coverage_spans(
+            rect, color, radius, None, top_only, self.scale,
+        ) {
+            self.solid(span, shaded);
         }
     }
 
@@ -724,8 +675,15 @@ impl Frame {
                     width,
                     radius,
                 } => {
-                    for span in nickel_ui::backend::rounded_border_spans(*rect, *width, *radius) {
-                        self.solid(span, *color);
+                    for (span, shaded) in nickel_ui::backend::rounded_coverage_spans(
+                        *rect,
+                        *color,
+                        *radius,
+                        Some(*width),
+                        false,
+                        self.scale,
+                    ) {
+                        self.solid(span, shaded);
                     }
                 }
                 PaintCommand::Gradient { rect, gradient } => {

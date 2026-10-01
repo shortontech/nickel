@@ -2489,3 +2489,148 @@ pub fn rounded_border_spans(rect: Rect, width: f32, radius: f32) -> impl Iterato
         .filter(move |span| width > 0.0 && span.size.width > 0.0 && span.size.height > 0.0)
     })
 }
+
+/// Antialiased rounded geometry in logical coordinates. Coverage is sampled on
+/// the physical pixel grid, including fractional origins and output scaling.
+/// Equal spans on adjacent rows are merged, so straight edges stay inexpensive.
+pub fn rounded_coverage_spans(
+    rect: Rect,
+    color: u32,
+    radius: f32,
+    stroke: Option<f32>,
+    top_only: bool,
+    scale: f32,
+) -> Vec<(Rect, u32)> {
+    if !scale.is_finite() || scale <= 0.0 || rect.size.width <= 0.0 || rect.size.height <= 0.0 {
+        return Vec::new();
+    }
+    let rect = Rect::new(
+        rect.origin.x * scale,
+        rect.origin.y * scale,
+        rect.size.width * scale,
+        rect.size.height * scale,
+    );
+    let radius = (radius * scale)
+        .max(0.0)
+        .min(rect.size.width / 2.0)
+        .min(rect.size.height / 2.0);
+    let width = stroke.map(|w| {
+        (w * scale)
+            .max(0.0)
+            .min(rect.size.width / 2.0)
+            .min(rect.size.height / 2.0)
+    });
+    if width == Some(0.0) {
+        return Vec::new();
+    }
+    let interval = |r: Rect, radius: f32, y: f32| -> Option<(f32, f32)> {
+        let y = y - r.origin.y;
+        if y < 0.0 || y >= r.size.height || r.size.width <= 0.0 {
+            return None;
+        }
+        let edge = if top_only {
+            y
+        } else {
+            y.min(r.size.height - y)
+        };
+        let inset = if edge < radius {
+            radius - (radius * radius - (radius - edge).powi(2)).max(0.0).sqrt()
+        } else {
+            0.0
+        };
+        Some((r.origin.x + inset, r.origin.x + r.size.width - inset))
+    };
+    let alpha = if color <= 0x00ff_ffff {
+        255
+    } else {
+        color >> 24
+    };
+    let mut spans: Vec<(Rect, u32)> = Vec::new();
+    let mut previous: Vec<usize> = Vec::new();
+    let mut row = rect.origin.y.floor() as i32;
+    let end = (rect.origin.y + rect.size.height).ceil() as i32;
+    let middle_start = (rect.origin.y + radius.max(width.unwrap_or(0.0))).ceil() as i32;
+    let bottom_radius = if top_only { 0.0 } else { radius };
+    let middle_end =
+        (rect.origin.y + rect.size.height - bottom_radius.max(width.unwrap_or(0.0))).floor() as i32;
+    while row < end {
+        let rows = if row >= middle_start && row < middle_end {
+            middle_end - row
+        } else {
+            1
+        };
+        // Integrate four horizontal slices per physical pixel. Horizontal
+        // coverage is analytic; only the curved vertical profile is sampled.
+        let mut slices = Vec::with_capacity(8);
+        for sample in 0..4 {
+            let y = row as f32 + (sample as f32 + 0.5) / 4.0;
+            if let Some((left, right)) = interval(rect, radius, y) {
+                let hole = width
+                    .and_then(|w| interval(rect.inset(Insets::all(w)), (radius - w).max(0.0), y));
+                if let Some((il, ir)) = hole {
+                    slices.push((left, il));
+                    slices.push((ir, right));
+                } else {
+                    slices.push((left, right));
+                }
+            }
+        }
+        let mut boundaries: Vec<i32> = slices
+            .iter()
+            .flat_map(|&(l, r)| {
+                [
+                    l.floor() as i32,
+                    l.ceil() as i32,
+                    r.floor() as i32,
+                    r.ceil() as i32,
+                ]
+            })
+            .collect();
+        boundaries.sort_unstable();
+        boundaries.dedup();
+        let mut current = Vec::new();
+        for pair in boundaries.windows(2) {
+            let x = pair[0] as f32;
+            let length = (pair[1] - pair[0]) as f32;
+            if length <= 0.0 {
+                continue;
+            }
+            let coverage: f32 = slices
+                .iter()
+                .map(|&(l, r)| (r.min(x + length) - l.max(x)).max(0.0))
+                .sum::<f32>()
+                / (4.0 * length);
+            let a = (alpha as f32 * coverage.clamp(0.0, 1.0)).round() as u32;
+            // Zero in the packed color format means opaque RGB, not transparent.
+            if a == 0 {
+                continue;
+            }
+            let shaded = (color & 0x00ff_ffff) | (a << 24);
+            let span = Rect::new(x, row as f32, length, rows as f32);
+            let existing = previous.iter().copied().find(|&index| {
+                let (old, c) = spans[index];
+                c == shaded
+                    && old.origin.x == x
+                    && old.size.width == length
+                    && old.origin.y + old.size.height == row as f32
+            });
+            let index = if let Some(index) = existing {
+                spans[index].0.size.height += rows as f32;
+                index
+            } else {
+                spans.push((span, shaded));
+                spans.len() - 1
+            };
+            current.push(index);
+        }
+        previous = current;
+        row += rows;
+    }
+    for (span, _) in &mut spans {
+        span.origin.x /= scale;
+        span.origin.y /= scale;
+        span.size.width /= scale;
+        span.size.height /= scale;
+    }
+    spans
+}

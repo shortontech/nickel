@@ -1,18 +1,21 @@
 use nickel_storage::{atomic_write, config_path, read_regular_file};
 use std::{
+    collections::BTreeMap,
     io,
     path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 const MAX_ENTRIES: usize = 64;
 const MAX_ENCODED_ID_BYTES: usize = 8_192;
 // Both complete lists, with the largest supported IDs and line framing.
-const MAX_FILE_BYTES: usize = 2 * MAX_ENTRIES * (MAX_ENCODED_ID_BYTES + 10);
+const MAX_FILE_BYTES: usize = 3 * MAX_ENTRIES * (MAX_ENCODED_ID_BYTES + 32);
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct LauncherPreferences {
     favorites: Vec<String>,
     recents: Vec<String>,
+    last_used: BTreeMap<String, u64>,
 }
 
 impl LauncherPreferences {
@@ -34,6 +37,16 @@ impl LauncherPreferences {
             let Some((kind, encoded)) = line.split_once('=') else {
                 continue;
             };
+            if kind == "used" {
+                if let Some((seconds, id)) = encoded.split_once(':')
+                    && let Ok(seconds) = seconds.parse::<u64>()
+                    && let Some(id) = decode(id)
+                    && preferences.last_used.len() < MAX_ENTRIES
+                {
+                    preferences.last_used.insert(id, seconds);
+                }
+                continue;
+            }
             let Some(value) = decode(encoded) else {
                 continue;
             };
@@ -46,6 +59,9 @@ impl LauncherPreferences {
                 entries.push(value);
             }
         }
+        preferences
+            .last_used
+            .retain(|id, _| preferences.recents.contains(id));
         Ok(preferences)
     }
 
@@ -78,6 +94,11 @@ impl LauncherPreferences {
             contents.push_str("recent=");
             contents.push_str(&encode(recent));
             contents.push('\n');
+        }
+        for id in &self.recents {
+            if let Some(seconds) = self.last_used.get(id) {
+                contents.push_str(&format!("used={seconds}:{}\n", encode(id)));
+            }
         }
         Ok(contents)
     }
@@ -135,10 +156,27 @@ impl LauncherPreferences {
         true
     }
 
+    /// Older histories retain unknown times until the next successful launch.
+    pub fn last_used(&self, application_id: &str) -> Option<u64> {
+        self.last_used.get(application_id).copied()
+    }
+
     pub fn record_launch(&mut self, application_id: &str) {
+        let seconds = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .map(|time| time.as_secs());
+        self.record_launch_at(application_id, seconds);
+    }
+
+    fn record_launch_at(&mut self, application_id: &str, seconds: Option<u64>) {
         self.recents.retain(|id| id != application_id);
         self.recents.insert(0, application_id.to_owned());
         self.recents.truncate(MAX_ENTRIES);
+        if let Some(seconds) = seconds {
+            self.last_used.insert(application_id.to_owned(), seconds);
+        }
+        self.last_used.retain(|id, _| self.recents.contains(id));
     }
 }
 
@@ -276,6 +314,30 @@ pub fn preferences_path() -> io::Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::LauncherPreferences;
+
+    #[test]
+    fn history_times_round_trip_without_inventing_times_for_legacy_entries() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("preferences");
+        std::fs::write(&path, "recent=6f6c64\nused=42:6f727068616e\n").unwrap();
+        let mut history = LauncherPreferences::load(&path).unwrap();
+        assert_eq!(history.recents(), ["old"]);
+        assert_eq!(history.last_used("old"), None);
+        assert_eq!(history.last_used("orphan"), None);
+        history.record_launch_at("new", Some(1_700_000_000));
+        history.record_launch_at("new", Some(1_700_000_060));
+        history.save(&path).unwrap();
+        let loaded = LauncherPreferences::load(&path).unwrap();
+        assert_eq!(loaded, history);
+        assert_eq!(loaded.recents(), ["new", "old"]);
+        assert_eq!(loaded.last_used("new"), Some(1_700_000_060));
+        assert_eq!(loaded.last_used("old"), None);
+        for index in 0..super::MAX_ENTRIES {
+            history.record_launch_at(&format!("app-{index}"), Some(index as u64));
+        }
+        assert_eq!(history.last_used("new"), None);
+        assert_eq!(history.last_used.len(), super::MAX_ENTRIES);
+    }
 
     #[test]
     fn local_favorites_preserve_new_history_and_history_preserves_new_favorites() {

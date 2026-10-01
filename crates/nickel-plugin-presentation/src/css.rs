@@ -1,13 +1,16 @@
 //! Bounded CSS subset with inherited custom properties and typed native styles.
 
-use std::collections::{HashMap, HashSet};
+use std::{
+    cell::RefCell,
+    collections::{HashMap, HashSet},
+};
 
 use cssparser::{
     AtRuleParser, CowRcStr, DeclarationParser, ParseError, Parser, ParserState,
     QualifiedRuleParser, RuleBodyItemParser, RuleBodyParser, StyleSheetParser,
 };
 use nickel_core::theme::{Appearance, ThemePalette};
-use nickel_ui::{Align, Insets, Justify, Length, ReadingDirection, Track};
+use nickel_ui::{Align, Insets, Justify, Length, ReadingDirection, TextAlign, Track};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum Display {
@@ -46,6 +49,7 @@ pub struct ControlStyle {
     pub radius: Option<f32>,
     pub font_size: Option<f32>,
     pub line_height: Option<f32>,
+    pub text_align: Option<TextAlign>,
     pub background: Option<u32>,
     pub color: Option<u32>,
     pub grow: Option<f32>,
@@ -157,16 +161,7 @@ impl Selector {
         state: Option<InteractionState>,
         ancestors: &[(String, Option<String>, Option<String>)],
     ) -> bool {
-        let mut remaining = ancestors;
-        for required in self.ancestors.iter().rev() {
-            let Some(index) = remaining.iter().rposition(|(kind, id, classes)| {
-                required.matches(kind, id.as_deref(), classes.as_deref(), None, &[])
-            }) else {
-                return false;
-            };
-            remaining = &remaining[..index];
-        }
-        !self.root
+        let leaf_matches = !self.root
             && self.state == state
             && self.kind.as_deref().is_none_or(|selector| selector == kind)
             && self
@@ -176,7 +171,20 @@ impl Selector {
             && self.classes.iter().all(|class| {
                 class_name
                     .is_some_and(|names| names.split_ascii_whitespace().any(|name| name == class))
-            })
+            });
+        if !leaf_matches {
+            return false;
+        }
+        let mut remaining = ancestors;
+        for required in self.ancestors.iter().rev() {
+            let Some(index) = remaining.iter().rposition(|(kind, id, classes)| {
+                required.matches(kind, id.as_deref(), classes.as_deref(), None, &[])
+            }) else {
+                return false;
+            };
+            remaining = &remaining[..index];
+        }
+        true
     }
 }
 
@@ -215,6 +223,7 @@ enum Declaration {
     Radius(f32),
     FontSize(f32),
     LineHeight(f32),
+    TextAlign(TextAlign),
     Background(u32),
     Color(u32),
     Grow(f32),
@@ -252,6 +261,7 @@ impl Declaration {
             Self::Radius(value) => style.radius = Some(*value),
             Self::FontSize(value) => style.font_size = Some(*value),
             Self::LineHeight(value) => style.line_height = Some(*value),
+            Self::TextAlign(value) => style.text_align = Some(*value),
             Self::Background(value) => style.background = Some(*value),
             Self::Color(value) => style.color = Some(*value),
             Self::Grow(value) => style.grow = Some(*value),
@@ -528,6 +538,12 @@ fn declaration(name: &str, value: &str) -> Result<Declaration, String> {
         "border-radius" => Declaration::Radius(px(value, 512.0)?),
         "font-size" => Declaration::FontSize(px(value, 256.0)?),
         "line-height" => Declaration::LineHeight(px(value, 512.0)?),
+        "text-align" => Declaration::TextAlign(match value {
+            "start" => TextAlign::Start,
+            "center" => TextAlign::Center,
+            "end" => TextAlign::End,
+            _ => return Err("text-align must be start, center, or end".into()),
+        }),
         "background-color" | "background" => Declaration::Background(color(value)?),
         "color" => Declaration::Color(color(value)?),
         "flex-grow" => {
@@ -744,6 +760,14 @@ fn palette_properties(palette: ThemePalette) -> HashMap<String, String> {
         ("soft-text", blend(palette.muted, palette.text, 40)),
         ("selected", blend(control, palette.accent, 25)),
         ("selected-border", blend(palette.accent, palette.text, 35)),
+        ("panel-soft", blend(palette.panel, palette.text, 4)),
+        ("border-soft", blend(palette.panel, palette.text, 12)),
+        ("divider-soft", blend(palette.panel, palette.text, 8)),
+        ("control-soft", blend(palette.panel, palette.text, 7)),
+        ("text-soft", blend(palette.panel, palette.text, 88)),
+        ("selection-soft", blend(palette.panel, palette.accent, 24)),
+        ("focus-soft", blend(palette.panel, palette.accent, 48)),
+        ("action-soft", blend(palette.panel, palette.accent, 72)),
     ] {
         properties.insert(
             format!("--nickel-{name}"),
@@ -856,12 +880,24 @@ fn resolve_value(
     Ok(output)
 }
 
+// A bounded cache belongs to one immutable rule set. Include inherited variables
+// and the complete ancestor chain, so descendant selectors cannot leak styles.
+#[derive(Clone, Debug, Hash, Eq, PartialEq)]
+struct StyleCacheKey {
+    kind: String,
+    id: Option<String>,
+    classes: Option<String>,
+    inherited: Vec<(String, String)>,
+    ancestors: Vec<(String, Option<String>, Option<String>)>,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct StyleSheet {
     rules: Vec<Rule>,
     palette: Option<ThemePalette>,
     uses_palette: bool,
     reading_direction: ReadingDirection,
+    resolved: RefCell<HashMap<StyleCacheKey, ControlStyle>>,
 }
 
 impl StyleSheet {
@@ -893,6 +929,7 @@ impl StyleSheet {
             palette: Some(palette),
             uses_palette: source.contains("--nickel-"),
             reading_direction: ReadingDirection::LeftToRight,
+            resolved: RefCell::default(),
         };
         sheet.validate()?;
         Ok(sheet)
@@ -905,6 +942,9 @@ impl StyleSheet {
     pub fn set_reading_direction(&mut self, direction: ReadingDirection) -> bool {
         let changed = self.reading_direction != direction;
         self.reading_direction = direction;
+        if changed {
+            self.resolved.get_mut().clear();
+        }
         changed
     }
 
@@ -913,6 +953,7 @@ impl StyleSheet {
             return Ok(false);
         }
         self.palette = Some(palette);
+        self.resolved.get_mut().clear();
         Ok(self.uses_palette)
     }
 
@@ -993,6 +1034,21 @@ impl StyleSheet {
         inherited: &HashMap<String, String>,
         ancestors: &[(String, Option<String>, Option<String>)],
     ) -> ControlStyle {
+        let mut variables = inherited
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect::<Vec<_>>();
+        variables.sort_unstable();
+        let key = StyleCacheKey {
+            kind: kind.into(),
+            id: id.map(str::to_owned),
+            classes: class_name.map(str::to_owned),
+            inherited: variables,
+            ancestors: ancestors.to_vec(),
+        };
+        if let Some(style) = self.resolved.borrow().get(&key) {
+            return style.clone();
+        }
         let mut style = ControlStyle::default();
         style.ancestors = ancestors.to_vec();
         style.ancestors.push((
@@ -1051,6 +1107,11 @@ impl StyleSheet {
                     .map(|value| (name.clone(), value))
             })
             .collect();
+        let mut cache = self.resolved.borrow_mut();
+        if cache.len() >= 256 {
+            cache.clear();
+        }
+        cache.insert(key, style.clone());
         style
     }
 

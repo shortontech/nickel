@@ -33,6 +33,8 @@ const KWALLET_PAM_SOCKET: &str = "PAM_KWALLET5_LOGIN";
 const KWALLET_PAM_HELPER: &str = "/usr/share/libpam-kwallet-common/pam_kwallet_init";
 
 pub fn hand_off_login_credentials() {
+    let started = std::time::Instant::now();
+    tracing::info!("starting KWallet PAM handoff");
     match hand_off_kwallet_pam_credentials(
         Path::new(KWALLET_PAM_HELPER),
         std::env::var_os(KWALLET_PAM_SOCKET).as_deref(),
@@ -44,6 +46,10 @@ pub fn hand_off_login_credentials() {
         Ok(Some(status)) => tracing::info!(?status, "KWallet PAM handoff completed"),
         Ok(None) => tracing::info!("KWallet PAM handoff was not present"),
     }
+    tracing::info!(
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "login credential handoff finished"
+    );
 }
 
 fn hand_off_kwallet_pam_credentials(

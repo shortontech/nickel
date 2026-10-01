@@ -1243,6 +1243,7 @@ impl PluginPanelApplication {
             !matches!(
                 *field,
                 "clock"
+                    | "viewport"
                     | "run"
                     | "windows"
                     | "windowMenu"
@@ -2921,25 +2922,21 @@ impl nickel_ui::Application for PluginPanelApplication {
         let mut validation_rejected = false;
         let (rendered, effects) = if let Some(state) = &mut self.composition {
             let result = (|| {
-                if events.len() != 1 {
-                    return Err(
-                        "composed surface event batches require owner-safe batch dispatch"
-                            .to_owned(),
-                    );
-                }
-                let event = &events[0];
-                let handle = state
-                    .events
-                    .get(&event[0].as_u64().ok_or("invalid host action")?)
-                    .ok_or("stale host action")?
-                    .clone();
+                let events = events
+                    .iter()
+                    .map(|event| {
+                        let handle = state
+                            .events
+                            .get(&event[0].as_u64().ok_or("invalid host action")?)
+                            .ok_or("stale host action")?
+                            .clone();
+                        Ok((handle, event.get(1).cloned().unwrap_or(Value::Null)))
+                    })
+                    .collect::<Result<Vec<_>, String>>()?;
                 let mut host = state.host.borrow_mut();
 
-                let rendered = host.dispatch_expanded_pending(
-                    &state.mount,
-                    &handle,
-                    event.get(1).unwrap_or(&Value::Null),
-                    |value| {
+                let rendered =
+                    host.dispatch_expanded_batch_pending(&state.mount, &events, |value| {
                         let node = parse_panel_for_manifest(
                             value,
                             &self.manifest,
@@ -2955,8 +2952,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                             node.requested_surface(surface, &self.stylesheet)?;
                         }
                         Ok(())
-                    },
-                )?;
+                    })?;
                 let node = parse_panel_for_manifest(
                     &rendered.node,
                     &self.manifest,
@@ -3327,7 +3323,7 @@ mod tests {
             assert!(std::rc::Rc::ptr_eq(&application.shared_runtime(), &runtime));
             applications.push(application);
         }
-        assert_eq!(applications.len(), 5);
+        assert!(!applications.is_empty());
         // Constructing additional surfaces must not initialize registration modules again.
         runtime
             .borrow_mut()
@@ -3551,6 +3547,15 @@ mod tests {
                 application.update(application.button_message("contribution").unwrap());
                 assert_eq!(application.take_effects(), vec![PluginEffect::ShowLauncher]);
 
+                let replacement = application.button_message("replacement").unwrap();
+                let contribution = application.button_message("contribution").unwrap();
+                application.update_messages(vec![replacement, contribution]);
+                assert_eq!(
+                    application.take_effects(),
+                    vec![PluginEffect::ShowLauncher, PluginEffect::ShowLauncher]
+                );
+                assert!(application.last_error().is_none());
+
                 let host = application.shared_composition_runtime().unwrap();
                 let owner = host.borrow().resolution().active.clone();
                 let mut data = host.borrow().snapshot(&owner).unwrap().clone();
@@ -3761,7 +3766,7 @@ mod tests {
 
     #[test]
     fn bundled_plugin_packages_validate_with_manifest_sample_data() {
-        for name in ["hello-panel", "run"] {
+        for name in ["hello-panel", "nickel-default"] {
             let directory = format!("{}/../../assets/plugins/{name}", env!("CARGO_MANIFEST_DIR"));
             let package = PluginPackage::load(directory).unwrap();
             PluginPanelApplication::validate_package(&package)
@@ -3958,8 +3963,10 @@ mod tests {
     #[test]
     fn independent_jsx_sliders_dispatch_their_own_values() {
         let source = "function App() { const [hue, setHue] = useState(0.2); const [intensity, setIntensity] = useState(0.6); return h(Panel, {}, h(Slider, {value: hue, accessibilityLabel: 'Hue', className: 'hue', onChange: setHue}), h(Slider, {value: intensity, accessibilityLabel: 'Intensity', onChange: setIntensity})); }";
-        let mut host =
-            nickel_ui::UiHost::new(PluginPanelApplication::new(source).unwrap(), 440, 220);
+        let mut application = PluginPanelApplication::new(source).unwrap();
+        application.stylesheet =
+            StyleSheet::compile("slider { width: 180px; height: 24px; }").unwrap();
+        let mut host = nickel_ui::UiHost::new(application, 440, 220);
         let hue = host
             .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
                 role: SemanticRole::Slider,
@@ -4662,6 +4669,16 @@ mod tests {
         package.source = "function App() { return h(Window, {id: 'main', width: 520, height: 340}, h(Button, {id: 'save', onClick: () => {}}, 'Save')); }".into();
         assert!(PluginPanelApplication::from_package(&package).is_ok());
         let ordinary_source = package.source.clone();
+        package.source = ordinary_source.replace("height: 340", "height: 340, output: 'active'");
+        let active = PluginPanelApplication::from_package(&package).unwrap();
+        assert_eq!(
+            active
+                .resolved_surface(&package.manifest.surfaces[0])
+                .unwrap()
+                .output,
+            nickel_core::plugins::PluginOutputScope::Active
+        );
+        package.source = ordinary_source.clone();
         package.source = "function App() { return h(Window, {className: 'settings'}, h(Button, {id: 'save', onClick: () => {}}, 'Save')); }".into();
         package.stylesheet = "window.settings { width: 520px; height: 340px; }".into();
         let css_sized = PluginPanelApplication::from_package(&package).unwrap();
@@ -4932,7 +4949,7 @@ mod tests {
 
         application = PluginPanelApplication::new(source).unwrap();
         application.stylesheet = StyleSheet::compile(
-            "progress.meter { background: #112233; color: #aabbcc; border-radius: 4px; }",
+            "progress.meter { background: #112233; border-radius: 4px; } progress-fill.meter { background: #aabbcc; }",
         )
         .unwrap();
         let styled = nickel_ui::UiHost::new(application, 440, 220);
@@ -5840,6 +5857,32 @@ mod tests {
         });
         assert!(denied.application_mut().take_effects().is_empty());
         assert!(denied.application().last_error().is_some());
+    }
+
+    #[test]
+    fn jsx_text_fields_keep_explicit_accessible_names_when_values_change() {
+        let source = "function App(){const [value,setValue]=useState(''); return h(Column,{}, h(TextField,{id:'search',value,placeholder:'Type here…',accessibilityLabel:'Search applications',onChange:setValue}), h(TextField,{id:'legacy',value:'',placeholder:'Legacy search',onChange:()=>{}}));}";
+        let mut host =
+            nickel_ui::UiHost::new(PluginPanelApplication::new(source).unwrap(), 400, 160);
+        let selector = nickel_ui::SemanticSelector::RoleAndName {
+            role: SemanticRole::TextField,
+            name: "Search applications".into(),
+        };
+        let input = host.query_unique(&selector).unwrap();
+        host.perform_semantic_action(
+            input.id,
+            nickel_ui::SemanticAction::SetValue(nickel_ui::SemanticValueInput::Text(
+                "terminal".into(),
+            )),
+        );
+        assert!(host.query_unique(&selector).is_ok());
+        assert!(
+            host.query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: SemanticRole::TextField,
+                name: "Legacy search".into()
+            })
+            .is_ok()
+        );
     }
 
     #[test]

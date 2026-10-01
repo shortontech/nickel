@@ -736,7 +736,7 @@ function h(kind, props, ...children) {
         'aria-label': props?.['aria-label'], 'aria-checked': props?.['aria-checked'],
         'aria-selected': props?.['aria-selected'],
         state: props?.state, disabled: props?.disabled, icon: props?.icon,
-        showLabel: props?.showLabel, contextAction, dragAction, dropAction, focusAction, blurAction,
+        description: props?.description, showLabel: props?.showLabel, iconSize: props?.iconSize, iconPlacement: props?.iconPlacement, contextAction, dragAction, dropAction, focusAction, blurAction,
         selectAction, moveAction, fileAction, closeAction,
         escapeAction, submitAction,
         value: props?.value, placeholder: props?.placeholder, secure: props?.secure, autoFocus: props?.autoFocus,

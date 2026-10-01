@@ -13,9 +13,10 @@ use super::{
     output_rescue_revision_is_current, pending_launch_window_disposition,
     placement_restore_is_current, prepare_shell_behavior_update, preview_mapping_has_exact_size,
     protocol_preview_from_cached, record_preview_capture_attempt, restored_drag_content_geometry,
-    retain_live_idle_inhibitors, retain_superseded_xdg_settlement, retire_displaced_window,
-    retire_pointer_surface, retire_shell_surface, reuse_preview_pixels, shell_behavior_value,
-    shell_registration_is_active, shell_registration_rejection, shell_registration_role_changed,
+    retain_launcher_invocation_output, retain_live_idle_inhibitors,
+    retain_superseded_xdg_settlement, retire_displaced_window, retire_pointer_surface,
+    retire_shell_surface, reuse_preview_pixels, shell_behavior_value, shell_registration_is_active,
+    shell_registration_rejection, shell_registration_role_changed,
     shell_role_accepts_ordinary_focus, test_control_may_invoke, x11_fullscreen_restore_geometry,
     xdg_configure_extends_existing_request, xdg_configure_matches_existing_desired,
     xdg_settlement_requires_resize_cleanup,
@@ -7062,6 +7063,17 @@ fn internal_launcher_owns_keyboard_until_it_is_hidden() {
 
     assert!(session.toggle_internal_launcher());
     assert_eq!(session.internal_ui.focused(), Some(application));
+}
+
+#[test]
+fn explicit_launcher_output_wins_over_the_visibility_fallback() {
+    let mut output = Some("left".into());
+    retain_launcher_invocation_output(&mut output, Some("inactive".into()));
+    assert_eq!(output.as_deref(), Some("left"));
+
+    let mut output = None;
+    retain_launcher_invocation_output(&mut output, Some("fallback".into()));
+    assert_eq!(output.as_deref(), Some("fallback"));
 }
 
 #[test]

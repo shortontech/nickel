@@ -195,7 +195,9 @@ Supported declarations are `padding`, `margin`, `border` (solid only),
 (pixel lengths), `background` or `background-color`, `color`, `gap`, `width`,
 `height`, `min-width`, `max-width`, `min-height`, `max-height`, `display`,
 `flex-direction`, `flex`, `flex-grow`, `flex-shrink`, `flex-basis`, `align-items`,
-`justify-content`, and `grid-template-columns`. Generic `<div>` defaults to a
+`justify-content`, `text-align` (`start`, `center`, or `end`), and
+`grid-template-columns`. Text alignment inherits through containers.
+Generic `<div>` defaults to a
 vertical block layout; `display: flex` defaults to a row, and `display: grid`
 uses Nickel's native grid. Grid tracks support pixels, fractions, `auto`,
 bounded `repeat()`, and `minmax()`. Lengths support pixels, percentages, `auto`,
@@ -207,6 +209,19 @@ The JSX `width` and `height` props remain available. Root component layout uses
 ordinary CSS width, height, percentages, and flex sizing. When the host supplies
 a right to left reading direction, rows, horizontal flex layouts, and grids
 mirror their visual child order. Text and artwork retain their content direction.
+
+`Button` accepts an integer `iconSize` from 8 through 128 logical pixels; the
+default is 32. `iconPlacement="top"` places the icon above its visible label
+inside one focusable hit area; the default is `"left"`. An optional `description` (up to 4096 bytes) adds a second text
+line inside the same button hit area; style it with `text.button-description`.
+`TextField` accepts `aria-label` or `accessibilityLabel` for its
+accessible name, falling back to its placeholder when neither is supplied.
+
+Compositor-owned package scenes receive `nickel.data.viewport` with the current
+surface `width` and `height`, output name, and the output work area's
+`availableWidth` and `availableHeight` in logical pixels. Available dimensions
+can be null when the output is unknown. Components can use these bounds to adapt
+their requested size and layout when moving between outputs.
 
 ### Inherited variables and semantic defaults
 

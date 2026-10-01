@@ -124,7 +124,7 @@ pub(crate) use ui::PaintCommand;
 /// Renderer-facing command stream. Application UI should use declarative
 /// components or [`CustomPaint`]; platform presenters consume this module.
 pub mod backend {
-    pub use crate::ui::{PaintCommand, rounded_border_spans};
+    pub use crate::ui::{PaintCommand, rounded_border_spans, rounded_coverage_spans};
 
     use std::{convert::Infallible, sync::Arc};
 

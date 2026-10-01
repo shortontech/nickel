@@ -306,7 +306,15 @@ impl InternalShellCoordinator {
                 if taskbar && (!self.bar_on_all_displays && index != 0) {
                     continue;
                 }
-                if surface.output != nickel_core::plugins::PluginOutputScope::All && index != 0 {
+                let output_matches = match surface.output {
+                    nickel_core::plugins::PluginOutputScope::All => true,
+                    nickel_core::plugins::PluginOutputScope::Primary => index == 0,
+                    nickel_core::plugins::PluginOutputScope::Active => self
+                        .shell
+                        .active_plugin_output()
+                        .is_some_and(|active| active == output.name),
+                };
+                if !output_matches {
                     continue;
                 }
                 let size = (
@@ -674,6 +682,21 @@ impl InternalShellCoordinator {
             );
         }
         Some(())
+    }
+
+    pub(crate) fn take_pointer_paint_scene(
+        &mut self,
+        id: InternalSurfaceId,
+    ) -> Option<Vec<PaintCommand>> {
+        let surface = self.entries.iter_mut().find(|surface| surface.id == id)?;
+        let commands = self
+            .shell
+            .take_plugin_pointer_paint(surface.plugin.as_ref()?)?;
+        surface.scene_generation = surface.scene_generation.saturating_add(1);
+        surface.commands_copied = surface
+            .commands_copied
+            .saturating_add(commands.len() as u64);
+        Some(commands)
     }
 
     pub fn scene(&mut self, id: InternalSurfaceId) -> Option<Vec<PaintCommand>> {
@@ -1502,8 +1525,14 @@ impl InternalShellCoordinator {
                         if (taskbar_key.as_ref() == Some(&key)
                             && !self.bar_on_all_displays
                             && index != 0)
-                            || (surface.output != nickel_core::plugins::PluginOutputScope::All
-                                && index != 0)
+                            || match surface.output {
+                                nickel_core::plugins::PluginOutputScope::All => false,
+                                nickel_core::plugins::PluginOutputScope::Primary => index != 0,
+                                nickel_core::plugins::PluginOutputScope::Active => self
+                                    .shell
+                                    .active_plugin_output()
+                                    .is_none_or(|active| active != output),
+                            }
                         {
                             None
                         } else {

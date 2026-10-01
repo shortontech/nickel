@@ -2,6 +2,11 @@ column.appearance-page {
     width: 100%;
     gap: 16px;
 }
+column.appearance-page text {
+    color: var(--nickel-text);
+    font-size: var(--nickel-font-size);
+    line-height: var(--nickel-line-height);
+}
 column.appearance-card {
     width: 100%;
     gap: 12px;
@@ -19,6 +24,16 @@ row.appearance-choices, row.appearance-swatches {
 }
 .appearance-page slider {
     width: 100%;
+}
+column.appearance-page button {
+    min-height: 36px;
+    padding: 8px 12px;
+    background: var(--nickel-control);
+    color: var(--nickel-text);
+    border: 1px solid var(--nickel-border);
+    border-radius: var(--nickel-radius-control);
+    font-size: var(--nickel-font-size);
+    line-height: var(--nickel-line-height);
 }
 button.appearance-choice.selected {
     border-color: var(--nickel-accent);

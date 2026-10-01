@@ -452,27 +452,6 @@ const IMAGE_CACHE_BYTE_LIMIT: usize = 32 * 1024 * 1024;
 const TEXT_CACHE_ENTRY_LIMIT: usize = 1_024;
 const TEXT_CACHE_BYTE_LIMIT: usize = 8 * 1024 * 1024;
 
-fn estimated_rounded_elements(rect: nickel_ui::Rect, radius: f32, top_only: bool) -> usize {
-    let rows = rect.size.height.ceil().max(1.0) as usize;
-    let radius = radius
-        .max(0.0)
-        .min(rect.size.width / 2.0)
-        .min(rect.size.height / 2.0);
-    if radius < 0.5 {
-        return 1;
-    }
-    let corner_rows = radius.ceil() as usize;
-    let corner_rows = if top_only {
-        corner_rows
-    } else {
-        corner_rows.saturating_mul(2)
-    };
-    // Corner strips plus the coalesced rectangular middle. This is a
-    // conservative upper bound because pixel-centre sampling can turn an
-    // edge row into part of the middle.
-    rows.min(corner_rows.saturating_add(1))
-}
-
 struct SharedTextureCaches {
     images: Rc<RefCell<TextureCache<ImageTextureKey>>>,
     text: Rc<RefCell<TextureCache<TextTextureKey>>>,
@@ -582,6 +561,8 @@ impl SmithayFrameRenderer {
         })
     }
 
+    // SolidColorRenderElement uses integer logical geometry. Sample coverage
+    // on that grid so fractional spans cannot round onto each other and blend twice.
     fn estimated_gpu_elements(commands: &[PaintCommand]) -> usize {
         commands.iter().fold(0_usize, |total, command| {
             let elements = match command {
@@ -590,19 +571,40 @@ impl SmithayFrameRenderer {
                 | PaintCommand::Image { .. }
                 | PaintCommand::Text { .. }
                 | PaintCommand::StyledText { .. } => 1,
-                PaintCommand::TopRoundedFill { rect, radius, .. } => {
-                    estimated_rounded_elements(*rect, *radius, true)
-                }
-                PaintCommand::RoundedFill { rect, radius, .. } => {
-                    estimated_rounded_elements(*rect, *radius, false)
-                }
+                PaintCommand::TopRoundedFill {
+                    rect,
+                    color,
+                    radius,
+                } => nickel_ui::backend::rounded_coverage_spans(
+                    *rect, *color, *radius, None, true, 1.0,
+                )
+                .len(),
+                PaintCommand::RoundedFill {
+                    rect,
+                    color,
+                    radius,
+                } => nickel_ui::backend::rounded_coverage_spans(
+                    *rect, *color, *radius, None, false, 1.0,
+                )
+                .len(),
                 PaintCommand::Gradient { rect, gradient } => match gradient.axis {
                     GradientAxis::Horizontal => rect.size.width.ceil().max(1.0) as usize,
                     GradientAxis::Vertical => rect.size.height.ceil().max(1.0) as usize,
                 },
-                PaintCommand::RoundedStroke { rect, .. } => {
-                    (rect.size.height.ceil().max(0.0).min(16384.0) as usize).saturating_mul(2)
-                }
+                PaintCommand::RoundedStroke {
+                    rect,
+                    color,
+                    width,
+                    radius,
+                } => nickel_ui::backend::rounded_coverage_spans(
+                    *rect,
+                    *color,
+                    *radius,
+                    Some(*width),
+                    false,
+                    1.0,
+                )
+                .len(),
                 PaintCommand::Stroke { .. } | PaintCommand::OverlayStroke { .. } => 4,
                 PaintCommand::PushClip(_) | PaintCommand::PopClip => 0,
             };
@@ -622,78 +624,6 @@ impl SmithayFrameRenderer {
             rect,
             SolidColorBuffer::new(size, color32f(color)),
         ));
-    }
-
-    fn push_rounded_solid(
-        &mut self,
-        rect: nickel_ui::Rect,
-        color: u32,
-        radius: f32,
-        top_only: bool,
-        clip: nickel_ui::Rect,
-    ) {
-        let radius = radius
-            .max(0.0)
-            .min(rect.size.width / 2.0)
-            .min(rect.size.height / 2.0);
-        if radius < 0.5 {
-            self.push_solid(rect, color, clip);
-            return;
-        }
-        // Only corner rows need individual strips. Coalesce the rectangular
-        // middle into one element so a large rounded launcher background does
-        // not exceed the GPU element budget merely because it is tall. That
-        // otherwise activates two full-output software fallback buffers and
-        // leaves the process allocator's resident high-water mark behind when
-        // the transient surface closes.
-        let rows = rect.size.height.ceil().max(1.0) as u32;
-        let mut middle_start = None::<f32>;
-        let mut middle_end = 0.0_f32;
-        for row in 0..rows {
-            let y = row as f32;
-            let height = (rect.size.height - y).clamp(0.0, 1.0);
-            if height == 0.0 {
-                continue;
-            }
-            let sample_y = y + height / 2.0;
-            let corner_y = if sample_y < radius {
-                Some(radius - sample_y)
-            } else if !top_only && sample_y > rect.size.height - radius {
-                Some(sample_y - (rect.size.height - radius))
-            } else {
-                None
-            };
-            let inset = corner_y
-                .map(|dy| radius - (radius * radius - dy * dy).max(0.0).sqrt())
-                .unwrap_or(0.0);
-            if inset == 0.0 {
-                middle_start.get_or_insert(y);
-                middle_end = y + height;
-                continue;
-            }
-            self.push_solid(
-                nickel_ui::Rect::new(
-                    rect.origin.x + inset,
-                    rect.origin.y + y,
-                    (rect.size.width - inset * 2.0).max(0.0),
-                    height,
-                ),
-                color,
-                clip,
-            );
-        }
-        if let Some(y) = middle_start {
-            self.push_solid(
-                nickel_ui::Rect::new(
-                    rect.origin.x,
-                    rect.origin.y + y,
-                    rect.size.width,
-                    middle_end - y,
-                ),
-                color,
-                clip,
-            );
-        }
     }
 
     fn push_gradient(
@@ -757,12 +687,24 @@ impl SmithayFrameRenderer {
                     rect,
                     color,
                     radius,
-                } => self.push_rounded_solid(*rect, *color, *radius, true, clip),
+                } => {
+                    for (span, shaded) in nickel_ui::backend::rounded_coverage_spans(
+                        *rect, *color, *radius, None, true, 1.0,
+                    ) {
+                        self.push_solid(span, shaded, clip);
+                    }
+                }
                 PaintCommand::RoundedFill {
                     rect,
                     color,
                     radius,
-                } => self.push_rounded_solid(*rect, *color, *radius, false, clip),
+                } => {
+                    for (span, shaded) in nickel_ui::backend::rounded_coverage_spans(
+                        *rect, *color, *radius, None, false, 1.0,
+                    ) {
+                        self.push_solid(span, shaded, clip);
+                    }
+                }
                 PaintCommand::Gradient { rect, gradient } => {
                     self.push_gradient(*rect, *gradient, clip)
                 }
@@ -772,8 +714,15 @@ impl SmithayFrameRenderer {
                     width,
                     radius,
                 } => {
-                    for span in nickel_ui::backend::rounded_border_spans(*rect, *width, *radius) {
-                        self.push_solid(span, *color, clip);
+                    for (span, shaded) in nickel_ui::backend::rounded_coverage_spans(
+                        *rect,
+                        *color,
+                        *radius,
+                        Some(*width),
+                        false,
+                        1.0,
+                    ) {
+                        self.push_solid(span, shaded, clip);
                     }
                 }
                 PaintCommand::Stroke { rect, color, width }
@@ -1513,11 +1462,14 @@ fn color32f(color: u32) -> Color32F {
     } else {
         (color >> 24) & 0xff
     };
+    // Smithay consumes premultiplied RGBA. Coverage spans retain straight RGB,
+    // so their partial alpha must attenuate the color channels here as well.
+    let alpha = alpha as f32 / 255.0;
     Color32F::new(
-        ((color >> 16) & 0xff) as f32 / 255.0,
-        ((color >> 8) & 0xff) as f32 / 255.0,
-        (color & 0xff) as f32 / 255.0,
-        alpha as f32 / 255.0,
+        ((color >> 16) & 0xff) as f32 / 255.0 * alpha,
+        ((color >> 8) & 0xff) as f32 / 255.0 * alpha,
+        (color & 0xff) as f32 / 255.0 * alpha,
+        alpha,
     )
 }
 
@@ -4254,7 +4206,9 @@ mod tests {
 
         assert_eq!(renderer.mode(), InternalUiPresentationMode::GpuSolid);
         assert!(renderer.raster.is_none());
-        assert_eq!(renderer.primitives.len(), 17);
+        // Antialiased corner rows have coverage spans on each edge; the
+        // rectangular middle must still be coalesced rather than row-expanded.
+        assert!(renderer.primitives.len() <= 128);
         let GpuPrimitive::Solid(first, _) = &renderer.primitives[0] else {
             panic!("rounded row should be a solid")
         };

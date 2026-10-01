@@ -88,7 +88,7 @@ export function Taskbar(props) {
     return <FixedWindow id="taskbar" output="all" edge="bottom"
         reserveWorkArea={true} className="taskbar">
         <div className="taskbar-content">
-            <Button id="taskbar-launcher" className="launcher-button" icon="logo" accessibilityLabel="Open Nickel Start"
+            <Button id="taskbar-launcher" className="launcher-button" icon="nickel-logo" showLabel={true} accessibilityLabel="Open Nickel Start"
                 onClick={() => nickel.surfaces.show("launcher")}>Nickel</Button>
             {items.map(item => <Task key={item.id} item={item} />)}
             {contributions.map(entry => <entry.component key={entry.key} />)}

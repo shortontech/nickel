@@ -14,11 +14,16 @@ use serde_json::{Value, json};
 
 const MAX_TARGETS: usize = 128;
 const MAX_HANDLERS: usize = 128;
-type CachedCatalog = Option<(Instant, Value)>;
+#[derive(Default)]
+struct CachedCatalog {
+    observed: Option<(Instant, Value)>,
+    refreshing: bool,
+    generation: u64,
+}
 
 fn catalog_cache() -> &'static Mutex<CachedCatalog> {
     static CACHE: OnceLock<Mutex<CachedCatalog>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(None))
+    CACHE.get_or_init(|| Mutex::new(CachedCatalog::default()))
 }
 
 fn valid_identity(id: &str) -> bool {
@@ -61,26 +66,36 @@ fn catalog(revision: u64, snapshots: &[AssociationSnapshot], truncated: bool) ->
 }
 
 pub(crate) fn snapshot(result: Option<&Value>) -> Value {
-    // Native association inventory may involve process or registry queries.
-    // Sharing a short observation cache avoids doing that work per surface render.
+    // Native inventory can launch many bounded subprocesses. Never perform
+    // that work on the compositor thread, or hold the cache lock while it runs.
     let mut cache = catalog_cache()
         .lock()
         .unwrap_or_else(|error| error.into_inner());
-    let mut value = if let Some((_, value)) = cache
+    let stale = cache
+        .observed
         .as_ref()
-        .filter(|(observed, _)| observed.elapsed() < Duration::from_secs(2))
-    {
-        value.clone()
-    } else {
-        let value = match association_service().inspect_available_bounded_versioned(MAX_TARGETS) {
-            Ok((revision, snapshots, truncated)) => catalog(revision, &snapshots, truncated),
-            Err(error) => {
-                json!({"available":false,"reason":text(&error.to_string()),"targets":[],"operations":{"setDefault":false,"openSystemSettings":true}})
+        .is_none_or(|(at, _)| at.elapsed() >= Duration::from_secs(2));
+    if stale && !cache.refreshing {
+        cache.refreshing = true;
+        let generation = cache.generation;
+        if std::thread::Builder::new().name("nickel-associations".into()).spawn(move || {
+            let value = match association_service().inspect_available_bounded_versioned(MAX_TARGETS) {
+                Ok((revision, snapshots, truncated)) => catalog(revision, &snapshots, truncated),
+                Err(error) => json!({"available":false,"reason":text(&error.to_string()),"targets":[],"operations":{"setDefault":false,"openSystemSettings":true}}),
+            };
+            let mut cache = catalog_cache().lock().unwrap_or_else(|error| error.into_inner());
+            cache.refreshing = false;
+            // An action may have invalidated this observation while it ran.
+            if cache.generation == generation {
+                cache.observed = Some((Instant::now(), value));
             }
-        };
-        *cache = Some((Instant::now(), value.clone()));
-        value
-    };
+        }).is_err() {
+            cache.refreshing = false;
+            cache.observed = Some((Instant::now(), json!({"available":false,"reason":"Association inventory worker is unavailable.","targets":[],"operations":{"setDefault":false,"openSystemSettings":true}})));
+        }
+    }
+    let mut value = cache.observed.as_ref().map(|(_, value)| value.clone()).unwrap_or_else(||
+        json!({"available":false,"loading":true,"reason":"Loading default applications…","targets":[],"operations":{"setDefault":false,"openSystemSettings":true}}));
     value["lastResult"] = result.cloned().unwrap_or(Value::Null);
     value
 }
@@ -228,9 +243,11 @@ impl AssociationsEffect {
 
     pub(crate) fn execute_native(&self) -> Result<Value, String> {
         let result = self.execute(&NativeApplicationAssociations::shared());
-        *catalog_cache()
+        let mut cache = catalog_cache()
             .lock()
-            .unwrap_or_else(|error| error.into_inner()) = None;
+            .unwrap_or_else(|error| error.into_inner());
+        cache.observed = None;
+        cache.generation = cache.generation.wrapping_add(1);
         result
     }
 }

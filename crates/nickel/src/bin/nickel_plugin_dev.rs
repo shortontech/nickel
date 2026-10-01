@@ -557,6 +557,32 @@ mod platform {
         let config = tempfile::tempdir()
             .map_err(|error| format!("could not create isolated plugin profile: {error}"))?;
         stage_all(&packages, &directories, config.path())?;
+        // Preview the default shell with a snapshot of the user's pins/recents.
+        // Subsequent preview edits remain confined to this temporary profile.
+        if packages
+            .iter()
+            .any(|package| package.manifest.id == "nickel-default")
+        {
+            match nickel_core::launcher_preferences::LauncherPreferences::load_default() {
+                Ok(preferences) => {
+                    let directory = staged_config_directory(config.path());
+                    std::fs::create_dir_all(&directory).map_err(|error| {
+                        format!("could not create preview preferences directory: {error}")
+                    })?;
+                    preferences
+                        .save(directory.join("launcher-preferences"))
+                        .map_err(|error| {
+                            format!("could not stage launcher preferences: {error}")
+                        })?;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(format!(
+                        "could not read launcher preferences for preview: {error}"
+                    ));
+                }
+            }
+        }
         let mut current_fingerprints = packages
             .iter()
             .zip(&directories)
@@ -1026,7 +1052,7 @@ mod platform {
                 std::fs::write(directory.path().join("main.jsx"), "import {Launcher} from './Launcher.js'; export default Launcher;").unwrap();
                 let (source, modules) = super::super::compile_jsx_modules(directory.path(), "main.js", Path::new("main.jsx")).unwrap();
                 let graph = JsxModuleGraph::new("main.js", modules.iter().map(|module|ModuleSource {path:&module.path,source:&module.source})).unwrap();
-                let apps = (0..14).map(|index|serde_json::json!({"id":format!("application-{index}"),"name":format!("Editor {index}"),"icon":format!("application:icon-{index}"),"pinned":false,"pinOrder":null,"recentOrder":null,"kind":"application"})).collect::<Vec<_>>();
+                let apps = (0..14).map(|index|serde_json::json!({"id":format!("application-{index}"),"name":format!("Editor {index}"),"icon":format!("application:icon-{index}"),"pinned":true,"pinOrder":index,"recentOrder":null,"kind":"application"})).collect::<Vec<_>>();
                 let mut data = serde_json::json!({"applications":apps,"applicationSearch":{"available":true,"query":"","results":[],"total":0}});
                 let mut runtime = JsxRuntime::new_modules(&graph, Some(&data.to_string())).unwrap();
                 fn action(node: &serde_json::Value, id: &str) -> Option<u64> {
@@ -1059,7 +1085,210 @@ mod platform {
                 let mut app = PluginPanelApplication::from_package(&package).unwrap();
                 app.sync_data(&data).unwrap();
                 let host = nickel_ui::UiHost::new(app,620,548);
-                assert!(host.query_unique(&nickel_ui::SemanticSelector::RoleAndName {role:nickel_ui::SemanticRole::Button,name:"Pinned & recent".into()}).is_ok());
+                assert!(host.query_unique(&nickel_ui::SemanticSelector::RoleAndName {role:nickel_ui::SemanticRole::Button,name:"All apps  ›".into()}).is_ok());
+            }).unwrap().join().unwrap();
+        }
+
+        #[test]
+        fn launcher_reference_layout_selection_categories_and_rasters() {
+            std::thread::Builder::new().stack_size(16 * 1024 * 1024).spawn(|| {
+                use nickel_ui::{ActionKind, SemanticAction, SemanticRole, SemanticSelector, SemanticValueInput, UiHost};
+                use nickel_shell::plugin_panel::PluginEffect;
+                let enter = |order| nickel_input::InputEvent::Key(nickel_input::KeyEvent {
+                    device: nickel_input::DeviceId(1),
+                    order: nickel_input::EventOrder(order),
+                    physical: nickel_input::PhysicalKey::Code(nickel_input::KeyCode::Enter),
+                    logical: nickel_input::LogicalKey::Named(nickel_input::NamedKey::Enter),
+                    location: nickel_input::KeyLocation::Standard,
+                    edge: nickel_input::KeyEdge::Pressed,
+                    repeat: false,
+                    modifiers: nickel_input::ModifierState::default(),
+                });
+                let directory = tempfile::tempdir().unwrap();
+                std::fs::create_dir(directory.path().join("styles")).unwrap();
+                std::fs::write(directory.path().join("Launcher.jsx"), include_str!("../../../../assets/plugins/nickel-default/src/Launcher.jsx")).unwrap();
+                std::fs::write(directory.path().join("styles/launcher.css"), include_str!("../../../../assets/plugins/nickel-default/src/styles/launcher.css")).unwrap();
+                std::fs::write(directory.path().join("main.jsx"), "import {Launcher} from './Launcher.js'; export default Launcher;").unwrap();
+                let (source, modules) = super::super::compile_jsx_modules(directory.path(), "main.js", Path::new("main.jsx")).unwrap();
+                let mut manifest = PluginManifest::from_json(include_str!("../../../../assets/plugins/nickel-default/plugin.json")).unwrap();
+                manifest.entry = "main.js".into();
+                manifest.composition = None;
+                manifest.surfaces.retain(|surface| surface.id == "launcher");
+                let package = PluginPackage { manifest, source, modules, stylesheet: String::new(), images: Default::default() };
+                let names = ["Firefox", "Terminal", "Files", "Visual Studio Code", "Steam", "Settings", "Nickel", "Discord", "Spotify", "Obsidian", "Docker Desktop"];
+                let mut applications = names.iter().enumerate().map(|(index, name)| serde_json::json!({
+                    "id":format!("app-{index}"),"name":name,"pinned":true,"pinOrder":index,
+                    "recentOrder":if index < 5 {Some(index)} else {None},"kind":"application",
+                    "lastUsedUnixSeconds":1_700_000_000-index*600
+                })).collect::<Vec<_>>();
+                applications.push(serde_json::json!({"id":"running-only","name":"Unregistered running window","kind":"application","canLaunch":false,"canPin":false}));
+                let mut data = serde_json::json!({"applications":applications,"applicationSearch":{
+                    "available":true,"query":"term","nowUnixSeconds":1_700_000_120,"pinSaveFailed":true,
+                    "results":[{"id":"app-1","name":"Terminal","kind":"application","description":"Run commands, shells, and scripts","path":"/usr/bin/terminal","pinned":true},
+                        {"id":"windows-terminal","name":"Windows Terminal","kind":"application","description":"Modern terminal application"}],
+                    "settingsResults":[{"id":"setting:default-apps","name":"Default applications","kind":"setting","destination":"default-apps","description":"Choose your default terminal application"}],
+                    "actionResults":[{"id":"action:run","name":"Run a command","kind":"action","destination":"run","description":"Open the command dialog"}]}});
+                let mut artwork = nickel_shell::plugin_panel::PluginImages::new();
+                if let Some(directory) = std::env::var_os("NICKEL_LAUNCHER_ARTWORK") {
+                    for item in data["applications"].as_array_mut().unwrap() {
+                        let id = item["id"].as_str().unwrap().to_owned();
+                        let path = std::path::PathBuf::from(&directory).join(format!("{id}.png"));
+                        if path.is_file() {
+                            let key = format!("fixture:{id}");
+                            let image = image::open(path).unwrap().into_rgba8();
+                            artwork.insert(key.clone(), (0x4000 + artwork.len() as u16, std::sync::Arc::new(image)));
+                            item["icon"] = key.into();
+                        }
+                    }
+                    for result in data["applicationSearch"]["results"].as_array_mut().unwrap() {
+                        if let Some(image) = artwork.get("fixture:app-1").cloned() {
+                            let key = format!("fixture:{}", result["id"].as_str().unwrap());
+                            artwork.insert(key.clone(), image);
+                            result["icon"] = key.into();
+                        }
+                    }
+                }
+                let mut app = PluginPanelApplication::from_package(&package).unwrap();
+                app.sync_images(artwork);
+                app.sync_data(&data).unwrap();
+                let mut host = UiHost::new(app, 608, 628);
+                let target = |host: &UiHost<PluginPanelApplication>, role, name: &str| host.query_unique(&SemanticSelector::RoleAndName {role, name:name.into()}).unwrap_or_else(|error| panic!("missing {name}: {error:?}"));
+                let capture = |host: &UiHost<PluginPanelApplication>, name: &str, width: u32, height: u32| {
+                    if let Some(directory) = std::env::var_os("NICKEL_LAUNCHER_ARTIFACTS") {
+                        let directory = std::path::PathBuf::from(directory);
+                        std::fs::create_dir_all(&directory).unwrap();
+                        let scale = 3_u32;
+                        let raster = nickel_ui_testkit::render_host(host, width * scale, height * scale, scale as f32);
+                        image::RgbaImage::from_raw(raster.width, raster.height, raster.rgba).unwrap().save(directory.join(format!("{name}.png"))).unwrap();
+                        std::fs::write(directory.join(format!("{name}.layout.txt")), host.layout_snapshot()).unwrap();
+                        std::fs::write(directory.join(format!("{name}.paint.txt")), format!("{:#?}", host.commands())).unwrap();
+                    }
+                };
+                let firefox = host.query(&SemanticSelector::RoleAndName {role:SemanticRole::Button,name:"Firefox".into()});
+                let settings = host.query(&SemanticSelector::RoleAndName {role:SemanticRole::Button,name:"Settings".into()}).into_iter().min_by(|a,b| a.bounds.origin.y.total_cmp(&b.bounds.origin.y)).unwrap();
+                assert!(firefox.iter().any(|item| (item.bounds.origin.y-settings.bounds.origin.y).abs()<2.0), "six pins must share the first row");
+                let last_recent = host.query(&SemanticSelector::RoleAndName {role:SemanticRole::Button,name:"Steam".into()})
+                    .into_iter().max_by(|a,b| a.bounds.origin.y.total_cmp(&b.bounds.origin.y)).unwrap();
+                let footer = target(&host, SemanticRole::Button, "Local session");
+                assert!(last_recent.bounds.origin.y + last_recent.bounds.size.height <= footer.bounds.origin.y,
+                    "all five recent rows fit above the dashboard footer");
+                capture(&host, "dashboard", 608, 628);
+                let light = nickel_core::theme::ThemePalette::from_appearance(nickel_core::theme::Appearance {
+                    mode: nickel_core::theme::ThemeMode::Light,
+                    ..Default::default()
+                });
+                let dark = nickel_core::theme::ThemePalette::from_appearance(Default::default());
+                host.application_mut().sync_theme_palette(light).unwrap();
+                host.step(nickel_ui::HostBatch { application_changed:true, ..Default::default() });
+                capture(&host, "dashboard-light", 608, 628);
+                let input = target(&host, SemanticRole::TextField, "Search apps, files, settings, or commands");
+                host.perform_semantic_action(input.id, SemanticAction::SetValue(SemanticValueInput::Text("term".into())));
+                assert!(matches!(host.application_mut().take_effects().as_slice(), [PluginEffect::SearchApplications {query,..}] if query=="term"));
+                host.resize(608, 628);
+                capture(&host, "search-light", 608, 628);
+                host.application_mut().sync_theme_palette(dark).unwrap();
+                host.application_mut().sync_reading_direction(nickel_ui::ReadingDirection::RightToLeft);
+                host.step(nickel_ui::HostBatch { application_changed:true, ..Default::default() });
+                capture(&host, "search-rtl", 608, 628);
+                let rtl_category = target(&host, SemanticRole::Button, "All   4");
+                let rtl_actions = target(&host, SemanticRole::Button, "Actions   1");
+                assert!(rtl_category.bounds.origin.x > rtl_actions.bounds.origin.x, "RTL mirrors the horizontal filters");
+                host.application_mut().sync_reading_direction(nickel_ui::ReadingDirection::LeftToRight);
+                host.step(nickel_ui::HostBatch { application_changed:true, ..Default::default() });
+                capture(&host, "search", 608, 628);
+                let input = target(&host, SemanticRole::TextField, "Search apps, files, settings, or commands");
+                host.request_focus(input.id);
+                host.handle_input(&enter(1), None);
+                let enter_effects = host.application_mut().take_effects();
+                assert!(matches!(enter_effects.first(), Some(PluginEffect::LaunchApplication{id}) if id=="app-1"), "Enter in search opens the selected result: {enter_effects:?}");
+                let second = target(&host, SemanticRole::Button, "Windows Terminal");
+                host.request_focus(second.id);
+                let pin = target(&host, SemanticRole::Button, "Pin to launcher");
+                host.perform_semantic_action(pin.id, SemanticAction::Invoke(ActionKind::Activate));
+                assert!(matches!(host.application_mut().take_effects().as_slice(), [PluginEffect::ToggleApplicationPin{id}] if id=="windows-terminal"));
+                let open = target(&host, SemanticRole::Button, "Open");
+                host.perform_semantic_action(open.id, SemanticAction::Invoke(ActionKind::Activate));
+                assert!(matches!(host.application_mut().take_effects().first(), Some(PluginEffect::LaunchApplication{id}) if id=="windows-terminal"));
+                let settings_category = target(&host, SemanticRole::Button, "Settings   1");
+                host.request_focus(settings_category.id);
+                host.handle_input(&enter(2), None);
+                assert!(host.application_mut().take_effects().is_empty());
+                let open = target(&host, SemanticRole::Button, "Open");
+                host.perform_semantic_action(open.id, SemanticAction::Invoke(ActionKind::Activate));
+                assert!(matches!(host.application_mut().take_effects().first(), Some(PluginEffect::ShowSettings(Some(screen))) if screen=="default-apps"));
+                let input = target(&host, SemanticRole::TextField, "Search apps, files, settings, or commands");
+                host.perform_semantic_action(input.id, SemanticAction::SetValue(SemanticValueInput::Text(String::new())));
+                target(&host, SemanticRole::Button, "All apps  ›");
+                let mut compact_data = data.clone();
+                compact_data["viewport"] = serde_json::json!({"availableWidth":376,"availableHeight":436,"output":"small"});
+                host.application_mut().sync_data(&compact_data).unwrap();
+                host.resize(360, 420);
+                capture(&host, "dashboard-compact", 360, 420);
+                let input = target(&host, SemanticRole::TextField, "Search apps, files, settings, or commands");
+                host.perform_semantic_action(input.id, SemanticAction::SetValue(SemanticValueInput::Text("term".into())));
+                host.application_mut().take_effects();
+                let all = target(&host, SemanticRole::Button, "All   4");
+                host.perform_semantic_action(all.id, SemanticAction::Invoke(ActionKind::Activate));
+                capture(&host, "search-compact", 360, 420);
+                let item = target(&host, SemanticRole::Button, "Windows Terminal");
+                host.perform_controller_semantic_action(item.id, SemanticAction::Invoke(ActionKind::Activate));
+                assert!(matches!(host.application_mut().take_effects().first(), Some(PluginEffect::LaunchApplication{id}) if id=="windows-terminal"));
+                let more = target(&host, SemanticRole::Button, "More…");
+                host.perform_semantic_action(more.id, SemanticAction::Invoke(ActionKind::Activate));
+                assert!(host.application_mut().take_effects().is_empty());
+                capture(&host, "detail-compact", 360, 420);
+                let open = target(&host, SemanticRole::Button, "Open");
+                assert!(open.bounds.origin.x >= 0.0 && open.bounds.origin.x + open.bounds.size.width <= 360.0);
+                assert!(open.bounds.origin.y + open.bounds.size.height <= 420.0);
+                host.perform_semantic_action(open.id, SemanticAction::Invoke(ActionKind::Activate));
+                assert!(matches!(host.application_mut().take_effects().first(), Some(PluginEffect::LaunchApplication{id}) if id=="windows-terminal"));
+                let back = target(&host, SemanticRole::Button, "‹  Results");
+                host.perform_semantic_action(back.id, SemanticAction::Invoke(ActionKind::Activate));
+                target(&host, SemanticRole::Button, "Windows Terminal");
+                let item = target(&host, SemanticRole::Button, "Windows Terminal");
+                host.request_focus(item.id);
+                let more = target(&host, SemanticRole::Button, "More…");
+                host.perform_semantic_action(more.id, SemanticAction::Invoke(ActionKind::Activate));
+                host.shortcut(nickel_ui::Shortcut::Escape);
+                target(&host, SemanticRole::Button, "Windows Terminal");
+                assert!(host.application_mut().take_effects().is_empty(), "Escape closes compact details without hiding the launcher");
+                host.shortcut(nickel_ui::Shortcut::Escape);
+                target(&host, SemanticRole::Button, "All apps  ›");
+                assert!(matches!(host.application_mut().take_effects().as_slice(), [PluginEffect::SearchApplications{query,..}] if query.is_empty()));
+                let apps = target(&host, SemanticRole::Button, "All apps  ›");
+                host.perform_semantic_action(apps.id, SemanticAction::Invoke(ActionKind::Activate));
+                target(&host, SemanticRole::Button, "‹  Back");
+                assert!(host.query(&SemanticSelector::RoleAndName {role:SemanticRole::Button,name:"Unregistered running window".into()}).is_empty(),
+                    "All apps must only offer applications with a launch route");
+                host.shortcut(nickel_ui::Shortcut::Escape);
+                target(&host, SemanticRole::Button, "All apps  ›");
+                assert!(host.application_mut().take_effects().is_empty(), "Escape returns from All apps to the dashboard");
+                let pin = host.query(&SemanticSelector::RoleAndName {role:SemanticRole::Button,name:"Firefox".into()})
+                    .into_iter().min_by(|a,b| a.bounds.origin.y.total_cmp(&b.bounds.origin.y)).unwrap();
+                host.perform_semantic_action(pin.id, SemanticAction::Invoke(ActionKind::ContextMenu));
+                let retry = target(&host, SemanticRole::MenuItem, "Retry saving favorites");
+                host.perform_semantic_action(retry.id, SemanticAction::Invoke(ActionKind::Activate));
+                assert!(matches!(host.application_mut().take_effects().as_slice(), [PluginEffect::RetryApplicationPinSave]));
+                host.shortcut(nickel_ui::Shortcut::Escape);
+                assert!(matches!(host.application_mut().take_effects().as_slice(), [PluginEffect::HidePluginSurface{surface_id,..}] if surface_id=="launcher"));
+                compact_data["viewport"]["availableHeight"] = 336.into();
+                host.application_mut().sync_data(&compact_data).unwrap();
+                host.resize(360, 320);
+                let input = target(&host, SemanticRole::TextField, "Search apps, files, settings, or commands");
+                host.perform_semantic_action(input.id, SemanticAction::SetValue(SemanticValueInput::Text("term".into())));
+                host.application_mut().take_effects();
+                capture(&host, "search-short", 360, 320);
+                let item = target(&host, SemanticRole::Button, "Windows Terminal");
+                host.request_focus(item.id);
+                let more = target(&host, SemanticRole::Button, "More…");
+                host.perform_semantic_action(more.id, SemanticAction::Invoke(ActionKind::Activate));
+                let open = target(&host, SemanticRole::Button, "Open");
+                host.request_focus(open.id);
+                let open = target(&host, SemanticRole::Button, "Open");
+                assert!(open.bounds.origin.y >= 71.0 && open.bounds.origin.y + open.bounds.size.height <= 272.0,
+                    "Open remains visible in the short detail viewport: {:?}", open.bounds);
+                capture(&host, "detail-short", 360, 320);
+                assert!(host.application().last_error().is_none());
             }).unwrap().join().unwrap();
         }
 

@@ -124,10 +124,28 @@ function groupEntries(settings, pages) {
     return groups;
 }
 
+function centeredWorkAreaSize(outputs) {
+    const output = outputs.find(item => item.primary) || outputs[0];
+    const geometry = output?.geometry;
+    const workArea = output?.work_area;
+    if (!geometry || !workArea) return {width:900, height:600};
+
+    const centeredLimit = (screenSize, workStart, workSize) => Math.max(320, Math.min(
+        screenSize,
+        screenSize - 2 * workStart,
+        2 * (workStart + workSize) - screenSize
+    ));
+    const width = centeredLimit(geometry.width, workArea.x - geometry.x, workArea.width);
+    const height = centeredLimit(geometry.height, workArea.y - geometry.y, workArea.height);
+    return {width:Math.min(1100, width), height:Math.min(800, height)};
+}
+
 export function Settings() {
     const SettingsNavigation = nickel.component("shell.settings.navigation");
     const SettingControl = nickel.component("shell.settings.controls");
     const settings = readPluginSettings().settings;
+    const displays = nickel.displays.get();
+    const windowSize = centeredWorkAreaSize(displays?.outputs || []);
     const pages = [...readPluginSettingsPages().pages, ...nickel.contributions("settings.pages").map(entry => ({
         id:"contribution/" + entry.id, providerPackage:entry.provider, label:entry.id,
         group:"Extensions", component:entry.component
@@ -150,11 +168,11 @@ export function Settings() {
     const ActivePage = active && typeof active.component === "function" ? active.component : null;
     const groups = groupEntries(settings, pages);
 
-    return <Window id="settings" title="Nickel Settings" width={1100} height={800}
+    return <Window id="settings" title="Nickel Settings" width={windowSize.width} height={windowSize.height}
         className="settings-window">
         <div className="settings-shell wide">
             <div className="settings-sidebar">
-                <ScrollView id="settings-sidebar-scroll" height={736}>
+                <ScrollView id="settings-sidebar-scroll" grow={true}>
                     <SettingsNavigation groups={groups.map(group => ({...group, entries:group.entries.map(entry => ({
                         id:entry.id, providerPackage:entry.providerPackage, label:entry.label,
                         description:entry.description, group:entry.group
@@ -169,7 +187,7 @@ export function Settings() {
                         {active && active.description ? <Text className="settings-subtitle" wrap={true}>{active.description}</Text> : null}
                     </Column>
                 </Row>
-                <ScrollView id="settings-content" className="settings-content" height={704}>
+                <ScrollView id="settings-content" className="settings-content" grow={true}>
                     {!active ? <Text>No settings are registered.</Text> : null}
                     {active && active.component && !ActivePage ? <Text>Settings page component is not resolved.</Text> : null}
                     {ActivePage ? <ActivePage /> : active && !active.component ? <Column className="settings-registered-control">

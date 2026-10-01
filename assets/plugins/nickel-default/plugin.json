@@ -5,6 +5,9 @@
   "author": "Nickel",
   "version": "0.2.0",
   "entry": "src/Shell.js",
+  "images": [
+    { "id": "nickel-logo", "path": "images/nickel-logo.png" }
+  ],
   "composition": {
     "api_version": 1,
     "id": "nickel-default",
@@ -105,9 +108,12 @@
     },
     {
       "id": "launcher",
-      "kind": "window",
-      "width": 620,
-      "height": 548,
+      "kind": "overlay",
+      "width": 608,
+      "height": 628,
+      "anchor": "bottom-left",
+      "offset_x": 8,
+      "offset_y": -64,
       "initially_open": false
     },
     {

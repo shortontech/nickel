@@ -172,6 +172,7 @@ fn desired_output_surfaces(
     create_desktops: bool,
     _bar_on_all_displays: bool,
     _primary_output: Option<&str>,
+    active_output: Option<&str>,
     plugin_panel_enabled: bool,
     plugin_panel_output: nickel_core::plugins::PluginOutputScope,
 ) -> HashSet<(String, SurfaceRole)> {
@@ -184,9 +185,12 @@ fn desired_output_surfaces(
                     (*role != SurfaceRole::Desktop || create_desktops)
                         && (*role != SurfaceRole::Panel
                             || (plugin_panel_enabled
-                                && (plugin_panel_output
-                                    == nickel_core::plugins::PluginOutputScope::All
-                                    || output_names.first() == Some(output))))
+                                && output_scope_matches(
+                                    plugin_panel_output,
+                                    output_names,
+                                    output,
+                                    active_output,
+                                )))
                 })
                 .map(|role| (output.clone(), role))
         })
@@ -195,6 +199,7 @@ fn desired_output_surfaces(
 
 fn desired_plugin_surfaces(
     output_names: &[String],
+    active_output: Option<&str>,
     panels: &std::collections::BTreeMap<
         nickel_core::plugins::PluginSurfaceKey,
         nickel_core::plugins::PluginSurface,
@@ -206,12 +211,32 @@ fn desired_plugin_surfaces(
             output_names
                 .iter()
                 .enumerate()
-                .filter(move |(index, _)| {
-                    surface.output == nickel_core::plugins::PluginOutputScope::All || *index == 0
+                .filter(move |(_, output)| {
+                    output_scope_matches(surface.output, output_names, output, active_output)
                 })
                 .map(|(_, output)| (output.clone(), key.clone()))
         })
         .collect()
+}
+
+fn output_scope_matches(
+    scope: nickel_core::plugins::PluginOutputScope,
+    output_names: &[String],
+    output: &str,
+    active_output: Option<&str>,
+) -> bool {
+    match scope {
+        nickel_core::plugins::PluginOutputScope::All => true,
+        nickel_core::plugins::PluginOutputScope::Primary => {
+            output_names.first().is_some_and(|name| name == output)
+        }
+        nickel_core::plugins::PluginOutputScope::Active => active_output
+            .filter(|active| output_names.iter().any(|name| name == active))
+            .map_or_else(
+                || output_names.first().is_some_and(|name| name == output),
+                |active| active == output,
+            ),
+    }
 }
 
 fn fixed_plugin_surface_key(
@@ -774,6 +799,7 @@ impl WinitShell {
             create_desktops,
             self.options.bar_on_all_displays,
             self.primary_output_name.as_deref(),
+            self.active_output_name.as_deref(),
             self.plugin_panel_enabled,
             self.plugin_panel_surface.output,
         );
@@ -808,7 +834,8 @@ impl WinitShell {
             panels.insert(primary_key.clone(), self.plugin_panel_surface.clone());
         }
 
-        let mut desired_panels = desired_plugin_surfaces(&output_names, &panels);
+        let mut desired_panels =
+            desired_plugin_surfaces(&output_names, self.active_output_name.as_deref(), &panels);
         let taskbar_outputs = panel_outputs(
             &output_names,
             self.options.bar_on_all_displays,
@@ -897,6 +924,7 @@ impl WinitShell {
             create_desktops,
             self.options.bar_on_all_displays,
             self.primary_output_name.as_deref(),
+            self.active_output_name.as_deref(),
             self.plugin_panel_enabled,
             self.plugin_panel_surface.output,
         );
@@ -913,7 +941,11 @@ impl WinitShell {
                 self.plugin_panel_surface.clone(),
             );
         }
-        let mut desired_plugin_panels = desired_plugin_surfaces(&output_names, &active_panels);
+        let mut desired_plugin_panels = desired_plugin_surfaces(
+            &output_names,
+            self.active_output_name.as_deref(),
+            &active_panels,
+        );
         let outputs = panel_outputs(
             &output_names,
             self.options.bar_on_all_displays,
@@ -3253,9 +3285,9 @@ mod tests {
         DisplayGeometry, OUTPUT_CREATION_RETRY_MAX, OUTPUT_CREATION_RETRY_MIN,
         OUTPUT_RETIREMENT_SETTLE, OutputCreationRetry, OutputRetirementTracker, PanelEdge,
         ShellEvent, SurfaceRole, desired_output_surfaces, desired_plugin_surfaces,
-        durable_presenter_peak, output_name_at, output_role_is_retired, panel_outputs,
-        parse_proc_status_rss, preferred_output_index, queue_shell_input, record_pump_status,
-        require_displays, surface_geometry, surface_is_borderless,
+        durable_presenter_peak, output_name_at, output_role_is_retired, output_scope_matches,
+        panel_outputs, parse_proc_status_rss, preferred_output_index, queue_shell_input,
+        record_pump_status, require_displays, surface_geometry, surface_is_borderless,
     };
 
     use nickel_input::{
@@ -3521,7 +3553,7 @@ mod tests {
                 surface,
             );
         }
-        let desired = desired_plugin_surfaces(&["DP-1".into(), "DP-2".into()], &panels);
+        let desired = desired_plugin_surfaces(&["DP-1".into(), "DP-2".into()], None, &panels);
         assert_eq!(desired.len(), 4);
         assert_eq!(
             desired
@@ -3542,6 +3574,23 @@ mod tests {
                 .iter()
                 .any(|(output, key)| { output == "DP-2" && key.plugin_id == "org.example.mail" })
         );
+    }
+
+    #[test]
+    fn active_plugin_surface_follows_the_interaction_output() {
+        let outputs = ["DP-1".into(), "DP-2".into()];
+        assert!(output_scope_matches(
+            nickel_core::plugins::PluginOutputScope::Active,
+            &outputs,
+            "DP-2",
+            Some("DP-2")
+        ));
+        assert!(!output_scope_matches(
+            nickel_core::plugins::PluginOutputScope::Active,
+            &outputs,
+            "DP-1",
+            Some("DP-2")
+        ));
     }
 
     #[test]
@@ -3576,6 +3625,7 @@ mod tests {
             &outputs,
             true,
             true,
+            None,
             None,
             false,
             nickel_core::plugins::PluginOutputScope::Primary,
@@ -3632,6 +3682,7 @@ mod tests {
                 &["DP-1".into(), "DP-2".into()],
                 true,
                 true,
+                None,
                 None,
                 true,
                 panel.output,
@@ -3702,6 +3753,7 @@ mod tests {
             true,
             false,
             None,
+            None,
             false,
             nickel_core::plugins::PluginOutputScope::Primary,
         );
@@ -3709,6 +3761,7 @@ mod tests {
             &["DP-1".to_owned(), "HDMI-A-1".to_owned()],
             true,
             false,
+            None,
             None,
             false,
             nickel_core::plugins::PluginOutputScope::Primary,
@@ -3732,6 +3785,7 @@ mod tests {
             true,
             true,
             None,
+            None,
             false,
             nickel_core::plugins::PluginOutputScope::Primary,
         );
@@ -3739,6 +3793,7 @@ mod tests {
             &["HDMI-A-1".to_owned(), "DP-1".to_owned()],
             true,
             true,
+            None,
             None,
             false,
             nickel_core::plugins::PluginOutputScope::Primary,
@@ -3752,6 +3807,7 @@ mod tests {
             &["DP-1".to_owned(), "HDMI-A-1".to_owned()],
             false,
             true,
+            None,
             None,
             false,
             nickel_core::plugins::PluginOutputScope::Primary,

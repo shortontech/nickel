@@ -7065,6 +7065,8 @@ impl NickelSession {
         let shell = self.internal_shell.as_mut().unwrap();
         shell.set_file_clipboard_available(file_clipboard_available);
         let mut changed = Vec::new();
+        let mut pointer_scenes = Vec::new();
+        let mut pointer_paint_only = true;
         for (runtime_id, batch, modifiers) in events {
             let Some((shell_id, _role, output)) = reverse.get(&runtime_id).cloned() else {
                 continue;
@@ -7078,11 +7080,40 @@ impl NickelSession {
             if let Some(modifiers) = modifiers {
                 shell.set_desktop_input_modifiers(shell_id, &modifiers);
             }
-            changed.extend(shell.step_slot_changes(shell_id, batch));
+            pointer_paint_only &= crate::live_shell::passive_pointer_batch(&batch);
+            let changes = shell.step_slot_changes(shell_id, batch);
+            if let Some(scene) = shell.take_pointer_paint_scene(shell_id) {
+                if changes.iter().all(|id| *id == shell_id) {
+                    if !changes.is_empty() {
+                        pointer_scenes.push((runtime_id, scene));
+                    }
+                } else {
+                    pointer_paint_only = false;
+                }
+            } else {
+                pointer_paint_only = false;
+            }
+            changed.extend(changes);
         }
         let launcher_is_visible = shell.launcher_visible();
         let plugin_surfaces_changed = plugin_surfaces_before != shell.plugin_surfaces();
         let _ = shell;
+        if pointer_paint_only
+            && !plugin_surfaces_changed
+            && launcher_was_visible == launcher_is_visible
+        {
+            for (runtime, scene) in pointer_scenes {
+                self.internal_ui.update_scene(runtime, scene);
+            }
+            if !changed.is_empty() {
+                self.request_output_redraw();
+                #[cfg(feature = "backend-udev")]
+                self.schedule_native_ui_frame();
+            }
+            // Keep existing application deadlines; passive hover has no effects
+            // requiring an immediate session snapshot or plugin data refresh.
+            return;
+        }
         if plugin_surfaces_changed {
             self.reconcile_internal_shell_outputs();
         }
@@ -7101,8 +7132,8 @@ impl NickelSession {
         changed.extend(self.pending_desktop_scenes.drain());
         self.flush_native_clipboard_results();
         if !launcher_was_visible && launcher_is_visible {
-            self.launcher_output_name =
-                self.resolve_interaction_output(InvocationSource::RecentInteraction);
+            let fallback = self.resolve_interaction_output(InvocationSource::RecentInteraction);
+            retain_launcher_invocation_output(&mut self.launcher_output_name, fallback);
             if self.launcher_restore_window.is_none() {
                 self.launcher_restore_window = self
                     .windows
@@ -7117,13 +7148,18 @@ impl NickelSession {
         }
         if launcher_was_visible && !launcher_is_visible {
             self.restore_launcher_focus();
+            self.launcher_output_name = None;
         } else if !launcher_was_visible
             && launcher_is_visible
             && let Some(runtime) = self.internal_shell.as_ref().and_then(|shell| {
                 shell
                     .surfaces()
                     .iter()
-                    .find(|surface| surface.role == crate::winit_shell::SurfaceRole::Launcher)
+                    .find(|surface| {
+                        surface.role == crate::winit_shell::SurfaceRole::Launcher
+                            || surface.plugin.as_ref()
+                                == Some(&shell.active_shell_surface_key("launcher"))
+                    })
                     .and_then(|surface| self.internal_shell_surfaces.get(&surface.id).copied())
             })
         {
@@ -7478,7 +7514,8 @@ impl NickelSession {
                 crate::winit_shell::SurfaceRole::ControlCenter
                     | crate::winit_shell::SurfaceRole::Screenshot
                     | crate::winit_shell::SurfaceRole::WindowContextMenu
-            ) {
+            ) || surface.plugin.as_ref() == Some(&shell.active_shell_surface_key("launcher"))
+            {
                 focus_on_show = Some(runtime_id);
             }
         }
@@ -7895,6 +7932,12 @@ impl NickelSession {
         self.space.map_element(window.clone(), location, activate);
         self.fit_window_above_keyboard(&window);
         true
+    }
+}
+
+fn retain_launcher_invocation_output(output: &mut Option<String>, fallback: Option<String>) {
+    if output.is_none() {
+        *output = fallback;
     }
 }
 
@@ -10245,6 +10288,8 @@ impl NickelSession {
                             .iter()
                             .find(|surface| {
                                 surface.role == crate::winit_shell::SurfaceRole::Launcher
+                                    || surface.plugin.as_ref()
+                                        == Some(&shell.active_shell_surface_key("launcher"))
                             })
                             .and_then(|surface| {
                                 self.internal_shell_surfaces.get(&surface.id).copied()

@@ -278,6 +278,60 @@
         assert!(status.contains("No such file") || status.contains("not found"));
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn repeated_application_activation_cannot_bypass_secure_storage_readiness() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct StartingStorageHost(AtomicUsize);
+
+        impl crate::session_host::SessionHost for StartingStorageHost {
+            fn dispatch(
+                &self,
+                _command: crate::platform::ShellCommand,
+            ) -> Result<(), crate::platform::SessionRequestError> {
+                Ok(())
+            }
+
+            fn secure_storage_state(
+                &self,
+            ) -> Result<
+                crate::platform::SecureStorageState,
+                crate::platform::SessionRequestError,
+            > {
+                Ok(crate::platform::SecureStorageState::Starting)
+            }
+
+            fn request_secure_storage_retry(
+                &self,
+            ) -> Result<(), crate::platform::SessionRequestError> {
+                self.0.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            }
+        }
+
+        let host = std::sync::Arc::new(StartingStorageHost(AtomicUsize::new(0)));
+        let mut shell = LiveShell::new_with_session_host(host.clone()).unwrap();
+        let application = crate::model::Application::new(
+            "org.example.application".into(),
+            "External application".into(),
+            None,
+            None,
+            Some(vec!["nickel-command-that-must-never-run".into()]),
+        );
+
+        shell.launch_application(application.clone());
+        shell.launch_application(application);
+
+        assert_eq!(host.0.load(Ordering::Relaxed), 2);
+        assert_eq!(
+            shell.launcher_status.as_deref(),
+            Some(
+                "Secure storage is not ready. External application will remain blocked until your existing wallet is available."
+            )
+        );
+    }
+
     #[test]
     fn unavailable_shortcut_application_is_a_visible_typed_failure() {
         let mut shell = LiveShell::new().unwrap();

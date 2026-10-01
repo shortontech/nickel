@@ -660,6 +660,7 @@ pub struct LiveShell {
             nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>,
         ),
     >,
+    plugin_pointer_paint: Option<nickel_core::plugins::PluginSurfaceKey>,
     plugin_panel_memory: std::collections::BTreeMap<nickel_core::plugins::PluginSurfaceKey, u64>,
     plugin_window_placement_overrides: std::collections::BTreeMap<
         nickel_core::plugins::PluginSurfaceKey,
@@ -709,7 +710,6 @@ pub struct LiveShell {
     launcher_preferences_path: Option<std::path::PathBuf>,
     #[cfg(test)]
     launcher_persistence_attempts: usize,
-    secure_storage_override: Option<String>,
     secure_storage_state: platform::SecureStorageState,
     #[cfg(target_os = "linux")]
     secure_storage_query_error: Option<(platform::SessionRequestError, Instant)>,
@@ -894,6 +894,22 @@ pub(crate) fn launcher_placeholder_icon() -> (u16, Arc<image::RgbaImage>) {
             )
         })),
     )
+}
+
+pub(crate) fn passive_pointer_batch(batch: &HostBatch) -> bool {
+    if batch.window_focused.is_some() || batch.application_changed || batch.events.len() != 1 {
+        return false;
+    }
+    match &batch.events[0] {
+        HostEvent::Ui(UiEvent::PointerMoved(_) | UiEvent::PointerCancelled) => true,
+        event => matches!(
+            normalized_input(event),
+            Some(nickel_input::InputEvent::Pointer(
+                nickel_input::PointerEvent::Motion { .. }
+                    | nickel_input::PointerEvent::Leave { .. }
+            ))
+        ),
+    }
 }
 
 fn step_plugin_host(
@@ -1383,6 +1399,7 @@ impl LiveShell {
                 }
                 hosts
             },
+            plugin_pointer_paint: None,
             plugin_panel_memory: std::collections::BTreeMap::new(),
             plugin_window_placement_overrides: std::collections::BTreeMap::new(),
             #[cfg(target_os = "windows")]
@@ -1433,7 +1450,6 @@ impl LiveShell {
             launcher_preferences_path: None,
             #[cfg(test)]
             launcher_persistence_attempts: 0,
-            secure_storage_override: None,
             secure_storage_state,
             #[cfg(target_os = "linux")]
             secure_storage_query_error,
@@ -1819,7 +1835,6 @@ impl LiveShell {
             && secure_storage_state == platform::SecureStorageState::Ready
         {
             self.launcher_status = None;
-            self.secure_storage_override = None;
             changed = true;
         }
         changed
@@ -3821,6 +3836,27 @@ impl LiveShell {
         width: u32,
         height: u32,
     ) -> Option<Vec<PaintCommand>> {
+        self.plugin_panel_scene_in_viewport(key, None, width, height)
+    }
+
+    fn plugin_panel_scene_in_viewport(
+        &mut self,
+        key: &nickel_core::plugins::PluginSurfaceKey,
+        output: Option<&str>,
+        width: u32,
+        height: u32,
+    ) -> Option<Vec<PaintCommand>> {
+        let desktop = self.desktop_host.application();
+        let output = output.or(Some(desktop.active_output.as_str()));
+        let available = desktop
+            .outputs
+            .iter()
+            .find(|candidate| Some(candidate.id.as_str()) == output);
+        let viewport = serde_json::json!({
+            "width": width, "height": height, "output": output,
+            "availableWidth": available.map(|output| output.work_area.width),
+            "availableHeight": available.map(|output| output.work_area.height),
+        });
         let dependency_ids = self
             .plugin_panel_host_for(key)?
             .application()
@@ -3828,7 +3864,8 @@ impl LiveShell {
         let dependency_fields = dependency_ids
             .into_iter()
             .map(|id| {
-                let fields = self.plugin_owner_resource_fields(&id);
+                let mut fields = self.plugin_owner_resource_fields(&id);
+                fields.push(("viewport", viewport.clone()));
                 (id, fields)
             })
             .collect::<std::collections::BTreeMap<_, _>>();
@@ -3843,6 +3880,7 @@ impl LiveShell {
         let shortcuts = self.plugin_features(&key.plugin_id, true);
         let mut application_images =
             self.plugin_application_images(applications.as_ref(), application_search.as_ref());
+        application_images.insert("codex".into(), (u16::MAX, self.codex_icon.clone()));
         let clock = crate::clock_capabilities::snapshot();
         let notifications = self.external_plugin_notifications(&key.plugin_id);
         let tray = self.plugin_registry.get(&key.plugin_id)
@@ -3871,6 +3909,7 @@ impl LiveShell {
             let projected = (|| -> Result<bool, String> {
                 application_images.extend(preview_images);
                 let fields = [
+                    ("viewport", Some(&viewport)),
                     ("clock", Some(&clock)),
                     ("keyboard", keyboard_data.as_ref()),
                     ("windows", windows.as_ref()),
@@ -3951,11 +3990,11 @@ impl LiveShell {
     pub(crate) fn plugin_panel_scene_for_output(
         &mut self,
         key: &nickel_core::plugins::PluginSurfaceKey,
-        _output: Option<&str>,
+        output: Option<&str>,
         width: u32,
         height: u32,
     ) -> Option<Vec<PaintCommand>> {
-        self.plugin_panel_scene(key, width, height)
+        self.plugin_panel_scene_in_viewport(key, output, width, height)
     }
 
     pub(crate) fn plugin_surface_scene_for_output(
@@ -5769,17 +5808,34 @@ impl LiveShell {
         batch: HostBatch,
         keyboard_epoch: Option<u64>,
     ) -> bool {
+        self.plugin_pointer_paint = None;
+        let pointer_only = passive_pointer_batch(&batch);
         let result = {
             let Some(host) = self.plugin_panel_host_for(key) else {
                 return false;
             };
-            step_plugin_host(host, None, batch)
-                .map(|(outcome, _)| (outcome.changed, host.application_mut().take_effects()))
+            step_plugin_host(host, None, batch).map(|(outcome, _)| {
+                let paint_only = pointer_only
+                    && outcome.messages.is_empty()
+                    && matches!(
+                        outcome.invalidation,
+                        nickel_ui::Invalidation::None | nickel_ui::Invalidation::Paint
+                    );
+                (
+                    outcome.changed,
+                    paint_only,
+                    host.application_mut().take_effects(),
+                )
+            })
         };
-        let (changed, effects) = match result {
+        let (changed, paint_only, effects) = match result {
             Ok(result) => result,
             Err(error) => return self.fail_plugin_panel_runtime(&key.plugin_id, error),
         };
+        if paint_only && effects.is_empty() {
+            self.plugin_pointer_paint = Some(key.clone());
+            return changed;
+        }
         let root_changed = match self.reconcile_plugin_surface_root(key) {
             Ok(changed) => changed,
             Err(error) => return self.fail_plugin_panel_runtime(&key.plugin_id, error),
@@ -5787,6 +5843,19 @@ impl LiveShell {
         changed
             | root_changed
             | self.apply_plugin_effects_with_keyboard_epoch(effects, keyboard_epoch)
+    }
+
+    /// Consume immediately after routing a pointer batch, before any data update.
+    pub(crate) fn take_plugin_pointer_paint(
+        &mut self,
+        key: &nickel_core::plugins::PluginSurfaceKey,
+    ) -> Option<Vec<PaintCommand>> {
+        (self.plugin_pointer_paint.take().as_ref() == Some(key))
+            .then(|| {
+                self.plugin_panel_host_ref(key)
+                    .map(|host| host.commands().to_vec())
+            })
+            .flatten()
     }
 
     pub(crate) fn plugin_panel_host_input_for(
@@ -7081,6 +7150,12 @@ impl LiveShell {
 
     pub fn set_panel_output(&mut self, output: impl Into<String>) {
         self.switch_panel_output(Some(output.into()));
+    }
+
+    pub(crate) fn active_plugin_output(&self) -> Option<&str> {
+        self.panel_output
+            .as_deref()
+            .or(Some(self.desktop_host.application().active_output.as_str()))
     }
 
     fn switch_panel_output(&mut self, output: Option<String>) {
@@ -8634,6 +8709,25 @@ impl LiveShell {
     }
 
     fn launch_application(&mut self, application: Application) {
+        #[cfg(target_os = "linux")]
+        {
+            let secure_storage_state = self.session_host.secure_storage_state().unwrap_or_else(
+                |error| {
+                    tracing::warn!(%error, "secure-storage query failed before application launch");
+                    platform::SecureStorageState::ControlUnavailable
+                },
+            );
+            if !platform::secure_storage_allows_application_launch(secure_storage_state) {
+                if let Err(error) = self.session_host.request_secure_storage_retry() {
+                    tracing::warn!(%error, "secure-storage retry command failed");
+                }
+                self.launcher_status = Some(format!(
+                    "Secure storage is not ready. {} will remain blocked until your existing wallet is available.",
+                    application.name()
+                ));
+                return;
+            }
+        }
         if application.id().starts_with("place:")
             && let Some(path) = application
                 .launch_command()
@@ -8660,29 +8754,6 @@ impl LiveShell {
             }
             return;
         }
-        #[cfg(target_os = "linux")]
-        if platform::application_requires_secure_storage(&application)
-            && self
-                .session_host
-                .secure_storage_state()
-                .unwrap_or_else(|error| {
-                    tracing::warn!(%error, "secure-storage query failed before application launch");
-                    platform::SecureStorageState::ControlUnavailable
-                })
-                != platform::SecureStorageState::Ready
-            && self.secure_storage_override.as_deref() != Some(application.id())
-        {
-            if let Err(error) = self.session_host.request_secure_storage_retry() {
-                tracing::warn!(%error, "secure-storage retry command failed");
-            }
-            self.secure_storage_override = Some(application.id().to_owned());
-            self.launcher_status = Some(format!(
-                "Secure storage is not ready. Activate {} again to launch without credentials.",
-                application.name()
-            ));
-            return;
-        }
-        self.secure_storage_override = None;
         self.launcher_status = None;
         #[cfg(target_os = "linux")]
         let result = if application.name() == "Nickel Settings" {

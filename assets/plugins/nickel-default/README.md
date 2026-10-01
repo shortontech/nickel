@@ -15,8 +15,10 @@ Settings consumes `readPluginSettings().settings` and
 `readPluginSettingsPages().pages`. Qualified provider identities keep equal setting
 IDs distinct. Native resources and operations remain capability checked; the
 components own navigation, layout, drafts, and confirmation UI. Foreign custom
-page component references and independent contributor lifecycle are still being
-completed.
+page components execute in their published owner's retained package context.
+Contributor registrations survive hidden surfaces and are retired on disable or
+runtime failure; activation generations prevent stale callbacks from regaining
+authority after re-enable.
 
 ## Public contracts
 
@@ -53,10 +55,20 @@ snapshot contains at most 256 applications. The query echoed in the snapshot
 lets a component distinguish pending search from an empty result.
 
 Applications carry stable `id`, `icon`, `kind`, `pinOrder`, and `recentOrder`
-metadata. Launch and pin actions use `id`; `icon` is a bounded stable asset key.
-The default Launcher owns its query, tabs, pagination, and menus. It does not
-change the native launcher's query. Native project overview remains an explicit
-entry point until project capabilities replace it.
+metadata, plus optional `description`, absolute `path`, and `lastUsedUnixSeconds`.
+Legacy history has no timestamp until the next recorded launch. Launch and pin
+actions use `id`; `icon` is a bounded stable asset key. Independent
+`settingsResults` and `actionResults` provide native fuzzy matches for supported
+shell destinations without changing application ranking or the application total.
+
+The default Launcher presents separate Pinned and Recent sections before typing.
+Search preserves the same 608×628 surface, with horizontal category filters,
+full-width grouped results, a compact selected-result action row, and recent
+shortcuts. Metadata opens through More rather than occupying a permanent pane.
+Keyboard focus updates the selected result; result activation and Open launch it. The launcher owns its query, category, pagination, and menus;
+it does not change the native launcher's query. Files currently exposes known
+Places; it is not a filesystem index. Native project overview remains available
+from Places. Unsupported elevation and reveal actions are not displayed.
 
 ## Settings controls and pages
 
@@ -74,9 +86,11 @@ binary and per-page hosts are retired.
 The package loads through a shared composed runtime. Focused tests verify
 registration, declared surfaces, inherited selection, caller-owned callbacks,
 native children, and distinct package image namespaces. Live nested checks have
-passed Launcher, Settings, hue/intensity/color controls, and installed window
-lifecycle. Overall acceptance remains incomplete while native screenshot capture,
-full control styling, and remaining composition lifecycle work are being finished.
+passed the shared shell, Launcher, optional JSX Settings, hue/intensity/color
+controls, native screenshot capture, component layout inspection, installed
+window lifecycle, and clean shutdown. Runtime, presentation, and development-tool
+tests cover package composition, contributor lifecycle, CSS controls, and package
+validation. Manual native Windows UI acceptance remains with the user.
 
 ## Public component lookup
 
@@ -110,7 +124,9 @@ search and current/protected/read-only state, and reports native consent and
 write results. Writes invoke `nickel.associations.setDefault` with stable native
 identities; no Rust Settings projection or indexed page request is involved.
 Native parser validation and synthetic identity/consent/protection/search checks
-passed. Large catalog pagination and live visual acceptance remain unfinished.
+passed. The ABI deliberately bounds each catalog to 128 targets and handlers and
+reports truncation; users can open the operating system's default-app settings for
+entries outside that bound. Paginated traversal of larger catalogs is not implemented.
 
 `Displays.jsx` owns display selection, draft layout, drag arrangement/snapping,
 mode selection, scale, and primary display selection. It submits whole layouts
@@ -249,3 +265,8 @@ candidate omits Settings or its package fails. The ordinary Plugins page display
 confirmation whenever it is available in the selected shell; it does not own the
 recovery timer or provide a Rust page host. This selector manages already known
 packages and does not install packages.
+
+The launcher uses an anchored overlay with a 120×36 All apps button and an
+alphabetical app list. Default-shell `nickel-plugin dev` previews copy saved
+launcher pins and recents into the temporary profile at startup. Changes made
+inside the preview remain in that temporary profile.

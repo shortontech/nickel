@@ -65,7 +65,7 @@ export function Taskbar(props) {
     const contributions = nickel.contributions("taskbar.items");
     return h(FixedWindow, { id: "taskbar", output: "all", edge: "bottom", reserveWorkArea: true, className: "taskbar" },
         h("div", { className: "taskbar-content" },
-            h(Button, { id: "taskbar-launcher", className: "launcher-button", icon: "logo", accessibilityLabel: "Open Nickel Start", onClick: () => nickel.surfaces.show("launcher") }, "Nickel"),
+            h(Button, { id: "taskbar-launcher", className: "launcher-button", icon: "nickel-logo", showLabel: true, accessibilityLabel: "Open Nickel Start", onClick: () => nickel.surfaces.show("launcher") }, "Nickel"),
             items.map(item => h(Task, { key: item.id, item: item })),
             contributions.map(entry => h(entry.component, { key: entry.key })),
             h(Spacer, { className: "taskbar-spacer" }),

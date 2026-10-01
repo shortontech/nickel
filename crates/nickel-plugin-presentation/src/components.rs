@@ -131,7 +131,7 @@ impl WindowRequest {
         if let Some(output) = self.output.as_deref() {
             let matches = match output {
                 "all" => surface.output == nickel_core::plugins::PluginOutputScope::All,
-                "primary" => true,
+                "primary" | "active" => true,
                 _ => false,
             };
             if !matches {
@@ -340,6 +340,7 @@ pub enum PanelNode {
     TextField {
         id: String,
         class_name: Option<String>,
+        accessibility_label: String,
         value: String,
         placeholder: String,
         secure: bool,
@@ -352,12 +353,15 @@ pub enum PanelNode {
         id: String,
         class_name: Option<String>,
         label: String,
+        description: Option<String>,
         accessibility_label: String,
         accessibility_state: Option<String>,
         disabled: bool,
         width: Option<u32>,
         height: Option<u32>,
         icon: Option<String>,
+        icon_size: u32,
+        icon_above: bool,
         show_label: bool,
         action: usize,
         context_action: Option<usize>,
@@ -567,6 +571,9 @@ fn styled_text<Message>(mut text: Text<Message>, style: &ControlStyle) -> Text<M
     if let Some(line_height) = style.line_height {
         text = text.line_height(line_height);
     }
+    if let Some(align) = style.text_align {
+        text = text.align(align);
+    }
     text
 }
 
@@ -575,6 +582,7 @@ struct InheritedTextStyle {
     color: Option<u32>,
     font_size: Option<f32>,
     line_height: Option<f32>,
+    text_align: Option<nickel_ui::TextAlign>,
     custom_properties: std::collections::HashMap<String, String>,
     ancestors: Vec<(String, Option<String>, Option<String>)>,
 }
@@ -585,6 +593,7 @@ impl InheritedTextStyle {
             color: style.color.or(self.color),
             font_size: style.font_size.or(self.font_size),
             line_height: style.line_height.or(self.line_height),
+            text_align: style.text_align.or(self.text_align),
             custom_properties: style.custom_properties.clone(),
             ancestors: style.ancestors.clone(),
         }
@@ -599,6 +608,7 @@ impl InheritedTextStyle {
         style.color = style.color.or(self.color);
         style.font_size = style.font_size.or(self.font_size);
         style.line_height = style.line_height.or(self.line_height);
+        style.text_align = style.text_align.or(self.text_align);
         style
     }
 
@@ -741,6 +751,8 @@ impl PanelNode {
         surface.height = dimension(height, grant.height);
         if request.output.as_deref() == Some("primary") {
             surface.output = nickel_core::plugins::PluginOutputScope::Primary;
+        } else if request.output.as_deref() == Some("active") {
+            surface.output = nickel_core::plugins::PluginOutputScope::Active;
         }
         if let Some(reserve) = request.reserve_work_area {
             surface.reserve_work_area = reserve;
@@ -795,6 +807,24 @@ impl PanelNode {
         });
         own + descendants
             + match self {
+                Self::Button {
+                    id,
+                    class_name,
+                    label,
+                    description,
+                    accessibility_label,
+                    accessibility_state,
+                    icon,
+                    ..
+                } => {
+                    capacity(id)
+                        + class_name.as_ref().map_or(0, capacity)
+                        + capacity(label)
+                        + description.as_ref().map_or(0, capacity)
+                        + capacity(accessibility_label)
+                        + accessibility_state.as_ref().map_or(0, capacity)
+                        + icon.as_ref().map_or(0, capacity)
+                }
                 Self::Badge {
                     item,
                     label,
@@ -1221,7 +1251,7 @@ impl PanelNode {
                         }
                         _ => return Err("window title must be 1 to 128 printable bytes".into()),
                     };
-                    let output = optional_token("output", &["primary", "all"])?;
+                    let output = optional_token("output", &["primary", "active", "all"])?;
                     let edge = optional_token("edge", &["top", "bottom", "left", "right"])?;
                     let anchor = optional_token(
                         "anchor",
@@ -1655,6 +1685,13 @@ impl PanelNode {
             }
             "text-field" => Ok(Self::TextField {
                 class_name,
+                accessibility_label: value
+                    .get("aria-label")
+                    .or_else(|| value.get("accessibilityLabel"))
+                    .and_then(Value::as_str)
+                    .or_else(|| value.get("placeholder").and_then(Value::as_str))
+                    .unwrap_or("")
+                    .to_owned(),
                 id: value
                     .get("id")
                     .and_then(Value::as_str)
@@ -1741,10 +1778,33 @@ impl PanelNode {
                         .and_then(Value::as_str)
                         .filter(|asset| asset.len() <= 128)
                         .map(str::to_owned),
+                    icon_size: match value.get("iconSize") {
+                        None | Some(Value::Null) => 32,
+                        Some(size) => size
+                            .as_u64()
+                            .filter(|size| (8..=128).contains(size))
+                            .map(|size| size as u32)
+                            .ok_or("button iconSize must be 8 to 128")?,
+                    },
+                    icon_above: match value.get("iconPlacement") {
+                        None | Some(Value::Null) => false,
+                        Some(Value::String(position)) if position == "left" => false,
+                        Some(Value::String(position)) if position == "top" => true,
+                        _ => return Err("button iconPlacement must be left or top".into()),
+                    },
                     show_label: value
                         .get("showLabel")
                         .and_then(Value::as_bool)
                         .unwrap_or(false),
+                    description: match value.get("description") {
+                        None | Some(Value::Null) => None,
+                        Some(Value::String(text)) if text.len() <= 4096 => Some(text.clone()),
+                        _ => {
+                            return Err(
+                                "button description must be a string of at most 4096 bytes".into(),
+                            );
+                        }
+                    },
                     label,
                     action: match value.get("action").and_then(Value::as_u64) {
                         Some(action) => usize::try_from(action)
@@ -2590,7 +2650,7 @@ impl PanelNode {
                             ));
                         }
                         grid = grid.direction(stylesheet.reading_direction());
-                        AnyView::new(grid)
+                        AnyView::new(grid.grow(1.0))
                     }
                     Display::Flex
                         if style.flex_direction.unwrap_or_default() == FlexDirection::Row =>
@@ -2625,7 +2685,7 @@ impl PanelNode {
                         {
                             row = row.reverse();
                         }
-                        AnyView::new(row)
+                        AnyView::new(row.grow(1.0))
                     }
                     Display::Block | Display::Flex => {
                         let mut column = Column::new();
@@ -2653,7 +2713,7 @@ impl PanelNode {
                                 slots,
                             ));
                         }
-                        AnyView::new(column)
+                        AnyView::new(column.grow(1.0))
                     }
                 };
                 let mut container = Container::new().child(content);
@@ -2841,7 +2901,10 @@ impl PanelNode {
                     AnyView::new(row)
                 } else {
                     with_margin(
-                        AnyView::new(apply_container_style(Container::new().child(row), &style)),
+                        AnyView::new(apply_container_style(
+                            Container::new().child(row.grow(1.0)),
+                            &style,
+                        )),
                         &style,
                     )
                 }
@@ -2881,7 +2944,7 @@ impl PanelNode {
                 } else {
                     with_margin(
                         AnyView::new(apply_container_style(
-                            Container::new().child(column),
+                            Container::new().child(column.grow(1.0)),
                             &style,
                         )),
                         &style,
@@ -3224,6 +3287,7 @@ impl PanelNode {
             Self::TextField {
                 id,
                 class_name,
+                accessibility_label,
                 value,
                 placeholder,
                 secure,
@@ -3269,7 +3333,7 @@ impl PanelNode {
                 let mut field = field
                     .auto_focus(*auto_focus)
                     .id(id.clone())
-                    .accessibility_label(placeholder)
+                    .accessibility_label(accessibility_label)
                     .grow(1.0)
                     .wrap(false);
                 if let Some(message) = focus_message {
@@ -3445,12 +3509,15 @@ impl PanelNode {
                 id,
                 class_name,
                 label,
+                description,
                 accessibility_label,
                 accessibility_state,
                 disabled,
                 width,
                 height,
                 icon,
+                icon_size,
+                icon_above,
                 show_label,
                 action,
                 context_action,
@@ -3462,23 +3529,47 @@ impl PanelNode {
                 let style =
                     inherited.resolve(stylesheet, "button", Some(id), class_name.as_deref());
                 let text_style = inherited.apply(style.clone());
-                let visual =
-                    icon.as_ref()
-                        .and_then(|asset| images.get(asset))
-                        .map_or_else(
-                            || AnyView::new(styled_text(Text::new(label).wrap(true), &text_style)),
-                            |(id, image)| {
-                                let icon =
-                                    Image::new(*id, Arc::clone(image)).width(32.0).height(32.0);
-                                if *show_label {
-                                    AnyView::new(Row::new().gap(8.0).child(icon).child(
-                                        styled_text(Text::new(label).wrap(true), &text_style),
-                                    ))
-                                } else {
-                                    AnyView::new(icon)
-                                }
-                            },
-                        );
+                let label_visual = || {
+                    let title = styled_text(Text::new(label).wrap(true), &text_style);
+                    if let Some(description) = description {
+                        let inherited = inherited.extend(&text_style);
+                        let description_style = inherited.apply(inherited.resolve(
+                            stylesheet,
+                            "text",
+                            None,
+                            Some("button-description"),
+                        ));
+                        AnyView::new(
+                            Column::new()
+                                .gap(2.0)
+                                .child(title)
+                                .child(styled_text(Text::new(description), &description_style)),
+                        )
+                    } else {
+                        AnyView::new(title)
+                    }
+                };
+                let visual = icon
+                    .as_ref()
+                    .and_then(|asset| images.get(asset))
+                    .map_or_else(label_visual, |(id, image)| {
+                        let icon = Image::new(*id, Arc::clone(image))
+                            .width(*icon_size as f32)
+                            .height(*icon_size as f32);
+                        if *show_label && *icon_above {
+                            AnyView::new(
+                                Column::new()
+                                    .gap(6.0)
+                                    .align_items(nickel_ui::Align::Center)
+                                    .child(icon)
+                                    .child(label_visual()),
+                            )
+                        } else if *show_label {
+                            AnyView::new(Row::new().gap(8.0).child(icon).child(label_visual()))
+                        } else {
+                            AnyView::new(icon)
+                        }
+                    });
                 let mut container = Container::new()
                     .id(id.clone())
                     .accessibility_label(accessibility_label)
@@ -4037,6 +4128,84 @@ fn child_text(children: &[Value]) -> Result<String, String> {
 mod compound_css_tests {
     use super::*;
     use nickel_ui::{Rect, UiFrame, backend::PaintCommand};
+
+    #[test]
+    fn styled_flex_content_fills_its_allocated_frame() {
+        for kind in ["div", "row", "column"] {
+            let node = PanelNode::parse(
+                &serde_json::json!({"kind":"div","className":"root","children":[
+                    {"kind":kind,"className":"body","children":[
+                        {"kind":"div","className":"pane","children":[]}
+                    ]},
+                    {"kind":"div","className":"footer","children":[]}
+                ]}),
+            )
+            .unwrap();
+            let sheet = StyleSheet::compile(
+                ".root { height: 200px; width: 200px; } .body { display: flex; flex-grow: 1; align-items: stretch; } .pane { flex-grow: 1; background: #123456; } .footer { height: 20px; flex-shrink: 0; }",
+            ).unwrap();
+            let frame = UiFrame::layout_with_state(
+                node.view(&PluginImages::new(), &sheet),
+                Rect::new(0.0, 0.0, 200.0, 200.0),
+                &mut Default::default(),
+            );
+            assert!(frame.commands().iter().any(|command| matches!(command,
+                PaintCommand::Fill { rect, color } if *color == 0xff123456 && rect.size.height == 180.0
+            )), "{kind} content must use the height assigned to its CSS frame: {:?}", frame.commands());
+        }
+    }
+
+    #[test]
+    fn text_alignment_inherits_and_can_be_overridden_for_launcher_labels() {
+        let node = PanelNode::parse(&serde_json::json!({"kind":"column","children":[
+            {"kind":"text","children":["Centered"]},
+            {"kind":"text","className":"time","children":["2m ago"]}
+        ]}))
+        .unwrap();
+        let sheet = StyleSheet::compile(
+            "column { text-align: center; color: #eeeeee; } text.time { text-align: end; }",
+        )
+        .unwrap();
+        let frame = UiFrame::layout_with_state(
+            node.view(&PluginImages::new(), &sheet),
+            Rect::new(0.0, 0.0, 200.0, 80.0),
+            &mut Default::default(),
+        );
+        for (label, expected) in [
+            ("Centered", nickel_ui::TextAlign::Center),
+            ("2m ago", nickel_ui::TextAlign::End),
+        ] {
+            assert!(frame.commands().iter().any(|command| matches!(command, PaintCommand::Text{text,align,..} if text==label && *align==expected)));
+        }
+        assert!(StyleSheet::compile("text { text-align: nonsense; }").is_err());
+    }
+
+    #[test]
+    fn button_icon_size_is_bounded_and_controls_rendered_artwork() {
+        let mut data = serde_json::json!({"kind":"button","id":"result","icon":"app","iconSize":24,"action":0,"children":["Terminal"]});
+        let node = PanelNode::parse(&data).unwrap();
+        let images = PluginImages::from([(
+            "app".into(),
+            (
+                7,
+                Arc::new(image::RgbaImage::from_pixel(
+                    32,
+                    32,
+                    image::Rgba([40, 80, 120, 255]),
+                )),
+            ),
+        )]);
+        let frame = UiFrame::layout_with_state(
+            node.view(&images, &StyleSheet::default()),
+            Rect::new(0.0, 0.0, 200.0, 60.0),
+            &mut Default::default(),
+        );
+        assert!(frame.commands().iter().any(|command| matches!(command, PaintCommand::Image {bounds,..} if bounds.size.width==24.0 && bounds.size.height==24.0)));
+        for invalid in [0, 7, 129] {
+            data["iconSize"] = invalid.into();
+            assert!(PanelNode::parse(&data).is_err());
+        }
+    }
 
     #[test]
     fn scroll_view_scrollbar_parts_control_native_paint_geometry_and_states() {

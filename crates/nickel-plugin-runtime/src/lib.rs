@@ -3,7 +3,7 @@
 //! Hosts own component validation and effect authority. This crate owns only
 //! the Boa context and the bootstrap's render and event transactions.
 
-use boa_engine::{Context, Source};
+use boa_engine::{Context, JsValue, Source, js_string};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
@@ -25,8 +25,8 @@ pub struct JsxRuntime {
     settings_provider: Option<String>,
     settings_pages: std::collections::BTreeSet<String>,
     settings_revision: u64,
-    settings_data: Option<String>,
-    checkpoint: Option<(u64, Option<String>)>,
+    settings_data: Option<std::rc::Rc<Value>>,
+    checkpoint: Option<(u64, Option<std::rc::Rc<Value>>)>,
     invalidated: bool,
 }
 
@@ -85,17 +85,40 @@ impl JsxRuntime {
     }
 
     pub fn set_data(&mut self, serialized_json: &str) -> Result<(), String> {
-        self.eval(&format!("__nickelSetData({serialized_json})"))?;
-        // Surface geometry does not change package setting values.
-        let mut data: Value =
+        if self.invalidated {
+            return Err("runtime checkpoint was invalidated".into());
+        }
+        let data: Value =
             serde_json::from_str(serialized_json).map_err(|error| error.to_string())?;
+        self.set_data_value(data)
+    }
+
+    /// Pass an already parsed host snapshot without serializing and reparsing it.
+    pub fn set_data_value(&mut self, mut data: Value) -> Result<(), String> {
+        if self.invalidated {
+            return Err("runtime checkpoint was invalidated".into());
+        }
+        // Host snapshots are data, not source code. Compiling a large object
+        // literal on every input/projection update stalls the compositor.
+        let argument =
+            JsValue::from_json(&data, &mut self.context).map_err(|error| error.to_string())?;
+        let setter = self
+            .context
+            .global_object()
+            .get(js_string!("__nickelSetData"), &mut self.context)
+            .map_err(|error| error.to_string())?;
+        setter
+            .as_callable()
+            .ok_or("host data setter is not callable")?
+            .call(&JsValue::undefined(), &[argument], &mut self.context)
+            .map_err(|error| error.to_string())?;
+        // Surface geometry does not change package setting values.
         if let Some(object) = data.as_object_mut() {
             object.remove("surface");
         }
-        let data = data.to_string();
-        if self.settings_data.as_ref() != Some(&data) {
+        if self.settings_data.as_deref() != Some(&data) {
             self.settings_revision = self.settings_revision.wrapping_add(1);
-            self.settings_data = Some(data);
+            self.settings_data = Some(std::rc::Rc::new(data));
         }
         Ok(())
     }

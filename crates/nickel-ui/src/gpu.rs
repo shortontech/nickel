@@ -517,15 +517,57 @@ impl SoftwareRenderer {
                 width,
                 radius,
             } => {
-                for span in crate::ui::rounded_border_spans(
-                    physical_rect(*rect, self.scale),
-                    width * self.scale,
-                    radius * self.scale,
-                ) {
-                    if let Some(bounds) = intersection(span, clip) {
-                        self.fill_rect(bounds, pixel(*color));
-                    }
+                let rect = physical_rect(*rect, self.scale);
+                let width = (width * self.scale)
+                    .max(0.0)
+                    .min(rect.size.width / 2.0)
+                    .min(rect.size.height / 2.0);
+                let radius = (radius * self.scale)
+                    .max(0.0)
+                    .min(rect.size.width / 2.0)
+                    .min(rect.size.height / 2.0);
+                let source = pixel(*color);
+                if width == 0.0 || source.a == 0 {
+                    return;
                 }
+                let Some(bounds) = intersection(rect, clip) else {
+                    return;
+                };
+                let inner = Rect::new(
+                    rect.origin.x + width,
+                    rect.origin.y + width,
+                    rect.size.width - width * 2.0,
+                    rect.size.height - width * 2.0,
+                );
+                // Coverage of the outer curve minus its inset leaves the center
+                // transparent, without rounding fractional edges to whole pixels.
+                let coverage = |rect: Rect, radius: f32, x: f32, y: f32| {
+                    if rect.size.width <= 0.0 || rect.size.height <= 0.0 {
+                        return 0.0;
+                    }
+                    let qx = (x - rect.origin.x - rect.size.width / 2.0).abs()
+                        - rect.size.width / 2.0
+                        + radius;
+                    let qy = (y - rect.origin.y - rect.size.height / 2.0).abs()
+                        - rect.size.height / 2.0
+                        + radius;
+                    let distance = qx.max(0.0).hypot(qy.max(0.0)) + qx.max(qy).min(0.0) - radius;
+                    (0.5 - distance).clamp(0.0, 1.0)
+                };
+                self.for_pixels(bounds, |renderer, x, y| {
+                    let outer = coverage(rect, radius, x as f32 + 0.5, y as f32 + 0.5);
+                    let hole = coverage(
+                        inner,
+                        (radius - width).max(0.0),
+                        x as f32 + 0.5,
+                        y as f32 + 0.5,
+                    );
+                    let mut covered = source;
+                    covered.a = (f32::from(source.a) * (outer - hole).max(0.0)).round() as u8;
+                    if covered.a != 0 {
+                        renderer.blend(x, y, covered);
+                    }
+                });
             }
             PaintCommand::Gradient { rect, gradient } => {
                 self.fill_gradient(physical_rect(*rect, self.scale), *gradient, clip);
@@ -596,8 +638,13 @@ impl SoftwareRenderer {
                 (corners & 0b1000 != 0 && left < radius && bottom < radius)
                     .then_some((left - radius, bottom - radius))
             });
-            if rounded.is_none_or(|(dx, dy)| dx * dx + dy * dy <= radius * radius) {
-                renderer.blend(x, y, pixel(color));
+            let coverage = rounded.map_or(1.0, |(dx, dy)| {
+                (radius + 0.5 - (dx * dx + dy * dy).sqrt()).clamp(0.0, 1.0)
+            });
+            if coverage > 0.0 {
+                let mut source = pixel(color);
+                source.a = (f32::from(source.a) * coverage).round() as u8;
+                renderer.blend(x, y, source);
             }
         });
     }
@@ -1367,7 +1414,7 @@ mod tests {
             };
             assert_eq!(at(20.0, 15.0), Pixel::rgba(0x12, 0x34, 0x56, 255));
             assert_eq!(at(5.0, 5.0), Pixel::rgba(0x12, 0x34, 0x56, 255));
-            assert_eq!(at(20.0, 5.0), Pixel::rgba(0xab, 0xcd, 0xef, 255));
+            assert_eq!(at(20.0, 6.0), Pixel::rgba(0xab, 0xcd, 0xef, 255));
         }
     }
 
