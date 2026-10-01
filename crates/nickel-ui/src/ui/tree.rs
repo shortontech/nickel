@@ -28,6 +28,7 @@ struct HitRegion<Message> {
     message: Option<Message>,
     message_mapper: Option<fn(f32) -> Message>,
     seeded_value_mapper: Option<fn(Message, f32) -> Message>,
+    drag_seed: Option<Message>,
     drag_mapper: Option<fn(Message, DragGesture) -> Message>,
     drop_message: Option<Message>,
     drop_mapper: Option<fn(Message, DropGesture) -> Message>,
@@ -495,7 +496,7 @@ impl<Message: Clone> UiFrame<Message> {
     fn drag_message(&self, id: &UiId, phase: DragPhase, position: Point) -> Option<Message> {
         let hit = self.hits.iter().rev().find(|hit| &hit.id == id)?;
         Some((hit.drag_mapper?)(
-            hit.message.clone()?,
+            hit.drag_seed.clone()?,
             DragGesture {
                 phase,
                 position,
@@ -1040,6 +1041,7 @@ impl<Message: Clone> UiFrame<Message> {
                 message: item.action.clone(),
                 message_mapper: None,
                 seeded_value_mapper: None,
+                drag_seed: None,
                 drag_mapper: None,
                 drop_message: None,
                 drop_mapper: None,
@@ -2480,7 +2482,12 @@ impl<Message: Clone> UiFrame<Message> {
             .iter()
             .rev()
             .find(|hit| contains(hit.rect, point))
-            .and_then(|hit| hit.message.as_ref())
+            .and_then(|hit| {
+                hit.drag_mapper
+                    .is_none()
+                    .then_some(hit.message.as_ref())
+                    .flatten()
+            })
     }
 
     pub fn id_at(&self, point: Point) -> Option<&UiId> {

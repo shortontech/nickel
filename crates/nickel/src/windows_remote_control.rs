@@ -105,6 +105,7 @@ impl Drop for LaunchPreparationAdmission {
 pub(crate) fn observe_physical_key(event: nickel_input::windows::NativeKeyboardEvent) {
     use std::sync::atomic::Ordering;
     if !event.injected {
+        crate::windows_remote_input::observe_physical_key(event);
         crate::windows_remote_input::release_all();
         advance_local_input_epoch();
     }
@@ -118,6 +119,7 @@ pub(crate) fn observe_physical_key(event: nickel_input::windows::NativeKeyboardE
 
 pub(crate) fn observe_physical_pointer(event: nickel_input::windows::NativePointerEvent) {
     if !event.injected {
+        crate::windows_remote_input::observe_physical_pointer(event);
         crate::windows_remote_input::release_all();
         advance_local_input_epoch();
     }

@@ -178,7 +178,8 @@ impl DesktopApplication {
     ) -> Self {
         let (operation_tx, operation_rx) = std::sync::mpsc::channel();
         let path = nickel_file::desktop_directory();
-        let browser = DirectoryBrowser::open(&path).ok();
+        let browser =
+            DirectoryBrowser::open_with_hidden(&path, nickel_platform::show_hidden_files()).ok();
         let mut layout = DesktopLayout::new(Vec::new());
         if let Some(browser) = &browser {
             layout.reconcile(desktop_snapshot(browser));

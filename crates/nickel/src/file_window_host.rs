@@ -93,20 +93,8 @@ impl FileWindowHost for InProcessFileWindowHost {
             .spawn(move || {
                 let _window_thread = crate::platform::register_internal_window_thread();
                 let adapter = nickel_file::FileHostAdapter::default()
-                    .with_focused_shortcut_handler(|key, edge| match key {
-                        nickel_input::KeyCode::SuperLeft => {
-                            crate::platform::observe_nickel_window_key(
-                                Some(1),
-                                edge == nickel_input::KeyEdge::Pressed,
-                            );
-                        }
-                        nickel_input::KeyCode::SuperRight => {
-                            crate::platform::observe_nickel_window_key(
-                                Some(2),
-                                edge == nickel_input::KeyEdge::Pressed,
-                            );
-                        }
-                        _ => crate::platform::handle_focused_shortcut(key, edge),
+                    .with_focused_shortcut_handler(|key, edge| {
+                        crate::platform::handle_focused_shortcut(key, edge);
                     });
                 if let Err(error) =
                     nickel_ui::run_with_adapter_on_any_thread(launch.into_app(), adapter)

@@ -67,7 +67,28 @@ fn windows() -> Vec<(Window, bool)> {
     result
 }
 
-fn process_app_id(pid: u32) -> Option<String> {
+pub(crate) fn core_window_for_pid(pid: u32) -> Option<usize> {
+    windows()
+        .into_iter()
+        .find_map(|(window, is_frame)| (!is_frame && window.pid == pid).then_some(window.hwnd))
+}
+
+pub(crate) fn frame_window_for_app(app_id: &str) -> Option<(usize, u32)> {
+    windows().into_iter().find_map(|(window, is_frame)| {
+        (is_frame && frame_app_id(window.hwnd).as_deref() == Some(app_id))
+            .then_some((window.hwnd, window.pid))
+    })
+}
+
+pub(crate) fn frame_windows() -> Vec<(usize, u32, Option<String>)> {
+    windows()
+        .into_iter()
+        .filter(|(_, is_frame)| *is_frame)
+        .map(|(window, _)| (window.hwnd, window.pid, frame_app_id(window.hwnd)))
+        .collect()
+}
+
+pub(crate) fn process_app_id(pid: u32) -> Option<String> {
     // SAFETY: Windows checks the requested process access and output buffer.
     let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?;
     let mut buffer = [0u16; 1024];
@@ -95,7 +116,7 @@ fn frame_app_id(hwnd: usize) -> Option<String> {
     }
 }
 
-fn uncloak(app_id: &str) -> windows::core::Result<()> {
+pub(crate) fn uncloak(app_id: &str) -> windows::core::Result<()> {
     const SHELL: GUID = GUID::from_u128(0xc2f03a33_21f5_47fa_b4bb_156362a2f239);
     const COLLECTION: GUID = GUID::from_u128(0x1841c6d7_4f9d_42c0_af41_8747538f10e5);
     type Lookup = unsafe extern "system" fn(*mut c_void, *const u16, *mut *mut c_void) -> HRESULT;

@@ -9,11 +9,11 @@ use std::{
     sync::atomic::{AtomicU8, AtomicU64, Ordering},
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_KEYUP,
-    KEYEVENTF_UNICODE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN,
-    MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE,
-    MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL,
-    MOUSEINPUT, SendInput, VIRTUAL_KEY,
+    INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE,
+    MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
+    MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN,
+    MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL, MOUSEINPUT, SendInput,
+    VIRTUAL_KEY,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     GA_ROOT, GetAncestor, GetClientRect, GetCursorPos, GetDesktopWindow, GetForegroundWindow,
@@ -31,6 +31,57 @@ const LEFT: u8 = 1;
 const RIGHT: u8 = 2;
 const MIDDLE: u8 = 4;
 static HELD_BUTTONS: AtomicU8 = AtomicU8::new(0);
+static PHYSICAL_KEYS: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
+static PHYSICAL_BUTTONS: AtomicU8 = AtomicU8::new(0);
+
+pub(crate) fn observe_physical_key(event: nickel_input::windows::NativeKeyboardEvent) {
+    if event.injected || event.virtual_key > 255 {
+        return;
+    }
+    let key = event.virtual_key as usize;
+    let bit = 1_u64 << (key % 64);
+    match event.edge {
+        nickel_input::KeyEdge::Pressed => {
+            PHYSICAL_KEYS[key / 64].fetch_or(bit, Ordering::AcqRel);
+        }
+        nickel_input::KeyEdge::Released => {
+            PHYSICAL_KEYS[key / 64].fetch_and(!bit, Ordering::AcqRel);
+        }
+    }
+}
+
+pub(crate) fn observe_physical_pointer(event: nickel_input::windows::NativePointerEvent) {
+    if event.injected {
+        return;
+    }
+    use nickel_input::windows::NativePointerKind;
+    match event.kind {
+        NativePointerKind::PrimaryPressed => {
+            PHYSICAL_BUTTONS.fetch_or(LEFT, Ordering::AcqRel);
+        }
+        NativePointerKind::PrimaryReleased => {
+            PHYSICAL_BUTTONS.fetch_and(!LEFT, Ordering::AcqRel);
+        }
+        NativePointerKind::SecondaryPressed => {
+            PHYSICAL_BUTTONS.fetch_or(RIGHT, Ordering::AcqRel);
+        }
+        NativePointerKind::SecondaryReleased => {
+            PHYSICAL_BUTTONS.fetch_and(!RIGHT, Ordering::AcqRel);
+        }
+        NativePointerKind::Moved => {}
+    }
+}
+
+fn physical_key_held(key: usize) -> bool {
+    PHYSICAL_KEYS[key / 64].load(Ordering::Acquire) & (1_u64 << (key % 64)) != 0
+}
+
+pub(crate) fn physical_modifiers_idle() -> bool {
+    const MODIFIERS: [usize; 11] = [
+        0x10, 0x11, 0x12, 0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0x5b, 0x5c,
+    ];
+    MODIFIERS.into_iter().all(|key| !physical_key_held(key))
+}
 
 fn key_input(key: u8, released: bool) -> INPUT {
     INPUT {
@@ -317,11 +368,10 @@ pub(crate) fn scroll(horizontal_v120: i32, vertical_v120: i32) -> Result<(), Str
 }
 
 pub(crate) fn physical_input_idle() -> bool {
-    (1_u16..=255).all(|key| {
-        // SAFETY: this read-only query samples the current input desktop and
-        // does not retain which key was down.
-        unsafe { GetAsyncKeyState(i32::from(key)) >= 0 }
-    })
+    PHYSICAL_KEYS
+        .iter()
+        .all(|word| word.load(Ordering::Acquire) == 0)
+        && PHYSICAL_BUTTONS.load(Ordering::Acquire) == 0
 }
 
 /// Release every synthesized held edge. This is bounded to 256 events and may

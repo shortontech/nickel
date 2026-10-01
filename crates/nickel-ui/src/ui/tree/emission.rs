@@ -287,6 +287,7 @@ pub(super) fn emit_element<Message: Clone>(
                 message: Some(message.clone()),
                 message_mapper: element.message_mapper,
                 seeded_value_mapper: element.seeded_value_mapper,
+                drag_seed: element.drag_seed.clone(),
                 drag_mapper: element.drag_mapper,
                 drop_message: element.drop_message.clone(),
                 drop_mapper: element.drop_mapper,
@@ -311,6 +312,7 @@ pub(super) fn emit_element<Message: Clone>(
             message: None,
             message_mapper: None,
             seeded_value_mapper: None,
+            drag_seed: None,
             drag_mapper: None,
             drop_message: element.drop_message.clone(),
             drop_mapper: element.drop_mapper,
@@ -341,11 +343,35 @@ pub(super) fn emit_element<Message: Clone>(
                 message: None,
                 message_mapper: None,
                 seeded_value_mapper: None,
+                drag_seed: element.drag_seed.clone(),
                 drag_mapper: element.drag_mapper,
                 drop_message: element.drop_message.clone(),
                 drop_mapper: element.drop_mapper,
             });
         }
+    }
+    if element.message.is_none()
+        && element.context_message.is_none()
+        && element.drag_seed.is_some()
+        && let Some(hit_rect) = node
+            .clip
+            .map(|clip| intersection(rect, clip))
+            .unwrap_or(Some(rect))
+    {
+        tree.resolved.nodes[node_index].hit_stack = Some(tree.hits.len());
+        tree.hits.push(HitRegion {
+            id: node.id.clone(),
+            rect: hit_rect,
+            target_bounds: rect,
+            value_bounds: (value_bounds != rect).then_some(value_bounds),
+            message: None,
+            message_mapper: None,
+            seeded_value_mapper: None,
+            drag_seed: element.drag_seed.clone(),
+            drag_mapper: element.drag_mapper,
+            drop_message: element.drop_message.clone(),
+            drop_mapper: element.drop_mapper,
+        });
     }
     if let Some(map) = &element.text_mapper
         && let Kind::Text {
@@ -410,6 +436,7 @@ pub(super) fn emit_element<Message: Clone>(
                 message: None,
                 message_mapper: None,
                 seeded_value_mapper: None,
+                drag_seed: None,
                 drag_mapper: None,
                 drop_message: None,
                 drop_mapper: None,
@@ -631,6 +658,7 @@ pub(super) fn emit_element<Message: Clone>(
                             message: Some(message.clone()),
                             message_mapper: None,
                             seeded_value_mapper: None,
+                            drag_seed: None,
                             drag_mapper: None,
                             drop_message: None,
                             drop_mapper: None,
@@ -1065,6 +1093,7 @@ pub(super) fn emit_element<Message: Clone>(
                             message,
                             message_mapper: None,
                             seeded_value_mapper: None,
+                            drag_seed: None,
                             drag_mapper: None,
                             drop_message: None,
                             drop_mapper: None,

@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
-     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui"
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
   <Package Name="Nickel"
            Manufacturer="Nickel contributors"
            Version="$(ProductVersion)"
@@ -15,6 +16,34 @@
     <Property Id="INSTALLLEVEL" Value="1" />
     <WixVariable Id="WixUILicenseRtf" Value="license.rtf" />
     <ui:WixUI Id="WixUI_FeatureTree" />
+
+    <util:CloseApplication Id="CloseNickel"
+                           Target="nickel.exe"
+                           Description="Nickel must close before setup can continue."
+                           CloseMessage="yes"
+                           ElevatedCloseMessage="yes"
+                           ElevatedEndSessionMessage="yes"
+                           Timeout="5"
+                           TerminateProcess="0"
+                           RebootPrompt="no" />
+    <util:CloseApplication Id="CloseNickelSettings"
+                           Target="nickel-settings.exe"
+                           Description="Nickel Settings must close before setup can continue."
+                           CloseMessage="yes"
+                           ElevatedCloseMessage="yes"
+                           ElevatedEndSessionMessage="yes"
+                           Timeout="5"
+                           TerminateProcess="0"
+                           RebootPrompt="no" />
+    <util:CloseApplication Id="CloseNickelTerminal"
+                           Target="nickel-terminal.exe"
+                           Description="Nickel Terminal must close before setup can continue."
+                           CloseMessage="yes"
+                           ElevatedCloseMessage="yes"
+                           ElevatedEndSessionMessage="yes"
+                           Timeout="5"
+                           TerminateProcess="0"
+                           RebootPrompt="no" />
 
     <StandardDirectory Id="LocalAppDataFolder">
       <Directory Id="InstallFolder" Name="Nickel" />
@@ -61,6 +90,12 @@
                   Execute="rollback"
                   Impersonate="yes"
                   Return="ignore" />
+    <CustomAction Id="ActivateNickelShell"
+                  FileRef="NickelShellSetupExe"
+                  ExeCommand="activate &quot;[#NickelExe]&quot;"
+                  Execute="commit"
+                  Impersonate="yes"
+                  Return="check" />
 
     <InstallExecuteSequence>
       <Custom Action="RollbackEnableNickelShell"
@@ -75,6 +110,9 @@
       <Custom Action="DisableNickelShell"
               Before="RemoveFiles"
               Condition="(!DefaultShellFeature = 3) AND (&amp;DefaultShellFeature = 2)" />
+      <Custom Action="ActivateNickelShell"
+              After="EnableNickelShell"
+              Condition="(&amp;DefaultShellFeature = 3)" />
     </InstallExecuteSequence>
   </Package>
 

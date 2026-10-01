@@ -5,6 +5,8 @@ use crate::model::{TrayItem, WindowId};
 pub(crate) use windows::WindowsShortcutDiagnosticSource;
 #[cfg(target_os = "windows")]
 pub(crate) use windows::remote_observation;
+#[cfg(target_os = "windows")]
+pub(crate) use windows::run_packaged_activation_child;
 pub(crate) mod status_mailbox;
 use nickel_input::global::{ShortcutCapability, ShortcutOwnership};
 
@@ -51,6 +53,31 @@ pub(crate) fn windows_touchscreen_present() -> bool {
 
 pub struct DesktopCapture {
     pub image: image::RgbaImage,
+}
+
+const TEMP_SCREENSHOT_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
+pub(crate) fn remove_stale_temp_screenshots(directory: &std::path::Path, prefix: &str) {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !name.starts_with(prefix) || !name.ends_with(".png") {
+            continue;
+        }
+        let stale = entry
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_some_and(|age| age >= TEMP_SCREENSHOT_MAX_AGE);
+        if stale {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -474,7 +501,11 @@ pub fn system_status_receiver() -> status_mailbox::StatusReceiver {
     {
         linux::system_status_receiver()
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "windows")]
+    {
+        windows::system_status_receiver()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     {
         let (_sender, receiver) = status_mailbox::channel();
         receiver
@@ -1199,22 +1230,23 @@ pub(crate) use linux::{
 mod windows;
 #[cfg(target_os = "windows")]
 pub use windows::{
-    NotificationFeed, TrayFeed, WindowFeed, activate_wifi_network, active_display_point,
-    application_discovery, application_icon, applications, audio_status, bluetooth_status,
-    capture_active_window, capture_active_window_to_file, capture_desktop, capture_pointer,
-    configure_context_menu_window, configure_desktop_window, configure_launcher_window,
-    configure_notification_window, configure_panel_window, configure_plugin_dialog_window,
-    configure_preview_window, configure_screenshot_window, configured_primary_output,
-    copy_image_to_clipboard, copy_temp_image_path, deliver_on_screen_keyboard_input,
-    disconnect_wifi_network, ensure_panel_tray_host, execute_run_command, handle_consumer_control,
-    handle_focused_shortcut, hide_preview_window, launch_application,
-    launcher_has_foreground_focus, launcher_hotkey_receiver, launcher_visibility_applied,
-    launcher_window_visible, lock_workstation, network_status, observe_nickel_window_key,
+    InternalWindowThreadGuard, NotificationFeed, TrayFeed, WindowFeed, activate_wifi_network,
+    active_display_point, application_discovery, application_icon, applications, audio_status,
+    bluetooth_status, capture_active_window, capture_active_window_to_file, capture_desktop,
+    capture_pointer, configure_context_menu_window, configure_desktop_window,
+    configure_launcher_window, configure_notification_window, configure_panel_window,
+    configure_plugin_dialog_window, configure_preview_window, configure_screenshot_window,
+    configured_primary_output, copy_image_to_clipboard, copy_temp_image_path,
+    deliver_on_screen_keyboard_input, disconnect_wifi_network, ensure_panel_tray_host,
+    execute_run_command, handle_consumer_control, handle_focused_shortcut, hide_preview_window,
+    launch_application, launcher_has_foreground_focus, launcher_hotkey_receiver,
+    launcher_visibility_applied, launcher_window_visible, lock_workstation, network_status,
     on_screen_keyboard_snapshot, pair_bluetooth_device, register_internal_window_thread,
-    register_session_shell, release_panel_window, release_pointer, reposition_panel_window,
-    select_audio_device, send_shell_command, set_audio_volume, set_bluetooth_discovery,
-    set_bluetooth_powered, set_wifi_enabled, show_overlay_window_without_activation,
-    show_window_system_menu, toggle_bluetooth_device, update_panel_fullscreen_state, wallpaper,
+    register_session_shell, register_shell_window_thread, release_panel_window, release_pointer,
+    reposition_panel_window, select_audio_device, send_shell_command, set_audio_volume,
+    set_bluetooth_discovery, set_bluetooth_powered, set_wifi_enabled,
+    show_overlay_window_without_activation, show_window_system_menu, toggle_bluetooth_device,
+    update_panel_fullscreen_state, wallpaper,
 };
 
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]

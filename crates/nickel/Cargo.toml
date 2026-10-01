@@ -96,14 +96,18 @@ nickel-uwu = { path = "../nickel-uwu", default-features = false }
 accesskit = "0.24.1"
 accesskit_windows = "0.34.0"
 nickel-platform = { path = "../nickel-platform" }
+notify.workspace = true
 pollster.workspace = true
 wgpu.workspace = true
 bytemuck.workspace = true
 windows-core = "0.62.2"
 windows = { workspace = true, features = [
     "Foundation",
+    "ApplicationModel",
     "Media_Control",
     "System",
+    "UI_Notifications",
+    "UI_Notifications_Management",
     "Win32_Foundation",
     "Win32_Globalization",
     "Win32_Graphics_Dwm",

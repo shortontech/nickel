@@ -71,7 +71,7 @@ use windows::{
             Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent},
             Controls::MARGINS,
             HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetThreadDpiAwarenessContext},
-            Input::KeyboardAndMouse::{GetAsyncKeyState, GetCapture, ReleaseCapture, SetCapture},
+            Input::KeyboardAndMouse::{GetCapture, ReleaseCapture, SetCapture},
             Shell::PropertiesSystem::{IPropertyStore, SHGetPropertyStoreForWindow},
             Shell::{
                 ABE_BOTTOM, ABE_TOP, ABM_NEW, ABM_QUERYPOS, ABM_REMOVE, ABM_SETPOS, APPBARDATA,
@@ -82,27 +82,30 @@ use windows::{
                 SHGetFileInfoW, ShellExecuteW,
             },
             WindowsAndMessaging::{
-                CallWindowProcW, CopyImage, CreateWindowExW, DI_NORMAL, DefWindowProcW,
-                DestroyIcon, DrawIconEx, EVENT_OBJECT_DESTROY, EVENT_SYSTEM_MOVESIZEEND,
-                EVENT_SYSTEM_MOVESIZESTART, EnumWindows, GA_ROOT, GA_ROOTOWNER, GCLP_HICON,
-                GCLP_HICONSM, GWL_EXSTYLE, GWLP_WNDPROC, GetAncestor, GetClassLongPtrW,
-                GetClassNameW, GetClientRect, GetCursorPos, GetForegroundWindow,
+                CallNextHookEx, CallWindowProcW, CopyImage, CreateWindowExW, DI_NORMAL,
+                DefWindowProcW, DestroyIcon, DrawIconEx, EVENT_OBJECT_DESTROY,
+                EVENT_SYSTEM_MOVESIZEEND, EVENT_SYSTEM_MOVESIZESTART, EnumWindows, GA_ROOT,
+                GA_ROOTOWNER, GCLP_HICON, GCLP_HICONSM, GWL_EXSTYLE, GWLP_WNDPROC, GetAncestor,
+                GetClassLongPtrW, GetClassNameW, GetClientRect, GetCursorPos, GetForegroundWindow,
                 GetLastActivePopup, GetSystemMenu, GetSystemMetrics, GetWindowLongPtrW,
                 GetWindowRect, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId,
-                HICON, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT,
-                HTTOPRIGHT, HWND_BOTTOM, HWND_BROADCAST, HWND_TOPMOST, IMAGE_ICON, IsIconic,
-                IsWindow, IsWindowVisible, IsZoomed, LR_COPYFROMRESOURCE, LWA_ALPHA,
+                HHOOK, HICON, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTLEFT, HTRIGHT, HTTOP,
+                HTTOPLEFT, HTTOPRIGHT, HWND_BOTTOM, HWND_BROADCAST, HWND_TOPMOST, IMAGE_ICON,
+                IsIconic, IsWindow, IsWindowVisible, IsZoomed, LR_COPYFROMRESOURCE, LWA_ALPHA,
                 NID_INTEGRATED_TOUCH, NID_READY, PostMessageW, RegisterClassW,
-                RegisterShellHookWindow, RegisterWindowMessageW, SM_CXICON, SM_CYICON,
-                SM_DIGITIZER, SPI_GETWORKAREA, SPI_SETWORKAREA, SPIF_SENDCHANGE, SW_HIDE,
-                SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOWNOACTIVATE, SW_SHOWNORMAL,
-                SWP_ASYNCWINDOWPOS, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-                SWP_NOZORDER, SendNotifyMessageW, SetForegroundWindow, SetLayeredWindowAttributes,
-                SetWindowLongPtrW, SetWindowPos, ShowWindow, SystemParametersInfoW, TPM_RETURNCMD,
-                TPM_RIGHTBUTTON, TrackPopupMenu, WINDOW_EX_STYLE, WINDOW_STYLE,
+                RegisterShellHookWindow, RegisterWindowMessageW, SEND_MESSAGE_TIMEOUT_FLAGS,
+                SM_CXICON, SM_CYICON, SM_DIGITIZER, SMTO_ABORTIFHUNG, SPI_GETWORKAREA,
+                SPI_SETWORKAREA, SPIF_SENDCHANGE, SW_HIDE, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE,
+                SW_SHOWNOACTIVATE, SW_SHOWNORMAL, SWP_ASYNCWINDOWPOS, SWP_FRAMECHANGED,
+                SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SendMessageTimeoutW,
+                SendNotifyMessageW, SetForegroundWindow, SetLayeredWindowAttributes,
+                SetWindowLongPtrW, SetWindowPos, SetWindowsHookExW, ShowWindow, ShowWindowAsync,
+                SystemParametersInfoW, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu,
+                UnhookWindowsHookEx, WH_GETMESSAGE, WINDOW_EX_STYLE, WINDOW_STYLE,
                 WINEVENT_OUTOFCONTEXT, WM_CANCELMODE, WM_CLOSE, WM_CONTEXTMENU, WM_COPYDATA,
-                WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCLBUTTONDOWN, WM_RBUTTONDOWN,
-                WM_RBUTTONUP, WM_SYSCOMMAND, WNDCLASSW, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS,
+                WM_GETICON, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+                WM_NCLBUTTONDOWN, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSCOMMAND, WM_SYSKEYDOWN,
+                WM_SYSKEYUP, WNDCLASSW, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS,
                 WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
                 WS_EX_TRANSPARENT, WS_POPUP, WindowFromPoint,
             },
@@ -366,11 +369,13 @@ pub fn copy_image_to_clipboard(image: image::RgbaImage) -> Result<(), String> {
 }
 
 pub fn copy_temp_image_path(image: &image::RgbaImage) -> Result<PathBuf, String> {
+    let directory = env::temp_dir();
+    super::remove_stale_temp_screenshots(&directory, "nickel-crop-");
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis();
-    let path = env::temp_dir().join(format!("nickel-crop-{stamp}.png"));
+    let path = directory.join(format!("nickel-crop-{stamp}.png"));
     image
         .save(&path)
         .map_err(|error| format!("could not save temporary screenshot: {error}"))?;
@@ -679,6 +684,58 @@ pub(crate) fn prepare_application_discovery() -> ApplicationDiscovery {
 }
 
 pub(crate) fn publish_application_discovery(_: &ApplicationDiscovery) {}
+
+pub fn system_status_receiver() -> super::status_mailbox::StatusReceiver {
+    use notify::{RecursiveMode, Watcher};
+
+    let (_, mut receiver) = super::status_mailbox::channel();
+    let sender = receiver.sender();
+    let (changed_tx, changed_rx) = std::sync::mpsc::sync_channel(1);
+    let Ok(mut watcher) =
+        notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+            if event
+                .as_ref()
+                .is_ok_and(start_menu::application_inventory_event_changed)
+            {
+                let _ = changed_tx.try_send(());
+            }
+        })
+    else {
+        return receiver;
+    };
+    let mut watching = false;
+    for root in start_menu::application_roots()
+        .into_iter()
+        .filter(|root| root.is_dir())
+    {
+        watching |= watcher.watch(&root, RecursiveMode::Recursive).is_ok();
+    }
+    if !watching {
+        return receiver;
+    }
+    std::thread::Builder::new()
+        .name("nickel-app-catalog".into())
+        .spawn(move || {
+            while changed_rx.recv().is_ok() {
+                while changed_rx
+                    .recv_timeout(std::time::Duration::from_millis(150))
+                    .is_ok()
+                {}
+                let discovery = prepare_application_discovery();
+                if sender
+                    .send(std::sync::Arc::new(
+                        super::SystemStatusUpdate::ApplicationInventory(discovery),
+                    ))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .ok();
+    receiver.keep_alive(watcher);
+    receiver
+}
 
 pub fn application_icon(reference: &str) -> Option<image::RgbaImage> {
     nickel_platform::path_icon_with_theme_at_size(PathBuf::from(reference).as_path(), None, 96)
@@ -1151,8 +1208,21 @@ fn project_windows_shortcuts(
 }
 
 pub fn handle_focused_shortcut(key: KeyCode, edge: KeyEdge) {
+    handle_focused_shortcut_edge(key, edge, false);
+}
+
+fn handle_focused_shortcut_edge(key: KeyCode, edge: KeyEdge, synthesize_missing_tab_press: bool) {
     let actions = windows_input_adapter().lock().ok().map(|mut adapter| {
-        if key == KeyCode::PrintScreen
+        if synthesize_missing_tab_press
+            && key == KeyCode::Tab
+            && edge == KeyEdge::Released
+            && adapter.modifier_held(AggregateModifier::Alt)
+            && !adapter.key_held(KeyCode::Tab)
+        {
+            let mut outcomes = adapter.handle_key_code(key, KeyEdge::Pressed).outcomes;
+            outcomes.extend(adapter.handle_key_code(key, KeyEdge::Released).outcomes);
+            outcomes
+        } else if key == KeyCode::PrintScreen
             && edge == KeyEdge::Released
             && !adapter.key_held(KeyCode::PrintScreen)
         {
@@ -1330,6 +1400,9 @@ static WINDOWS_INPUT_ADAPTER: std::sync::OnceLock<Mutex<WindowsInputAdapter<Hotk
     std::sync::OnceLock::new();
 static WINDOW_SWITCH_ACTIVE: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
+static LAST_HOOK_TAB_RELEASE_TICK: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(0);
+static SHOW_DESKTOP_WINDOWS: Mutex<Option<Vec<ShowDesktopWindow>>> = Mutex::new(None);
 static PANEL_FULLSCREEN_ACTIVE: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 #[derive(Clone, Copy)]
@@ -1369,13 +1442,6 @@ static LAUNCHER_WINDOW_HANDLE: std::sync::atomic::AtomicIsize =
     std::sync::atomic::AtomicIsize::new(0);
 static INTERNAL_WINDOW_THREADS: LazyLock<Mutex<HashSet<u32>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
-static SUPER_HOOK_TOGGLE_GENERATION: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
-static NICKEL_WINDOW_SUPER_SIDES: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
-static NICKEL_WINDOW_SUPER_CHORDED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-static NICKEL_WINDOW_TOGGLE_GENERATION: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
 static PREVIEW_WINDOW_HANDLE: std::sync::atomic::AtomicIsize =
     std::sync::atomic::AtomicIsize::new(0);
 static TASK_SWITCHER_PEEK_WINDOW_HANDLE: std::sync::atomic::AtomicIsize =
@@ -1610,6 +1676,12 @@ struct NativeWindowFingerprint {
     process_id: u32,
     thread_id: u32,
     process_created: u64,
+}
+
+#[derive(Clone, Copy)]
+struct ShowDesktopWindow {
+    fingerprint: NativeWindowFingerprint,
+    maximized: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -2400,13 +2472,18 @@ fn pointer_release_binding(
     })
 }
 
-fn completion_button_physically_held(binding: CompletionBinding) -> bool {
+fn completion_button_physically_held(
+    binding: CompletionBinding,
+    event: NativePointerEvent,
+) -> bool {
     let CompletionGesture::Button(button) = binding.gesture else {
         return false;
     };
-    let virtual_key = if button == 1 { 0x01 } else { 0x02 };
-    // SAFETY: this is a read-only physical button-state query on the hook thread.
-    unsafe { GetAsyncKeyState(virtual_key) < 0 }
+    if button == 1 {
+        event.primary_physically_held
+    } else {
+        event.secondary_physically_held
+    }
 }
 
 fn operation_kind(resize_edge: Option<u32>) -> Option<OperationKind> {
@@ -2466,6 +2543,7 @@ fn handle_native_keyboard_hook(
     event: NativeKeyboardEvent,
     registered_hotkey_owned: bool,
     alt_physically_held: bool,
+    super_physically_held: bool,
 ) -> HookDisposition {
     crate::windows_remote_control::observe_physical_key(event);
     // Alt changes the layout-translated virtual key for the physical grave key on some layouts
@@ -2475,6 +2553,10 @@ fn handle_native_keyboard_hook(
         PhysicalKey::Code(key) => Some(key),
         PhysicalKey::Native(_) => None,
     };
+    if key == Some(KeyCode::Tab) && event.edge == KeyEdge::Released {
+        // SAFETY: GetTickCount64 is a read-only monotonic clock query.
+        LAST_HOOK_TAB_RELEASE_TICK.store(unsafe { GetTickCount64() } as u32, Ordering::Release);
+    }
     let super_edge = matches!(key, Some(KeyCode::SuperLeft | KeyCode::SuperRight));
     if key == Some(KeyCode::KeyR) && registered_hotkey_owned {
         if let Ok(mut adapter) = windows_input_adapter().lock() {
@@ -2508,9 +2590,8 @@ fn handle_native_keyboard_hook(
             // A pointer-hook startup race must never leave a stale synthetic
             // Super side affecting later ordinary keys. Reconcile aggregate
             // state against Windows before interpreting a non-Super key.
-            if !super_edge && unsafe { GetAsyncKeyState(0x5b) >= 0 && GetAsyncKeyState(0x5c) >= 0 }
-            {
-                outcomes.extend(adapter.reconcile_modifier_release(AggregateModifier::Super));
+            if !super_edge && !super_physically_held {
+                adapter.clear_modifier_state(AggregateModifier::Super);
             }
             // Windows can deliver Print Screen as a release without a press. Recover the
             // pressed shortcut edge here, where the hook sees every foreground window.
@@ -2543,12 +2624,6 @@ fn handle_native_keyboard_hook(
     } else {
         super_edge || outcomes.iter().any(|outcome| outcome.suppress)
     };
-    if outcomes
-        .iter()
-        .any(|outcome| outcome.action == HotkeyAction::ToggleLauncher)
-    {
-        SUPER_HOOK_TOGGLE_GENERATION.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-    }
     send_hotkey_outcomes(outcomes);
     if suppress {
         HookDisposition::Suppress
@@ -2605,7 +2680,6 @@ fn is_host_owned_action(action: HotkeyAction) -> bool {
             | HotkeyAction::RestoreOrMinimizeActiveWindow
             | HotkeyAction::MoveWindowToPreviousOutput
             | HotkeyAction::MoveWindowToNextOutput
-            | HotkeyAction::ShowDesktop
             | HotkeyAction::ProjectDisplays
     )
 }
@@ -2620,6 +2694,7 @@ fn send_hotkey_action(action: Option<HotkeyAction>) {
         Some(HotkeyAction::ShowControlCenter) => GlobalShortcut::ShowControlCenter,
         Some(HotkeyAction::ShowNotifications) => GlobalShortcut::ShowNotifications,
         Some(HotkeyAction::ShowWindowMenu) => GlobalShortcut::ShowWindowMenu,
+        Some(HotkeyAction::ShowDesktop) => GlobalShortcut::ShowDesktop,
         Some(HotkeyAction::SwitchNext) => GlobalShortcut::SwitchNext,
         Some(HotkeyAction::SwitchPrevious) => GlobalShortcut::SwitchPrevious,
         Some(HotkeyAction::SwitchGroupNext) => GlobalShortcut::SwitchGroupNext,
@@ -2650,7 +2725,6 @@ fn send_hotkey_action(action: Option<HotkeyAction>) {
             | HotkeyAction::RestoreOrMinimizeActiveWindow
             | HotkeyAction::MoveWindowToPreviousOutput
             | HotkeyAction::MoveWindowToNextOutput
-            | HotkeyAction::ShowDesktop
             | HotkeyAction::ProjectDisplays,
         ) => return,
         None => return,
@@ -2732,20 +2806,106 @@ struct ForeignWindowAtPoint {
     found: HWND,
 }
 
-pub struct InternalWindowThreadGuard(u32);
+pub struct InternalWindowThreadGuard {
+    thread_id: u32,
+    message_hook: Option<HHOOK>,
+    draggable_windows: bool,
+}
 
-pub fn register_internal_window_thread() -> InternalWindowThreadGuard {
+unsafe extern "system" fn internal_window_message_hook(
+    code: i32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    if code >= 0 {
+        // SAFETY: WH_GETMESSAGE supplies a readable MSG pointer for the duration of this call.
+        let message =
+            unsafe { &*(lparam.0 as *const windows::Win32::UI::WindowsAndMessaging::MSG) };
+        if let Some((key, edge)) =
+            internal_message_shortcut(message.message, message.wParam.0, message.lParam.0)
+        {
+            let hook_observed_release = if key == KeyCode::Tab && edge == KeyEdge::Released {
+                let hook_tick = LAST_HOOK_TAB_RELEASE_TICK.load(Ordering::Acquire);
+                let message_tick = message.time;
+                hook_tick != 0
+                    && (message_tick.wrapping_sub(hook_tick) <= 50
+                        || hook_tick.wrapping_sub(message_tick) <= 50)
+            } else {
+                false
+            };
+            handle_focused_shortcut_edge(key, edge, !hook_observed_release);
+        }
+    }
+    // SAFETY: forwarding preserves the hook chain; this hook does not own the message.
+    unsafe { CallNextHookEx(None, code, wparam, lparam) }
+}
+
+fn internal_message_shortcut(
+    message: u32,
+    virtual_key: usize,
+    metadata: isize,
+) -> Option<(KeyCode, KeyEdge)> {
+    let edge = match message {
+        WM_KEYDOWN | WM_SYSKEYDOWN => KeyEdge::Pressed,
+        WM_KEYUP | WM_SYSKEYUP => KeyEdge::Released,
+        _ => return None,
+    };
+    let metadata = metadata as usize;
+    if edge == KeyEdge::Pressed && metadata & (1 << 30) != 0 {
+        return None;
+    }
+    let scan_code = ((metadata >> 16) & 0xff) as u32;
+    let extended = metadata & (1 << 24) != 0;
+    let PhysicalKey::Code(key) = physical_key(virtual_key as u32, scan_code, extended) else {
+        return None;
+    };
+    Some((key, edge))
+}
+
+fn register_window_message_thread(draggable_windows: bool) -> InternalWindowThreadGuard {
+    // SAFETY: this installs an in-process hook only for the current thread. The callback and
+    // owning guard both remain valid until the hook is removed on this same thread.
     let thread_id = unsafe { GetCurrentThreadId() };
-    if let Ok(mut threads) = INTERNAL_WINDOW_THREADS.lock() {
+    let message_hook = unsafe {
+        SetWindowsHookExW(
+            WH_GETMESSAGE,
+            Some(internal_window_message_hook),
+            None,
+            thread_id,
+        )
+    }
+    .map_err(|error| {
+        tracing::warn!(%error, thread_id, "could not observe internal window messages");
+    })
+    .ok();
+    if draggable_windows && let Ok(mut threads) = INTERNAL_WINDOW_THREADS.lock() {
         threads.insert(thread_id);
     }
-    InternalWindowThreadGuard(thread_id)
+    InternalWindowThreadGuard {
+        thread_id,
+        message_hook,
+        draggable_windows,
+    }
+}
+
+pub fn register_internal_window_thread() -> InternalWindowThreadGuard {
+    register_window_message_thread(true)
+}
+
+pub fn register_shell_window_thread() -> InternalWindowThreadGuard {
+    register_window_message_thread(false)
 }
 
 impl Drop for InternalWindowThreadGuard {
     fn drop(&mut self) {
-        if let Ok(mut threads) = INTERNAL_WINDOW_THREADS.lock() {
-            threads.remove(&self.0);
+        if let Some(hook) = self.message_hook.take() {
+            // SAFETY: this guard owns the thread-local hook handle.
+            let _ = unsafe { UnhookWindowsHookEx(hook) };
+        }
+        if self.draggable_windows
+            && let Ok(mut threads) = INTERNAL_WINDOW_THREADS.lock()
+        {
+            threads.remove(&self.thread_id);
         }
     }
 }
@@ -2753,12 +2913,20 @@ impl Drop for InternalWindowThreadGuard {
 fn draggable_window_owner(window: HWND, nickel_process: u32) -> bool {
     let mut process_id = 0;
     let thread_id = unsafe { GetWindowThreadProcessId(window, Some(&mut process_id)) };
+    INTERNAL_WINDOW_THREADS.lock().is_ok_and(|threads| {
+        drag_target_owner_allowed(process_id, thread_id, nickel_process, &threads)
+    })
+}
+
+fn drag_target_owner_allowed(
+    process_id: u32,
+    thread_id: u32,
+    nickel_process: u32,
+    internal_window_threads: &HashSet<u32>,
+) -> bool {
     process_id != 0
         && thread_id != 0
-        && (process_id != nickel_process
-            || INTERNAL_WINDOW_THREADS
-                .lock()
-                .is_ok_and(|threads| threads.contains(&thread_id)))
+        && (process_id != nickel_process || internal_window_threads.contains(&thread_id))
 }
 
 unsafe extern "system" fn find_foreign_window_at_point(window: HWND, state: LPARAM) -> BOOL {
@@ -2906,13 +3074,6 @@ fn pointer_drag_rectangle(
 
 fn handle_native_pointer_hook(event: NativePointerEvent) -> HookDisposition {
     crate::windows_remote_control::observe_physical_pointer(event);
-    if matches!(
-        event.kind,
-        NativePointerKind::PrimaryPressed | NativePointerKind::SecondaryPressed
-    ) && NICKEL_WINDOW_SUPER_SIDES.load(std::sync::atomic::Ordering::Acquire) != 0
-    {
-        NICKEL_WINDOW_SUPER_CHORDED.store(true, std::sync::atomic::Ordering::Release);
-    }
     // Injected hook traffic is not the physical Windows pointer source and may
     // neither start, update, nor complete its operation binding.
     if event.injected {
@@ -2954,7 +3115,7 @@ fn handle_native_pointer_hook(event: NativePointerEvent) -> HookDisposition {
         if event.kind == NativePointerKind::Moved || current_release {
             if event.kind == NativePointerKind::Moved
                 && now.saturating_sub(operation.initiated_at) >= 250
-                && !completion_button_physically_held(operation.completion)
+                && !completion_button_physically_held(operation.completion, event)
             {
                 // Low-level button-up delivery is not infallible. Once another
                 // hook event proves the initiating button has been released,
@@ -3010,33 +3171,20 @@ fn handle_native_pointer_hook(event: NativePointerEvent) -> HookDisposition {
     ) {
         return HookDisposition::Forward;
     }
-    // A focused in-process window can report Super on its own event queue even
-    // when the low-level hook has not observed the corresponding key edge yet.
-    let file_window_super =
-        NICKEL_WINDOW_SUPER_SIDES.load(std::sync::atomic::Ordering::Acquire) != 0;
-    let physical_super = event.super_physically_held || file_window_super;
-    let physical_alt = unsafe { GetAsyncKeyState(0x12) < 0 };
-    let (super_held, gesture, reconciled) = windows_input_adapter()
+    let physical_alt = event.alt_physically_held;
+    let (super_held, gesture) = windows_input_adapter()
         .lock()
         .map(|mut adapter| {
-            let reconciled = if !physical_super {
-                adapter.reconcile_modifier_release(AggregateModifier::Super)
-            } else {
-                Vec::new()
-            };
             let super_held = adapter.modifier_held(AggregateModifier::Super);
-            let gesture = adapter.begin_physical_super_pointer_gesture(
-                if event.kind == NativePointerKind::PrimaryPressed {
+            let gesture =
+                adapter.begin_pointer_gesture(if event.kind == NativePointerKind::PrimaryPressed {
                     PointerButton::Primary
                 } else {
                     PointerButton::Secondary
-                },
-                physical_super,
-            );
-            (super_held, gesture, reconciled)
+                });
+            (super_held, gesture)
         })
         .unwrap_or_default();
-    send_hotkey_outcomes(reconciled);
     let gesture = gesture.or_else(|| {
         physical_alt.then_some(match event.kind {
             NativePointerKind::PrimaryPressed => SuperPointerGesture::Move,
@@ -3047,8 +3195,6 @@ fn handle_native_pointer_hook(event: NativePointerEvent) -> HookDisposition {
     let chord_started = gesture.is_some();
     tracing::debug!(
         super_held,
-        physical_super,
-        file_window_super,
         physical_alt,
         chord_started,
         button = if event.kind == NativePointerKind::PrimaryPressed {
@@ -3584,42 +3730,75 @@ fn activate_packaged_application(
     app_user_model_id: &str,
     arguments: &[String],
 ) -> Result<Option<u32>, LaunchError> {
+    let argument_line = arguments
+        .iter()
+        .map(|argument| quote_windows_argument(argument))
+        .collect::<Vec<_>>()
+        .join(" ");
+    activate_application_on_sta(app_user_model_id, &argument_line)
+        .map(|process_id| (process_id != 0).then_some(process_id))
+        .map_err(LaunchError::Platform)
+}
+
+fn activate_application_on_sta(app_user_model_id: &str, arguments: &str) -> Result<u32, String> {
+    let executable = std::env::current_exe()
+        .map_err(|error| format!("find Nickel executable for packaged activation: {error}"))?;
+    let output = std::process::Command::new(executable)
+        .arg("--nickel-activate-packaged-app")
+        .arg(app_user_model_id)
+        .arg(arguments)
+        .output()
+        .map_err(|error| format!("start packaged activation process: {error}"))?;
+    if !output.status.success() {
+        let error = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("packaged activation process failed: {error}"));
+    }
+    String::from_utf8(output.stdout)
+        .map_err(|error| format!("read packaged activation result: {error}"))?
+        .trim()
+        .parse::<u32>()
+        .map_err(|error| format!("invalid packaged activation result: {error}"))
+}
+
+pub(crate) fn run_packaged_activation_child() -> Result<(), String> {
     use windows::Win32::{
         System::Com::CLSCTX_LOCAL_SERVER,
         UI::Shell::{AO_NONE, ApplicationActivationManager, IApplicationActivationManager},
     };
 
-    // SAFETY: This thread uses COM only for the duration of the synchronous
-    // activation. If it already has an apartment, CoCreateInstance uses that
-    // apartment and only successful initialization is balanced below.
-    let initialized = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.is_ok();
+    let mut arguments = std::env::args().skip(2);
+    let app_user_model_id = arguments
+        .next()
+        .ok_or_else(|| "packaged activation child is missing an application ID".to_string())?;
+    let application_arguments = arguments
+        .next()
+        .ok_or_else(|| "packaged activation child is missing its argument line".to_string())?;
+    if arguments.next().is_some() {
+        return Err("packaged activation child received unexpected arguments".into());
+    }
+    // SAFETY: This short-lived process uses COM only on its main thread. The
+    // successful initialization is balanced after the synchronous activation.
+    unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }
+        .ok()
+        .map_err(|error| format!("initialize activation STA: {error}"))?;
     let result = (|| {
         let manager: IApplicationActivationManager =
             unsafe { CoCreateInstance(&ApplicationActivationManager, None, CLSCTX_LOCAL_SERVER) }
-                .map_err(|error| LaunchError::Platform(error.to_string()))?;
+                .map_err(|error| format!("create application activation manager: {error}"))?;
         let app_id: Vec<u16> = app_user_model_id.encode_utf16().chain([0]).collect();
-        let argument_line = arguments
-            .iter()
-            .map(|argument| quote_windows_argument(argument))
-            .collect::<Vec<_>>()
-            .join(" ");
-        let argument_line: Vec<u16> = argument_line.encode_utf16().chain([0]).collect();
-        let argument_pointer = if arguments.is_empty() {
+        let application_arguments: Vec<u16> =
+            application_arguments.encode_utf16().chain([0]).collect();
+        let argument_pointer = if application_arguments.len() == 1 {
             PCWSTR::null()
         } else {
-            PCWSTR(argument_line.as_ptr())
+            PCWSTR(application_arguments.as_ptr())
         };
-        let process_id = unsafe {
-            manager.ActivateApplication(PCWSTR(app_id.as_ptr()), argument_pointer, AO_NONE)
-        }
-        .map_err(|error| LaunchError::Platform(error.to_string()))?;
-        Ok((process_id != 0).then_some(process_id))
+        unsafe { manager.ActivateApplication(PCWSTR(app_id.as_ptr()), argument_pointer, AO_NONE) }
+            .map_err(|error| format!("activate {app_user_model_id}: {error}"))
     })();
-    if initialized {
-        // SAFETY: Balances the successful CoInitializeEx call above.
-        unsafe { CoUninitialize() };
-    }
-    result
+    unsafe { CoUninitialize() };
+    println!("{}", result?);
+    Ok(())
 }
 
 fn shell_execute_observed(
@@ -3729,29 +3908,13 @@ fn quote_windows_argument(argument: &str) -> String {
 }
 
 fn launch_uri(uri: &str) -> windows::core::Result<bool> {
-    use windows::{
-        Win32::System::Com::CLSCTX_LOCAL_SERVER,
-        Win32::System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize, RoUninitialize},
-        Win32::UI::Shell::{AO_NONE, ApplicationActivationManager, IApplicationActivationManager},
-    };
-
-    unsafe { RoInitialize(RO_INIT_MULTITHREADED)? };
-    let result = (|| {
-        let manager: IApplicationActivationManager =
-            unsafe { CoCreateInstance(&ApplicationActivationManager, None, CLSCTX_LOCAL_SERVER)? };
-        let arguments: Vec<u16> = uri.encode_utf16().chain([0]).collect();
-        let process_id = unsafe {
-            manager.ActivateApplication(
-                w!("windows.immersivecontrolpanel_cw5n1h2txyewy!microsoft.windows.immersivecontrolpanel"),
-                PCWSTR(arguments.as_ptr()),
-                AO_NONE,
-            )?
-        };
-        eprintln!("activated Settings URI {uri} as process {process_id}");
-        Ok(process_id != 0)
-    })();
-    unsafe { RoUninitialize() };
-    result
+    const SETTINGS_AUMID: &str =
+        "windows.immersivecontrolpanel_cw5n1h2txyewy!microsoft.windows.immersivecontrolpanel";
+    activate_application_on_sta(SETTINGS_AUMID, uri)
+        .map(|process_id| process_id != 0)
+        .map_err(|error| {
+            windows::core::Error::new(windows::core::HRESULT(0x80004005_u32 as i32), error)
+        })
 }
 
 pub fn configure_desktop_window(
@@ -3895,59 +4058,20 @@ pub fn configure_plugin_dialog_window(window: &impl raw_window_handle::HasWindow
         .is_ok()
     }
 }
-
-pub fn observe_nickel_window_key(super_side: Option<u8>, pressed: bool) {
-    use std::sync::atomic::Ordering;
-
-    if pressed {
-        if let Some(side) = super_side {
-            let previous = NICKEL_WINDOW_SUPER_SIDES.fetch_or(side, Ordering::AcqRel);
-            if previous == 0 {
-                NICKEL_WINDOW_SUPER_CHORDED.store(false, Ordering::Release);
-                NICKEL_WINDOW_TOGGLE_GENERATION.store(
-                    SUPER_HOOK_TOGGLE_GENERATION.load(Ordering::Acquire),
-                    Ordering::Release,
-                );
-            }
-        } else if NICKEL_WINDOW_SUPER_SIDES.load(Ordering::Acquire) != 0 {
-            NICKEL_WINDOW_SUPER_CHORDED.store(true, Ordering::Release);
-        }
-        return;
-    }
-    let Some(side) = super_side else {
-        return;
-    };
-    let previous = NICKEL_WINDOW_SUPER_SIDES.fetch_and(!side, Ordering::AcqRel);
-    if previous & side == 0 || previous & !side != 0 {
-        return;
-    }
-    let chorded = NICKEL_WINDOW_SUPER_CHORDED.swap(false, Ordering::AcqRel);
-    let hook_dispatched = SUPER_HOOK_TOGGLE_GENERATION.load(Ordering::Acquire)
-        != NICKEL_WINDOW_TOGGLE_GENERATION.load(Ordering::Acquire);
-    if !chorded
-        && !hook_dispatched
-        && let Some(sender) = SHORTCUT_SENDER.get()
-    {
-        let _ = sender.send(GlobalShortcut::ToggleLauncher);
-    }
-}
-
 pub fn configure_notification_window(window: &impl raw_window_handle::HasWindowHandle) -> bool {
-    if prepare_trusted_control_window(window).is_err() {
-        return false;
-    }
     let Some(hwnd) = window_hwnd(window) else {
         return false;
     };
-    // Approval is trusted local chrome: keep it above ordinary/fullscreen windows and out of
-    // task switching, but do not use NOACTIVATE because keyboard users must be able to focus it.
-    // Capture exclusion is installed above before the window can ever be shown.
+    // Notifications are ordinary user-visible shell chrome. Keep them above application windows
+    // and out of task switching without taking keyboard focus when the first pointer gesture
+    // arrives. Their pixels remain available to screenshots and other user-initiated capture
+    // tools. Trusted indicators use their own protected surface.
     unsafe {
         let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
         SetWindowLongPtrW(
             hwnd,
             GWL_EXSTYLE,
-            ((style | WS_EX_TOOLWINDOW.0) & !WS_EX_APPWINDOW.0 & !WS_EX_NOACTIVATE.0) as isize,
+            ((style | WS_EX_TOOLWINDOW.0 | WS_EX_NOACTIVATE.0) & !WS_EX_APPWINDOW.0) as isize,
         );
         SetWindowPos(
             hwnd,
@@ -4983,11 +5107,56 @@ impl TraySource for TrayFeed {
 
 pub struct NotificationFeed {
     store: Arc<Mutex<crate::notification::NotificationStore>>,
+    listener: Option<windows::UI::Notifications::Management::UserNotificationListener>,
+    windows_ids: Arc<Mutex<HashMap<u32, u32>>>,
 }
 impl NotificationFeed {
     pub fn new() -> Result<Self, String> {
+        use windows::UI::Notifications::Management::{
+            UserNotificationListener, UserNotificationListenerAccessStatus,
+        };
+
+        let store = Arc::new(Mutex::new(crate::notification::NotificationStore::default()));
+        let windows_ids = Arc::new(Mutex::new(HashMap::new()));
+        let listener = match UserNotificationListener::Current() {
+            Ok(listener) => {
+                let access = match listener.GetAccessStatus() {
+                    Ok(UserNotificationListenerAccessStatus::Allowed) => {
+                        UserNotificationListenerAccessStatus::Allowed
+                    }
+                    Ok(_) => listener
+                        .RequestAccessAsync()
+                        .and_then(|operation| operation.join())
+                        .unwrap_or(UserNotificationListenerAccessStatus::Denied),
+                    Err(error) => {
+                        tracing::warn!(%error, "could not query Windows notification access");
+                        UserNotificationListenerAccessStatus::Denied
+                    }
+                };
+                if access == UserNotificationListenerAccessStatus::Allowed {
+                    if let Err(error) =
+                        start_windows_notification_worker(store.clone(), windows_ids.clone())
+                    {
+                        tracing::warn!(%error, "could not start Windows notification listener");
+                        None
+                    } else {
+                        tracing::info!("Windows notification listener is active");
+                        Some(listener)
+                    }
+                } else {
+                    tracing::warn!(?access, "Windows notification access is unavailable");
+                    None
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, "Windows notification listener is unavailable");
+                None
+            }
+        };
         Ok(Self {
-            store: Arc::new(Mutex::new(crate::notification::NotificationStore::default())),
+            store,
+            listener,
+            windows_ids,
         })
     }
 
@@ -5046,6 +5215,20 @@ impl NotificationSource for NotificationFeed {
             .unwrap_or_default()
     }
     fn dismiss(&self, id: u32) {
+        let windows_id = self.windows_ids.lock().ok().and_then(|mut ids| {
+            let windows_id = ids
+                .iter()
+                .find_map(|(windows_id, nickel_id)| (*nickel_id == id).then_some(*windows_id));
+            if let Some(windows_id) = windows_id {
+                ids.remove(&windows_id);
+            }
+            windows_id
+        });
+        if let (Some(listener), Some(windows_id)) = (&self.listener, windows_id)
+            && let Err(error) = listener.RemoveNotification(windows_id)
+        {
+            tracing::warn!(%error, windows_id, "could not dismiss Windows notification");
+        }
         self.close_internal(id);
     }
     fn invoke(&self, id: u32, action_key: &str) {
@@ -5057,6 +5240,169 @@ impl NotificationSource for NotificationFeed {
             self.close_internal(id);
         }
     }
+}
+
+fn start_windows_notification_worker(
+    store: Arc<Mutex<crate::notification::NotificationStore>>,
+    windows_ids: Arc<Mutex<HashMap<u32, u32>>>,
+) -> Result<(), String> {
+    thread::Builder::new()
+        .name("nickel-windows-notifications".into())
+        .spawn(move || {
+            use windows::Foundation::TypedEventHandler;
+            use windows::UI::Notifications::{
+                Management::UserNotificationListener, UserNotificationChangedEventArgs,
+            };
+            use windows::Win32::System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize, RoUninitialize};
+
+            let initialized = unsafe { RoInitialize(RO_INIT_MULTITHREADED) }.is_ok();
+            let Ok(listener) = UserNotificationListener::Current() else {
+                tracing::warn!("could not create the Windows notification listener on its worker");
+                if initialized {
+                    unsafe { RoUninitialize() };
+                }
+                return;
+            };
+            let (sender, receiver) = mpsc::sync_channel::<()>(1);
+            let handler = TypedEventHandler::<
+                UserNotificationListener,
+                UserNotificationChangedEventArgs,
+            >::new(move |_, _| {
+                let _ = sender.try_send(());
+                Ok(())
+            });
+            let token = match listener.NotificationChanged(&handler) {
+                Ok(token) => Some(token),
+                Err(error) => {
+                    tracing::warn!(%error, "Windows notification change events are unavailable; polling instead");
+                    None
+                }
+            };
+            sync_windows_notifications(&listener, &store, &windows_ids);
+            while let Ok(()) | Err(mpsc::RecvTimeoutError::Timeout) =
+                receiver.recv_timeout(Duration::from_secs(2))
+            {
+                sync_windows_notifications(&listener, &store, &windows_ids);
+            }
+            if let Some(token) = token {
+                let _ = listener.RemoveNotificationChanged(token);
+            }
+            if initialized {
+                unsafe { RoUninitialize() };
+            }
+        })
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+fn sync_windows_notifications(
+    listener: &windows::UI::Notifications::Management::UserNotificationListener,
+    store: &Arc<Mutex<crate::notification::NotificationStore>>,
+    windows_ids: &Arc<Mutex<HashMap<u32, u32>>>,
+) {
+    use windows::UI::Notifications::NotificationKinds;
+
+    let notifications = match listener
+        .GetNotificationsAsync(NotificationKinds::Toast)
+        .and_then(|operation| operation.join())
+    {
+        Ok(notifications) => notifications,
+        Err(error) => {
+            tracing::warn!(%error, "could not synchronize Windows notifications");
+            return;
+        }
+    };
+    let mut incoming = HashMap::new();
+    let Ok(size) = notifications.Size() else {
+        return;
+    };
+    for index in 0..size {
+        let Ok(notification) = notifications.GetAt(index) else {
+            continue;
+        };
+        let Ok(windows_id) = notification.Id() else {
+            continue;
+        };
+        if let Some(request) = windows_notification_request(&notification) {
+            incoming.insert(windows_id, request);
+        }
+    }
+
+    let (Ok(mut store), Ok(mut ids)) = (store.lock(), windows_ids.lock()) else {
+        return;
+    };
+    let removed = ids
+        .keys()
+        .copied()
+        .filter(|windows_id| !incoming.contains_key(windows_id))
+        .collect::<Vec<_>>();
+    for windows_id in removed {
+        if let Some(nickel_id) = ids.remove(&windows_id) {
+            store.close(nickel_id, 2);
+        }
+    }
+    for (windows_id, request) in incoming {
+        let replaces_id = ids.get(&windows_id).copied().unwrap_or(0);
+        let nickel_id = store.notify(replaces_id, request, Instant::now()).0;
+        if nickel_id != 0 {
+            ids.insert(windows_id, nickel_id);
+        }
+    }
+}
+
+fn windows_notification_request(
+    notification: &windows::UI::Notifications::UserNotification,
+) -> Option<crate::notification::NotificationRequest> {
+    let app_name = notification
+        .AppInfo()
+        .and_then(|app| app.DisplayInfo())
+        .and_then(|display| display.DisplayName())
+        .map(|name| name.to_string())
+        .unwrap_or_else(|_| "Windows application".into());
+    let bindings = notification
+        .Notification()
+        .ok()?
+        .Visual()
+        .ok()?
+        .Bindings()
+        .ok()?;
+    let mut text = Vec::new();
+    let size = bindings.Size().ok()?;
+    for index in 0..size {
+        let Ok(elements) = bindings
+            .GetAt(index)
+            .and_then(|binding| binding.GetTextElements())
+        else {
+            continue;
+        };
+        let Ok(element_count) = elements.Size() else {
+            continue;
+        };
+        for element_index in 0..element_count {
+            if let Ok(value) = elements
+                .GetAt(element_index)
+                .and_then(|element| element.Text())
+            {
+                let value = value.to_string();
+                if !value.trim().is_empty() && !text.contains(&value) {
+                    text.push(value);
+                }
+            }
+        }
+        if !text.is_empty() {
+            break;
+        }
+    }
+    Some(crate::notification::NotificationRequest {
+        app_name,
+        summary: text
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "Notification".into()),
+        body: text.into_iter().skip(1).collect::<Vec<_>>().join("\n"),
+        actions: Vec::new(),
+        expire_timeout_ms: 0,
+    })
 }
 
 impl TrayFeed {
@@ -5140,6 +5486,7 @@ pub fn send_shell_command(command: ShellCommand) -> bool {
         ShellCommand::SessionAction(crate::platform::SessionAction::Lock) => {
             return lock_workstation();
         }
+        ShellCommand::ToggleShowDesktop => return toggle_show_desktop(),
         ShellCommand::Show | ShellCommand::ShowFromController => {
             let foreground = unsafe { GetForegroundWindow() };
             PREVIOUS_FOREGROUND_WINDOW.store(foreground.0 as isize, Ordering::Relaxed);
@@ -5307,6 +5654,68 @@ pub fn send_shell_command(command: ShellCommand) -> bool {
             WindowAction::SnapLeading | WindowAction::SnapTrailing => false,
         }
     }
+}
+
+fn toggle_show_desktop() -> bool {
+    let Ok(mut state) = SHOW_DESKTOP_WINDOWS.lock() else {
+        return false;
+    };
+    if let Some(windows) = state.take() {
+        // EnumWindows visits windows from front to back. Restore in reverse order so the
+        // previously foreground window ends up in front again.
+        for window in windows.into_iter().rev() {
+            if native_window_fingerprint(window.fingerprint.window) != Some(window.fingerprint) {
+                continue;
+            }
+            let hwnd = HWND(window.fingerprint.window as *mut c_void);
+            if unsafe { IsIconic(hwnd).as_bool() } {
+                let command = if window.maximized {
+                    SW_MAXIMIZE
+                } else {
+                    SW_RESTORE
+                };
+                let _ = focus::request_show_state(hwnd, command);
+            }
+        }
+        return true;
+    }
+
+    let mut windows: Vec<ShowDesktopWindow> = Vec::new();
+    // SAFETY: The callback only reads each live HWND and stores process fingerprints.
+    if unsafe {
+        EnumWindows(
+            Some(collect_show_desktop_window),
+            LPARAM((&mut windows as *mut Vec<ShowDesktopWindow>) as isize),
+        )
+    }
+    .is_err()
+    {
+        return false;
+    }
+    for window in &windows {
+        if native_window_fingerprint(window.fingerprint.window) != Some(window.fingerprint) {
+            continue;
+        }
+        let hwnd = HWND(window.fingerprint.window as *mut c_void);
+        let _ = focus::request_show_state(hwnd, SW_MINIMIZE);
+    }
+    *state = Some(windows);
+    true
+}
+
+unsafe extern "system" fn collect_show_desktop_window(hwnd: HWND, state: LPARAM) -> BOOL {
+    if ordinary_window_metadata(hwnd).is_some()
+        && !unsafe { IsIconic(hwnd).as_bool() }
+        && let Some(fingerprint) = native_window_fingerprint(hwnd.0 as isize)
+    {
+        // SAFETY: state points to the live Vec passed to EnumWindows by toggle_show_desktop.
+        let windows = unsafe { &mut *(state.0 as *mut Vec<ShowDesktopWindow>) };
+        windows.push(ShowDesktopWindow {
+            fingerprint,
+            maximized: unsafe { IsZoomed(hwnd).as_bool() },
+        });
+    }
+    BOOL(1)
 }
 
 pub fn register_session_shell() -> Result<(), super::SessionRequestError> {
@@ -5716,8 +6125,8 @@ impl WindowFeed {
 
     pub fn snapshot(&self, _: &Launcher) -> FeedState<Vec<OpenWindow>> {
         let mut windows = Vec::new();
-        // SAFETY: The callback only reads top-level window metadata and the LPARAM points to this
-        // live vector for the duration of the synchronous EnumWindows call.
+        // SAFETY: The callback inspects top-level windows, hides narrowly matched Codex helper
+        // terminals, and the LPARAM points to this live vector for the synchronous call.
         unsafe {
             let state = LPARAM((&mut windows as *mut Vec<OpenWindow>) as isize);
             if EnumWindows(Some(collect_window), state).is_err() {
@@ -5752,10 +6161,7 @@ impl WindowFeed {
 
     pub fn icon(&self, window: WindowId) -> Option<image::RgbaImage> {
         let hwnd = hwnd(window);
-        executable_path(hwnd)
-            .as_deref()
-            .and_then(executable_icon)
-            .or_else(|| window_icon(hwnd))
+        window_icon(hwnd).or_else(|| executable_path(hwnd).as_deref().and_then(executable_icon))
     }
 }
 
@@ -5824,6 +6230,12 @@ unsafe extern "system" fn collect_window(hwnd: HWND, state: LPARAM) -> BOOL {
     let Some((_process_id, title, class)) = window_metadata(hwnd, true) else {
         return BOOL(1);
     };
+    if is_codex_helper_terminal(&title, &class) {
+        // SAFETY: EnumWindows supplied this live top-level HWND. The asynchronous request avoids
+        // waiting for the Windows Terminal UI thread while hiding its helper window from Alt-Tab.
+        let _ = unsafe { ShowWindowAsync(hwnd, SW_HIDE) };
+        return BOOL(1);
+    }
     // This presentation housekeeping belongs only to the existing bar feed.
     if unsafe { IsIconic(hwnd).as_bool() } {
         park_iconic_window(hwnd);
@@ -5878,6 +6290,64 @@ unsafe extern "system" fn collect_window(hwnd: HWND, state: LPARAM) -> BOOL {
         },
     });
     BOOL(1)
+}
+
+fn is_codex_helper_terminal(title: &str, class: &str) -> bool {
+    if !class.eq_ignore_ascii_case("CASCADIA_HOSTING_WINDOW_CLASS") {
+        return false;
+    }
+    static RUNTIME_ROOT: LazyLock<Option<String>> = LazyLock::new(|| {
+        env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .map(|path| {
+                path.join("OpenAI")
+                    .join("Codex")
+                    .join("runtimes")
+                    .join("cua_node")
+            })
+            .map(|path| {
+                format!(
+                    "{}\\",
+                    normalized_codex_window_path(&path.to_string_lossy())
+                )
+            })
+    });
+    static NPM_ROOT: LazyLock<Option<String>> = LazyLock::new(|| {
+        env::var_os("APPDATA")
+            .map(PathBuf::from)
+            .map(|path| {
+                path.join("npm")
+                    .join("node_modules")
+                    .join("@openai")
+                    .join("codex")
+            })
+            .map(|path| {
+                format!(
+                    "{}\\",
+                    normalized_codex_window_path(&path.to_string_lossy())
+                )
+            })
+    });
+    let title = normalized_codex_window_path(title);
+    if let Some(relative) = RUNTIME_ROOT
+        .as_ref()
+        .and_then(|root| title.strip_prefix(root))
+    {
+        let Some((version, executable)) = relative.split_once("\\bin\\") else {
+            return false;
+        };
+        return !version.is_empty()
+            && !version.contains('\\')
+            && matches!(executable, "node.exe" | "node_repl.exe");
+    }
+    NPM_ROOT
+        .as_ref()
+        .and_then(|root| title.strip_prefix(root))
+        .is_some_and(|relative| relative.ends_with("\\bin\\codex-code-mode-host.exe"))
+}
+
+fn normalized_codex_window_path(path: &str) -> String {
+    path.replace('/', "\\").to_ascii_lowercase()
 }
 
 fn window_application_user_model_id(hwnd: HWND) -> Option<String> {
@@ -6057,15 +6527,35 @@ fn executable_icon(path: &std::path::Path) -> Option<image::RgbaImage> {
 }
 
 fn window_icon(hwnd: HWND) -> Option<image::RgbaImage> {
+    // Installers and other frameworks commonly assign an icon to the HWND with
+    // WM_SETICON while leaving the registered class icon empty. Bound each
+    // cross-process query so a hung window cannot stall the shell.
+    let handle = [1_usize, 2, 0].into_iter().find_map(|size| {
+        let mut handle = 0_usize;
+        // SAFETY: The enumerated HWND is valid at the start of the query. USER32
+        // owns the returned borrowed HICON, and the timeout bounds a hung peer.
+        let completed = unsafe {
+            SendMessageTimeoutW(
+                hwnd,
+                WM_GETICON,
+                WPARAM(size),
+                LPARAM(0),
+                SEND_MESSAGE_TIMEOUT_FLAGS(SMTO_ABORTIFHUNG.0),
+                25,
+                Some(&mut handle),
+            )
+        };
+        (completed.0 != 0 && handle != 0).then_some(handle)
+    });
     // SAFETY: These class icon handles are owned by the window class and remain borrowed here.
-    let handle = unsafe {
+    let handle = handle.unwrap_or_else(|| unsafe {
         let large = GetClassLongPtrW(hwnd, GCLP_HICON);
         if large != 0 {
             large
         } else {
             GetClassLongPtrW(hwnd, GCLP_HICONSM)
         }
-    };
+    });
     (handle != 0)
         .then_some(HICON(handle as *mut c_void))
         .and_then(render_icon)
@@ -6291,6 +6781,11 @@ mod tests {
     use std::collections::{HashSet, VecDeque};
 
     use windows::Win32::Foundation::{POINT, RECT};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CreateWindowExW, DestroyWindow, IDI_APPLICATION, LoadIconW, SendMessageW, WINDOW_EX_STYLE,
+        WM_KEYDOWN, WM_KEYUP, WM_SETICON, WM_SYSKEYDOWN, WS_POPUP,
+    };
+    use windows::core::w;
 
     use nickel_core::{
         geometry::LogicalRect,
@@ -6298,6 +6793,7 @@ mod tests {
             ControlMode, FieldOwner, NativeRequest, NativeRequestId, Settlement, SettlementLimits,
             SettlementStatus,
         },
+        hotkeys::KeyEdge,
         window_operation::{CancellationReason, CompletionBinding, CompletionGesture, OperationId},
     };
 
@@ -6308,13 +6804,14 @@ mod tests {
         TrayNotifyIconData, WindowDrag, WindowDragAdmission, WindowDragCoordinator,
         adjusted_appbar_rect, application_icon, apply_native_write_completion, apply_window_drag,
         clamp_preview_x, classify_window_drag_observation, contain_rect, contested_authority,
-        contested_drag_within_bound, enqueue_issued_settlement, executable_icon,
-        fallback_panel_layout, is_nickel_host_terminal, is_shell_infrastructure,
-        native_hotkey_requests, native_system_drag_hit, parse_windows_command,
-        permits_contested_workflow, pointer_drag_rectangle, project_native_preview_diagnostics,
-        project_windows_shortcuts, rectangle_covers, restore_legacy_icon_alpha,
-        should_observe_tokenless_geometry, should_restore_on_activation,
-        unknown_suspension_within_bound, windows_pid_descends_from, work_area_above_panel,
+        contested_drag_within_bound, drag_target_owner_allowed, enqueue_issued_settlement,
+        executable_icon, fallback_panel_layout, internal_message_shortcut, is_nickel_host_terminal,
+        is_shell_infrastructure, native_hotkey_requests, native_system_drag_hit,
+        parse_windows_command, permits_contested_workflow, pointer_drag_rectangle,
+        project_native_preview_diagnostics, project_windows_shortcuts, rectangle_covers,
+        restore_legacy_icon_alpha, should_observe_tokenless_geometry, should_restore_on_activation,
+        unknown_suspension_within_bound, window_icon, windows_pid_descends_from,
+        work_area_above_panel,
     };
     use crate::winit_shell::PanelEdge;
 
@@ -6372,6 +6869,84 @@ mod tests {
         let top = fallback_panel_layout(&monitor);
         assert_eq!(top.work_area.top, 236);
         assert_eq!(top.windows[0].1.top, 200);
+    }
+
+    #[test]
+    fn internal_message_observer_preserves_keys_winit_may_drop() {
+        assert_eq!(
+            internal_message_shortcut(WM_KEYUP, 0x2c, 0),
+            Some((
+                nickel_core::hotkeys::KeyCode::PrintScreen,
+                KeyEdge::Released
+            ))
+        );
+        assert_eq!(
+            internal_message_shortcut(WM_SYSKEYDOWN, 0x09, 0),
+            Some((nickel_core::hotkeys::KeyCode::Tab, KeyEdge::Pressed))
+        );
+        assert_eq!(internal_message_shortcut(WM_KEYDOWN, 0x41, 1 << 30), None);
+    }
+
+    #[test]
+    fn shell_thread_windows_are_not_modifier_drag_targets() {
+        let nickel_process = 41;
+        let shell_thread = 7;
+        let file_thread = 8;
+        let internal_threads = HashSet::from([file_thread]);
+
+        assert!(!drag_target_owner_allowed(
+            nickel_process,
+            shell_thread,
+            nickel_process,
+            &internal_threads,
+        ));
+        assert!(drag_target_owner_allowed(
+            nickel_process,
+            file_thread,
+            nickel_process,
+            &internal_threads,
+        ));
+        assert!(drag_target_owner_allowed(
+            99,
+            shell_thread,
+            nickel_process,
+            &internal_threads,
+        ));
+    }
+
+    #[test]
+    fn window_specific_icon_is_available_without_a_class_icon() {
+        // SAFETY: STATIC is a system class. The test owns and destroys its
+        // hidden window; LoadIconW returns a shared system icon.
+        unsafe {
+            let window = CreateWindowExW(
+                WINDOW_EX_STYLE::default(),
+                w!("STATIC"),
+                w!("Nickel window icon test"),
+                WS_POPUP,
+                0,
+                0,
+                1,
+                1,
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("create icon test window");
+            let icon = LoadIconW(None, IDI_APPLICATION).expect("load shared application icon");
+            SendMessageW(
+                window,
+                WM_SETICON,
+                Some(windows::Win32::Foundation::WPARAM(1)),
+                Some(windows::Win32::Foundation::LPARAM(icon.0 as isize)),
+            );
+
+            let image = window_icon(window).expect("resolve HWND-specific icon");
+            assert!(image.pixels().any(|pixel| pixel.0[3] != 0));
+
+            let _ = DestroyWindow(window);
+        }
     }
 
     fn fingerprint(window: isize, process_created: u64) -> NativeWindowFingerprint {

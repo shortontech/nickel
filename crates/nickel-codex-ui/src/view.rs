@@ -3439,7 +3439,7 @@ fn diagnostics_panel(
                         <Text color={theme.text.secondary}>{format!("Source: {source:?}")}</Text>
                     })}
                     {state.fallback_reason.as_ref().map(|reason| ui! {
-                        <Text color={theme.text.secondary} wrap={true}>{format!("Installed Codex was rejected: {reason}")}</Text>
+                        <Text color={theme.text.secondary} wrap={true}>{format!("Backend fallback: {reason}")}</Text>
                     })}
                     {state.selected_thread.as_ref().map(|thread| ui! {
                         <Text color={theme.text.secondary} wrap={true}>{format!("Thread: {}", thread.0)}</Text>
@@ -4963,7 +4963,7 @@ mod tests {
         assert!(has_accessible_text(&details, "Transport interrupted"));
         assert!(has_accessible_text(
             &details,
-            "Installed Codex was rejected: installed schema incompatible"
+            "Backend fallback: installed schema incompatible"
         ));
         assert!(has_accessible_text(&details, "Reconnect"));
     }

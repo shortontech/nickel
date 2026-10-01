@@ -1229,6 +1229,7 @@ pub struct Element<Message = String> {
     message_mapper: Option<fn(f32) -> Message>,
     seeded_value_mapper: Option<fn(Message, f32) -> Message>,
     scroll_extent_mapper: Option<fn(ScrollExtent) -> Message>,
+    drag_seed: Option<Message>,
     drag_mapper: Option<fn(Message, DragGesture) -> Message>,
     drop_message: Option<Message>,
     drop_mapper: Option<fn(Message, DropGesture) -> Message>,
@@ -1254,6 +1255,7 @@ impl<Message> Element<Message> {
             message_mapper: None,
             seeded_value_mapper: None,
             scroll_extent_mapper: None,
+            drag_seed: None,
             drag_mapper: None,
             drop_message: None,
             drop_mapper: None,
@@ -1299,6 +1301,7 @@ impl<Message> Element<Message> {
             message_mapper: None,
             seeded_value_mapper: None,
             scroll_extent_mapper: None,
+            drag_seed: None,
             drag_mapper: None,
             drop_message: None,
             drop_mapper: None,
@@ -1516,7 +1519,7 @@ impl<Message> Element<Message> {
     /// The seed message supplies target-specific typed data. Nickel UI owns
     /// hit testing and pointer capture, then calls `map` for every drag phase.
     pub fn on_drag(mut self, seed: Message, map: fn(Message, DragGesture) -> Message) -> Self {
-        self.message = Some(seed);
+        self.drag_seed = Some(seed);
         self.drag_mapper = Some(map);
         self
     }
@@ -1653,6 +1656,7 @@ impl<Message> Element<Message> {
             message_mapper: None,
             seeded_value_mapper: None,
             scroll_extent_mapper: None,
+            drag_seed: None,
             drag_mapper: None,
             drop_message: None,
             drop_mapper: None,
