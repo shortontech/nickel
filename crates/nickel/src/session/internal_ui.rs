@@ -98,6 +98,38 @@ struct PresentedSurface {
     visible: bool,
     z_order: u64,
     decoration: Option<InternalWindowDecoration>,
+    backdrop_materials: Vec<BackdropMaterial>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct BackdropMaterial {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub radius: f32,
+    pub blur: f32,
+}
+
+fn backdrop_materials(commands: &[PaintCommand]) -> Vec<BackdropMaterial> {
+    commands
+        .iter()
+        .filter_map(|command| match command {
+            PaintCommand::BackdropBlur { rect, radius, blur }
+                if rect.size.width > 0.0 && rect.size.height > 0.0 && *blur > 0.0 =>
+            {
+                Some(BackdropMaterial {
+                    x: rect.origin.x.floor() as i32,
+                    y: rect.origin.y.floor() as i32,
+                    width: rect.size.width.ceil() as u32,
+                    height: rect.size.height.ceil() as u32,
+                    radius: *radius,
+                    blur: *blur,
+                })
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 struct SceneSlot;
@@ -544,7 +576,8 @@ impl SmithayFrameRenderer {
         commands.iter().all(|command| {
             matches!(
                 command,
-                PaintCommand::Fill { .. }
+                PaintCommand::BackdropBlur { .. }
+                    | PaintCommand::Fill { .. }
                     | PaintCommand::OverlayFill { .. }
                     | PaintCommand::TopRoundedFill { .. }
                     | PaintCommand::RoundedFill { .. }
@@ -606,7 +639,9 @@ impl SmithayFrameRenderer {
                 )
                 .len(),
                 PaintCommand::Stroke { .. } | PaintCommand::OverlayStroke { .. } => 4,
-                PaintCommand::PushClip(_) | PaintCommand::PopClip => 0,
+                PaintCommand::BackdropBlur { .. }
+                | PaintCommand::PushClip(_)
+                | PaintCommand::PopClip => 0,
             };
             total.saturating_add(elements)
         })
@@ -680,6 +715,7 @@ impl SmithayFrameRenderer {
         for command in frame.commands {
             let clip = *clips.last().unwrap_or(&viewport);
             match command {
+                PaintCommand::BackdropBlur { .. } => {}
                 PaintCommand::Fill { rect, color } | PaintCommand::OverlayFill { rect, color } => {
                     self.push_solid(*rect, *color, clip)
                 }
@@ -1568,6 +1604,32 @@ impl Default for InternalUiRuntime {
 }
 
 impl InternalUiRuntime {
+    /// Return explicit compositor material requests emitted by styled elements.
+    pub(crate) fn backdrop_blur_regions(
+        &self,
+        output: &str,
+        output_origin: Point<i32, Logical>,
+        _output_width: u32,
+    ) -> Vec<BackdropMaterial> {
+        self.presentation
+            .values()
+            .filter(|surface| {
+                surface.visible && surface.placement.output.as_deref() == Some(output)
+            })
+            .flat_map(|surface| {
+                let (surface_x, surface_y, _, _) = surface.placement.geometry;
+                surface
+                    .backdrop_materials
+                    .iter()
+                    .map(move |material| BackdropMaterial {
+                        x: surface_x - output_origin.x + material.x,
+                        y: surface_y - output_origin.y + material.y,
+                        ..*material
+                    })
+            })
+            .collect()
+    }
+
     pub(crate) fn layout_surface_ids(&self) -> impl Iterator<Item = InternalSurfaceId> + '_ {
         self.presentation.keys().copied()
     }
@@ -1693,6 +1755,7 @@ impl InternalUiRuntime {
                 visible: true,
                 z_order: self.next_z_order,
                 decoration: None,
+                backdrop_materials: Vec::new(),
             },
         );
         id
@@ -1974,6 +2037,7 @@ impl InternalUiRuntime {
                 visible: true,
                 z_order: self.next_z_order,
                 decoration: None,
+                backdrop_materials: Vec::new(),
             },
         );
         id
@@ -3052,6 +3116,7 @@ impl InternalUiRuntime {
         let presentation = self.presentation.get_mut(&id)?;
         if presentation.dirty {
             if let Some(commands) = &presentation.external_scene {
+                presentation.backdrop_materials = backdrop_materials(commands);
                 let (_, _, width, height) = presentation.placement.geometry;
                 let _ = presentation.renderer.render_frame(RenderFrame {
                     commands,
@@ -3061,7 +3126,9 @@ impl InternalUiRuntime {
                 });
             } else {
                 let surface = self.surfaces.get(id)?;
-                let _ = presentation.renderer.render_frame(surface.render_frame());
+                let frame = surface.render_frame();
+                presentation.backdrop_materials = backdrop_materials(frame.commands);
+                let _ = presentation.renderer.render_frame(frame);
             }
             presentation.dirty = false;
         }
@@ -3193,6 +3260,7 @@ impl InternalUiRuntime {
                 if self.presentation.get(&id)?.dirty {
                     let presentation = self.presentation.get_mut(&id)?;
                     if let Some(commands) = &presentation.external_scene {
+                        presentation.backdrop_materials = backdrop_materials(commands);
                         let (_, _, width, height) = placement.geometry;
                         let _ = presentation.renderer.render_frame(RenderFrame {
                             commands,
@@ -3202,7 +3270,9 @@ impl InternalUiRuntime {
                         });
                     } else {
                         let surface = self.surfaces.get(id)?;
-                        let _ = presentation.renderer.render_frame(surface.render_frame());
+                        let frame = surface.render_frame();
+                        presentation.backdrop_materials = backdrop_materials(frame.commands);
+                        let _ = presentation.renderer.render_frame(frame);
                     }
                     presentation.dirty = false;
                 }

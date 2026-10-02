@@ -825,6 +825,12 @@ fn apply_transient_state_with_parent<Message>(
             if let Some(radius) = paint.radius {
                 element.style.corner_radius = radius;
             }
+            if let Some(width) = paint.width {
+                element.style.width = width;
+            }
+            if let Some(height) = paint.height {
+                element.style.height = height;
+            }
             fn text_paint<Message>(
                 element: &mut Element<Message>,
                 paint: InteractionPaint,
@@ -1128,17 +1134,63 @@ fn apply_transient_state_with_parent<Message>(
             element.style.scroll_offset_x = scroll_offset_x.max(0.0);
         }
     }
+    let magnified_child = element.style.dock_magnification.and_then(|_| {
+        let hovered = state.hovered()?.as_str();
+        element
+            .children
+            .iter()
+            .enumerate()
+            .find_map(|(index, child)| {
+                let child_id = child.id.as_ref().map_or_else(
+                    || id.scoped(format!("#{index}")),
+                    |child_id| id.scoped(child_id.as_str()),
+                );
+                (hovered == child_id.as_str()
+                    || hovered.starts_with(&format!("{}/", child_id.as_str())))
+                .then_some(index)
+            })
+    });
     for (index, child) in element.children.iter_mut().enumerate() {
         let child_id = child.id.as_ref().map_or_else(
             || id.scoped(format!("#{index}")),
             |child_id| id.scoped(child_id.as_str()),
         );
+        if let Some(magnification) = element.style.dock_magnification {
+            let target = magnified_child.map_or(1.0, |hovered| {
+                let pointer_index = hovered as f32 + state.hover_fraction() - 0.5;
+                let distance = (index as f32 - pointer_index).abs();
+                if distance > magnification.radius as f32 + 0.5 {
+                    1.0
+                } else {
+                    let influence = 1.0 - distance / (magnification.radius as f32 + 1.0);
+                    1.0 + (magnification.maximum_scale - 1.0) * influence
+                }
+            });
+            let scale = state.animate_geometry_scale(
+                child_id.clone(),
+                target,
+                element.style.transition_duration_ms,
+            );
+            scale_explicit_geometry(child, scale);
+        }
         apply_transient_state_with_parent(
             child,
             &child_id,
             state,
             direct_interaction.or(parent_interaction),
         );
+    }
+}
+
+fn scale_explicit_geometry<Message>(element: &mut Element<Message>, scale: f32) {
+    if let Length::Px(width) = element.style.width {
+        element.style.width = Length::Px(width * scale);
+    }
+    if let Length::Px(height) = element.style.height {
+        element.style.height = Length::Px(height * scale);
+    }
+    for child in &mut element.children {
+        scale_explicit_geometry(child, scale);
     }
 }
 

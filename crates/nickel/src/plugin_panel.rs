@@ -26,11 +26,11 @@ struct CompositionPanelState {
     snapshots: std::collections::BTreeMap<PackageIdentity, Value>,
 }
 use nickel_ui::{
-    AnyView, Column, DragPhase, FrameOverlay, OverlayAnchor, OverlayId, OverlayMenu, OverlayStyle,
-    Row, Shortcut, Size, Spacer, TransientSurface, UiId, ViewContext,
+    AnyView, Column, DragPhase, FrameOverlay, Length, OverlayAnchor, OverlayId, OverlayMenu,
+    OverlayStyle, Row, Shortcut, Size, Spacer, TransientSurface, UiFrame, UiId, ViewContext,
 };
 #[cfg(test)]
-use nickel_ui::{Length, Point, SemanticRole};
+use nickel_ui::{Point, SemanticRole};
 use serde_json::Value;
 
 use nickel_core::display_projection::ProjectionMode;
@@ -444,9 +444,26 @@ fn package_stylesheet(package: &PluginPackage) -> Result<StyleSheet, String> {
 
 impl PluginPanelApplication {
     pub fn resolved_surface(&self, grant: &PluginSurface) -> Result<PluginSurface, String> {
-        self.node
+        let mut surface = self
+            .node
             .requested_surface(grant, &self.stylesheet)
-            .map(|surface| surface.unwrap_or_else(|| grant.clone()))
+            .map(|surface| surface.unwrap_or_else(|| grant.clone()))?;
+        let Some((width, height)) = self.node.requested_surface_lengths(&self.stylesheet) else {
+            return Ok(surface);
+        };
+        if matches!(width, Length::MaxContent) || matches!(height, Length::MaxContent) {
+            let preferred = UiFrame::preferred_size(
+                self.node.view(&self.images, &self.stylesheet),
+                Size::new(grant.width as f32, grant.height as f32),
+            );
+            if matches!(width, Length::MaxContent) {
+                surface.width = preferred.width.ceil().max(1.0) as u32;
+            }
+            if matches!(height, Length::MaxContent) {
+                surface.height = preferred.height.ceil().max(1.0) as u32;
+            }
+        }
+        Ok(surface)
     }
 
     pub(crate) fn button_message(&self, id: &str) -> Option<PluginMessage> {
@@ -4777,6 +4794,25 @@ mod tests {
         );
         package.source = "function App() { return h(Panel, {}, h(Window, {id: 'main', width: 520, height: 340})); }".into();
         assert!(PluginPanelApplication::from_package(&package).is_err());
+    }
+
+    #[test]
+    fn max_content_window_resolves_to_intrinsic_child_width() {
+        let manifest = fixed_window_test_manifest();
+        let source = "function App() { return h(FixedWindow, {id: 'main', width: 'max-content', height: 56, output: 'all', edge: 'bottom'}, h(Row, {}, h(Button, {id: 'one', width: 58, height: 40, onClick: () => {}}, 'One'), h(Button, {id: 'two', width: 70, height: 40, onClick: () => {}}, 'Two'))); }";
+        let mut package = PluginPackage {
+            modules: Vec::new(),
+            manifest,
+            images: Default::default(),
+            stylesheet: String::new(),
+            source: source.into(),
+        };
+        package.manifest.surfaces[0].reserve_work_area = false;
+        let application = PluginPanelApplication::from_package(&package).unwrap();
+        let resolved = application
+            .resolved_surface(&package.manifest.surfaces[0])
+            .unwrap();
+        assert_eq!(resolved.width, 128);
     }
 
     #[test]

@@ -74,7 +74,8 @@ pub(super) fn paint_dropdown_part(
 
 fn custom_paint_bounds(command: &PaintCommand) -> Option<Rect> {
     match command {
-        PaintCommand::Fill { rect, .. }
+        PaintCommand::BackdropBlur { rect, .. }
+        | PaintCommand::Fill { rect, .. }
         | PaintCommand::TopRoundedFill { rect, .. }
         | PaintCommand::RoundedFill { rect, .. }
         | PaintCommand::Gradient { rect, .. }
@@ -103,7 +104,8 @@ fn translate_custom_command(mut command: PaintCommand, origin: Point) -> PaintCo
         rect.origin.y += origin.y;
     };
     match &mut command {
-        PaintCommand::Fill { rect, .. }
+        PaintCommand::BackdropBlur { rect, .. }
+        | PaintCommand::Fill { rect, .. }
         | PaintCommand::TopRoundedFill { rect, .. }
         | PaintCommand::RoundedFill { rect, .. }
         | PaintCommand::Gradient { rect, .. }
@@ -209,6 +211,39 @@ pub(super) fn emit_element<Message: Clone>(
         }
         _ => None,
     };
+    if let Some(blur) = element.style.backdrop_blur
+        && blur > 0.0
+    {
+        tree.commands.push(PaintCommand::BackdropBlur {
+            rect,
+            radius: element.style.corner_radius,
+            blur,
+        });
+    }
+    if let Some(shadow) = element.style.box_shadow
+        && shadow.color != 0
+    {
+        let layers = shadow.blur.ceil().clamp(1.0, 12.0) as u32;
+        let source_alpha = (shadow.color >> 24) & 0xff;
+        for layer in (1..=layers).rev() {
+            let blur = shadow.blur * layer as f32 / layers as f32;
+            let expansion = (shadow.spread + blur).max(0.0);
+            let alpha = ((source_alpha as f32 / layers as f32) * 1.8)
+                .round()
+                .clamp(1.0, 255.0) as u32;
+            let color = (shadow.color & 0x00ff_ffff) | (alpha << 24);
+            tree.commands.push(PaintCommand::RoundedFill {
+                rect: Rect::new(
+                    rect.origin.x + shadow.offset_x - expansion,
+                    rect.origin.y + shadow.offset_y - expansion,
+                    rect.size.width + expansion * 2.0,
+                    rect.size.height + expansion * 2.0,
+                ),
+                color,
+                radius: element.style.corner_radius + expansion,
+            });
+        }
+    }
     if let Some((background, border)) = rounded_solid_border {
         let width = element
             .style

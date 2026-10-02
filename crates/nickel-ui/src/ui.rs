@@ -171,6 +171,26 @@ pub struct InteractionPaint {
     pub radius: Option<f32>,
     pub font_size: Option<f32>,
     pub line_height: Option<f32>,
+    /// Optional interaction geometry. Declarative CSS uses this for controls
+    /// such as magnifying dock icons; layout and hit testing remain unified.
+    pub width: Option<Length>,
+    pub height: Option<Length>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct BoxShadow {
+    pub offset_x: f32,
+    pub offset_y: f32,
+    pub blur: f32,
+    pub spread: f32,
+    pub color: Color,
+}
+
+/// Native sibling magnification for dock-like horizontal containers.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DockMagnification {
+    pub maximum_scale: f32,
+    pub radius: usize,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -830,6 +850,13 @@ impl Tone {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum PaintCommand {
+    /// Compositor material request. Renderers do not paint this command; a
+    /// compositor may sample and filter the scene behind the rounded region.
+    BackdropBlur {
+        rect: Rect,
+        radius: f32,
+        blur: f32,
+    },
     Fill {
         rect: Rect,
         color: Color,
@@ -926,7 +953,8 @@ pub(crate) fn assert_background_color_policy(identity: &str, commands: &[PaintCo
                 }
                 continue;
             }
-            PaintCommand::RoundedStroke { .. }
+            PaintCommand::BackdropBlur { .. }
+            | PaintCommand::RoundedStroke { .. }
             | PaintCommand::Stroke { .. }
             | PaintCommand::OverlayStroke { .. }
             | PaintCommand::Text { .. }
@@ -957,6 +985,10 @@ pub struct Style {
     pub background: Option<Background>,
     pub border: Option<Color>,
     pub border_width: f32,
+    pub box_shadow: Option<BoxShadow>,
+    pub backdrop_blur: Option<f32>,
+    pub dock_magnification: Option<DockMagnification>,
+    pub transition_duration_ms: f32,
     pub foreground: Option<Color>,
     /// Semantic background applied while an interactive element is hovered.
     pub interaction_paints: Option<Box<[InteractionPaint; 3]>>,
@@ -1043,6 +1075,10 @@ impl Default for Style {
             background: None,
             border: None,
             border_width: 1.0,
+            box_shadow: None,
+            backdrop_blur: None,
+            dock_magnification: None,
+            transition_duration_ms: 0.0,
             foreground: None,
             interaction_paints: None,
             hover_background: None,
@@ -1359,6 +1395,26 @@ impl<Message> Element<Message> {
 
     pub fn radius(mut self, radius: f32) -> Self {
         self.style.corner_radius = radius.max(0.0);
+        self
+    }
+
+    pub fn box_shadow(mut self, shadow: BoxShadow) -> Self {
+        self.style.box_shadow = Some(shadow);
+        self
+    }
+
+    pub fn backdrop_blur(mut self, radius: f32) -> Self {
+        self.style.backdrop_blur = Some(radius.clamp(0.0, 128.0));
+        self
+    }
+
+    pub fn dock_magnification(mut self, magnification: DockMagnification) -> Self {
+        self.style.dock_magnification = Some(magnification);
+        self
+    }
+
+    pub fn transition_duration_ms(mut self, duration: f32) -> Self {
+        self.style.transition_duration_ms = duration.clamp(0.0, 2_000.0);
         self
     }
 

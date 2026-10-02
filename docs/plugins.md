@@ -192,11 +192,16 @@ definitions only.
 
 Supported declarations are `padding`, `margin`, `border` (solid only),
 `border-width`, `border-color`, `border-radius`, `font-size`, `line-height`
-(pixel lengths), `background` or `background-color`, `color`, `gap`, `width`,
+(pixel lengths), `box-shadow` (`x y blur spread color`), `background` or
+`background-color`, `color`, `gap`, `width`,
 `height`, `min-width`, `max-width`, `min-height`, `max-height`, `display`,
 `flex-direction`, `flex`, `flex-grow`, `flex-shrink`, `flex-basis`, `align-items`,
 `justify-content`, `text-align` (`start`, `center`, or `end`), and
-`grid-template-columns`. Text alignment inherits through containers.
+`grid-template-columns`. Floating docks may additionally use
+`-nickel-dock-magnification: <maximum-scale> <sibling-radius>` with a bounded
+`transition-duration` in milliseconds. Nickel applies the falloff to neighboring
+children in native layout, keeps hit geometry synchronized, and schedules the
+interpolated frames itself. Text alignment inherits through containers.
 Generic `<div>` defaults to a
 vertical block layout; `display: flex` defaults to a row, and `display: grid`
 uses Nickel's native grid. Grid tracks support pixels, fractions, `auto`,
@@ -204,6 +209,11 @@ bounded `repeat()`, and `minmax()`. Lengths support pixels, percentages, `auto`,
 `min-content`, and `max-content` where the native layout context permits them.
 Colors accept hex, `rgba()`, and `transparent`. Unsupported selectors or
 declarations fail validation.
+
+Centered, translucent taskbar surfaces are compositor materials: Nickel samples
+and blurs the scene behind the surface before composing its CSS background,
+border, shadow, and content. A full-width taskbar remains on the ordinary opaque
+panel path.
 
 The JSX `width` and `height` props remain available. Root component layout uses
 ordinary CSS width, height, percentages, and flex sizing. When the host supplies
@@ -263,9 +273,11 @@ Buttons, text fields, selects, sliders, switches, checkboxes, color swatches,
 select options, and menu items support `:hover`, `:active`, and `:focus` paint.
 State rules can set `background`/`background-color`, `color`, `border`/`border-color`,
 `border-width`, `border-radius`, `font-size`, and `line-height`, including
-transparent backgrounds. State rules cannot set layout declarations such as
-width, height, padding, margin, or flex. State and ordinary selectors must be in
-separate rules. `Button` and `TextField` also accept `onFocus` and `onBlur`;
+transparent backgrounds. State rules can additionally set `width` and `height`,
+allowing controls such as dock icons to magnify through production layout and
+hit testing. Other layout declarations such as padding, margin, or flex remain
+unavailable in state rules. State and ordinary selectors must be in separate
+rules. `Button` and `TextField` also accept `onFocus` and `onBlur`;
 focus changes dispatch blur before focus, and window focus loss dispatches blur.
 
 Native compound controls expose ordinary element selectors for their parts:

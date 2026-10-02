@@ -3406,7 +3406,8 @@ impl<A: Application> UiHost<A> {
                         }
                     }
                     HostEvent::Poll => {
-                        let changed = self.application.poll();
+                        let changed =
+                            self.application.poll() || self.state.geometry_animation_active();
                         self.next_application_deadline = self
                             .application
                             .poll_interval()
@@ -3569,6 +3570,11 @@ impl<A: Application> UiHost<A> {
         };
         combined.next_deadline = [
             self.next_application_deadline,
+            self.state
+                .geometry_animation_active()
+                // Request often enough for high-refresh displays; the platform
+                // presenter still coalesces this with its actual frame clock.
+                .then(|| now + Duration::from_millis(8)),
             self.pending_long_press
                 .as_ref()
                 .map(|pending| pending.deadline),
@@ -3585,6 +3591,9 @@ impl<A: Application> UiHost<A> {
     pub fn next_deadline(&self) -> Option<Instant> {
         [
             self.next_application_deadline,
+            self.state
+                .geometry_animation_active()
+                .then(|| Instant::now() + Duration::from_millis(8)),
             self.pending_long_press
                 .as_ref()
                 .map(|pending| pending.deadline),

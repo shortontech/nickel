@@ -10,7 +10,10 @@ use cssparser::{
     QualifiedRuleParser, RuleBodyItemParser, RuleBodyParser, StyleSheetParser,
 };
 use nickel_core::theme::{Appearance, ThemePalette};
-use nickel_ui::{Align, Insets, Justify, Length, ReadingDirection, TextAlign, Track};
+use nickel_ui::{
+    Align, BoxShadow, DockMagnification, Insets, Justify, Length, ReadingDirection, TextAlign,
+    Track,
+};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum Display {
@@ -46,6 +49,10 @@ pub struct ControlStyle {
     pub margin: Option<Insets>,
     pub border_width: Option<f32>,
     pub border_color: Option<u32>,
+    pub box_shadow: Option<BoxShadow>,
+    pub backdrop_blur: Option<f32>,
+    pub dock_magnification: Option<DockMagnification>,
+    pub transition_duration_ms: Option<f32>,
     pub radius: Option<f32>,
     pub font_size: Option<f32>,
     pub line_height: Option<f32>,
@@ -231,6 +238,10 @@ enum Declaration {
     Bottom(f32),
     Top(f32),
     Border(f32, u32),
+    BoxShadow(BoxShadow),
+    BackdropBlur(f32),
+    DockMagnification(DockMagnification),
+    TransitionDuration(f32),
 }
 
 impl Declaration {
@@ -258,6 +269,10 @@ impl Declaration {
             Self::Margin(value) => style.margin = Some(*value),
             Self::BorderWidth(value) => style.border_width = Some(*value),
             Self::BorderColor(value) => style.border_color = Some(*value),
+            Self::BoxShadow(value) => style.box_shadow = Some(*value),
+            Self::BackdropBlur(value) => style.backdrop_blur = Some(*value),
+            Self::DockMagnification(value) => style.dock_magnification = Some(*value),
+            Self::TransitionDuration(value) => style.transition_duration_ms = Some(*value),
             Self::Radius(value) => style.radius = Some(*value),
             Self::FontSize(value) => style.font_size = Some(*value),
             Self::LineHeight(value) => style.line_height = Some(*value),
@@ -281,6 +296,18 @@ fn px(source: &str, maximum: f32) -> Result<f32, String> {
     let value: f32 = number.parse().map_err(|_| "expected a CSS pixel length")?;
     if !value.is_finite()
         || !(0.0..=maximum).contains(&value)
+        || (!source.trim().ends_with("px") && value != 0.0)
+    {
+        return Err("CSS length is outside the supported range".into());
+    }
+    Ok(value)
+}
+
+fn signed_px(source: &str, maximum: f32) -> Result<f32, String> {
+    let number = source.trim().strip_suffix("px").unwrap_or(source.trim());
+    let value: f32 = number.parse().map_err(|_| "expected a CSS pixel length")?;
+    if !value.is_finite()
+        || !(-maximum..=maximum).contains(&value)
         || (!source.trim().ends_with("px") && value != 0.0)
     {
         return Err("CSS length is outside the supported range".into());
@@ -535,6 +562,71 @@ fn declaration(name: &str, value: &str) -> Result<Declaration, String> {
             }
             Declaration::Border(width, color)
         }
+        "box-shadow" => {
+            let mut parts = value.split_ascii_whitespace();
+            let offset_x = signed_px(parts.next().ok_or("box-shadow needs an x offset")?, 256.0)?;
+            let offset_y = signed_px(parts.next().ok_or("box-shadow needs a y offset")?, 256.0)?;
+            let blur = px(parts.next().ok_or("box-shadow needs a blur radius")?, 128.0)?;
+            let spread = px(
+                parts.next().ok_or("box-shadow needs a spread radius")?,
+                128.0,
+            )?;
+            let color = color(parts.next().ok_or("box-shadow needs a color")?)?;
+            if parts.next().is_some() {
+                return Err("box-shadow has too many values".into());
+            }
+            Declaration::BoxShadow(BoxShadow {
+                offset_x,
+                offset_y,
+                blur,
+                spread,
+                color,
+            })
+        }
+        "backdrop-filter" => {
+            let inner = value
+                .strip_prefix("blur(")
+                .and_then(|value| value.strip_suffix(')'))
+                .ok_or("backdrop-filter currently supports blur(<length>)")?;
+            Declaration::BackdropBlur(px(inner.trim(), 128.0)?)
+        }
+        "-nickel-dock-magnification" => {
+            let mut parts = value.split_ascii_whitespace();
+            let maximum_scale = bounded_number(
+                parts
+                    .next()
+                    .ok_or("dock magnification needs a maximum scale")?,
+                3.0,
+                "dock magnification",
+            )?;
+            if maximum_scale < 1.0 {
+                return Err("dock magnification scale must be at least 1".into());
+            }
+            let radius = parts
+                .next()
+                .ok_or("dock magnification needs a sibling radius")?
+                .parse::<usize>()
+                .map_err(|_| "invalid dock magnification radius")?;
+            if radius > 8 || parts.next().is_some() {
+                return Err("dock magnification radius must be 0 to 8".into());
+            }
+            Declaration::DockMagnification(DockMagnification {
+                maximum_scale,
+                radius,
+            })
+        }
+        "transition-duration" => {
+            let milliseconds = value
+                .strip_suffix("ms")
+                .ok_or("transition-duration must use ms")?
+                .trim()
+                .parse::<f32>()
+                .map_err(|_| "invalid transition-duration")?;
+            if !milliseconds.is_finite() || !(0.0..=2_000.0).contains(&milliseconds) {
+                return Err("transition-duration is outside the supported range".into());
+            }
+            Declaration::TransitionDuration(milliseconds)
+        }
         "border-radius" => Declaration::Radius(px(value, 512.0)?),
         "font-size" => Declaration::FontSize(px(value, 256.0)?),
         "line-height" => Declaration::LineHeight(px(value, 512.0)?),
@@ -652,8 +744,8 @@ impl<'i> QualifiedRuleParser<'i> for CssRuleParser {
                     "plugin CSS state selectors require an interactive control part",
                 ));
             }
-            if declarations.iter().any(|parsed| !matches!(parsed, ParsedDeclaration::Property(name, _) if matches!(name.as_str(), "background" | "background-color" | "color" | "border" | "border-color" | "border-width" | "border-radius" | "font-size" | "line-height"))) {
-                return Err(ParseError::custom("CSS interaction declarations require paint or typography properties"));
+            if declarations.iter().any(|parsed| !matches!(parsed, ParsedDeclaration::Property(name, _) if matches!(name.as_str(), "background" | "background-color" | "color" | "border" | "border-color" | "border-width" | "border-radius" | "font-size" | "line-height" | "width" | "height"))) {
+                return Err(ParseError::custom("CSS interaction declarations require paint, typography, width, or height properties"));
             }
         }
         if declarations
@@ -920,8 +1012,8 @@ impl StyleSheet {
                 )
             })?;
             rules.push(rule);
-            if rules.len() > 256 {
-                return Err("plugin stylesheet has more than 256 rules".into());
+            if rules.len() > 512 {
+                return Err("plugin stylesheet has more than 512 rules".into());
             }
         }
         let sheet = Self {
@@ -1148,6 +1240,8 @@ impl StyleSheet {
             radius: style.radius,
             font_size: style.font_size,
             line_height: style.line_height,
+            width: style.width,
+            height: style.height,
         }
     }
 
@@ -1470,6 +1564,37 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn interaction_geometry_and_rounded_shadow_compile_to_typed_styles() {
+        let css = StyleSheet::compile(
+            ".dock { box-shadow: -2px 10px 24px 0px #00000059; backdrop-filter: blur(12px); \
+             -nickel-dock-magnification: 1.38 2; transition-duration: 150ms; } \
+             button.icon:hover { width: 76px; height: 76px; }",
+        )
+        .unwrap();
+        let shadow = css.resolve("div", None, Some("dock")).box_shadow.unwrap();
+        assert_eq!(shadow.offset_x, -2.0);
+        assert_eq!(shadow.offset_y, 10.0);
+        assert_eq!(shadow.blur, 24.0);
+        assert_eq!(shadow.spread, 0.0);
+        assert_eq!(shadow.color, 0x5900_0000);
+        let dock = css.resolve("div", None, Some("dock"));
+        assert_eq!(dock.backdrop_blur, Some(12.0));
+        assert_eq!(dock.dock_magnification.unwrap().maximum_scale, 1.38);
+        assert_eq!(dock.dock_magnification.unwrap().radius, 2);
+        assert_eq!(dock.transition_duration_ms, Some(150.0));
+        let hover = css.resolve_interaction_paint(
+            "button",
+            None,
+            Some("icon"),
+            InteractionState::Hover,
+            &HashMap::new(),
+            &[],
+        );
+        assert_eq!(hover.width, Some(Length::Px(76.0)));
+        assert_eq!(hover.height, Some(Length::Px(76.0)));
     }
 
     #[test]

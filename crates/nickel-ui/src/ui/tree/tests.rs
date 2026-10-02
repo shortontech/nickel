@@ -102,6 +102,52 @@ fn captured_drag_releases_on_another_drop_target() {
 }
 
 #[test]
+fn dock_magnification_eases_hover_and_neighbor_geometry() {
+    let view = || {
+        Row::new()
+            .children([
+                Button::new(TestMessage::Named("left"), "L")
+                    .id("left")
+                    .width(40.0)
+                    .height(40.0),
+                Button::new(TestMessage::Named("center"), "C")
+                    .id("center")
+                    .width(40.0)
+                    .height(40.0),
+                Button::new(TestMessage::Named("right"), "R")
+                    .id("right")
+                    .width(40.0)
+                    .height(40.0),
+            ])
+            .into_element()
+            .dock_magnification(DockMagnification {
+                maximum_scale: 1.5,
+                radius: 1,
+            })
+            .transition_duration_ms(160.0)
+    };
+    let mut state = UiStateStore::default();
+    state.set_hovered(Some(UiId::from("root/center")));
+    let first = UiFrame::layout_with_state(view(), Rect::new(0.0, 0.0, 240.0, 80.0), &mut state);
+    let width = |frame: &UiFrame<TestMessage>, id: &str| {
+        frame
+            .resolved_layout()
+            .find(&UiId::from(id))
+            .unwrap()
+            .allocated
+            .size
+            .width
+    };
+    let center_first = width(&first, "root/center");
+    let left_first = width(&first, "root/left");
+    assert!(center_first > left_first && left_first > 40.0);
+
+    let second = UiFrame::layout_with_state(view(), Rect::new(0.0, 0.0, 240.0, 80.0), &mut state);
+    assert!(width(&second, "root/center") > center_first);
+    assert!(state.geometry_animation_active());
+}
+
+#[test]
 fn declarative_drag_target_captures_motion_beyond_its_bounds() {
     let tree = UiFrame::layout(
         Container::new()

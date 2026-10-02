@@ -1502,6 +1502,13 @@ impl<Message: Clone> UiFrame<Message> {
         Self::layout_internal(root, bounds, false)
     }
 
+    /// Measure a declarative root without forcing it to occupy a presentation
+    /// surface. Hosts use this to resolve intrinsic native-surface dimensions.
+    pub fn preferred_size(root: impl Component<Message>, maximum: Size) -> Size {
+        let root = root.into_element();
+        measure_element(&root, Constraints::loose(maximum))
+    }
+
     pub fn layout_with_diagnostics(root: impl Component<Message>, bounds: Rect) -> Self {
         Self::layout_internal(root, bounds, true)
     }
@@ -1526,6 +1533,7 @@ impl<Message: Clone> UiFrame<Message> {
             |id| UiId::from("root").scoped(id.as_str()),
         );
         state.begin_frame();
+        state.begin_geometry_animation_frame();
         apply_transient_state(&mut root, &root_id, state);
         let mut tree = Self {
             diagnostics_enabled: diagnostics,
@@ -3012,7 +3020,15 @@ impl<Message: Clone> UiFrame<Message> {
                     .scrollbar_at(point)
                     .map(|(scroll, axis)| scrollbar_id(&scroll.id, axis))
                     .or_else(|| self.id_at(point).cloned());
-                let mut invalidation = state.set_hovered(hovered);
+                let hover_fraction = hovered
+                    .as_ref()
+                    .and_then(|id| self.hits.iter().rev().find(|hit| &hit.id == id))
+                    .map_or(0.5, |hit| {
+                        ((point.x - hit.rect.origin.x) / hit.rect.size.width.max(1.0))
+                            .clamp(0.0, 1.0)
+                    });
+                let pointer_invalidation = state.set_pointer_position(point, hover_fraction);
+                let mut invalidation = state.set_hovered(hovered).merge(pointer_invalidation);
                 if let Some(captured) = state.captured()
                     && let Some(message) = self.drag_message(captured, DragPhase::Moved, point)
                 {

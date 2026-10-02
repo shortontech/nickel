@@ -1977,6 +1977,26 @@ impl<Message> Container<Message> {
         self
     }
 
+    pub fn box_shadow(mut self, shadow: BoxShadow) -> Self {
+        self.0 = self.0.box_shadow(shadow);
+        self
+    }
+
+    pub fn backdrop_blur(mut self, radius: f32) -> Self {
+        self.0 = self.0.backdrop_blur(radius);
+        self
+    }
+
+    pub fn dock_magnification(mut self, magnification: crate::DockMagnification) -> Self {
+        self.0 = self.0.dock_magnification(magnification);
+        self
+    }
+
+    pub fn transition_duration_ms(mut self, duration: f32) -> Self {
+        self.0 = self.0.transition_duration_ms(duration);
+        self
+    }
+
     pub fn padding(mut self, padding: impl Into<Insets>) -> Self {
         self.0 = self.0.padding(padding);
         self
