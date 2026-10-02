@@ -17,6 +17,10 @@ pub enum SessionAuthorityRequest {
     Command(Command),
     PublishClipboardImage(std::sync::Arc<Vec<u8>>),
     PublishClipboardText(String),
+    OptionalFeaturesCommitted {
+        codex_generation: u64,
+        keyboard_generation: u64,
+    },
 }
 
 impl From<Query> for SessionAuthorityRequest {

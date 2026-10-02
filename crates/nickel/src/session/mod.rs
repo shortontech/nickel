@@ -21,7 +21,7 @@ mod recovery_ui;
 mod remote_accessibility;
 mod remote_identity;
 pub(crate) use crate::remote_indicator;
-mod session_services;
+pub(crate) mod session_services;
 mod shell_layout;
 mod state;
 mod task_switcher_render;
@@ -364,7 +364,10 @@ fn run_with_arguments(
         }
     }
 
-    state.enable_internal_shell(Arc::new(in_process_session_host.clone()))?;
+    state.enable_internal_shell_with_safe_mode(
+        Arc::new(in_process_session_host.clone()),
+        arguments.safe_mode,
+    )?;
     state.schedule_internal_shell_deadline();
     tracing::info!(
         surfaces = state.internal_ui.len(),
@@ -378,12 +381,15 @@ fn run_with_arguments(
         // client can immediately complete its Wayland connection.
         let secure_storage_may_start = Arc::clone(&secure_storage_may_start);
         event_loop.handle().insert_idle(move |_| {
+            tracing::info!("starting login credential handoff from compositor event loop");
             login_services::hand_off_login_credentials();
             secure_storage_may_start.store(true, Ordering::Release);
         });
     }
 
+    tracing::info!("starting XWayland initialization");
     state.start_xwayland();
+    tracing::info!("XWayland initialization dispatched");
 
     if arguments.test_control {
         let control = std::env::var_os("NICKEL_SESSION_CONTROL")
@@ -403,6 +409,7 @@ fn run_with_arguments(
         import_runtime_environment();
     }
 
+    tracing::info!("entering compositor event loop");
     event_loop.run(None, &mut state, move |state| {
         state.log_shell_readiness_if_changed();
     })?;
@@ -456,8 +463,9 @@ const USER_SESSION_ENVIRONMENT: &[&str] = &[
 const SECURE_STORAGE_STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
 
 fn import_runtime_environment() {
+    let started = Instant::now();
+    tracing::info!("starting user-session environment import");
     match Command::new("dbus-update-activation-environment")
-        .arg("--systemd")
         .args(USER_SESSION_ENVIRONMENT)
         .status()
     {
@@ -469,6 +477,16 @@ fn import_runtime_environment() {
             tracing::warn!(%error, "could not start user-session environment import");
         }
     }
+    tracing::info!(
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "user-session environment import completed"
+    );
+
+    // Do not pass --systemd here. On this login path the user manager can take
+    // 25 seconds to reply, and the pending bus call stalls D-Bus-dependent
+    // applications such as Konsole even when the helper runs on another thread.
+    // The activation environment above is the authority used by session D-Bus
+    // services, including the Secret Service provider.
 }
 
 fn secure_storage_startup_timed_out(

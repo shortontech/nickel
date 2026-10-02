@@ -352,6 +352,10 @@ pub struct ScreenshotTool {
 }
 
 impl ScreenshotTool {
+    pub(crate) fn layout_snapshot(&self) -> String {
+        self.host.layout_snapshot()
+    }
+
     pub(crate) fn pointer_interaction_active(&self) -> bool {
         self.host.pointer_interaction_active() || self.host.application().drag_start.is_some()
     }
@@ -456,6 +460,7 @@ impl ScreenshotTool {
     }
 
     pub fn hide(&mut self) {
+        self.capture_deadline = None;
         self.pending_pointer = None;
         self.pointer_deadline = None;
         let app = self.host.application_mut();
@@ -623,7 +628,6 @@ impl ScreenshotTool {
         outcome.changed | self.apply_effects()
     }
 
-    #[cfg(any(test, target_os = "linux"))]
     pub fn controller_action(&mut self, action: nickel_ui::ControllerAction) -> bool {
         if action == nickel_ui::ControllerAction::Cancel {
             return self.escape();

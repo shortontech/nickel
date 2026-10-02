@@ -140,7 +140,7 @@ pub(crate) fn semantic_node_at(
 fn diagnostic_role(role: SurfaceRole) -> Option<ShellDiagnosticRole> {
     Some(match role {
         SurfaceRole::Desktop => ShellDiagnosticRole::Desktop,
-        SurfaceRole::Panel => ShellDiagnosticRole::Panel,
+        SurfaceRole::Taskbar => ShellDiagnosticRole::Panel,
         SurfaceRole::Launcher => ShellDiagnosticRole::Launcher,
         SurfaceRole::ControlCenter => ShellDiagnosticRole::ControlCenter,
         SurfaceRole::Notification => ShellDiagnosticRole::Notification,
@@ -149,7 +149,10 @@ fn diagnostic_role(role: SurfaceRole) -> Option<ShellDiagnosticRole> {
         SurfaceRole::WindowContextMenu => ShellDiagnosticRole::WindowContextMenu,
         SurfaceRole::Screenshot => ShellDiagnosticRole::Screenshot,
         SurfaceRole::OnScreenKeyboard => ShellDiagnosticRole::OnScreenKeyboard,
-        SurfaceRole::CodexProjectMenu | SurfaceRole::Lock | SurfaceRole::CodexChat => return None,
+        SurfaceRole::Panel
+        | SurfaceRole::CodexProjectMenu
+        | SurfaceRole::Lock
+        | SurfaceRole::CodexChat => return None,
         #[cfg(target_os = "windows")]
         SurfaceRole::TrustedControl => return None,
     })
@@ -158,7 +161,7 @@ fn diagnostic_role(role: SurfaceRole) -> Option<ShellDiagnosticRole> {
 fn event_role(role: SurfaceRole) -> Option<ShellEventRole> {
     Some(match role {
         SurfaceRole::Desktop => ShellEventRole::Desktop,
-        SurfaceRole::Panel => ShellEventRole::Panel,
+        SurfaceRole::Taskbar => ShellEventRole::Panel,
         SurfaceRole::Launcher => ShellEventRole::Launcher,
         SurfaceRole::ControlCenter => ShellEventRole::ControlCenter,
         SurfaceRole::Notification => ShellEventRole::Notification,
@@ -167,7 +170,10 @@ fn event_role(role: SurfaceRole) -> Option<ShellEventRole> {
         SurfaceRole::WindowContextMenu => ShellEventRole::WindowContextMenu,
         SurfaceRole::Screenshot => ShellEventRole::Screenshot,
         SurfaceRole::OnScreenKeyboard => ShellEventRole::OnScreenKeyboard,
-        SurfaceRole::CodexProjectMenu | SurfaceRole::Lock | SurfaceRole::CodexChat => return None,
+        SurfaceRole::Panel
+        | SurfaceRole::CodexProjectMenu
+        | SurfaceRole::Lock
+        | SurfaceRole::CodexChat => return None,
         #[cfg(target_os = "windows")]
         SurfaceRole::TrustedControl => return None,
     })
@@ -353,7 +359,7 @@ mod tests {
 
     #[test]
     fn presenter_projection_uses_only_per_surface_production_state() {
-        let mut protected = observation(SurfaceRole::Panel, 2);
+        let mut protected = observation(SurfaceRole::Taskbar, 2);
         protected.protected = true;
         let records = project_presenters(
             false,
@@ -373,7 +379,7 @@ mod tests {
 
     #[test]
     fn projects_only_visible_unprotected_ordinary_surfaces() {
-        let mut protected = observation(SurfaceRole::Panel, 2);
+        let mut protected = observation(SurfaceRole::Taskbar, 2);
         protected.protected = true;
         let mut hidden = observation(SurfaceRole::ControlCenter, 3);
         hidden.canonical_visible = false;
@@ -465,7 +471,7 @@ mod tests {
     fn omits_records_without_valid_native_or_scene_evidence() {
         let mut missing_geometry = observation(SurfaceRole::Launcher, 1);
         missing_geometry.geometry = None;
-        let mut missing_scene = observation(SurfaceRole::Panel, 2);
+        let mut missing_scene = observation(SurfaceRole::Taskbar, 2);
         missing_scene.scene_generation = None;
         let mut disconnected = observation(SurfaceRole::Desktop, 3);
         disconnected.native_visible = false;
@@ -477,7 +483,7 @@ mod tests {
     #[test]
     fn bounds_records_and_reports_truncation() {
         let observations = (1..=(MAX_DIAGNOSTIC_SHELL_SURFACES as u64 + 1))
-            .map(|generation| observation(SurfaceRole::Panel, generation));
+            .map(|generation| observation(SurfaceRole::Taskbar, generation));
         let (records, truncated) = project(false, observations);
         assert_eq!(records.len(), MAX_DIAGNOSTIC_SHELL_SURFACES);
         assert!(truncated);

@@ -132,24 +132,6 @@ pub struct DashboardAccount {
     pub supporting_text: String,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SettingsDestination {
-    Nickel,
-    KeyboardShortcuts,
-    About,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum DashboardAction {
-    LaunchFavorite(String),
-    OpenProject(String),
-    SeeAllProjects,
-    OpenSettings(SettingsDestination),
-    OpenAccount,
-    RequestLogout,
-    FocusSearch,
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DashboardSection<T> {
     Loading,
@@ -380,6 +362,10 @@ impl Launcher {
 
     pub fn applications(&self) -> impl Iterator<Item = &Application> {
         self.applications.iter()
+    }
+
+    pub fn is_place_application(&self, id: &str) -> bool {
+        self.place_ids.contains(id)
     }
 
     pub fn place_applications(&self) -> impl Iterator<Item = &Application> {
@@ -825,6 +811,39 @@ impl Launcher {
         }
     }
 
+    /// Rank an independent query using the same native matcher as the launcher.
+    /// This read does not change the launcher's query, selection, or dashboard.
+    pub fn search(&self, query: &str, limit: usize) -> Vec<&Application> {
+        self.search_indices(query)
+            .into_iter()
+            .take(limit)
+            .map(|index| &self.applications[index])
+            .collect()
+    }
+
+    fn search_indices(&self, query: &str) -> Vec<usize> {
+        let pattern = Pattern::new(
+            query,
+            CaseMatching::Ignore,
+            Normalization::Smart,
+            AtomKind::Fuzzy,
+        );
+        let mut matcher = Matcher::new(Config::DEFAULT);
+        let candidates = self
+            .applications
+            .iter()
+            .enumerate()
+            .map(|(index, application)| Candidate {
+                index,
+                name: application.name(),
+            });
+        pattern
+            .match_list(candidates, &mut matcher)
+            .into_iter()
+            .map(|(candidate, _score)| candidate.index)
+            .collect()
+    }
+
     fn refresh(&mut self) {
         let mode = self.mode();
         if mode == LauncherMode::Dashboard {
@@ -874,27 +893,7 @@ impl Launcher {
                 .min(self.results.len().saturating_sub(1));
             return;
         }
-        let effective_query = self.effective_query();
-        let pattern = Pattern::new(
-            &effective_query,
-            CaseMatching::Ignore,
-            Normalization::Smart,
-            AtomKind::Fuzzy,
-        );
-        let mut matcher = Matcher::new(Config::DEFAULT);
-        let candidates = self
-            .applications
-            .iter()
-            .enumerate()
-            .map(|(index, application)| Candidate {
-                index,
-                name: application.name(),
-            });
-        self.results = pattern
-            .match_list(candidates, &mut matcher)
-            .into_iter()
-            .map(|(candidate, _score)| candidate.index)
-            .collect();
+        self.results = self.search_indices(&self.effective_query());
         self.selected = self
             .search_selected
             .min(self.results.len().saturating_sub(1));

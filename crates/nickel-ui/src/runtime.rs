@@ -1189,6 +1189,26 @@ pub trait Application: Sized {
 
     fn update(&mut self, message: Self::Message);
 
+    /// Apply messages emitted by one UI transition in order. Applications
+    /// with retained callback tables may execute them before rebuilding.
+    fn update_messages(&mut self, messages: Vec<Self::Message>) {
+        for message in messages {
+            self.update(message);
+        }
+    }
+
+    /// Native window focus lifecycle, independent of focused controls.
+    /// Returned messages join the control transition callback batch before rebuild.
+    fn window_focus_message(&self, _focused: bool) -> Option<Self::Message> {
+        None
+    }
+
+    /// Deliver a blur callback from the tree that preceded a rebuild. Applications
+    /// with render-scoped callback tables can resolve it against that generation.
+    fn update_removed_focus(&mut self, message: Self::Message) {
+        self.update(message);
+    }
+
     /// Whether current application state contains an authentication or other
     /// protected surface. Compositor adapters must reject remote observation
     /// and control of such a surface, regardless of an agent's lease scope.
@@ -1229,6 +1249,19 @@ pub trait Application: Sized {
     /// Drains a host-owned transient opening requested by the application.
     /// The host validates its declaration and anchor after rebuilding the view.
     fn take_transient_request(&mut self) -> Option<(OverlayId, UiId)> {
+        None
+    }
+
+    /// Drains an application-requested dismissal of its currently open transient.
+    /// The host ignores a stale request for a different overlay.
+    fn take_transient_dismissal(&mut self) -> Option<OverlayId> {
+        None
+    }
+
+    /// Returns an application message when the host dismisses an open transient
+    /// through input or focus loss. Applications can synchronize component state
+    /// before the next declarative frame is built.
+    fn transient_dismissed(&self, _id: &OverlayId) -> Option<Self::Message> {
         None
     }
 
@@ -1405,6 +1438,13 @@ pub struct UiHostViewport<Message> {
 }
 
 impl<Message> UiHostViewport<Message> {
+    pub fn layout_snapshot(&self) -> String
+    where
+        Message: Clone,
+    {
+        self.tree.resolved_layout().deterministic_snapshot()
+    }
+
     /// Observe a retained viewport without activating it or changing focus.
     /// The application owner must also validate current application protection.
     pub fn bounded_semantics(
@@ -2394,6 +2434,11 @@ impl<A: Application> UiHost<A> {
         self.tree.semantic_nodes()
     }
 
+    /// Computed component geometry for the explicitly enabled local test socket.
+    pub fn layout_snapshot(&self) -> String {
+        self.tree.resolved_layout().deterministic_snapshot()
+    }
+
     /// Protection is queried from live application state as well as the tree,
     /// so an authentication transition is protected before its next paint.
     /// A previously protected tree remains protected until it is rebuilt.
@@ -2735,9 +2780,7 @@ impl<A: Application> UiHost<A> {
             .expect("system focus is an ordinary frame event");
         let changed =
             transition.invalidation != crate::Invalidation::None || !transition.messages.is_empty();
-        for message in transition.messages {
-            self.application.update(message);
-        }
+        self.application.update_messages(transition.messages);
         let outcome = HostEventOutcome {
             changed,
             clipboard_text: transition.clipboard_text,
@@ -3041,6 +3084,7 @@ impl<A: Application> UiHost<A> {
     }
 
     pub fn step(&mut self, batch: HostBatch) -> HostEventOutcome {
+        let prior_transient = self.state.open_overlay_id().cloned();
         self.state.clipboard_text_limit = batch.clipboard_text_limit;
         let controller_authority = batch.controller_authority;
         if let Some(authority) = controller_authority
@@ -3362,7 +3406,8 @@ impl<A: Application> UiHost<A> {
                         }
                     }
                     HostEvent::Poll => {
-                        let changed = self.application.poll();
+                        let changed =
+                            self.application.poll() || self.state.geometry_animation_active();
                         self.next_application_deadline = self
                             .application
                             .poll_interval()
@@ -3393,8 +3438,31 @@ impl<A: Application> UiHost<A> {
             cancellation.merge(outcome);
             combined.merge(cancellation);
         }
+        if let Some(id) = prior_transient
+            && self.state.open_overlay_id() != Some(&id)
+            && let Some(message) = self.application.transient_dismissed(&id)
+        {
+            combined
+                .messages
+                .push(self.application.message_evidence(&message));
+            self.application.update(message);
+            combined.changed = true;
+            combined.invalidation = combined.invalidation.merge(Invalidation::Layout);
+        }
         combined.telemetry.input_to_message_us = elapsed_us(step_started);
         if combined.changed {
+            let (paint_list_us, layout_us, rebuild_outcome) = self.rebuild_timed();
+            combined.merge(rebuild_outcome);
+            combined.telemetry.paint_list_us = paint_list_us;
+            combined.telemetry.layout_us = layout_us;
+            combined.telemetry.rebuilt = true;
+        }
+        if let Some(id) = self.application.take_transient_dismissal()
+            && self.state.open_overlay_id() == Some(&id)
+        {
+            let invalidation = self.state.dismiss_overlay(crate::DismissReason::Action);
+            combined.changed = true;
+            combined.invalidation = combined.invalidation.merge(invalidation);
             let (paint_list_us, layout_us, rebuild_outcome) = self.rebuild_timed();
             combined.merge(rebuild_outcome);
             combined.telemetry.paint_list_us = paint_list_us;
@@ -3430,9 +3498,7 @@ impl<A: Application> UiHost<A> {
             if focus.invalidation != Invalidation::None || !focus.messages.is_empty() {
                 combined.changed = true;
                 combined.invalidation = combined.invalidation.merge(focus.invalidation);
-                for message in focus.messages {
-                    self.application.update(message);
-                }
+                self.application.update_messages(focus.messages);
                 let (paint_list_us, layout_us, rebuild_outcome) = self.rebuild_timed();
                 combined.merge(rebuild_outcome);
                 combined.telemetry.paint_list_us = combined
@@ -3504,6 +3570,11 @@ impl<A: Application> UiHost<A> {
         };
         combined.next_deadline = [
             self.next_application_deadline,
+            self.state
+                .geometry_animation_active()
+                // Request often enough for high-refresh displays; the platform
+                // presenter still coalesces this with its actual frame clock.
+                .then(|| now + Duration::from_millis(8)),
             self.pending_long_press
                 .as_ref()
                 .map(|pending| pending.deadline),
@@ -3520,6 +3591,9 @@ impl<A: Application> UiHost<A> {
     pub fn next_deadline(&self) -> Option<Instant> {
         [
             self.next_application_deadline,
+            self.state
+                .geometry_animation_active()
+                .then(|| Instant::now() + Duration::from_millis(8)),
             self.pending_long_press
                 .as_ref()
                 .map(|pending| pending.deadline),
@@ -3577,6 +3651,15 @@ impl<A: Application> UiHost<A> {
         {
             self.pointer_icon = self.tree.pointer_icon_at(*point);
         }
+        let window_focus_message = match &event {
+            UiEvent::FocusGained if self.state.observe_window_focus(true) => {
+                self.application.window_focus_message(true)
+            }
+            UiEvent::FocusLost if self.state.observe_window_focus(false) => {
+                self.application.window_focus_message(false)
+            }
+            _ => None,
+        };
         let source = event.input_source();
         let direct_target = match &event {
             UiEvent::AccessibilityFocus(target)
@@ -3584,7 +3667,7 @@ impl<A: Application> UiHost<A> {
             | UiEvent::AccessibilityContextMenu(target) => Some(target.clone()),
             _ => None,
         };
-        let outcome =
+        let mut outcome =
             match self
                 .tree
                 .transition(&mut self.state, source, InteractionIntent::Event(event))
@@ -3603,6 +3686,9 @@ impl<A: Application> UiHost<A> {
                     };
                 }
             };
+        if let Some(message) = window_focus_message {
+            outcome.messages.push(message);
+        }
         let invalidation = outcome.invalidation;
         let disposition = outcome.disposition;
         let changed = invalidation != Invalidation::None || !outcome.messages.is_empty();
@@ -3611,9 +3697,7 @@ impl<A: Application> UiHost<A> {
             .iter()
             .map(|message| self.application.message_evidence(message))
             .collect();
-        for message in outcome.messages {
-            self.application.update(message);
-        }
+        self.application.update_messages(outcome.messages);
         let clipboard_text = self
             .application
             .take_clipboard_write()
@@ -3654,9 +3738,7 @@ impl<A: Application> UiHost<A> {
                     .iter()
                     .map(|message| self.application.message_evidence(message))
                     .collect();
-                for message in outcome.messages {
-                    self.application.update(message);
-                }
+                self.application.update_messages(outcome.messages);
                 HostEventOutcome {
                     changed,
                     disposition,
@@ -3694,6 +3776,28 @@ impl<A: Application> UiHost<A> {
     fn dispatch_controller_action(&mut self, action: ControllerAction) -> HostEventOutcome {
         if !self.state.window_focused() {
             return HostEventOutcome::default();
+        }
+        // Ordinary windows use their existing Escape callback after native nested
+        // interaction has unwound; a controller Cancel must reach that same callback.
+        if action == ControllerAction::Cancel
+            && self.state.open_overlay_id().is_none()
+            && !self.state.navigation().controller_editing()
+            && self.state.navigation().controller_scope().is_none()
+            && self.touch_owner_target().is_none()
+        {
+            let shortcut = self.application.shortcut_outcome(Shortcut::Escape);
+            if shortcut.disposition != crate::EventDisposition::Unhandled {
+                return HostEventOutcome {
+                    changed: shortcut.changed,
+                    disposition: shortcut.disposition,
+                    invalidation: if shortcut.changed {
+                        Invalidation::Layout
+                    } else {
+                        Invalidation::None
+                    },
+                    ..HostEventOutcome::default()
+                };
+            }
         }
         if action == ControllerAction::Launcher {
             return HostEventOutcome {
@@ -3819,6 +3923,14 @@ impl<A: Application> UiHost<A> {
     }
 
     fn rebuild_timed(&mut self) -> (u64, u64, HostEventOutcome) {
+        let focused_before = self
+            .state
+            .window_focused()
+            .then(|| self.state.focused().cloned())
+            .flatten();
+        let removed_focus_message = focused_before
+            .as_ref()
+            .and_then(|id| self.tree.blur_message(id));
         let pending_long_press_was_bound = self
             .pending_long_press
             .as_ref()
@@ -3887,7 +3999,23 @@ impl<A: Application> UiHost<A> {
         } else {
             self.finalize_pending_long_press_attachment();
         }
-        (paint_list_us, elapsed_us(layout_started), cancellation)
+        let layout_us = elapsed_us(layout_started);
+        if focused_before
+            .as_ref()
+            .is_some_and(|id| self.tree.resolved_layout().find(id).is_none())
+            && let Some(message) = removed_focus_message
+        {
+            self.application.update_removed_focus(message);
+            let (next_paint_us, next_layout_us, next_outcome) = self.rebuild_timed();
+            let mut outcome = cancellation;
+            outcome.merge(next_outcome);
+            return (
+                paint_list_us.saturating_add(next_paint_us),
+                layout_us.saturating_add(next_layout_us),
+                outcome,
+            );
+        }
+        (paint_list_us, layout_us, cancellation)
     }
 
     pub fn shutdown(&mut self) {
@@ -7192,6 +7320,66 @@ mod tests {
             crate::EventDisposition::Rejected("action unavailable")
         );
         assert_eq!(rejected.semantic_failures.len(), 1);
+    }
+
+    #[test]
+    fn controller_cancel_dismisses_native_menu_before_window_escape_callback() {
+        #[derive(Default)]
+        struct EscapeApplication {
+            escapes: usize,
+        }
+        impl Application for EscapeApplication {
+            type Message = ();
+            fn update(&mut self, (): ()) {}
+            fn view(&self, _context: ViewContext) -> impl crate::View<()> {
+                Button::new((), "Anchor").id("anchor")
+            }
+            fn shortcut_outcome(&mut self, shortcut: Shortcut) -> ShortcutOutcome {
+                assert_eq!(shortcut, Shortcut::Escape);
+                self.escapes += 1;
+                ShortcutOutcome::handled(true)
+            }
+            fn frame_overlays(&self, _context: ViewContext) -> Vec<FrameOverlay<()>> {
+                vec![FrameOverlay::Menu(
+                    crate::OverlayMenu::new(
+                        "menu",
+                        crate::OverlayAnchor::Node(crate::UiId::from("anchor")),
+                    )
+                    .item(crate::OverlayMenuItem::action("entry", "Entry", ())),
+                )]
+            }
+        }
+        let mut host = UiHost::new(EscapeApplication::default(), 320, 200);
+        host.step(HostBatch {
+            window_focused: Some(true),
+            ..HostBatch::default()
+        });
+        let anchor = host
+            .query_unique(&crate::SemanticSelector::Role(SemanticRole::Button))
+            .unwrap()
+            .id;
+        host.perform_semantic_action(anchor, SemanticAction::Invoke(ActionKind::ContextMenu));
+        assert!(host.inspect().open_overlay.is_some());
+        host.step(HostBatch {
+            events: vec![HostEvent::Controller(ControllerAction::Cancel)],
+            ..HostBatch::default()
+        });
+        assert!(host.inspect().open_overlay.is_none());
+        assert_eq!(host.application().escapes, 0);
+        host.step(HostBatch {
+            events: vec![HostEvent::Controller(ControllerAction::Cancel)],
+            ..HostBatch::default()
+        });
+        assert_eq!(host.application().escapes, 1);
+        host.step(HostBatch {
+            window_focused: Some(false),
+            ..HostBatch::default()
+        });
+        host.step(HostBatch {
+            events: vec![HostEvent::Controller(ControllerAction::Cancel)],
+            ..HostBatch::default()
+        });
+        assert_eq!(host.application().escapes, 1);
     }
 
     #[test]

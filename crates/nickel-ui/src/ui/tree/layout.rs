@@ -48,6 +48,7 @@ pub(super) fn layout_element<Message: Clone>(
         grid_tracks: Vec::new(),
         hit_stack: None,
         interaction,
+        auto_focus: element.style.auto_focus,
         navigation_scope: element.navigation_scope.clone(),
         adjustment_step: element.adjustment_step,
         controller_value: match &element.kind {
@@ -68,7 +69,7 @@ pub(super) fn layout_element<Message: Clone>(
                 actions
             } else {
                 if let Kind::Slider { value, .. } = &element.kind
-                    && element.message_mapper.is_some()
+                    && (element.message_mapper.is_some() || element.seeded_value_mapper.is_some())
                 {
                     if *value < 1.0 {
                         actions.push(ActionKind::Increment);
@@ -292,9 +293,9 @@ pub(super) fn layout_element<Message: Clone>(
                 scroll_rect.size.width
             };
             let horizontal_scrollbar_gutter = match element.style.overflow_x {
-                Overflow::Scroll => SCROLLBAR_GUTTER,
+                Overflow::Scroll => scrollbar::scrollbar_gutter(&element.style),
                 Overflow::Auto if intrinsic_content_width > scroll_rect.size.width + 0.01 => {
-                    SCROLLBAR_GUTTER
+                    scrollbar::scrollbar_gutter(&element.style)
                 }
                 _ => 0.0,
             }
@@ -393,6 +394,7 @@ pub(super) fn layout_element<Message: Clone>(
                     clip: descendant_clip.unwrap_or(scroll_rect),
                     extent,
                     scrollbar: element.style.scrollbar_palette,
+                    parts: element.style.scrollbar_parts.clone(),
                 });
                 clamped
             } else {
@@ -416,6 +418,7 @@ pub(super) fn layout_element<Message: Clone>(
                     clip: descendant_clip.unwrap_or(scroll_rect),
                     extent,
                     scrollbar: element.style.scrollbar_palette,
+                    parts: element.style.scrollbar_parts.clone(),
                 });
             }
             let layout_content = Rect::new(
@@ -463,7 +466,7 @@ pub(super) fn layout_element<Message: Clone>(
                 viewport.origin.y,
                 (viewport.size.width
                     - if reserves_scrollbar {
-                        SCROLLBAR_GUTTER
+                        scrollbar::scrollbar_gutter(&element.style)
                     } else {
                         0.0
                     })
@@ -514,6 +517,7 @@ pub(super) fn layout_element<Message: Clone>(
                         clip: viewport_clip,
                         extent,
                         scrollbar: element.style.scrollbar_palette,
+                        parts: element.style.scrollbar_parts.clone(),
                     });
                 }
                 child_indices.push(layout_element(
@@ -535,7 +539,7 @@ pub(super) fn layout_element<Message: Clone>(
             let scroll_rect = rect.inset(element.style.padding);
             let horizontal_scrollbar_gutter =
                 if matches!(element.style.overflow_x, Overflow::Scroll | Overflow::Auto) {
-                    SCROLLBAR_GUTTER.min(scroll_rect.size.height)
+                    scrollbar::scrollbar_gutter(&element.style).min(scroll_rect.size.height)
                 } else {
                     0.0
                 };
@@ -588,10 +592,15 @@ pub(super) fn layout_element<Message: Clone>(
                         .fold(0.0, f32::max)
                 })
                 .collect::<Vec<_>>();
+            let track_width = widths.iter().sum::<f32>()
+                + element.style.gap * widths.len().saturating_sub(1) as f32;
+            let (leading, extra_gap) = justify_offsets(
+                (content.size.width - track_width).max(0.0),
+                widths.len(),
+                element.style.justify_content,
+            );
             let content_extent = Size::new(
-                (widths.iter().sum::<f32>()
-                    + element.style.gap * widths.len().saturating_sub(1) as f32)
-                    .max(content.size.width),
+                track_width.max(content.size.width),
                 (row_heights.iter().sum::<f32>()
                     + element.style.gap * rows.saturating_sub(1) as f32)
                     .max(content.size.height),
@@ -645,21 +654,40 @@ pub(super) fn layout_element<Message: Clone>(
                     clip: descendant_clip.unwrap_or(scroll_rect),
                     extent,
                     scrollbar: element.style.scrollbar_palette,
+                    parts: element.style.scrollbar_parts.clone(),
                 });
             }
             for (index, child) in element.children.iter().enumerate() {
                 let column = index % column_count;
                 let row = index / column_count;
                 let x = content.origin.x - offset_x
+                    + leading
                     + widths[..column].iter().sum::<f32>()
-                    + element.style.gap * column as f32;
-                let y = content.origin.y - offset_y
+                    + (element.style.gap + extra_gap) * column as f32;
+                let row_y = content.origin.y - offset_y
                     + row_heights[..row].iter().sum::<f32>()
                     + element.style.gap * row as f32;
+                let alignment = child.style.align_self.unwrap_or(element.style.align_items);
+                let item_height = measured[index].height.min(row_heights[row]);
+                let row_baseline = if alignment == Align::Baseline {
+                    measured[row * column_count..measured.len().min((row + 1) * column_count)]
+                        .iter()
+                        .map(|size| size.height * 0.8)
+                        .fold(0.0, f32::max)
+                } else {
+                    0.0
+                };
+                let (y, height) = match alignment {
+                    Align::Stretch => (row_y, row_heights[row]),
+                    Align::Center => (row_y + (row_heights[row] - item_height) / 2.0, item_height),
+                    Align::End => (row_y + row_heights[row] - item_height, item_height),
+                    Align::Baseline => (row_y + row_baseline - item_height * 0.8, item_height),
+                    Align::Start => (row_y, item_height),
+                };
                 child_indices.push(layout_element(
                     child,
                     &resolved_child_id(id, child, index),
-                    Rect::new(x, y, widths[column], row_heights[row]),
+                    Rect::new(x, y, widths[column], height),
                     foreground,
                     descendant_clip,
                     tree,
@@ -690,13 +718,39 @@ pub(super) fn apply_transient_state<Message>(
     id: &UiId,
     state: &mut UiStateStore,
 ) {
+    apply_transient_state_with_parent(element, id, state, None);
+}
+
+fn apply_transient_state_with_parent<Message>(
+    element: &mut Element<Message>,
+    id: &UiId,
+    state: &mut UiStateStore,
+    parent_interaction: Option<usize>,
+) {
+    let direct_interaction = if state.pressed() == Some(id) {
+        Some(1)
+    } else if state.window_focused()
+        && (state.focused() == Some(id) || state.navigation().controller_selected() == Some(id))
+    {
+        Some(2)
+    } else if state.hovered() == Some(id) {
+        Some(0)
+    } else {
+        None
+    };
+    let interaction_index = if element.style.parent_interaction {
+        parent_interaction.or(direct_interaction)
+    } else {
+        direct_interaction
+    };
     let focus_foreground = element.style.foreground.or_else(|| {
         element
             .children
             .iter()
             .find_map(|child| focus_participating_foreground(child))
     });
-    let owns_state = element.message.is_some()
+    let owns_state = element.style.parent_interaction
+        || element.message.is_some()
         || element.navigation_scope.is_some()
         || element.text_mapper.is_some()
         || matches!(element.style.overflow_x, Overflow::Scroll | Overflow::Auto)
@@ -743,13 +797,89 @@ pub(super) fn apply_transient_state<Message>(
         {
             element.style.background = Some(background);
         }
+        let exact_focus_background = (!scope_background_active
+            && state.window_focused()
+            && state.pressed() != Some(id)
+            && (state.focused() == Some(id)
+                || state.navigation().controller_selected() == Some(id)))
+        .then_some(element.style.focus_background)
+        .flatten();
+        if let Some(background) = exact_focus_background {
+            element.style.background = Some(background);
+        }
+        if let Some(index) = interaction_index {
+            let paint = element
+                .style
+                .interaction_paints
+                .as_ref()
+                .map_or(InteractionPaint::default(), |paints| paints[index]);
+            if let Some(color) = paint.background {
+                element.style.background = (color != 0).then_some(Background::Solid(color));
+            }
+            if let Some(color) = paint.border_color {
+                element.style.border = (color != 0).then_some(color);
+            }
+            if let Some(width) = paint.border_width {
+                element.style.border_width = width;
+            }
+            if let Some(radius) = paint.radius {
+                element.style.corner_radius = radius;
+            }
+            if let Some(width) = paint.width {
+                element.style.width = width;
+            }
+            if let Some(height) = paint.height {
+                element.style.height = height;
+            }
+            fn text_paint<Message>(
+                element: &mut Element<Message>,
+                paint: InteractionPaint,
+                owner: bool,
+            ) {
+                if let Some(color) = paint.foreground
+                    && (owner || element.style.inherited_state_text[0])
+                {
+                    element.style.foreground = Some(color);
+                }
+                if let Kind::Text {
+                    scale, line_height, ..
+                } = &mut element.kind
+                {
+                    if let Some(size) = paint.font_size
+                        && (owner || element.style.inherited_state_text[1])
+                    {
+                        *scale = -size;
+                    }
+                    if let Some(height) = paint.line_height
+                        && (owner || element.style.inherited_state_text[2])
+                    {
+                        *line_height = Some(height);
+                    }
+                }
+                for child in &mut element.children {
+                    text_paint(child, paint, false);
+                }
+            }
+            text_paint(element, paint, true);
+        }
         // A transparent editor already exposes keyboard focus through its caret.
         // Filling its entire text node with the generic fallback tint makes a
         // blue/purple strip appear and disappear as input modality changes.
         let transparent_editor = element.text_mapper.is_some()
             && matches!(element.kind, Kind::Text { .. })
             && element.style.background.is_none();
-        let active_focus_tint = if scope_background_active {
+        let css_dropdown = matches!(
+            element.kind,
+            Kind::Dropdown {
+                presentation: Some(_),
+                ..
+            }
+        );
+        let active_focus_tint = if scope_background_active
+            || exact_focus_background.is_some()
+            || css_dropdown
+            || !element.style.automatic_focus_tint
+        {
             None
         } else {
             if state.window_focused() && state.navigation().controller_selected() == Some(id) {
@@ -820,20 +950,107 @@ pub(super) fn apply_transient_state<Message>(
                 controlled: false,
                 ..
             } => *offset = scroll_offset.max(0.0),
+            Kind::Slider {
+                presentation: Some(parts),
+                ..
+            } => {
+                let index = if state.pressed() == Some(id) {
+                    Some(1)
+                } else if state.window_focused()
+                    && (state.focused() == Some(id)
+                        || state.navigation().controller_selected() == Some(id))
+                {
+                    Some(2)
+                } else if state.hovered() == Some(id) {
+                    Some(0)
+                } else {
+                    None
+                };
+                if let Some(index) = index {
+                    for part in parts.iter_mut() {
+                        *part = part.with_interaction(index);
+                    }
+                }
+            }
             Kind::Dropdown {
                 expanded,
                 options,
                 overlay,
+                presentation,
+                option_presentations,
+                resolved_options,
                 ..
             } => {
                 *expanded = dropdown_open;
-                element.style.height = Length::Px(if *overlay {
-                    30.0
-                } else if *expanded {
-                    42.0 + options.len() as f32 * 36.0
-                } else {
-                    42.0
+                let owner_paint = interaction_index
+                    .map(|index| {
+                        element
+                            .style
+                            .interaction_paints
+                            .as_ref()
+                            .map_or(InteractionPaint::default(), |paints| paints[index])
+                    })
+                    .unwrap_or_default();
+                if let Some(parts) = presentation.as_mut() {
+                    for part in parts.iter_mut() {
+                        *part = part.inherited_paint(owner_paint);
+                    }
+                    let resolved = |mut part: DropdownPartStyle, part_id: &UiId| {
+                        let index = if state.pressed() == Some(part_id) {
+                            Some(1)
+                        } else if state.window_focused()
+                            && (state.focused() == Some(part_id)
+                                || state.navigation().controller_selected() == Some(part_id))
+                        {
+                            Some(2)
+                        } else if state.hovered() == Some(part_id) {
+                            Some(0)
+                        } else {
+                            None
+                        };
+                        if let Some(index) = index {
+                            part = part.with_interaction(index);
+                        }
+                        part
+                    };
+                    parts[0] = resolved(parts[0], id);
+                    parts[2] = resolved(parts[2], id);
+                    *resolved_options = (0..options.len())
+                        .map(|index| {
+                            resolved(
+                                option_presentations
+                                    .get(index)
+                                    .copied()
+                                    .unwrap_or(parts[1])
+                                    .inherited_paint(owner_paint),
+                                &id.scoped(format!("option-{index}")),
+                            )
+                        })
+                        .collect();
+                }
+                let height = presentation.as_ref().map(|parts| {
+                    parts[0].height
+                        + parts[0].margin.height()
+                        + if *expanded && !*overlay {
+                            resolved_options
+                                .iter()
+                                .map(|part| part.height + part.margin.height())
+                                .sum::<f32>()
+                        } else {
+                            0.0
+                        }
                 });
+                if !element.style.css_paint {
+                    element.style.height = Length::Px(height.unwrap_or_else(|| {
+                        if *overlay {
+                            30.0
+                        } else if *expanded {
+                            42.0 + options.len() as f32 * 36.0
+                        } else {
+                            42.0
+                        }
+                    }));
+                }
             }
             _ => {}
         }
@@ -845,6 +1062,7 @@ pub(super) fn apply_transient_state<Message>(
                 selection_x,
                 caret_position,
                 input_value,
+                input_placeholder,
                 input_mask,
                 line_height,
                 ..
@@ -897,7 +1115,9 @@ pub(super) fn apply_transient_state<Message>(
                     y: line_index as f32 * height,
                 }
             });
-            *value = if let Some(mask) = input_mask {
+            *value = if editor.text().is_empty() && editor.preedit().is_empty() {
+                input_placeholder.clone().unwrap_or_default()
+            } else if let Some(mask) = input_mask {
                 mask_text(&editor.display_text_with_caret(""), *mask)
             } else {
                 editor.display_text_with_caret("")
@@ -914,12 +1134,63 @@ pub(super) fn apply_transient_state<Message>(
             element.style.scroll_offset_x = scroll_offset_x.max(0.0);
         }
     }
+    let magnified_child = element.style.proximity_magnification.and_then(|_| {
+        let hovered = state.hovered()?.as_str();
+        element
+            .children
+            .iter()
+            .enumerate()
+            .find_map(|(index, child)| {
+                let child_id = child.id.as_ref().map_or_else(
+                    || id.scoped(format!("#{index}")),
+                    |child_id| id.scoped(child_id.as_str()),
+                );
+                (hovered == child_id.as_str()
+                    || hovered.starts_with(&format!("{}/", child_id.as_str())))
+                .then_some(index)
+            })
+    });
     for (index, child) in element.children.iter_mut().enumerate() {
         let child_id = child.id.as_ref().map_or_else(
             || id.scoped(format!("#{index}")),
             |child_id| id.scoped(child_id.as_str()),
         );
-        apply_transient_state(child, &child_id, state);
+        if let Some(magnification) = element.style.proximity_magnification {
+            let target = magnified_child.map_or(1.0, |hovered| {
+                let pointer_index = hovered as f32 + state.hover_fraction() - 0.5;
+                let distance = (index as f32 - pointer_index).abs();
+                if distance > magnification.radius as f32 + 0.5 {
+                    1.0
+                } else {
+                    let influence = 1.0 - distance / (magnification.radius as f32 + 1.0);
+                    1.0 + (magnification.maximum_scale - 1.0) * influence
+                }
+            });
+            let scale = state.animate_geometry_scale(
+                child_id.clone(),
+                target,
+                element.style.transition_duration_ms,
+            );
+            scale_explicit_geometry(child, scale);
+        }
+        apply_transient_state_with_parent(
+            child,
+            &child_id,
+            state,
+            direct_interaction.or(parent_interaction),
+        );
+    }
+}
+
+pub(super) fn scale_explicit_geometry<Message>(element: &mut Element<Message>, scale: f32) {
+    if let Length::Px(width) = element.style.width {
+        element.style.width = Length::Px(width * scale);
+    }
+    if let Length::Px(height) = element.style.height {
+        element.style.height = Length::Px(height * scale);
+    }
+    for child in &mut element.children {
+        scale_explicit_geometry(child, scale);
     }
 }
 
@@ -1062,6 +1333,27 @@ fn resolve_track(track: &Track, contribution: f32) -> (f32, f32) {
     }
 }
 
+fn justify_offsets(free: f32, count: usize, justify: Justify) -> (f32, f32) {
+    if count == 0 {
+        return (0.0, 0.0);
+    }
+    match justify {
+        Justify::Start => (0.0, 0.0),
+        Justify::Center => (free / 2.0, 0.0),
+        Justify::End => (free, 0.0),
+        Justify::SpaceBetween if count > 1 => (0.0, free / (count - 1) as f32),
+        Justify::SpaceAround => {
+            let space = free / count as f32;
+            (space / 2.0, space)
+        }
+        Justify::SpaceEvenly => {
+            let space = free / (count + 1) as f32;
+            (space, space)
+        }
+        _ => (0.0, 0.0),
+    }
+}
+
 fn flex_bounds<Message>(
     content: Rect,
     axis: Axis,
@@ -1145,21 +1437,7 @@ fn flex_bounds<Message>(
         Axis::Vertical => content.size.height,
     };
     let free = (available - occupied).max(0.0);
-    let (leading, extra_gap) = match justify {
-        Justify::Start => (0.0, 0.0),
-        Justify::Center => (free / 2.0, 0.0),
-        Justify::End => (free, 0.0),
-        Justify::SpaceBetween if rects.len() > 1 => (0.0, free / (rects.len() - 1) as f32),
-        Justify::SpaceAround => {
-            let space = free / rects.len() as f32;
-            (space / 2.0, space)
-        }
-        Justify::SpaceEvenly => {
-            let space = free / (rects.len() + 1) as f32;
-            (space, space)
-        }
-        _ => (0.0, 0.0),
-    };
+    let (leading, extra_gap) = justify_offsets(free, rects.len(), justify);
     let shared_baseline = if axis == Axis::Horizontal {
         children
             .iter()
@@ -1182,7 +1460,9 @@ fn flex_bounds<Message>(
             Axis::Horizontal => {
                 rect.origin.x += main_offset;
                 let cross = measured.height.min(content.size.height);
-                if alignment != Align::Stretch {
+                if alignment != Align::Stretch
+                    || (child.style.css_paint && child.style.height != Length::Auto)
+                {
                     rect.size.height = cross;
                     rect.origin.y += match alignment {
                         Align::Center => (content.size.height - cross) / 2.0,
@@ -1195,7 +1475,9 @@ fn flex_bounds<Message>(
             Axis::Vertical => {
                 rect.origin.y += main_offset;
                 let cross = measured.width.min(content.size.width);
-                if alignment != Align::Stretch {
+                if alignment != Align::Stretch
+                    || (child.style.css_paint && child.style.width != Length::Auto)
+                {
                     rect.size.width = cross;
                     rect.origin.x += match alignment {
                         Align::Center => (content.size.width - cross) / 2.0,

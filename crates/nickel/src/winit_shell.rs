@@ -17,11 +17,7 @@ use nickel_input::InputEvent;
 use nickel_session_protocol::ShellRole as SessionShellRole;
 use nickel_ui::backend::PaintCommand;
 use nickel_ui::{AggregatePresenterCacheDiagnostics, DamageRegion, HostChangeToken};
-#[cfg(not(target_os = "windows"))]
-use winit::dpi::LogicalPosition;
-use winit::dpi::LogicalSize;
-#[cfg(target_os = "windows")]
-use winit::dpi::PhysicalPosition;
+use winit::dpi::{LogicalPosition, LogicalSize};
 use winit::event::{Event, WindowEvent};
 #[cfg(not(target_os = "windows"))]
 use winit::event_loop::EventLoopProxy;
@@ -47,13 +43,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 pub const DESKTOP_TITLE: &str = "Nickel Desktop";
-pub const PANEL_TITLE: &str = "Nickel Panel";
-pub const LAUNCHER_TITLE: &str = "Nickel Launcher";
+pub const PANEL_TITLE: &str = "Nickel Taskbar";
 pub const CONTROL_CENTER_TITLE: &str = "Nickel Control Center";
 pub const NOTIFICATION_TITLE: &str = "Nickel Notification";
-pub const VOLUME_OSD_TITLE: &str = "Nickel Volume";
 pub const WINDOW_PREVIEW_TITLE: &str = "Nickel Window Preview";
-pub const WINDOW_CONTEXT_MENU_TITLE: &str = "Nickel Window Menu";
 pub const CODEX_PROJECT_MENU_TITLE: &str = "Nickel Codex Projects";
 pub const LOCK_TITLE: &str = "Nickel Lock";
 pub const SCREENSHOT_TITLE: &str = "Nickel Screenshot";
@@ -177,12 +170,12 @@ fn durable_presenter_peak(
 fn desired_output_surfaces(
     output_names: &[String],
     create_desktops: bool,
-    bar_on_all_displays: bool,
-    primary_output: Option<&str>,
+    _bar_on_all_displays: bool,
+    _primary_output: Option<&str>,
+    active_output: Option<&str>,
+    plugin_panel_enabled: bool,
+    plugin_panel_output: nickel_core::plugins::PluginOutputScope,
 ) -> HashSet<(String, SurfaceRole)> {
-    let panel_outputs = panel_outputs(output_names, bar_on_all_displays, primary_output)
-        .into_iter()
-        .collect::<HashSet<_>>();
     output_names
         .iter()
         .flat_map(|output| {
@@ -190,11 +183,74 @@ fn desired_output_surfaces(
                 .into_iter()
                 .filter(|role| {
                     (*role != SurfaceRole::Desktop || create_desktops)
-                        && (*role != SurfaceRole::Panel || panel_outputs.contains(output))
+                        && (*role != SurfaceRole::Panel
+                            || (plugin_panel_enabled
+                                && output_scope_matches(
+                                    plugin_panel_output,
+                                    output_names,
+                                    output,
+                                    active_output,
+                                )))
                 })
                 .map(|role| (output.clone(), role))
         })
         .collect()
+}
+
+fn desired_plugin_surfaces(
+    output_names: &[String],
+    active_output: Option<&str>,
+    panels: &std::collections::BTreeMap<
+        nickel_core::plugins::PluginSurfaceKey,
+        nickel_core::plugins::PluginSurface,
+    >,
+) -> HashSet<(String, nickel_core::plugins::PluginSurfaceKey)> {
+    panels
+        .iter()
+        .flat_map(|(key, surface)| {
+            output_names
+                .iter()
+                .enumerate()
+                .filter(move |(_, output)| {
+                    output_scope_matches(surface.output, output_names, output, active_output)
+                })
+                .map(|(_, output)| (output.clone(), key.clone()))
+        })
+        .collect()
+}
+
+fn output_scope_matches(
+    scope: nickel_core::plugins::PluginOutputScope,
+    output_names: &[String],
+    output: &str,
+    active_output: Option<&str>,
+) -> bool {
+    match scope {
+        nickel_core::plugins::PluginOutputScope::All => true,
+        nickel_core::plugins::PluginOutputScope::Primary => {
+            output_names.first().is_some_and(|name| name == output)
+        }
+        nickel_core::plugins::PluginOutputScope::Active => active_output
+            .filter(|active| output_names.iter().any(|name| name == active))
+            .map_or_else(
+                || output_names.first().is_some_and(|name| name == output),
+                |active| active == output,
+            ),
+    }
+}
+
+fn fixed_plugin_surface_key(
+    role: SurfaceRole,
+    active: &HashSet<nickel_core::plugins::PluginSurfaceKey>,
+) -> Option<nickel_core::plugins::PluginSurfaceKey> {
+    match role {
+        SurfaceRole::VolumeOsd => None,
+        SurfaceRole::WindowPreview => active
+            .iter()
+            .find(|key| key.surface_id == "window-preview")
+            .cloned(),
+        _ => None,
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -295,6 +351,7 @@ pub struct ShellRuntimeDiagnostics {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum SurfaceRole {
     Desktop,
+    Taskbar,
     Panel,
     Launcher,
     ControlCenter,
@@ -440,6 +497,9 @@ fn queue_shell_input(pending: &mut VecDeque<ShellEvent>, surface: SurfaceId, eve
 pub struct ShellSurface {
     id: SurfaceId,
     role: SurfaceRole,
+    plugin: Option<nickel_core::plugins::PluginSurfaceKey>,
+    plugin_surface: Option<nickel_core::plugins::PluginSurface>,
+    passive_overlay: bool,
     application_id: String,
     display_index: usize,
     output_name: String,
@@ -469,6 +529,30 @@ impl ShellSurface {
         self.role
     }
 
+    pub fn is_taskbar_plugin(&self) -> bool {
+        self.role == SurfaceRole::Panel
+            && self
+                .plugin_surface
+                .as_ref()
+                .is_some_and(|surface| surface.reserve_work_area)
+    }
+
+    pub fn is_desktop_surface(&self) -> bool {
+        self.role == SurfaceRole::Desktop
+    }
+
+    fn diagnostic_role(&self) -> SurfaceRole {
+        if self.is_taskbar_plugin() {
+            SurfaceRole::Taskbar
+        } else {
+            self.role
+        }
+    }
+
+    pub fn plugin_key(&self) -> Option<&nickel_core::plugins::PluginSurfaceKey> {
+        self.plugin.as_ref()
+    }
+
     pub fn display_index(&self) -> usize {
         self.display_index
     }
@@ -482,12 +566,30 @@ impl ShellSurface {
     }
 }
 
+#[cfg(target_os = "windows")]
+impl Drop for ShellSurface {
+    fn drop(&mut self) {
+        if self.role == SurfaceRole::CodexChat
+            || self
+                .plugin_surface
+                .as_ref()
+                .is_some_and(crate::platform::native_application_windows::is_application_surface)
+        {
+            crate::platform::unregister_native_application_window(&self.window);
+        }
+        if matches!(self.role, SurfaceRole::Panel | SurfaceRole::Taskbar) {
+            crate::platform::release_panel_window(&self.window);
+        }
+    }
+}
+
 fn show_surface_native(surface: &ShellSurface) {
     #[cfg(target_os = "windows")]
     if matches!(
         surface.role,
         SurfaceRole::WindowPreview | SurfaceRole::Notification
-    ) {
+    ) || surface.passive_overlay
+    {
         crate::platform::show_overlay_window_without_activation(&surface.window);
         return;
     }
@@ -522,8 +624,14 @@ pub struct WinitShell {
     options: ShellOptions,
     primary_output_name: Option<String>,
     active_output_name: Option<String>,
-    #[cfg(target_os = "windows")]
-    launcher_surface_size: Option<(u32, u32)>,
+    active_fixed_plugins: HashSet<nickel_core::plugins::PluginSurfaceKey>,
+    plugin_panel_enabled: bool,
+    plugin_panel_surface: nickel_core::plugins::PluginSurface,
+    plugin_panel_owner: String,
+    extra_plugin_panels: std::collections::BTreeMap<
+        nickel_core::plugins::PluginSurfaceKey,
+        nickel_core::plugins::PluginSurface,
+    >,
     next_surface_diagnostic_generation: u64,
     #[cfg(target_os = "windows")]
     shortcut_diagnostics: Option<crate::platform::WindowsShortcutDiagnosticSource>,
@@ -582,8 +690,14 @@ impl WinitShell {
             options,
             primary_output_name: None,
             active_output_name: None,
-            #[cfg(target_os = "windows")]
-            launcher_surface_size: None,
+            active_fixed_plugins: [
+            ]
+            .into_iter()
+            .collect(),
+            plugin_panel_enabled: crate::plugin_panel::enabled(),
+            plugin_panel_surface: crate::plugin_panel::surface().clone(),
+            plugin_panel_owner: crate::plugin_panel::manifest().id.clone(),
+            extra_plugin_panels: std::collections::BTreeMap::new(),
             next_surface_diagnostic_generation: 0,
             #[cfg(target_os = "windows")]
             shortcut_diagnostics: None,
@@ -685,13 +799,16 @@ impl WinitShell {
             create_desktops,
             self.options.bar_on_all_displays,
             self.primary_output_name.as_deref(),
+            self.active_output_name.as_deref(),
+            self.plugin_panel_enabled,
+            self.plugin_panel_surface.output,
         );
         let mut output_creation_failed = false;
         for (display_index, geometry) in displays.iter().copied().enumerate() {
             let output_name = output_names.get(display_index).ok_or_else(|| {
                 "winit output identity count changed during shell startup".to_string()
             })?;
-            for role in [SurfaceRole::Desktop, SurfaceRole::Panel, SurfaceRole::Lock] {
+            for role in [SurfaceRole::Desktop, SurfaceRole::Lock] {
                 if !desired.contains(&(output_name.clone(), role)) {
                     continue;
                 }
@@ -707,6 +824,53 @@ impl WinitShell {
                 }
             }
         }
+        let mut panels = self.extra_plugin_panels.clone();
+        panels.retain(|key, _| !self.active_fixed_plugins.contains(key));
+        let primary_key = nickel_core::plugins::PluginSurfaceKey {
+            plugin_id: self.plugin_panel_owner.clone(),
+            surface_id: self.plugin_panel_surface.id.clone(),
+        };
+        if self.plugin_panel_enabled {
+            panels.insert(primary_key.clone(), self.plugin_panel_surface.clone());
+        }
+
+        let mut desired_panels =
+            desired_plugin_surfaces(&output_names, self.active_output_name.as_deref(), &panels);
+        let taskbar_outputs = panel_outputs(
+            &output_names,
+            self.options.bar_on_all_displays,
+            self.primary_output_name.as_deref(),
+        );
+        desired_panels.retain(|(output, key)| {
+            !panels.get(key).is_some_and(|panel| panel.reserve_work_area)
+                || taskbar_outputs.contains(output)
+        });
+        let mut panels = panels.into_iter().collect::<Vec<_>>();
+        // An owned dialog needs its ordinary panel window created first.
+        panels.sort_by_key(|(key, surface)| {
+            (
+                surface.kind == nickel_core::plugins::PluginSurfaceKind::Dialog,
+                key != &primary_key,
+            )
+        });
+        for (key, panel) in panels {
+            for (display_index, geometry) in displays.iter().copied().enumerate() {
+                let output_name = &output_names[display_index];
+                if !desired_panels.contains(&(output_name.clone(), key.clone())) {
+                    continue;
+                }
+                if let Err(error) = self.create_surface_with_plugin(
+                    SurfaceRole::Panel,
+                    display_index,
+                    geometry,
+                    output_name,
+                    Some((&key, &panel)),
+                ) {
+                    output_creation_failed = true;
+                    tracing::warn!(plugin = %key.plugin_id, output = output_name, %error, "failed to create startup plugin panel surface; retry scheduled");
+                }
+            }
+        }
         if output_creation_failed {
             self.output_creation_retry.failed(Instant::now());
         }
@@ -714,15 +878,17 @@ impl WinitShell {
         let primary_name = output_names.first().ok_or_else(|| {
             "winit reported no output identity for the primary display".to_string()
         })?;
-        self.create_surface(SurfaceRole::Launcher, 0, primary, primary_name)?;
+
         self.create_surface(SurfaceRole::ControlCenter, 0, primary, primary_name)?;
         self.create_surface(SurfaceRole::Notification, 0, primary, primary_name)?;
-        self.create_surface(SurfaceRole::VolumeOsd, 0, primary, primary_name)?;
-        self.create_surface(SurfaceRole::WindowPreview, 0, primary, primary_name)?;
-        self.create_surface(SurfaceRole::WindowContextMenu, 0, primary, primary_name)?;
-        self.create_surface(SurfaceRole::CodexProjectMenu, 0, primary, primary_name)?;
-        self.create_surface(SurfaceRole::Screenshot, 0, primary, primary_name)?;
-        self.create_surface(SurfaceRole::OnScreenKeyboard, 0, primary, primary_name)?;
+        for role in [SurfaceRole::WindowPreview] {
+            if fixed_plugin_surface_key(role, &self.active_fixed_plugins)
+                .is_some_and(|key| self.active_fixed_plugins.contains(&key))
+            {
+                self.create_surface(role, 0, primary, primary_name)?;
+            }
+        }
+
         tracing::info!(
             elapsed_ms = self.started.elapsed().as_secs_f64() * 1_000.0,
             surface_count = self.surfaces.len(),
@@ -758,14 +924,75 @@ impl WinitShell {
             create_desktops,
             self.options.bar_on_all_displays,
             self.primary_output_name.as_deref(),
+            self.active_output_name.as_deref(),
+            self.plugin_panel_enabled,
+            self.plugin_panel_surface.output,
         );
+        let primary_plugin_key = nickel_core::plugins::PluginSurfaceKey {
+            plugin_id: self.plugin_panel_owner.clone(),
+            surface_id: self.plugin_panel_surface.id.clone(),
+        };
+        let mut active_panels = self.extra_plugin_panels.clone();
+        active_panels.retain(|key, _| !self.active_fixed_plugins.contains(key));
+
+        if self.plugin_panel_enabled {
+            active_panels.insert(
+                primary_plugin_key.clone(),
+                self.plugin_panel_surface.clone(),
+            );
+        }
+        let mut desired_plugin_panels = desired_plugin_surfaces(
+            &output_names,
+            self.active_output_name.as_deref(),
+            &active_panels,
+        );
+        let outputs = panel_outputs(
+            &output_names,
+            self.options.bar_on_all_displays,
+            self.primary_output_name.as_deref(),
+        );
+        desired_plugin_panels.retain(|(output, key)| {
+            !active_panels
+                .get(key)
+                .is_some_and(|panel| panel.reserve_work_area)
+                || outputs.contains(output)
+        });
+        let panel_expected = |surface: &ShellSurface| {
+            surface.plugin.as_ref().is_some_and(|key| {
+                desired_plugin_panels.contains(&(surface.output_name.clone(), key.clone()))
+                    && active_panels
+                        .get(key)
+                        .is_some_and(|panel| panel.passive == surface.passive_overlay)
+            })
+        };
         // A settings policy change is authoritative immediately. Missing outputs remain
         // dormant for the retirement grace period so a transient topology snapshot or a
         // quick reconnect can preserve their stable surface identities.
-        self.surfaces.retain(|surface| {
-            surface.role != SurfaceRole::Panel
-                || desired.contains(&(surface.output_name.clone(), SurfaceRole::Panel))
+        self.surfaces.retain(|surface| match surface.role {
+            SurfaceRole::Launcher => false,
+            SurfaceRole::OnScreenKeyboard => false,
+            SurfaceRole::Screenshot => true,
+            SurfaceRole::WindowContextMenu | SurfaceRole::VolumeOsd => false,
+            SurfaceRole::Desktop => desired.contains(&(surface.output_name.clone(), surface.role)),
+            SurfaceRole::WindowPreview => {
+                fixed_plugin_surface_key(surface.role, &self.active_fixed_plugins)
+                    .is_some_and(|key| surface.plugin.as_ref() == Some(&key))
+            }
+            SurfaceRole::Panel => panel_expected(surface),
+            SurfaceRole::Taskbar => desired.contains(&(surface.output_name.clone(), surface.role)),
+            _ => true,
         });
+        #[cfg(target_os = "windows")]
+        if let Some(surface) = self.surfaces.iter().find(|surface| {
+            surface.role == SurfaceRole::Panel
+                && surface
+                    .plugin
+                    .as_ref()
+                    .and_then(|key| active_panels.get(key))
+                    .is_some_and(|panel| panel.reserve_work_area)
+        }) {
+            crate::platform::ensure_panel_tray_host(&surface.window);
+        }
         for surface in &mut self.surfaces {
             #[cfg(target_os = "windows")]
             if surface.role == SurfaceRole::TrustedControl {
@@ -773,7 +1000,11 @@ impl WinitShell {
                 continue;
             }
             if output_role(surface.role)
-                && !desired.contains(&(surface.output_name.clone(), surface.role))
+                && if surface.role == SurfaceRole::Panel {
+                    !panel_expected(surface)
+                } else {
+                    !desired.contains(&(surface.output_name.clone(), surface.role))
+                }
             {
                 surface.display_connected = false;
                 surface.presenter = None;
@@ -786,7 +1017,7 @@ impl WinitShell {
             let output_name = output_names.get(display_index).ok_or_else(|| {
                 "winit output identity count changed during shell sync".to_string()
             })?;
-            for role in [SurfaceRole::Desktop, SurfaceRole::Panel, SurfaceRole::Lock] {
+            for role in [SurfaceRole::Desktop, SurfaceRole::Lock] {
                 if !desired.contains(&(output_name.clone(), role)) {
                     continue;
                 }
@@ -804,9 +1035,15 @@ impl WinitShell {
                 }) {
                     surface.display_index = display_index;
                     surface.display_connected = true;
-                    let (_, x, y, width, height, _) =
-                        surface_geometry(role, geometry, self.options.panel_edge);
-                    set_surface_position(&surface.window, x, y);
+                    let (_, x, y, width, height, _) = surface_geometry_for_panel(
+                        role,
+                        geometry,
+                        self.options.panel_edge,
+                        &self.plugin_panel_surface,
+                    );
+                    surface
+                        .window
+                        .set_outer_position(LogicalPosition::new(x, y));
                     let _ = surface
                         .window
                         .request_inner_size(LogicalSize::new(width, height));
@@ -826,15 +1063,84 @@ impl WinitShell {
                 }
             }
         }
+        let mut panels = active_panels
+            .iter()
+            .map(|(key, surface)| (key.clone(), surface.clone()))
+            .collect::<Vec<_>>();
+        // A dialog with an owner needs its ordinary window created first.
+        panels.sort_by_key(|(key, surface)| {
+            (
+                surface.kind == nickel_core::plugins::PluginSurfaceKind::Dialog,
+                key != &primary_plugin_key,
+            )
+        });
+        for (key, panel) in panels {
+            for (display_index, geometry) in displays.iter().copied().enumerate() {
+                let output_name = &output_names[display_index];
+                if !desired_plugin_panels.contains(&(output_name.clone(), key.clone())) {
+                    continue;
+                }
+                if self.surfaces.iter().any(|surface| {
+                    surface.display_connected
+                        && surface.role == SurfaceRole::Panel
+                        && surface.output_name == *output_name
+                        && surface.plugin.as_ref() == Some(&key)
+                }) {
+                    continue;
+                }
+                if let Some(existing) = self.surfaces.iter_mut().find(|surface| {
+                    !surface.display_connected
+                        && surface.role == SurfaceRole::Panel
+                        && surface.output_name == *output_name
+                        && surface.plugin.as_ref() == Some(&key)
+                }) {
+                    existing.display_index = display_index;
+                    existing.display_connected = true;
+                    existing.plugin_surface = Some(panel.clone());
+                    let (_, x, y, width, height, _) = surface_geometry_for_panel(
+                        SurfaceRole::Panel,
+                        geometry,
+                        self.options.panel_edge,
+                        &panel,
+                    );
+                    existing
+                        .window
+                        .set_outer_position(LogicalPosition::new(x, y));
+                    let _ = existing
+                        .window
+                        .request_inner_size(LogicalSize::new(width, height));
+                    existing.window.set_visible(true);
+                } else if let Err(error) = self.create_surface_with_plugin(
+                    SurfaceRole::Panel,
+                    display_index,
+                    geometry,
+                    output_name,
+                    Some((&key, &panel)),
+                ) {
+                    creation_failed = true;
+                    tracing::warn!(plugin = %key.plugin_id, %error, "failed to create plugin panel surface");
+                }
+            }
+        }
         self.rebuild_surface_indices();
+        let primary = displays[0];
+        let primary_name = &output_names[0];
+        for role in [SurfaceRole::WindowPreview, SurfaceRole::Screenshot] {
+            if (role == SurfaceRole::Screenshot
+                || fixed_plugin_surface_key(role, &self.active_fixed_plugins)
+                    .is_some_and(|key| self.active_fixed_plugins.contains(&key)))
+                && !self.surfaces.iter().any(|surface| surface.role == role)
+                && let Err(error) = self.create_surface(role, 0, primary, primary_name)
+            {
+                creation_failed = true;
+                tracing::warn!(?role, %error, "failed to create bundled plugin surface");
+            }
+        }
         if creation_failed {
             self.output_creation_retry.failed(Instant::now());
         } else {
             self.output_creation_retry.succeeded();
         }
-
-        let primary = displays[0];
-        let primary_name = &output_names[0];
         for surface in &mut self.surfaces {
             #[cfg(target_os = "windows")]
             if surface.role == SurfaceRole::TrustedControl {
@@ -844,7 +1150,10 @@ impl WinitShell {
             if surface.display_connected
                 || matches!(
                     surface.role,
-                    SurfaceRole::Desktop | SurfaceRole::Panel | SurfaceRole::Lock
+                    SurfaceRole::Desktop
+                        | SurfaceRole::Taskbar
+                        | SurfaceRole::Panel
+                        | SurfaceRole::Lock
                 )
             {
                 continue;
@@ -852,9 +1161,15 @@ impl WinitShell {
             surface.display_index = 0;
             surface.output_name.clone_from(primary_name);
             surface.display_connected = true;
-            let (_, x, y, width, height, _) =
-                surface_geometry(surface.role, primary, self.options.panel_edge);
-            set_surface_position(&surface.window, x, y);
+            let (_, x, y, width, height, _) = surface_geometry_for_panel(
+                surface.role,
+                primary,
+                self.options.panel_edge,
+                &self.plugin_panel_surface,
+            );
+            surface
+                .window
+                .set_outer_position(LogicalPosition::new(x, y));
             let _ = surface
                 .window
                 .request_inner_size(LogicalSize::new(width, height));
@@ -892,14 +1207,82 @@ impl WinitShell {
             let Some(display) = displays.get(display_index).copied() else {
                 continue;
             };
-            let (_, x, y, width, height, _) =
-                surface_geometry(surface.role, display, self.options.panel_edge);
-            set_surface_position(&surface.window, x, y);
+            let (_, x, y, width, height, _) = surface_geometry_for_panel(
+                surface.role,
+                display,
+                self.options.panel_edge,
+                surface
+                    .plugin
+                    .as_ref()
+                    .and_then(|key| active_panels.get(key))
+                    .unwrap_or(&self.plugin_panel_surface),
+            );
+            surface
+                .window
+                .set_outer_position(LogicalPosition::new(x, y));
             let _ = surface
                 .window
                 .request_inner_size(LogicalSize::new(width, height));
+            #[cfg(target_os = "windows")]
+            if (surface.role == SurfaceRole::Taskbar
+                || (surface.role == SurfaceRole::Panel
+                    && surface
+                        .plugin
+                        .as_ref()
+                        .and_then(|key| active_panels.get(key))
+                        .is_some_and(|panel| panel.reserve_work_area)))
+                && !crate::platform::reposition_panel_window(
+                    &surface.window,
+                    self.options.panel_edge,
+                )
+            {
+                tracing::warn!(role = ?surface.role, "failed to reposition Windows reserved panel");
+            }
         }
+        #[cfg(target_os = "windows")]
+        self.set_plugin_dialog_owners_enabled(false);
         Ok(())
+    }
+
+    fn active_plugin_dialog_owners(&self) -> HashSet<(String, String, String)> {
+        self.surfaces
+            .iter()
+            .filter_map(|dialog| {
+                if !dialog.display_connected || dialog.role != SurfaceRole::Panel {
+                    return None;
+                }
+                let key = dialog.plugin.as_ref()?;
+                let declaration = dialog.plugin_surface.as_ref()?;
+                if declaration.kind != nickel_core::plugins::PluginSurfaceKind::Dialog {
+                    return None;
+                }
+                Some((
+                    key.plugin_id.clone(),
+                    declaration.owner.clone()?,
+                    dialog.output_name.clone(),
+                ))
+            })
+            .collect()
+    }
+
+    #[cfg(target_os = "windows")]
+    fn set_plugin_dialog_owners_enabled(&self, enabled: bool) {
+        use winit::platform::windows::WindowExtWindows;
+
+        let owners = self.active_plugin_dialog_owners();
+        for surface in &self.surfaces {
+            if surface.role == SurfaceRole::Panel
+                && surface.plugin.as_ref().is_some_and(|key| {
+                    owners.contains(&(
+                        key.plugin_id.clone(),
+                        key.surface_id.clone(),
+                        surface.output_name.clone(),
+                    ))
+                })
+            {
+                surface.window.set_enable(enabled);
+            }
+        }
     }
 
     pub fn set_bar_on_all_displays(&mut self, enabled: bool) -> Result<bool, String> {
@@ -907,6 +1290,169 @@ impl WinitShell {
             return Ok(false);
         }
         self.options.bar_on_all_displays = enabled;
+        self.sync_display_geometry()?;
+        Ok(true)
+    }
+
+    pub fn set_plugin_surfaces(
+        &mut self,
+        active_fixed_plugins: HashSet<nickel_core::plugins::PluginSurfaceKey>,
+        panels: Vec<(
+            nickel_core::plugins::PluginSurfaceKey,
+            nickel_core::plugins::PluginSurface,
+        )>,
+    ) -> Result<bool, String> {
+        let mut panels = panels.into_iter();
+        let primary = panels.next();
+        if primary
+            .as_ref()
+            .is_some_and(|(key, surface)| key.surface_id != surface.id)
+        {
+            return Err("mismatched primary plugin panel surface".into());
+        }
+        let mut extra = std::collections::BTreeMap::new();
+        for (key, surface) in panels {
+            if key.surface_id != surface.id || extra.insert(key, surface).is_some() {
+                return Err("duplicate or mismatched plugin panel surface".into());
+            }
+        }
+        let enabled = primary.is_some();
+        let (owner, surface) = primary.map_or_else(
+            || {
+                (
+                    crate::plugin_panel::manifest().id.clone(),
+                    crate::plugin_panel::surface().clone(),
+                )
+            },
+            |(key, surface)| (key.plugin_id, surface),
+        );
+        if enabled
+            && extra.contains_key(&nickel_core::plugins::PluginSurfaceKey {
+                plugin_id: owner.clone(),
+                surface_id: surface.id.clone(),
+            })
+        {
+            return Err("duplicate plugin panel surface".into());
+        }
+        if self.active_fixed_plugins == active_fixed_plugins
+            && self.plugin_panel_enabled == enabled
+            && self.plugin_panel_owner == owner
+            && self.plugin_panel_surface == surface
+            && self.extra_plugin_panels == extra
+        {
+            return Ok(false);
+        }
+        let mut previous_panels = self.extra_plugin_panels.clone();
+        if self.plugin_panel_enabled {
+            previous_panels.insert(
+                nickel_core::plugins::PluginSurfaceKey {
+                    plugin_id: self.plugin_panel_owner.clone(),
+                    surface_id: self.plugin_panel_surface.id.clone(),
+                },
+                self.plugin_panel_surface.clone(),
+            );
+        }
+        let mut active = extra.clone();
+
+        if enabled {
+            active.insert(
+                nickel_core::plugins::PluginSurfaceKey {
+                    plugin_id: owner.clone(),
+                    surface_id: surface.id.clone(),
+                },
+                surface.clone(),
+            );
+        }
+        #[cfg(target_os = "windows")]
+        self.set_plugin_dialog_owners_enabled(true);
+        self.surfaces.retain(|existing| {
+            existing.role != SurfaceRole::Panel
+                || existing.plugin.as_ref().is_some_and(|key| {
+                    active
+                        .get(key)
+                        .is_some_and(|surface| surface.passive == existing.passive_overlay)
+                })
+        });
+        for existing in self
+            .surfaces
+            .iter_mut()
+            .filter(|existing| existing.role == SurfaceRole::Panel && existing.display_connected)
+        {
+            let key = existing.plugin.as_ref().expect("plugin surface has owner");
+            let Some((previous, current)) = previous_panels.get(key).zip(active.get(key)) else {
+                continue;
+            };
+            if previous == current {
+                continue;
+            }
+            let Some((geometry, _)) = self.displays.get(existing.display_index) else {
+                continue;
+            };
+            let (_, x, y, width, height, _) = surface_geometry_for_panel(
+                SurfaceRole::Panel,
+                *geometry,
+                self.options.panel_edge,
+                current,
+            );
+            let requested_new_placement = (previous.anchor, previous.offset_x, previous.offset_y)
+                != (current.anchor, current.offset_x, current.offset_y);
+            if requested_new_placement
+                || !matches!(
+                    current.kind,
+                    nickel_core::plugins::PluginSurfaceKind::Window
+                        | nickel_core::plugins::PluginSurfaceKind::Dialog
+                )
+            {
+                existing
+                    .window
+                    .set_outer_position(LogicalPosition::new(x, y));
+            }
+            if (previous.width, previous.height) != (current.width, current.height) {
+                let _ = existing
+                    .window
+                    .request_inner_size(LogicalSize::new(width, height));
+            }
+            existing.plugin_surface = Some(current.clone());
+        }
+        self.rebuild_surface_indices();
+        #[cfg(target_os = "linux")]
+        for existing in self
+            .surfaces
+            .iter()
+            .filter(|existing| existing.role == SurfaceRole::Panel && existing.display_connected)
+        {
+            let key = existing.plugin.as_ref().expect("plugin surface has owner");
+            let surface = active.get(key).expect("retained plugin surface is active");
+            crate::platform::register_shell_surface(
+                nickel_session_protocol::ShellSurfaceIdentity {
+                    application_id: existing.application_id.clone(),
+                    role: if surface.reserve_work_area {
+                        SessionShellRole::Panel
+                    } else {
+                        SessionShellRole::PluginSurface
+                    },
+                    output: Some(existing.output_name.clone()),
+                    plugin_surface: Some(nickel_session_protocol::PluginSurfacePlacement {
+                        plugin_id: key.plugin_id.clone(),
+                        surface_id: surface.id.clone(),
+                        kind: protocol_plugin_surface_kind(surface.kind),
+                        width: surface.width,
+                        height: surface.height,
+                        bottom_offset: surface.bottom_offset,
+                        anchor: protocol_plugin_surface_anchor(surface.anchor),
+                        offset_x: surface.offset_x,
+                        offset_y: surface.offset_y,
+                        passive: surface.passive,
+                    }),
+                },
+            )
+            .map_err(|error| format!("failed to register plugin surface: {error}"))?;
+        }
+        self.active_fixed_plugins = active_fixed_plugins;
+        self.plugin_panel_enabled = enabled;
+        self.plugin_panel_owner = owner;
+        self.plugin_panel_surface = surface;
+        self.extra_plugin_panels = extra;
         self.sync_display_geometry()?;
         Ok(true)
     }
@@ -952,55 +1498,40 @@ impl WinitShell {
         true
     }
 
-    pub fn configure_launcher_surface(&mut self, compact_size: Option<(u32, u32)>) {
-        #[cfg(target_os = "windows")]
-        {
-            self.launcher_surface_size = compact_size;
-        }
-        let launchers = self
-            .surfaces
-            .iter()
-            .enumerate()
-            .filter_map(|(index, surface)| {
-                (surface.display_connected && surface.role == SurfaceRole::Launcher)
-                    .then_some(index)
-            })
-            .collect::<Vec<_>>();
-        for index in launchers {
-            if compact_size.is_some() {
-                #[cfg(target_os = "windows")]
-                self.relocate_to_active_output(index);
-                #[cfg(not(target_os = "windows"))]
-                if let Some((width, height)) = compact_size
-                    && self.surfaces[index].window.size() != (width, height)
-                {
-                    let _ = self.surfaces[index]
-                        .window
-                        .request_inner_size(LogicalSize::new(width, height));
-                }
-            } else {
-                self.relocate_to_active_output(index);
-            }
-        }
-    }
-
-    #[cfg(target_os = "windows")]
-    pub fn launcher_maximum_size(&self) -> Option<(u32, u32)> {
-        let index = self.active_output_index()?;
-        let geometry = self.displays.get(index)?.0;
-        let (width, height) = output_layout_size(geometry);
-        Some((
-            920.min(width),
-            680.min(height.saturating_sub(PANEL_HEIGHT + 8)),
-        ))
-    }
-
     fn active_output_index(&self) -> Option<usize> {
         preferred_output_index(
             &self.displays,
             self.active_output_name.as_deref(),
             self.primary_output_name.as_deref(),
         )
+    }
+
+    #[cfg(target_os = "windows")]
+    pub fn position_screenshot_on_active_output(&mut self) {
+        let Some(index) = self.active_output_index() else {
+            return;
+        };
+        let Some((geometry, _)) = self.displays.get(index) else {
+            return;
+        };
+        let Some(surface) = self
+            .surfaces
+            .iter_mut()
+            .find(|surface| surface.role == SurfaceRole::Screenshot)
+        else {
+            return;
+        };
+        surface.display_index = index;
+        surface.output_name = self.displays[index].1.clone();
+        surface
+            .window
+            .set_outer_position(LogicalPosition::new(geometry.x, geometry.y));
+        let size = (geometry.width, geometry.height);
+        if surface.window.size() != size {
+            let _ = surface
+                .window
+                .request_inner_size(LogicalSize::new(size.0, size.1));
+        }
     }
 
     fn relocate_to_active_output(&mut self, index: usize) {
@@ -1017,33 +1548,21 @@ impl WinitShell {
         if role == SurfaceRole::OnScreenKeyboard {
             return;
         }
-        if !matches!(role, SurfaceRole::Launcher | SurfaceRole::OnScreenKeyboard) {
+        if role != SurfaceRole::OnScreenKeyboard {
             return;
         }
-        let (_, x, y, width, height, _) = surface_geometry(role, geometry, self.options.panel_edge);
-        #[cfg(target_os = "windows")]
-        let (x, y, width, height) = if role == SurfaceRole::Launcher
-            && let Some((preferred_width, preferred_height)) = self.launcher_surface_size
-        {
-            let width = preferred_width.min(width);
-            let height = preferred_height.min(height);
-            let (_, output_height) = output_layout_size(geometry);
-            let local_y = match self.options.panel_edge {
-                PanelEdge::Top => PANEL_HEIGHT + 8,
-                PanelEdge::Bottom => output_height
-                    .saturating_sub(PANEL_HEIGHT)
-                    .saturating_sub(height)
-                    .saturating_sub(8),
-            };
-            let (x, y) = output_position(geometry, 18, local_y);
-            (x, y, width, height)
-        } else {
-            (x, y, width, height)
-        };
+        let (_, x, y, width, height, _) = surface_geometry_for_panel(
+            role,
+            geometry,
+            self.options.panel_edge,
+            &self.plugin_panel_surface,
+        );
         let surface = &mut self.surfaces[index];
         surface.display_index = display_index;
         surface.output_name = output_name;
-        set_surface_position(&surface.window, x, y);
+        surface
+            .window
+            .set_outer_position(LogicalPosition::new(x, y));
         if surface.window.size() != (width, height) {
             let _ = surface
                 .window
@@ -1145,7 +1664,12 @@ impl WinitShell {
                 i64::from(size.height),
             ]
         });
-        let scene = state.scene_change_token(surface.role);
+        let role = surface.diagnostic_role();
+        let scene = if let Some(key) = surface.plugin_key() {
+            state.plugin_surface_change_token(key)
+        } else {
+            state.scene_change_token(role)
+        };
         let native = surface
             .window
             .window_handle()
@@ -1159,11 +1683,11 @@ impl WinitShell {
             .unwrap_or_default();
         crate::windows_shell_diagnostics::SurfaceObservation {
             native,
-            role: surface.role,
+            role,
             generation: surface.diagnostic_generation,
             native_visible: surface.visible,
-            canonical_visible: state.surface_visible(surface.role),
-            protected: state.surface_remote_access_protected(surface.role),
+            canonical_visible: state.surface_visible(role),
+            protected: state.surface_remote_access_protected(role),
             geometry,
             output: Some(surface.output_name.clone()),
             scene_generation: scene.map(|token| token.frame_generation),
@@ -1195,6 +1719,17 @@ impl WinitShell {
     pub fn surface_mut(&mut self, id: SurfaceId) -> Option<&mut ShellSurface> {
         let index = *self.surface_indices.get(&id.0)?;
         self.surfaces.get_mut(index)
+    }
+
+    pub fn set_surface_title(&self, id: SurfaceId, title: &str) -> bool {
+        let Some(surface) = self.surface(id) else {
+            return false;
+        };
+        if surface.window.title() == title {
+            return false;
+        }
+        surface.window.set_title(title);
+        true
     }
 
     pub fn mark_initial_exposed(&mut self, id: SurfaceId) -> bool {
@@ -1239,11 +1774,16 @@ impl WinitShell {
         let id = SurfaceId(window.id());
         let index = self.surfaces.len();
         let diagnostic_generation = self.next_surface_diagnostic_generation()?;
+        #[cfg(target_os = "windows")]
+        crate::platform::register_native_application_window(&window, application_id);
         self.surface_indices.insert(id.0, index);
         self.native_surface_indices.insert(window.id(), index);
         self.surfaces.push(ShellSurface {
             id,
             role: SurfaceRole::CodexChat,
+            plugin: None,
+            plugin_surface: None,
+            passive_overlay: false,
             application_id: application_id.to_owned(),
             display_index: 0,
             output_name: String::new(),
@@ -1315,6 +1855,9 @@ impl WinitShell {
         self.surfaces.push(ShellSurface {
             id,
             role: SurfaceRole::TrustedControl,
+            plugin: None,
+            plugin_surface: None,
+            passive_overlay: false,
             application_id: "nickel.trusted-remote-control".to_owned(),
             display_index,
             output_name: output_name.to_owned(),
@@ -1453,7 +1996,12 @@ impl WinitShell {
     pub fn presenter_roles(&self) -> Vec<SurfaceRole> {
         self.surfaces
             .iter()
-            .filter_map(|surface| surface.presenter.as_ref().map(|_| surface.role))
+            .filter_map(|surface| {
+                surface
+                    .presenter
+                    .as_ref()
+                    .map(|_| surface.diagnostic_role())
+            })
             .collect()
     }
 
@@ -1727,14 +2275,26 @@ impl WinitShell {
             .map(|(geometry, _)| *geometry)
             .or_else(|| self.displays.first().map(|(geometry, _)| *geometry))
             .ok_or_else(|| "cannot recreate a shell surface without an output".to_owned())?;
+        let panel = surface
+            .plugin_surface
+            .as_ref()
+            .unwrap_or(&self.plugin_panel_surface);
         let (base_title, x, y, width, height, _) =
-            surface_geometry(surface.role, geometry, self.options.panel_edge);
+            surface_geometry_for_panel(surface.role, geometry, self.options.panel_edge, panel);
         let title = base_title;
         let attributes = Window::default_attributes()
             .with_title(title)
             .with_position(LogicalPosition::new(x, y))
             .with_inner_size(LogicalSize::new(width, height))
-            .with_decorations(!surface_is_borderless(surface.role))
+            .with_decorations(
+                !surface_is_borderless(surface.role)
+                    || (surface.role == SurfaceRole::Panel
+                        && matches!(
+                            panel.kind,
+                            nickel_core::plugins::PluginSurfaceKind::Window
+                                | nickel_core::plugins::PluginSurfaceKind::Dialog
+                        )),
+            )
             .with_resizable(matches!(
                 surface.role,
                 SurfaceRole::WindowPreview
@@ -1744,6 +2304,11 @@ impl WinitShell {
             ))
             .with_visible(true)
             .with_name(&surface.application_id, &surface.application_id);
+        let attributes = if surface.plugin.is_some() {
+            attributes.with_transparent(true)
+        } else {
+            attributes
+        };
         #[allow(deprecated)]
         let replacement = self
             .events
@@ -1792,6 +2357,20 @@ impl WinitShell {
                 surface.window.focus_window();
                 raised = true;
             }
+        }
+        raised
+    }
+
+    pub fn raise_plugin_surface(&mut self, key: &nickel_core::plugins::PluginSurfaceKey) -> bool {
+        let ids = self
+            .surfaces
+            .iter()
+            .filter(|surface| surface.plugin_key() == Some(key))
+            .map(ShellSurface::id)
+            .collect::<Vec<_>>();
+        let mut raised = false;
+        for id in ids {
+            raised |= self.raise(id);
         }
         raised
     }
@@ -1891,6 +2470,8 @@ impl WinitShell {
     }
 
     fn pump_events(&mut self, timeout: Option<Duration>) {
+        #[cfg(target_os = "linux")]
+        let modal_owners = self.active_plugin_dialog_owners();
         let indices = &self.native_surface_indices;
         let surfaces = &self.surfaces;
         let adapters = &mut self.input_adapters;
@@ -1972,10 +2553,32 @@ impl WinitShell {
                     let native_device = native_device.unwrap_or_else(winit::event::DeviceId::dummy);
                     let device = devices.get_or_insert(native_device);
                     let adapter = adapters.entry(window_id).or_default();
+                    #[cfg(target_os = "linux")]
+                    let blocked_by_dialog = surfaces[index].role == SurfaceRole::Panel
+                        && surfaces[index].plugin.as_ref().is_some_and(|key| {
+                            modal_owners.contains(&(
+                                key.plugin_id.clone(),
+                                key.surface_id.clone(),
+                                surfaces[index].output_name.clone(),
+                            ))
+                        });
                     for input in adapter.normalize_at_scale(device, scale, &event) {
+                        #[cfg(target_os = "linux")]
+                        if blocked_by_dialog {
+                            continue;
+                        }
                         queue_shell_input(pending, surface, input);
                     }
                     if let Some(event) = translate_window_event(surface, scale as f32, &event) {
+                        #[cfg(target_os = "linux")]
+                        if blocked_by_dialog
+                            && matches!(
+                                event,
+                                ShellEvent::PointerEntered { .. } | ShellEvent::FileDrop { .. }
+                            )
+                        {
+                            return;
+                        }
                         pending.push_back(event);
                     }
                 }
@@ -2022,12 +2625,50 @@ impl WinitShell {
         geometry: DisplayGeometry,
         output_name: &str,
     ) -> Result<(), String> {
+        self.create_surface_with_plugin(role, display_index, geometry, output_name, None)
+    }
+
+    fn create_surface_with_plugin(
+        &mut self,
+        role: SurfaceRole,
+        display_index: usize,
+        geometry: DisplayGeometry,
+        output_name: &str,
+        plugin: Option<(
+            &nickel_core::plugins::PluginSurfaceKey,
+            &nickel_core::plugins::PluginSurface,
+        )>,
+    ) -> Result<(), String> {
+        let panel = plugin
+            .map(|(_, surface)| surface.clone())
+            .or_else(|| {
+                fixed_plugin_surface_key(role, &self.active_fixed_plugins)
+                    .and_then(|key| self.extra_plugin_panels.get(&key).cloned())
+            })
+            .unwrap_or_else(|| self.plugin_panel_surface.clone());
+        let plugin_key = match role {
+            SurfaceRole::Taskbar => None,
+            SurfaceRole::VolumeOsd => None,
+            SurfaceRole::WindowPreview => {
+                fixed_plugin_surface_key(role, &self.active_fixed_plugins)
+            }
+            SurfaceRole::Panel => Some(plugin.map_or_else(
+                || nickel_core::plugins::PluginSurfaceKey {
+                    plugin_id: self.plugin_panel_owner.clone(),
+                    surface_id: panel.id.clone(),
+                },
+                |(key, _)| key.clone(),
+            )),
+            _ => None,
+        };
         let (base_title, x, y, width, height, hidden) =
-            surface_geometry(role, geometry, self.options.panel_edge);
+            surface_geometry_for_panel(role, geometry, self.options.panel_edge, &panel);
         let title = base_title;
         let session_role = match role {
             SurfaceRole::Desktop => SessionShellRole::Desktop,
-            SurfaceRole::Panel => SessionShellRole::Panel,
+            SurfaceRole::Taskbar => SessionShellRole::Panel,
+            SurfaceRole::Panel if panel.reserve_work_area => SessionShellRole::Panel,
+            SurfaceRole::Panel => SessionShellRole::PluginSurface,
             SurfaceRole::Launcher => SessionShellRole::Launcher,
             SurfaceRole::ControlCenter => SessionShellRole::ControlCenter,
             SurfaceRole::Notification => SessionShellRole::Notification,
@@ -2054,7 +2695,10 @@ impl WinitShell {
             );
             let output = matches!(
                 role,
-                SurfaceRole::Desktop | SurfaceRole::Panel | SurfaceRole::Lock
+                SurfaceRole::Desktop
+                    | SurfaceRole::Taskbar
+                    | SurfaceRole::Panel
+                    | SurfaceRole::Lock
             )
             .then(|| output_name.to_owned());
             crate::platform::register_shell_surface(
@@ -2062,19 +2706,38 @@ impl WinitShell {
                     application_id: application_id.clone(),
                     role: session_role,
                     output,
+                    plugin_surface: plugin_key.as_ref().map(|key| {
+                        nickel_session_protocol::PluginSurfacePlacement {
+                            plugin_id: key.plugin_id.clone(),
+                            surface_id: panel.id.clone(),
+                            kind: protocol_plugin_surface_kind(panel.kind),
+                            width: panel.width,
+                            height: panel.height,
+                            bottom_offset: panel.bottom_offset,
+                            anchor: protocol_plugin_surface_anchor(panel.anchor),
+                            offset_x: panel.offset_x,
+                            offset_y: panel.offset_y,
+                            passive: panel.passive,
+                        }
+                    }),
                 },
             )
             .map_err(|error| format!("failed to register shell surface: {error}"))?;
             application_id
         };
-        let attributes = Window::default_attributes().with_title(title);
-        #[cfg(target_os = "windows")]
-        let attributes = attributes.with_position(PhysicalPosition::new(x, y));
-        #[cfg(not(target_os = "windows"))]
-        let attributes = attributes.with_position(LogicalPosition::new(x, y));
-        let attributes = attributes
+        let attributes = Window::default_attributes()
+            .with_title(title)
+            .with_position(LogicalPosition::new(x, y))
             .with_inner_size(LogicalSize::new(width, height))
-            .with_decorations(!surface_is_borderless(role))
+            .with_decorations(
+                !surface_is_borderless(role)
+                    || (role == SurfaceRole::Panel
+                        && matches!(
+                            panel.kind,
+                            nickel_core::plugins::PluginSurfaceKind::Window
+                                | nickel_core::plugins::PluginSurfaceKind::Dialog
+                        )),
+            )
             .with_resizable(matches!(
                 role,
                 SurfaceRole::WindowPreview
@@ -2083,6 +2746,39 @@ impl WinitShell {
                     | SurfaceRole::OnScreenKeyboard
             ))
             .with_visible(!hidden || cfg!(target_os = "linux"));
+        let attributes = if plugin_key.is_some() {
+            attributes.with_transparent(true)
+        } else {
+            attributes
+        };
+        #[cfg(target_os = "windows")]
+        let attributes = if panel.kind == nickel_core::plugins::PluginSurfaceKind::Dialog {
+            if let Some(owner_id) = &panel.owner {
+                use raw_window_handle::RawWindowHandle;
+                use winit::platform::windows::WindowAttributesExtWindows;
+                let owner = self.surfaces.iter().find(|surface| {
+                    surface.display_connected
+                        && surface.output_name == output_name
+                        && surface.plugin.as_ref().is_some_and(|key| {
+                            plugin_key.as_ref().is_some_and(|dialog_key| {
+                                key.plugin_id == dialog_key.plugin_id && key.surface_id == *owner_id
+                            })
+                        })
+                });
+                let hwnd = owner
+                    .and_then(|surface| surface.window.window_handle().ok())
+                    .and_then(|handle| match handle.as_raw() {
+                        RawWindowHandle::Win32(handle) => Some(handle.hwnd.get()),
+                        _ => None,
+                    })
+                    .ok_or_else(|| format!("plugin dialog owner {owner_id:?} is unavailable"))?;
+                attributes.with_owner_window(hwnd)
+            } else {
+                attributes
+            }
+        } else {
+            attributes
+        };
         #[cfg(target_os = "linux")]
         let attributes = attributes.with_name(application_id.clone(), application_id.clone());
         #[allow(deprecated)]
@@ -2101,9 +2797,31 @@ impl WinitShell {
                     tracing::warn!(?role, "failed to configure Windows shell window");
                 }
             }
-            SurfaceRole::Panel => {
-                if !crate::platform::configure_panel_window(&window) {
+            SurfaceRole::Taskbar => {
+                if !crate::platform::configure_panel_window(&window, self.options.panel_edge) {
                     tracing::warn!(?role, "failed to configure Windows shell window");
+                }
+            }
+            SurfaceRole::Panel => {
+                if panel.reserve_work_area {
+                    if !crate::platform::configure_panel_window(&window, self.options.panel_edge) {
+                        tracing::warn!(?role, "failed to configure Windows reserved panel window");
+                    }
+                } else if matches!(
+                    panel.kind,
+                    nickel_core::plugins::PluginSurfaceKind::Panel
+                        | nickel_core::plugins::PluginSurfaceKind::Dock
+                ) && !crate::platform::configure_preview_window(&window)
+                {
+                    tracing::warn!(?role, "failed to configure Windows plugin panel window");
+                }
+                if matches!(
+                    panel.kind,
+                    nickel_core::plugins::PluginSurfaceKind::Dialog
+                        | nickel_core::plugins::PluginSurfaceKind::Overlay
+                ) && !crate::platform::configure_plugin_dialog_window(&window)
+                {
+                    tracing::warn!(?role, "failed to configure Windows plugin transient window");
                 }
             }
             SurfaceRole::Launcher => {
@@ -2121,17 +2839,7 @@ impl WinitShell {
                     tracing::warn!(?role, "failed to configure Windows shell window");
                 }
             }
-            SurfaceRole::WindowContextMenu => {
-                if !crate::platform::configure_context_menu_window(&window) {
-                    tracing::warn!(?role, "failed to configure Windows shell window");
-                }
-            }
-            SurfaceRole::VolumeOsd => {
-                let configured = crate::platform::configure_volume_osd_window(&window);
-                if !configured {
-                    tracing::warn!(?role, "failed to configure Windows shell window");
-                }
-            }
+
             _ => {}
         }
         if role == SurfaceRole::Screenshot {
@@ -2153,11 +2861,21 @@ impl WinitShell {
         let id = SurfaceId(window.id());
         let index = self.surfaces.len();
         let diagnostic_generation = self.next_surface_diagnostic_generation()?;
+        #[cfg(target_os = "windows")]
+        if let Some(key) = plugin_key
+            .as_ref()
+            .filter(|_| crate::platform::native_application_windows::is_application_surface(&panel))
+        {
+            crate::platform::register_native_application_window(&window, &key.plugin_id);
+        }
         self.surface_indices.insert(id.0, index);
         self.native_surface_indices.insert(window.id(), index);
         self.surfaces.push(ShellSurface {
             id,
             role,
+            plugin_surface: plugin_key.as_ref().map(|_| panel.clone()),
+            plugin: plugin_key,
+            passive_overlay: role == SurfaceRole::Panel && panel.passive,
             application_id,
             display_index,
             output_name: output_name.to_owned(),
@@ -2284,184 +3002,215 @@ fn translate_window_event(
     }
 }
 
+fn protocol_plugin_surface_kind(
+    kind: nickel_core::plugins::PluginSurfaceKind,
+) -> nickel_session_protocol::PluginSurfacePlacementKind {
+    use nickel_core::plugins::PluginSurfaceKind;
+    use nickel_session_protocol::PluginSurfacePlacementKind;
+    match kind {
+        PluginSurfaceKind::Panel => PluginSurfacePlacementKind::Panel,
+        PluginSurfaceKind::Dock => PluginSurfacePlacementKind::Dock,
+        PluginSurfaceKind::Window => PluginSurfacePlacementKind::Window,
+        PluginSurfaceKind::Dialog => PluginSurfacePlacementKind::Dialog,
+        PluginSurfaceKind::Overlay => PluginSurfacePlacementKind::Overlay,
+        PluginSurfaceKind::Desktop => PluginSurfacePlacementKind::Desktop,
+    }
+}
+
+fn protocol_plugin_surface_anchor(
+    anchor: nickel_core::plugins::PluginSurfaceAnchor,
+) -> nickel_session_protocol::PluginSurfaceAnchor {
+    use nickel_core::plugins::PluginSurfaceAnchor as Core;
+    use nickel_session_protocol::PluginSurfaceAnchor as Protocol;
+    match anchor {
+        Core::Center => Protocol::Center,
+        Core::TopLeft => Protocol::TopLeft,
+        Core::TopCenter => Protocol::TopCenter,
+        Core::TopRight => Protocol::TopRight,
+        Core::BottomLeft => Protocol::BottomLeft,
+        Core::BottomCenter => Protocol::BottomCenter,
+        Core::BottomRight => Protocol::BottomRight,
+    }
+}
+
+fn surface_geometry_for_panel(
+    role: SurfaceRole,
+    geometry: DisplayGeometry,
+    panel_edge: PanelEdge,
+    panel: &nickel_core::plugins::PluginSurface,
+) -> (&'static str, i32, i32, u32, u32, bool) {
+    if role == SurfaceRole::Panel {
+        let width = panel.width.min(geometry.width);
+        let height = panel.height.min(geometry.height);
+        if panel.reserve_work_area {
+            return (
+                PANEL_TITLE,
+                geometry.x,
+                match panel_edge {
+                    PanelEdge::Top => geometry.y,
+                    PanelEdge::Bottom => geometry.y + geometry.height.saturating_sub(height) as i32,
+                },
+                geometry.width,
+                height,
+                false,
+            );
+        }
+        if matches!(
+            panel.kind,
+            nickel_core::plugins::PluginSurfaceKind::Window
+                | nickel_core::plugins::PluginSurfaceKind::Dialog
+                | nickel_core::plugins::PluginSurfaceKind::Overlay
+        ) {
+            let (x, y) = panel.anchor.position(
+                (geometry.x, geometry.y, geometry.width, geometry.height),
+                (width, height),
+                (panel.offset_x, panel.offset_y),
+            );
+            return (
+                match panel.kind {
+                    nickel_core::plugins::PluginSurfaceKind::Dialog => "Nickel Plugin Dialog",
+                    nickel_core::plugins::PluginSurfaceKind::Overlay => "Nickel Plugin Overlay",
+                    _ => "Nickel Plugin Window",
+                },
+                x,
+                y,
+                width,
+                height,
+                panel.passive,
+            );
+        }
+        return (
+            "Nickel Plugin Panel",
+            geometry.x + geometry.width.saturating_sub(width) as i32 / 2,
+            geometry.y
+                + geometry
+                    .height
+                    .saturating_sub(height.saturating_add(panel.bottom_offset))
+                    as i32,
+            width,
+            height,
+            true,
+        );
+    }
+    surface_geometry(role, geometry, panel_edge)
+}
+
 fn surface_geometry(
     role: SurfaceRole,
     geometry: DisplayGeometry,
     panel_edge: PanelEdge,
 ) -> (&'static str, i32, i32, u32, u32, bool) {
-    let (output_width, output_height) = output_layout_size(geometry);
     match role {
-        SurfaceRole::Desktop => {
-            let (x, y) = output_position(geometry, 0, 0);
-            (DESKTOP_TITLE, x, y, output_width, output_height, false)
-        }
-        SurfaceRole::Panel => {
-            let local_y = match panel_edge {
-                PanelEdge::Top => 0,
-                PanelEdge::Bottom => output_height.saturating_sub(PANEL_HEIGHT),
-            };
-            let (x, y) = output_position(geometry, 0, local_y);
-            (PANEL_TITLE, x, y, output_width, PANEL_HEIGHT, false)
-        }
-        SurfaceRole::Launcher => {
-            let (x, y) = output_position(geometry, 18, output_height.saturating_sub(744));
+        SurfaceRole::Desktop => (
+            DESKTOP_TITLE,
+            geometry.x,
+            geometry.y,
+            geometry.width,
+            geometry.height,
+            false,
+        ),
+        SurfaceRole::Taskbar => {
+            let height = 0;
             (
-                LAUNCHER_TITLE,
-                x,
-                y,
-                920.min(output_width),
-                680.min(output_height.saturating_sub(PANEL_HEIGHT + 8)),
-                cfg!(not(target_os = "linux")),
+                PANEL_TITLE,
+                geometry.x,
+                match panel_edge {
+                    PanelEdge::Top => geometry.y,
+                    PanelEdge::Bottom => geometry.y + geometry.height.saturating_sub(height) as i32,
+                },
+                geometry.width,
+                height,
+                false,
             )
         }
-        SurfaceRole::ControlCenter => {
-            let (x, y) = output_position(
-                geometry,
-                output_width.saturating_sub(438),
-                output_height.saturating_sub(672),
-            );
-            (
-                CONTROL_CENTER_TITLE,
-                x,
-                y,
-                420.min(output_width),
-                600.min(output_height),
-                true,
-            )
-        }
+        SurfaceRole::Panel => (
+            "Nickel Plugin Panel",
+            geometry.x
+                + geometry
+                    .width
+                    .saturating_sub(crate::plugin_panel::surface().width) as i32
+                    / 2,
+            geometry.y
+                + geometry.height.saturating_sub(
+                    crate::plugin_panel::surface()
+                        .height
+                        .saturating_add(crate::plugin_panel::bottom_offset()),
+                ) as i32,
+            crate::plugin_panel::surface().width.min(geometry.width),
+            crate::plugin_panel::surface().height.min(geometry.height),
+            true,
+        ),
+        SurfaceRole::Launcher => unreachable!("launcher uses an ordinary plugin window"),
+        SurfaceRole::ControlCenter => (
+            CONTROL_CENTER_TITLE,
+            geometry.x + geometry.width.saturating_sub(438) as i32,
+            geometry.y + geometry.height.saturating_sub(672) as i32,
+            420.min(geometry.width),
+            600.min(geometry.height),
+            true,
+        ),
         SurfaceRole::Notification => {
-            let (x, y) = output_position(geometry, output_width.saturating_sub(438), 24);
+            let width = 420.min(geometry.width);
+            let height = 180.min(geometry.height);
             (
                 NOTIFICATION_TITLE,
-                x,
-                y,
-                420.min(output_width),
-                180.min(output_height),
+                geometry.x + geometry.width.saturating_sub(width + 18) as i32,
+                geometry.y + 24,
+                width,
+                height,
                 true,
             )
         }
-        SurfaceRole::VolumeOsd => {
-            let (x, y) = output_position(
-                geometry,
-                output_width.saturating_sub(320) / 2,
-                output_height.saturating_sub(170),
-            );
-            (
-                VOLUME_OSD_TITLE,
-                x,
-                y,
-                320.min(output_width),
-                88.min(output_height),
-                true,
-            )
-        }
-        SurfaceRole::WindowPreview => {
-            let (x, y) = output_position(
-                geometry,
-                output_width.saturating_sub(1160.min(output_width)) / 2,
-                output_height.saturating_sub(220.min(output_height)) / 2,
-            );
-            (
-                WINDOW_PREVIEW_TITLE,
-                x,
-                y,
-                1160.min(output_width),
-                220.min(output_height),
-                true,
-            )
-        }
-        SurfaceRole::WindowContextMenu => {
-            let (x, y) = output_position(geometry, 0, 0);
-            (
-                WINDOW_CONTEXT_MENU_TITLE,
-                x,
-                y,
-                220.min(output_width),
-                156.min(output_height),
-                true,
-            )
-        }
-        SurfaceRole::CodexProjectMenu => {
-            let (x, y) = output_position(
-                geometry,
-                output_width.saturating_sub(464),
-                output_height.saturating_sub(476),
-            );
-            (
-                CODEX_PROJECT_MENU_TITLE,
-                x,
-                y,
-                360.min(output_width),
-                420.min(output_height.saturating_sub(PANEL_HEIGHT)),
-                true,
-            )
-        }
-        SurfaceRole::Lock => {
-            let (x, y) = output_position(geometry, 0, 0);
-            (LOCK_TITLE, x, y, output_width, output_height, true)
-        }
-        SurfaceRole::Screenshot => {
-            let (x, y) = output_position(geometry, 0, 0);
-            (SCREENSHOT_TITLE, x, y, output_width, output_height, true)
-        }
+        SurfaceRole::VolumeOsd => ("Retired volume surface", 0, 0, 0, 0, true),
+        SurfaceRole::WindowPreview => (
+            WINDOW_PREVIEW_TITLE,
+            geometry.x + geometry.width.saturating_sub(1160.min(geometry.width)) as i32 / 2,
+            geometry.y + geometry.height.saturating_sub(220.min(geometry.height)) as i32 / 2,
+            1160.min(geometry.width),
+            220.min(geometry.height),
+            true,
+        ),
+        SurfaceRole::WindowContextMenu => ("Retired window menu surface", 0, 0, 0, 0, true),
+        SurfaceRole::CodexProjectMenu => (
+            CODEX_PROJECT_MENU_TITLE,
+            geometry.x + geometry.width.saturating_sub(464) as i32,
+            geometry.y + geometry.height.saturating_sub(476) as i32,
+            360.min(geometry.width),
+            420.min(geometry.height.saturating_sub(PANEL_HEIGHT)),
+            true,
+        ),
+        SurfaceRole::Lock => (
+            LOCK_TITLE,
+            geometry.x,
+            geometry.y,
+            geometry.width,
+            geometry.height,
+            true,
+        ),
+        SurfaceRole::Screenshot => (
+            SCREENSHOT_TITLE,
+            geometry.x,
+            geometry.y,
+            geometry.width,
+            geometry.height,
+            true,
+        ),
         SurfaceRole::CodexChat => unreachable!("chat surfaces are created dynamically"),
         #[cfg(target_os = "windows")]
         SurfaceRole::TrustedControl => unreachable!("trusted surfaces are created dynamically"),
         SurfaceRole::OnScreenKeyboard => {
             let height = nickel_core::on_screen_keyboard::KEYBOARD_HEIGHT
-                .min(output_height.saturating_sub(1));
-            let (x, y) = output_position(geometry, 0, output_height.saturating_sub(height));
+                .min(geometry.height.saturating_sub(1));
             (
                 "On-screen keyboard — Nickel",
-                x,
-                y,
-                output_width,
+                geometry.x,
+                geometry.y + geometry.height.saturating_sub(height) as i32,
+                geometry.width,
                 height,
                 true,
             )
         }
     }
-}
-
-fn output_layout_size(geometry: DisplayGeometry) -> (u32, u32) {
-    #[cfg(target_os = "windows")]
-    {
-        scaled_layout_size(geometry.width, geometry.height, geometry.scale)
-    }
-    #[cfg(not(target_os = "windows"))]
-    (geometry.width, geometry.height)
-}
-
-fn output_position(geometry: DisplayGeometry, logical_x: u32, logical_y: u32) -> (i32, i32) {
-    #[cfg(target_os = "windows")]
-    {
-        scaled_output_position(geometry, logical_x, logical_y)
-    }
-    #[cfg(not(target_os = "windows"))]
-    (geometry.x + logical_x as i32, geometry.y + logical_y as i32)
-}
-
-fn scaled_layout_size(width: u32, height: u32, scale: f32) -> (u32, u32) {
-    let scale = scale.max(1.0);
-    (
-        ((width as f32 / scale).floor() as u32).max(1),
-        ((height as f32 / scale).floor() as u32).max(1),
-    )
-}
-
-fn scaled_output_position(geometry: DisplayGeometry, logical_x: u32, logical_y: u32) -> (i32, i32) {
-    let scale = geometry.scale.max(1.0);
-    (
-        geometry.x + (logical_x as f32 * scale).round() as i32,
-        geometry.y + (logical_y as f32 * scale).round() as i32,
-    )
-}
-
-fn set_surface_position(window: &Window, x: i32, y: i32) {
-    #[cfg(target_os = "windows")]
-    window.set_outer_position(PhysicalPosition::new(x, y));
-    #[cfg(not(target_os = "windows"))]
-    window.set_outer_position(LogicalPosition::new(x, y));
 }
 
 fn require_displays(displays: Vec<DisplayGeometry>) -> Result<Vec<DisplayGeometry>, String> {
@@ -2475,7 +3224,7 @@ fn require_displays(displays: Vec<DisplayGeometry>) -> Result<Vec<DisplayGeometr
 fn output_role(role: SurfaceRole) -> bool {
     matches!(
         role,
-        SurfaceRole::Desktop | SurfaceRole::Panel | SurfaceRole::Lock
+        SurfaceRole::Desktop | SurfaceRole::Taskbar | SurfaceRole::Panel | SurfaceRole::Lock
     )
 }
 
@@ -2534,18 +3283,18 @@ mod tests {
     use super::surface_is_ephemeral;
     use super::{
         DisplayGeometry, OUTPUT_CREATION_RETRY_MAX, OUTPUT_CREATION_RETRY_MIN,
-        OUTPUT_RETIREMENT_SETTLE, OutputCreationRetry, OutputRetirementTracker, PANEL_HEIGHT,
-        PanelEdge, ShellEvent, SurfaceRole, desired_output_surfaces, durable_presenter_peak,
-        output_name_at, output_role_is_retired, panel_outputs, parse_proc_status_rss,
-        preferred_output_index, queue_shell_input, record_pump_status, require_displays,
-        scaled_layout_size, scaled_output_position, surface_geometry, surface_is_borderless,
+        OUTPUT_RETIREMENT_SETTLE, OutputCreationRetry, OutputRetirementTracker, PanelEdge,
+        ShellEvent, SurfaceRole, desired_output_surfaces, desired_plugin_surfaces,
+        durable_presenter_peak, output_name_at, output_role_is_retired, output_scope_matches,
+        panel_outputs, parse_proc_status_rss, preferred_output_index, queue_shell_input,
+        record_pump_status, require_displays, surface_geometry, surface_is_borderless,
     };
 
     use nickel_input::{
         DeviceId, EventOrder, InputEvent, KeyEdge, Point, PointerButton, PointerEvent, Vector,
     };
     use nickel_ui::AggregatePresenterCacheDiagnostics;
-    use std::collections::{HashSet, VecDeque};
+    use std::collections::{BTreeMap, HashSet, VecDeque};
     use std::time::{Duration, Instant};
     use winit::platform::pump_events::PumpStatus;
 
@@ -2675,9 +3424,7 @@ mod tests {
     fn wayland_surface_lifecycle_keeps_only_high_frequency_chrome_warm() {
         for role in [
             SurfaceRole::Notification,
-            SurfaceRole::VolumeOsd,
             SurfaceRole::WindowPreview,
-            SurfaceRole::WindowContextMenu,
             SurfaceRole::CodexProjectMenu,
             SurfaceRole::Screenshot,
         ] {
@@ -2685,7 +3432,7 @@ mod tests {
         }
         for role in [
             SurfaceRole::Desktop,
-            SurfaceRole::Panel,
+            SurfaceRole::Taskbar,
             SurfaceRole::Lock,
             SurfaceRole::Launcher,
             SurfaceRole::ControlCenter,
@@ -2736,34 +3483,8 @@ mod tests {
         };
         let (_, x, y, width, height, initially_hidden) =
             surface_geometry(SurfaceRole::Screenshot, display, PanelEdge::Bottom);
-        assert_eq!((x, y), (1920, -120));
-        assert_eq!((width, height), super::output_layout_size(display));
+        assert_eq!((x, y, width, height), (1920, -120, 2560, 1440));
         assert!(initially_hidden);
-    }
-
-    #[test]
-    fn windows_scaled_output_coordinates_keep_bottom_surfaces_visible() {
-        let display = DisplayGeometry {
-            x: 0,
-            y: 0,
-            width: 2560,
-            height: 1440,
-            scale: 1.5,
-        };
-        let (width, height) = scaled_layout_size(display.width, display.height, display.scale);
-        assert_eq!((width, height), (1706, 960));
-
-        let panel_y = height.saturating_sub(PANEL_HEIGHT);
-        let (_, panel_physical_y) = scaled_output_position(display, 0, panel_y);
-        let panel_physical_height = (PANEL_HEIGHT as f32 * display.scale).round() as i32;
-        assert_eq!(panel_physical_y + panel_physical_height, 1440);
-
-        let launcher_height = 680;
-        let launcher_y = height.saturating_sub(PANEL_HEIGHT + 8 + launcher_height);
-        let (_, launcher_physical_y) = scaled_output_position(display, 18, launcher_y);
-        let launcher_physical_height = (launcher_height as f32 * display.scale).round() as i32;
-        assert!(launcher_physical_y >= 0);
-        assert!(launcher_physical_y + launcher_physical_height < panel_physical_y);
     }
 
     #[test]
@@ -2802,6 +3523,77 @@ mod tests {
     }
 
     #[test]
+    fn multiple_plugin_surface_keys_can_target_the_same_output() {
+        let mut panels = BTreeMap::new();
+        for (id, surface_id, scope) in [
+            (
+                "org.example.clock",
+                "main",
+                nickel_core::plugins::PluginOutputScope::Primary,
+            ),
+            (
+                "org.example.mail",
+                "main",
+                nickel_core::plugins::PluginOutputScope::All,
+            ),
+            (
+                "org.example.mail",
+                "dock",
+                nickel_core::plugins::PluginOutputScope::Primary,
+            ),
+        ] {
+            let mut surface = crate::plugin_panel::surface().clone();
+            surface.id = surface_id.into();
+            surface.output = scope;
+            panels.insert(
+                nickel_core::plugins::PluginSurfaceKey {
+                    plugin_id: id.into(),
+                    surface_id: surface.id.clone(),
+                },
+                surface,
+            );
+        }
+        let desired = desired_plugin_surfaces(&["DP-1".into(), "DP-2".into()], None, &panels);
+        assert_eq!(desired.len(), 4);
+        assert_eq!(
+            desired
+                .iter()
+                .filter(|(output, _)| output == "DP-1")
+                .count(),
+            3
+        );
+        assert_eq!(
+            desired
+                .iter()
+                .filter(|(output, _)| output == "DP-2")
+                .count(),
+            1
+        );
+        assert!(
+            desired
+                .iter()
+                .any(|(output, key)| { output == "DP-2" && key.plugin_id == "org.example.mail" })
+        );
+    }
+
+    #[test]
+    fn active_plugin_surface_follows_the_interaction_output() {
+        let outputs = ["DP-1".into(), "DP-2".into()];
+        assert!(output_scope_matches(
+            nickel_core::plugins::PluginOutputScope::Active,
+            &outputs,
+            "DP-2",
+            Some("DP-2")
+        ));
+        assert!(!output_scope_matches(
+            nickel_core::plugins::PluginOutputScope::Active,
+            &outputs,
+            "DP-1",
+            Some("DP-2")
+        ));
+    }
+
+    #[test]
     fn primary_panel_policy_is_stable_across_reorder_hotplug_and_fallback() {
         let original = vec!["DP-1".to_owned(), "HDMI-A-1".to_owned()];
         let reordered = vec!["HDMI-A-1".to_owned(), "DP-1".to_owned()];
@@ -2827,28 +3619,152 @@ mod tests {
     }
 
     #[test]
-    fn every_enabled_output_requires_its_own_wallpaper_bar_and_lock() {
+    fn every_enabled_output_requires_wallpaper_and_lock() {
         let outputs = vec!["DP-1".to_owned(), "HDMI-A-1".to_owned()];
-        let desired = desired_output_surfaces(&outputs, true, true, None);
-        assert_eq!(desired.len(), 6);
+        let desired = desired_output_surfaces(
+            &outputs,
+            true,
+            true,
+            None,
+            None,
+            false,
+            nickel_core::plugins::PluginOutputScope::Primary,
+        );
+        assert_eq!(desired.len(), 4);
         for output in outputs {
-            for role in [SurfaceRole::Desktop, SurfaceRole::Panel, SurfaceRole::Lock] {
+            for role in [SurfaceRole::Desktop, SurfaceRole::Lock] {
                 assert!(
                     desired.contains(&(output.clone(), role)),
                     "{output} {role:?}"
                 );
             }
+            assert!(!desired.contains(&(output, SurfaceRole::Taskbar)));
         }
     }
 
     #[test]
+    fn installed_panel_geometry_uses_its_manifest() {
+        let geometry = DisplayGeometry {
+            x: 100,
+            y: 200,
+            width: 1920,
+            height: 1080,
+            scale: 1.0,
+        };
+        for kind in [
+            nickel_core::plugins::PluginSurfaceKind::Panel,
+            nickel_core::plugins::PluginSurfaceKind::Dock,
+        ] {
+            let panel = nickel_core::plugins::PluginSurface {
+                initially_open: true,
+                id: "main".into(),
+                kind,
+                width: 360,
+                height: 96,
+                bottom_offset: 12,
+                anchor: nickel_core::plugins::PluginSurfaceAnchor::Center,
+                offset_x: 0,
+                offset_y: 0,
+                passive: false,
+                reserve_work_area: false,
+                output: nickel_core::plugins::PluginOutputScope::Primary,
+                owner: None,
+            };
+            let (_, x, y, width, height, hidden) = super::surface_geometry_for_panel(
+                SurfaceRole::Panel,
+                geometry,
+                PanelEdge::Bottom,
+                &panel,
+            );
+            assert_eq!((x, y, width, height), (880, 1172, 360, 96));
+            assert!(hidden);
+            let desired = desired_output_surfaces(
+                &["DP-1".into(), "DP-2".into()],
+                true,
+                true,
+                None,
+                None,
+                true,
+                panel.output,
+            );
+            assert!(desired.contains(&("DP-1".into(), SurfaceRole::Panel)));
+            assert!(!desired.contains(&("DP-2".into(), SurfaceRole::Panel)));
+        }
+    }
+
+    #[test]
+    fn installed_window_geometry_centers_on_its_output() {
+        let geometry = DisplayGeometry {
+            x: 100,
+            y: 200,
+            width: 1920,
+            height: 1080,
+            scale: 1.5,
+        };
+        let window = nickel_core::plugins::PluginSurface {
+            initially_open: true,
+            id: "main".into(),
+            kind: nickel_core::plugins::PluginSurfaceKind::Window,
+            width: 520,
+            height: 340,
+            bottom_offset: 0,
+            anchor: nickel_core::plugins::PluginSurfaceAnchor::Center,
+            offset_x: 0,
+            offset_y: 0,
+            passive: false,
+            reserve_work_area: false,
+            output: nickel_core::plugins::PluginOutputScope::Primary,
+            owner: None,
+        };
+        let (title, x, y, width, height, hidden) = super::surface_geometry_for_panel(
+            SurfaceRole::Panel,
+            geometry,
+            PanelEdge::Bottom,
+            &window,
+        );
+        assert_eq!(title, "Nickel Plugin Window");
+        assert_eq!((x, y, width, height), (800, 570, 520, 340));
+        assert!(!hidden);
+        assert_eq!(
+            super::protocol_plugin_surface_kind(window.kind),
+            nickel_session_protocol::PluginSurfacePlacementKind::Window
+        );
+
+        let mut overlay = window;
+        overlay.kind = nickel_core::plugins::PluginSurfaceKind::Overlay;
+        overlay.anchor = nickel_core::plugins::PluginSurfaceAnchor::TopRight;
+        overlay.offset_x = -18;
+        overlay.offset_y = 24;
+        overlay.passive = true;
+        let (_, x, y, width, height, hidden) = super::surface_geometry_for_panel(
+            SurfaceRole::Panel,
+            geometry,
+            PanelEdge::Bottom,
+            &overlay,
+        );
+        assert_eq!((x, y, width, height), (1482, 224, 520, 340));
+        assert!(hidden);
+    }
+
+    #[test]
     fn hotplug_requires_output_chrome_even_when_the_existing_panel_is_healthy() {
-        let before = desired_output_surfaces(&["DP-1".to_owned()], true, false, None);
+        let before = desired_output_surfaces(
+            &["DP-1".to_owned()],
+            true,
+            false,
+            None,
+            None,
+            false,
+            nickel_core::plugins::PluginOutputScope::Primary,
+        );
         let after = desired_output_surfaces(
             &["DP-1".to_owned(), "HDMI-A-1".to_owned()],
             true,
             false,
             None,
+            None,
+            false,
+            nickel_core::plugins::PluginOutputScope::Primary,
         );
         let added = after.difference(&before).cloned().collect::<HashSet<_>>();
         assert_eq!(
@@ -2858,8 +3774,8 @@ mod tests {
                 ("HDMI-A-1".to_owned(), SurfaceRole::Lock),
             ])
         );
-        assert!(after.contains(&("DP-1".to_owned(), SurfaceRole::Panel)));
-        assert!(!after.contains(&("HDMI-A-1".to_owned(), SurfaceRole::Panel)));
+        assert!(!after.contains(&("DP-1".to_owned(), SurfaceRole::Taskbar)));
+        assert!(!after.contains(&("HDMI-A-1".to_owned(), SurfaceRole::Taskbar)));
     }
 
     #[test]
@@ -2869,12 +3785,18 @@ mod tests {
             true,
             true,
             None,
+            None,
+            false,
+            nickel_core::plugins::PluginOutputScope::Primary,
         );
         let reversed = desired_output_surfaces(
             &["HDMI-A-1".to_owned(), "DP-1".to_owned()],
             true,
             true,
             None,
+            None,
+            false,
+            nickel_core::plugins::PluginOutputScope::Primary,
         );
         assert_eq!(forward, reversed);
     }
@@ -2886,13 +3808,12 @@ mod tests {
             false,
             true,
             None,
+            None,
+            false,
+            nickel_core::plugins::PluginOutputScope::Primary,
         );
-        assert_eq!(desired.len(), 4);
-        assert!(
-            desired
-                .iter()
-                .all(|(_, role)| *role == SurfaceRole::Panel || *role == SurfaceRole::Lock)
-        );
+        assert_eq!(desired.len(), 2);
+        assert!(desired.iter().all(|(_, role)| *role == SurfaceRole::Lock));
     }
 
     #[test]
@@ -2932,20 +3853,17 @@ mod tests {
             height: 1006,
             scale: 1.5,
         };
-        let (width, height) = super::output_layout_size(display);
-        let (bottom_x, bottom_y) =
-            super::output_position(display, 0, height.saturating_sub(PANEL_HEIGHT));
         assert_eq!(
             surface_geometry(SurfaceRole::Desktop, display, PanelEdge::Bottom),
-            ("Nickel Desktop", 40, 20, width, height, false)
+            ("Nickel Desktop", 40, 20, 1920, 1006, false)
         );
         assert_eq!(
-            surface_geometry(SurfaceRole::Panel, display, PanelEdge::Bottom),
-            ("Nickel Panel", bottom_x, bottom_y, width, 56, false)
+            surface_geometry(SurfaceRole::Taskbar, display, PanelEdge::Bottom),
+            ("Nickel Taskbar", 40, 970, 1920, 56, false)
         );
         assert_eq!(
-            surface_geometry(SurfaceRole::Panel, display, PanelEdge::Top),
-            ("Nickel Panel", 40, 20, width, 56, false)
+            surface_geometry(SurfaceRole::Taskbar, display, PanelEdge::Top),
+            ("Nickel Taskbar", 40, 20, 1920, 56, false)
         );
     }
 
@@ -2955,7 +3873,7 @@ mod tests {
         let mut tracker = OutputRetirementTracker::default();
         let mut surfaces = vec![
             (SurfaceRole::Desktop, "winit".to_owned(), 11_u32),
-            (SurfaceRole::Panel, "winit".to_owned(), 12),
+            (SurfaceRole::Taskbar, "winit".to_owned(), 12),
             (SurfaceRole::Lock, "winit".to_owned(), 13),
         ];
 
@@ -3001,7 +3919,7 @@ mod tests {
         let mut surfaces = vec![
             (SurfaceRole::Desktop, "winit".to_owned(), 11_u32),
             (SurfaceRole::Desktop, "memory-a".to_owned(), 21),
-            (SurfaceRole::Panel, "memory-a".to_owned(), 22),
+            (SurfaceRole::Taskbar, "memory-a".to_owned(), 22),
             (SurfaceRole::Lock, "memory-a".to_owned(), 23),
         ];
         surfaces.retain(|(role, output, _)| !output_role_is_retired(*role, output, &retired));

@@ -1,4 +1,5 @@
 mod preference_persistence;
+mod shell_selection;
 
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -40,7 +41,13 @@ pub(crate) fn internal_normalized_ingress(
         reconnect_generation: device_generation,
     };
     let recipient = nickel_ui::NormalizedRecipientBinding {
-        lease: recipient.window_focused as u64,
+        // A focus-gained event is the authority that restores this host's input
+        // lease. Rejecting it while the previous lease is zero would leave a
+        // window unable to accept input after its first focus loss.
+        lease: u64::from(
+            recipient.window_focused
+                || matches!(input, nickel_input::InputEvent::FocusGained { .. }),
+        ),
         lifetime: recipient.frame_generation,
     };
     let authority = nickel_ui::NormalizedIngressAuthority {
@@ -88,9 +95,7 @@ fn normalized_input(event: &HostEvent) -> Option<&nickel_input::InputEvent> {
 
 use nickel_core::task_switcher::{SwitchWindow, TaskSwitchEffect, TaskSwitcher};
 use nickel_core::{
-    launcher_preferences::LauncherPreferences,
-    shell_settings::ShellSettings,
-    theme::{Appearance, ThemePalette},
+    launcher_preferences::LauncherPreferences, shell_settings::ShellSettings, theme::ThemePalette,
     wallpaper_settings::WallpaperSettings,
 };
 use nickel_file::desktop::{DesktopOutput, Point as DesktopPoint};
@@ -98,28 +103,25 @@ use nickel_session_protocol::ShellRole;
 #[cfg(any(target_os = "linux", test))]
 use nickel_session_protocol::{
     AnchorSide, Geometry, PointerInteraction, PreviewTargetAction, ResolvedShellTarget,
-    ShellPopoverAnchor, ShellSemanticTarget, WindowMenuTargetAction,
+    ShellPopoverAnchor, ShellSemanticTarget,
 };
 use nickel_ui::InternalSurfaceId;
 use nickel_ui::Rect;
 use nickel_ui::backend::PaintCommand;
 use nickel_ui::{
-    Application as UiApplication, Button, Column, Container, ControllerAction, HostBatch,
-    HostChangeToken, HostEvent, Insets, Layer, Point, SemanticRole, Shortcut, Size, Spacer, Text,
-    TextAlign, TextField, UiEvent, UiHostViewport, ViewContext,
+    Application as UiApplication, Column, Container, ControllerAction, HostBatch, HostChangeToken,
+    HostEvent, Insets, Point, SemanticRole, Shortcut, Size, Spacer, Text, TextAlign, TextField,
+    UiEvent, UiHostViewport, ViewContext,
 };
 
 #[cfg(any(target_os = "linux", target_os = "windows", test))]
 use crate::notification::{NotificationAction, NotificationRequest};
 
 use crate::{
-    control_view::{ControlAction, ControlCenterApp, ControlCenterHost},
+    control_view::ControlAction,
     file_window_host::{FileWindowHost, default_file_window_host},
-    launcher::{DashboardAccount, DashboardProject, DashboardSection, Launcher, LauncherView},
-    launcher_view::{
-        DashboardNarrowPage, LauncherAction, LauncherApplication, LauncherIconCache,
-        LauncherShellEffect, LauncherViewState, reduce_launcher_action,
-    },
+    launcher::{DashboardAccount, DashboardProject, DashboardSection, Launcher},
+    launcher_icon_cache::LauncherIconCache,
     model::{Application, OpenWindow, TrayItem, WindowGroup},
     notification::DesktopNotification,
     notification_view::{NotificationApp, NotificationEffect, NotificationHost},
@@ -127,14 +129,11 @@ use crate::{
         self, AudioStatus, BluetoothStatus, FeedState, FeedStatus, NetworkStatus, NotificationFeed,
         NotificationSource, ShellCommand, TrayFeed, TraySource, WindowAction, WindowFeed,
     },
+    projection_recovery::{ProjectionRecoveryApp, ProjectionRecoveryHost},
     screenshot::ScreenshotTool,
     session_host::{SessionHost, default_session_host},
     window_preview::{
-        ApplicationMenuAction, ApplicationMenuApp, ApplicationMenuTarget, MENU_WIDTH, MenuAction,
-        PreviewAction, TaskbarPreviewAnchor, WindowMenuApp, WindowPreviewFrame,
-        application_menu_entries, build_preview_frame, menu_height, menu_height_for_rows,
-        preview_dimensions, semantic_theme_from_palette, task_switcher_dimensions,
-        validated_application_close_targets, window_menu_action_is_current, window_menu_max_rows,
+        PreviewAction, preview_dimensions, semantic_theme_from_palette, task_switcher_dimensions,
     },
     winit_shell::SurfaceRole,
 };
@@ -153,147 +152,7 @@ pub(crate) enum CodexApprovalOwner {
     Winit(crate::winit_shell::SurfaceId),
 }
 
-const RUN_COMMAND_LIMIT: usize = 4096;
-const RUN_SURFACE_WIDTH: u32 = 620;
-const RUN_SURFACE_HEIGHT: u32 = 180;
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-enum RunAction {
-    SetCommand(String),
-    Submit,
-    Dismiss,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-enum RunEffect {
-    Submit(String),
-    Dismiss,
-}
-
-struct RunApplication {
-    command: String,
-    status: Option<String>,
-    palette: ThemePalette,
-    effects: Vec<RunEffect>,
-    dirty: bool,
-}
-
-impl RunApplication {
-    fn new(palette: ThemePalette) -> Self {
-        Self {
-            command: String::new(),
-            status: None,
-            palette,
-            effects: Vec::new(),
-            dirty: false,
-        }
-    }
-
-    fn take_effects(&mut self) -> Vec<RunEffect> {
-        std::mem::take(&mut self.effects)
-    }
-}
-
-impl UiApplication for RunApplication {
-    type Message = RunAction;
-
-    fn update(&mut self, message: Self::Message) {
-        match message {
-            RunAction::SetCommand(command) => {
-                self.command = command.chars().take(RUN_COMMAND_LIMIT).collect();
-                self.status = None;
-                self.dirty = true;
-            }
-            RunAction::Submit if !self.command.trim().is_empty() => {
-                self.effects
-                    .push(RunEffect::Submit(self.command.trim().to_owned()));
-            }
-            RunAction::Submit => {}
-            RunAction::Dismiss => self.effects.push(RunEffect::Dismiss),
-        }
-    }
-
-    fn shortcut_outcome(&mut self, shortcut: Shortcut) -> nickel_ui::ShortcutOutcome {
-        match shortcut {
-            Shortcut::Submit => self.update(RunAction::Submit),
-            Shortcut::Escape => self.update(RunAction::Dismiss),
-            _ => return nickel_ui::ShortcutOutcome::from_changed(false),
-        }
-        nickel_ui::ShortcutOutcome::handled(true)
-    }
-
-    fn poll(&mut self) -> bool {
-        std::mem::take(&mut self.dirty)
-    }
-
-    fn view(&self, context: ViewContext) -> impl nickel_ui::View<Self::Message> {
-        let content_width = (context.viewport.size.width - 36.0).max(0.0);
-        let content_height = (context.viewport.size.height - 36.0).max(0.0);
-        let mut content = Column::new()
-            .width(content_width)
-            .height(content_height)
-            .gap(10.0)
-            .child(
-                Text::new(nickel_i18n::system_text("ui-live-shell-run"))
-                    .scale(22.0)
-                    .color(self.palette.text)
-                    .bold(true),
-            )
-            .child(
-                TextField::on_change_with_placeholder(
-                    &self.command,
-                    nickel_i18n::system_text("ui-live-shell-enter-a-command"),
-                    RunAction::SetCommand,
-                )
-                .id("run-command")
-                .accessibility_label("Command")
-                .single_line_height(40.0)
-                .color(self.palette.text)
-                .background(self.palette.panel)
-                .focus_background_tint(self.palette.accent)
-                .controller_focus_background_tint(self.palette.complement),
-            )
-            .child(
-                Button::new(
-                    RunAction::Submit,
-                    nickel_i18n::system_text("ui-live-shell-run-2"),
-                )
-                .id("run-submit")
-                .width(88.0)
-                .height(36.0),
-            );
-        if let Some(status) = &self.status {
-            content = content.child(Text::new(status).color(self.palette.complement));
-        }
-        Container::new()
-            .id("run-dialog")
-            .semantic_role(SemanticRole::Dialog)
-            .accessibility_label("Run command")
-            .width(context.viewport.size.width)
-            .height(context.viewport.size.height)
-            .padding(Insets::all(18.0))
-            .background(self.palette.panel)
-            .child(content)
-    }
-}
-
-#[cfg(any(test, target_os = "linux"))]
-fn launcher_controller_host_event(action: ControllerAction, overlay_open: bool) -> HostEvent {
-    if action == ControllerAction::Cancel && !overlay_open {
-        HostEvent::Shortcut(Shortcut::Escape)
-    } else {
-        HostEvent::Controller(action)
-    }
-}
-
-const PANEL_ITEM_WIDTH: f32 = 52.0;
-const PANEL_CLOCK_WIDTH: f32 = 96.0;
-#[cfg(test)]
-const PANEL_CONTROL_GAP: f32 = 8.0;
-const PANEL_TRAY_WIDTH: f32 = 28.0;
 const PANEL_TRAY_ICON_SIZE: u32 = 18;
-const PANEL_CODEX_WIDTH: f32 = 36.0;
-const PANEL_CODEX_ICON_SIZE: f32 = 28.0;
 const PREVIEW_LEAVE_DELAY: Duration = Duration::from_millis(500);
 const PREVIEW_HOVER_DELAY: Duration = Duration::from_millis(300);
 const PREVIEW_REFRESH_INTERVAL: Duration = Duration::from_millis(500);
@@ -303,15 +162,10 @@ const WALLPAPER_MAX_WIDTH: u32 = 7680;
 const WALLPAPER_MAX_HEIGHT: u32 = 4320;
 const PREVIEW_CACHE_CAPACITY: usize = 32;
 
-#[path = "live_shell/panel.rs"]
-mod panel;
+#[path = "live_shell/icon_resources.rs"]
+mod icon_resources;
 pub(crate) mod remote_semantics;
-pub use panel::{PanelAction, PanelApplication};
-use panel::{
-    PanelHover, normalize_tray_items, panel_clock_text, panel_tray_icons, tint_panel_icon,
-};
-#[cfg(test)]
-use panel::{panel_status_layout, visible_tray_item};
+use icon_resources::{normalize_tray_items, panel_tray_icons, tint_panel_icon};
 
 #[path = "live_shell/keyboard.rs"]
 mod keyboard;
@@ -325,10 +179,19 @@ struct PendingPopoverAnchor {
 }
 #[path = "live_shell/desktop.rs"]
 mod desktop;
+use desktop::SettingsDestination;
+#[cfg(test)]
+use desktop::retain_unchanged_desktop_icons;
 #[allow(unused_imports)]
 pub use desktop::{DesktopApplication, DesktopCommand, DesktopMessage};
-#[cfg(test)]
-use desktop::{SettingsDestination, retain_unchanged_desktop_icons};
+
+struct WallpaperChooserRequest {
+    plugin_id: String,
+    identity: nickel_core::plugins::PluginManifest,
+    activation: u64,
+    effect: crate::appearance_capabilities::AppearanceEffect,
+    receiver: std::sync::mpsc::Receiver<nickel_platform::FileDialogOutcome>,
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct WallpaperSourceFingerprint {
@@ -362,74 +225,6 @@ pub struct LockApplication {
     effects: Vec<LockEffect>,
 }
 
-struct VolumeOsdApplication {
-    label: String,
-    percent: u8,
-    palette: ThemePalette,
-}
-
-impl nickel_ui::Application for VolumeOsdApplication {
-    type Message = ();
-
-    fn update(&mut self, (): Self::Message) {}
-
-    fn view(&self, context: ViewContext) -> impl nickel_ui::View<Self::Message> {
-        let width = context.viewport.size.width;
-        let height = context.viewport.size.height;
-        let track_width = (width - 48.0).max(0.0);
-        Container::new()
-            .id("volume-osd")
-            .semantic_role(SemanticRole::Status)
-            .accessibility_label(self.label.clone())
-            .width(width)
-            .height(height)
-            .background(self.palette.panel)
-            .radius(14.0)
-            .child(
-                Layer::new()
-                    .width(width)
-                    .height(height)
-                    .child(
-                        Container::new()
-                            .position(Point { x: 24.0, y: 14.0 })
-                            .width(track_width)
-                            .height(32.0)
-                            .child(
-                                Text::new(self.label.clone())
-                                    .width(track_width)
-                                    .height(32.0)
-                                    .scale(1.15)
-                                    .color(self.palette.text)
-                                    .align(TextAlign::Center)
-                                    .bold(true),
-                            ),
-                    )
-                    .child(
-                        Container::new()
-                            .position(Point {
-                                x: 24.0,
-                                y: height - 28.0,
-                            })
-                            .width(track_width)
-                            .height(8.0)
-                            .background(self.palette.surface_hover)
-                            .radius(4.0),
-                    )
-                    .child(
-                        Container::new()
-                            .position(Point {
-                                x: 24.0,
-                                y: height - 28.0,
-                            })
-                            .width(track_width * f32::from(self.percent) / 100.0)
-                            .height(8.0)
-                            .background(self.palette.accent)
-                            .radius(4.0),
-                    ),
-            )
-    }
-}
-
 #[cfg(any(test, feature = "workbench-fixtures"))]
 impl LockApplication {
     #[allow(dead_code)] // Binary and fixture library compile this shared module separately.
@@ -437,7 +232,7 @@ impl LockApplication {
         Self {
             password: Zeroizing::new(password.to_owned()),
             status,
-            palette: ThemePalette::from_appearance(Appearance::default()),
+            palette: ThemePalette::from_appearance(nickel_core::theme::Appearance::default()),
             effects: Vec::new(),
         }
     }
@@ -522,10 +317,7 @@ impl nickel_ui::Application for LockApplication {
                         .accessibility_label("Password")
                         .scale(18.0)
                         .single_line_height(28.0)
-                        .color(password_color)
-                        .background(self.palette.surface)
-                        .focus_background_tint(theme.borders.focus)
-                        .controller_focus_background_tint(theme.borders.controller_focus),
+                        .color(password_color),
                     ),
             );
         if let Some(status) = &self.status {
@@ -576,7 +368,165 @@ struct PanelTaskProjection {
     groups: Arc<Vec<crate::launcher::TaskbarApplication>>,
 }
 
+struct DisplayPreview {
+    owner: String,
+    previous: nickel_session_protocol::OutputLayout,
+    applied: nickel_session_protocol::OutputLayout,
+    deadline: Instant,
+}
+
+fn output_layout_from_snapshot(
+    outputs: &[nickel_session_protocol::OutputSnapshot],
+) -> nickel_session_protocol::OutputLayout {
+    let mut layout = nickel_session_protocol::OutputLayout {
+        primary: outputs
+            .iter()
+            .find(|output| output.primary && output.enabled)
+            .map(|output| output.name.clone())
+            .unwrap_or_default(),
+        placements: outputs
+            .iter()
+            .map(|output| nickel_session_protocol::OutputPlacement {
+                name: output.name.clone(),
+                x: output.geometry.x,
+                y: output.geometry.y,
+                enabled: output.enabled,
+                scale_120: output.scale_120,
+                mode: output.current_mode,
+                transform: Some(output.transform),
+            })
+            .collect(),
+    };
+    layout
+        .placements
+        .sort_by(|left, right| left.name.cmp(&right.name));
+    layout
+}
+
+fn normalized_output_layout_with_modes(
+    mut layout: nickel_session_protocol::OutputLayout,
+    outputs: &[nickel_session_protocol::OutputSnapshot],
+) -> nickel_session_protocol::OutputLayout {
+    let minimum_x = layout
+        .placements
+        .iter()
+        .map(|placement| placement.x)
+        .min()
+        .unwrap_or(0);
+    let minimum_y = layout
+        .placements
+        .iter()
+        .map(|placement| placement.y)
+        .min()
+        .unwrap_or(0);
+    for placement in &mut layout.placements {
+        placement.x -= minimum_x;
+        placement.y -= minimum_y;
+        if placement.transform.is_none() {
+            placement.transform = outputs
+                .iter()
+                .find(|output| output.name == placement.name)
+                .map(|output| output.transform);
+        }
+        if placement.mode.is_none() {
+            placement.mode = outputs
+                .iter()
+                .find(|output| output.name == placement.name)
+                .and_then(|output| output.current_mode);
+        }
+    }
+    layout
+        .placements
+        .sort_by(|left, right| left.name.cmp(&right.name));
+    layout
+}
+
+fn validate_plugin_display_layout(
+    outputs: &[nickel_session_protocol::OutputSnapshot],
+    layout: &nickel_session_protocol::OutputLayout,
+) -> Result<(), &'static str> {
+    if outputs.is_empty()
+        || outputs.len() > nickel_session_protocol::MAX_OUTPUTS
+        || layout.placements.len() != outputs.len()
+    {
+        return Err("display topology changed");
+    }
+    let current = outputs
+        .iter()
+        .map(|output| (output.name.as_str(), output))
+        .collect::<HashMap<_, _>>();
+    if current.len() != outputs.len() {
+        return Err("ambiguous display topology");
+    }
+    let mut seen = HashSet::new();
+    for placement in &layout.placements {
+        let Some(output) = current.get(placement.name.as_str()) else {
+            return Err("display topology changed");
+        };
+        if !seen.insert(placement.name.as_str())
+            || !(60..=480).contains(&placement.scale_120)
+            || !(-1_000_000..=1_000_000).contains(&placement.x)
+            || !(-1_000_000..=1_000_000).contains(&placement.y)
+            || placement
+                .mode
+                .is_some_and(|mode| !output.modes.contains(&mode))
+        {
+            return Err("invalid display placement");
+        }
+    }
+    if !layout
+        .placements
+        .iter()
+        .any(|placement| placement.name == layout.primary && placement.enabled)
+    {
+        return Err("primary display must be enabled");
+    }
+    Ok(())
+}
+
+#[derive(Clone)]
+enum RetainedPackageRuntime {
+    Ordinary(std::rc::Rc<std::cell::RefCell<nickel_plugin_runtime::JsxRuntime>>),
+    Composed(
+        std::rc::Rc<
+            std::cell::RefCell<nickel_plugin_runtime::composition_runtime::ShellCompositionRuntime>,
+        >,
+    ),
+}
+
+impl RetainedPackageRuntime {
+    fn contexts(
+        &self,
+        active: &str,
+    ) -> std::collections::BTreeMap<
+        String,
+        std::rc::Rc<std::cell::RefCell<nickel_plugin_runtime::JsxRuntime>>,
+    > {
+        match self {
+            Self::Ordinary(runtime) => {
+                std::collections::BTreeMap::from([(active.to_owned(), runtime.clone())])
+            }
+            Self::Composed(host) => {
+                let host = host.borrow();
+                host.participating_owners()
+                    .filter_map(|owner| {
+                        host.shared_owner_runtime(owner)
+                            .ok()
+                            .map(|runtime| (owner.id.clone(), runtime))
+                    })
+                    .collect()
+            }
+        }
+    }
+}
+
 pub struct LiveShell {
+    application_scale_service: crate::application_scale_capability::ApplicationScaleService,
+    appearance_capabilities: crate::appearance_capabilities::AppearanceCapabilities,
+    wallpaper_chooser: Option<WallpaperChooserRequest>,
+    wallpaper_chooser_results: std::collections::BTreeMap<String, serde_json::Value>,
+    preferences_capabilities: crate::preferences_capabilities::PreferencesCapabilities,
+    preferences_commit_pending: Option<ShellSettings>,
     session_host: Arc<dyn SessionHost>,
     screenshot_capture_pending: bool,
     pub(crate) screenshot_output: Option<String>,
@@ -661,30 +611,72 @@ pub struct LiveShell {
     bluetooth: BluetoothStatus,
     audio: AudioStatus,
     audio_status_observed: bool,
+    associations_results: HashMap<String, serde_json::Value>,
+    plugins_results: HashMap<String, serde_json::Value>,
+    shell_selection_preview: Option<shell_selection::ShellPreview>,
+    shell_preview_sequence: u64,
+    confirmed_shell_package_id: String,
+    settings_navigation: Option<serde_json::Value>,
+    settings_navigation_revision: u64,
     volume_osd_until: Option<Instant>,
-    volume_osd_host: nickel_ui::UiHost<VolumeOsdApplication>,
     launcher_visible: bool,
-    run_visible: bool,
-    run_host: nickel_ui::UiHost<RunApplication>,
+    run_status: HashMap<String, String>,
     locked: bool,
     lock_host: nickel_ui::UiHost<LockApplication>,
     lock_change_token: HostChangeToken,
     lock_deadline: Option<Instant>,
     control_visible: bool,
     codex_project_menu_visible: bool,
-    panel_hover: Option<PanelHover>,
-    panel_hover_output: Option<String>,
-    panel_host: nickel_ui::UiHost<PanelApplication>,
-    panel_hosts: HashMap<Option<String>, nickel_ui::UiHost<PanelApplication>>,
+    plugin_registry: nickel_core::plugins::PluginRegistry,
+    package_settings_registry: nickel_core::settings_registry::SettingsRegistry,
+    package_settings_runtimes: std::collections::BTreeMap<
+        String,
+        std::rc::Rc<std::cell::RefCell<nickel_plugin_runtime::JsxRuntime>>,
+    >,
+    active_shell_package_id: String,
+    package_runtimes: std::collections::BTreeMap<String, RetainedPackageRuntime>,
+    package_settings_generation: u64,
+    package_settings_values: nickel_plugin_runtime::settings::SettingsValueSnapshot,
+    package_settings_value_revisions: std::collections::BTreeMap<String, u64>,
+    package_settings_invoking: bool,
+    plugin_settings:
+        std::collections::BTreeMap<String, std::collections::BTreeMap<String, serde_json::Value>>,
+    external_plugin_packages:
+        std::collections::BTreeMap<String, nickel_core::plugins::PluginPackageSource>,
+    application_search: crate::application_capabilities::ApplicationSearch,
+    application_catalog_cache: [Option<ApplicationCatalogCache>; 2],
+    #[cfg(test)]
+    application_catalog_builds: u64,
+    feature_client: crate::feature_capabilities::FeatureClient,
+    shortcut_capability_observed: bool,
+    primary_panel_key: nickel_core::plugins::PluginSurfaceKey,
+    plugin_activation_generation: u64,
+    #[cfg(target_os = "linux")]
+    last_published_plugin_status: Option<nickel_session_protocol::PluginStatusSnapshot>,
+    plugin_surface_hosts: std::collections::BTreeMap<
+        nickel_core::plugins::PluginSurfaceKey,
+        (
+            nickel_core::plugins::PluginSurface,
+            nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>,
+        ),
+    >,
+    plugin_pointer_paint: Option<nickel_core::plugins::PluginSurfaceKey>,
+    plugin_panel_memory: std::collections::BTreeMap<nickel_core::plugins::PluginSurfaceKey, u64>,
+    plugin_window_placement_overrides: std::collections::BTreeMap<
+        nickel_core::plugins::PluginSurfaceKey,
+        (nickel_core::plugins::PluginSurfaceAnchor, i32, i32),
+    >,
+    #[cfg(target_os = "windows")]
+    pending_plugin_surface_focus: Option<nickel_core::plugins::PluginSurfaceKey>,
     panel_projections: HashMap<Option<String>, PanelTaskProjection>,
-    panel_change_token: HostChangeToken,
-    panel_deadline: Option<Instant>,
+    clock_deadline: Instant,
     panel_output: Option<String>,
     pending_popover_anchor: Option<PendingPopoverAnchor>,
     all_windows_on_every_bar: bool,
     #[cfg(target_os = "windows")]
     idle_policy: nickel_core::idle::IdlePolicy,
     preview_group: Option<usize>,
+    preview_generation: u64,
     preview_pending: Option<(usize, Instant)>,
     preview_focus_requested: bool,
     preview_pointer_inside: bool,
@@ -692,26 +684,21 @@ pub struct LiveShell {
     preview_hovered: Option<crate::model::WindowId>,
     preview_images: HashMap<crate::model::WindowId, Arc<image::RgbaImage>>,
     preview_refresh_deadline: Option<Instant>,
-    preview_frame: Option<WindowPreviewFrame>,
     window_menu: Option<crate::model::WindowId>,
     window_menu_snapshot: Option<OpenWindow>,
     window_menu_generation: u64,
-    window_menu_anchor_x: Option<i32>,
-    window_menu_anchor_y: Option<i32>,
-    window_menu_host: Option<nickel_ui::UiHost<WindowMenuApp>>,
-    application_menu_target: Option<ApplicationMenuTarget>,
-    application_menu_host: Option<nickel_ui::UiHost<ApplicationMenuApp>>,
     notification_host: NotificationHost,
     panel_origin_x: i32,
     panel_origin_y: i32,
-    control_host: ControlCenterHost,
+    control_host: ProjectionRecoveryHost,
     control_change_token: HostChangeToken,
     control_deadline: Option<Instant>,
     projection_chooser: nickel_core::display_projection::ProjectionChooser,
     projection_rollback_deadline: Option<Instant>,
-    launcher_view: LauncherViewState,
+    display_preview: Option<DisplayPreview>,
     launcher_icons: LauncherIconCache,
-    launcher_host: nickel_ui::UiHost<LauncherApplication>,
+    launcher_icon_revision: u64,
+
     launcher_status: Option<String>,
     #[cfg(target_os = "windows")]
     launcher_catalog_generation: u64,
@@ -723,13 +710,13 @@ pub struct LiveShell {
     launcher_preferences_path: Option<std::path::PathBuf>,
     #[cfg(test)]
     launcher_persistence_attempts: usize,
-    secure_storage_override: Option<String>,
     secure_storage_state: platform::SecureStorageState,
     #[cfg(target_os = "linux")]
     secure_storage_query_error: Option<(platform::SessionRequestError, Instant)>,
     requested_codex_project: Option<String>,
     screenshot: ScreenshotTool,
     keyboard_host: nickel_ui::UiHost<nickel_ui::on_screen_keyboard::KeyboardApp>,
+    keyboard_service_generation: u64,
     keyboard_visible: bool,
     keyboard_enabled: bool,
     #[cfg(target_os = "windows")]
@@ -743,6 +730,12 @@ pub struct LiveShell {
     keyboard_deadline: Instant,
     keyboard_gesture_leases: HashMap<(nickel_input::DeviceId, Option<nickel_input::TouchId>), u64>,
     keyboard_recipient: Option<nickel_session_protocol::OnScreenKeyboardSnapshot>,
+}
+
+struct ApplicationCatalogCache {
+    launcher_revision: Arc<()>,
+    windows: Vec<OpenWindow>,
+    value: serde_json::Value,
 }
 
 #[cfg(target_os = "linux")]
@@ -862,6 +855,98 @@ fn shortcut_capability_status(
     Some(format!("Global shortcuts unavailable: {reason}."))
 }
 
+fn should_auto_start_installed_plugin(id: &str, desired_enabled: bool, safe_mode: bool) -> bool {
+    // The selected fallback shell is started through the dedicated package
+    // lifecycle below. Running it through the installed-plugin approval pass
+    // again can overwrite its Running state with a stale approval failure.
+    id != "nickel-default" && desired_enabled && !safe_mode
+}
+
+fn external_plugin_settings(
+    manifest: &nickel_core::plugins::PluginManifest,
+) -> Result<std::collections::BTreeMap<String, serde_json::Value>, String> {
+    if manifest.settings.is_empty() {
+        return Ok(std::collections::BTreeMap::new());
+    }
+    #[cfg(test)]
+    let stored = nickel_core::plugins::PluginPreferences::default();
+    #[cfg(not(test))]
+    let stored = nickel_core::plugins::PluginPreferences::load_default(manifest)
+        .map_err(|error| format!("could not load plugin settings: {error}"))?;
+    Ok(stored.effective(manifest))
+}
+
+fn taskbar_plugin_control_bounds(
+    host: &nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>,
+    control: &str,
+) -> Option<nickel_ui::Rect> {
+    let mut matches = host
+        .accessibility_nodes()
+        .iter()
+        .filter(|node| node.interactive && node.id.as_str().rsplit('/').next() == Some(control));
+    let bounds = matches.next()?.rect;
+    matches.next().is_none().then_some(bounds)
+}
+
+pub(crate) fn launcher_placeholder_icon() -> (u16, Arc<image::RgbaImage>) {
+    static ICON: OnceLock<Arc<image::RgbaImage>> = OnceLock::new();
+    // The asynchronous app icon cache starts at 0x4000.
+    (
+        0x3fff,
+        Arc::clone(ICON.get_or_init(|| {
+            Arc::new(
+                crate::icons::load_svg_bytes(
+                    include_bytes!("../../../assets/icons/start-menu/applications.svg"),
+                    32,
+                )
+                .expect("bundled application placeholder must render"),
+            )
+        })),
+    )
+}
+
+pub(crate) fn passive_pointer_batch(batch: &HostBatch) -> bool {
+    if batch.window_focused.is_some() || batch.application_changed || batch.events.len() != 1 {
+        return false;
+    }
+    match &batch.events[0] {
+        HostEvent::Ui(UiEvent::PointerMoved(_) | UiEvent::PointerCancelled) => true,
+        event => matches!(
+            normalized_input(event),
+            Some(nickel_input::InputEvent::Pointer(
+                nickel_input::PointerEvent::Motion { .. }
+                    | nickel_input::PointerEvent::Leave { .. }
+            ))
+        ),
+    }
+}
+
+fn step_plugin_host(
+    host: &mut nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>,
+    data: Option<String>,
+    mut batch: HostBatch,
+) -> Result<(nickel_ui::HostEventOutcome, u64), String> {
+    if let Some(data) = data {
+        batch.application_changed |= host.application_mut().sync_serialized_data(data)?;
+    }
+    let outcome = host.step(batch);
+    if let Some(error) = host.application_mut().take_runtime_failure() {
+        return Err(error);
+    }
+    let retained_bytes = (outcome.telemetry.retained_frame_bytes as u64)
+        .saturating_add(host.application().retained_image_bytes());
+    Ok((outcome, retained_bytes))
+}
+
+fn render_plugin_host(
+    host: &mut nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>,
+    data: Option<String>,
+    batch: HostBatch,
+) -> Result<(Vec<PaintCommand>, u64), String> {
+    let (_, retained_bytes) = step_plugin_host(host, data, batch)?;
+    Ok((host.commands().to_vec(), retained_bytes))
+}
+
 // This shared shell implementation includes the compositor-facing API. The
 // Windows winit owner calls its own subset and leaves those Linux methods idle.
 #[cfg_attr(target_os = "windows", allow(dead_code))]
@@ -933,6 +1018,15 @@ impl LiveShell {
         Self::new_with_hosts(default_session_host(), default_file_window_host())
     }
 
+    pub fn new_with_safe_mode(safe_mode: bool) -> Result<Self, String> {
+        Self::new_with_hosts_and_transport(
+            default_session_host(),
+            default_file_window_host(),
+            true,
+            safe_mode,
+        )
+    }
+
     #[cfg(test)]
     pub(crate) fn new_with_session_host(
         session_host: Arc<dyn SessionHost>,
@@ -944,22 +1038,27 @@ impl LiveShell {
         session_host: Arc<dyn SessionHost>,
         file_window_host: Arc<dyn FileWindowHost>,
     ) -> Result<Self, String> {
-        Self::new_with_hosts_and_transport(session_host, file_window_host, true)
+        Self::new_with_hosts_and_transport(session_host, file_window_host, true, false)
     }
 
     #[cfg(target_os = "linux")]
-    pub(crate) fn new_with_internal_hosts(
+    pub(crate) fn new_with_internal_hosts_in_mode(
         session_host: Arc<dyn SessionHost>,
         file_window_host: Arc<dyn FileWindowHost>,
+        safe_mode: bool,
     ) -> Result<Self, String> {
-        Self::new_with_hosts_and_transport(session_host, file_window_host, false)
+        Self::new_with_hosts_and_transport(session_host, file_window_host, false, safe_mode)
     }
 
     fn new_with_hosts_and_transport(
         session_host: Arc<dyn SessionHost>,
         file_window_host: Arc<dyn FileWindowHost>,
         external_session_transport: bool,
+        safe_mode: bool,
     ) -> Result<Self, String> {
+        if safe_mode {
+            tracing::info!("plugin safe mode: installed plugins will not start automatically");
+        }
         let shell_settings = ShellSettings::load_default();
         #[cfg(target_os = "windows")]
         let optional_feature_settings =
@@ -1036,8 +1135,9 @@ impl LiveShell {
             .and_then(wallpaper_source_fingerprint);
         let wallpaper_loaded_source_fingerprint =
             wallpaper.as_ref().and(wallpaper_source_fingerprint.clone());
-        let palette =
-            ThemePalette::from_appearance(shell_settings.resolve_appearance(Appearance::default()));
+        let palette = ThemePalette::from_appearance(
+            shell_settings.resolve_appearance(crate::appearance_capabilities::system_appearance()),
+        );
         let panel_icon = crate::icons::load_svg_bytes(
             include_bytes!("../../../assets/icons/nickel-start.svg"),
             96,
@@ -1072,15 +1172,6 @@ impl LiveShell {
         let network = platform::network_status();
         let bluetooth = platform::bluetooth_status();
         let audio = platform::audio_status();
-        let volume_osd_host = nickel_ui::UiHost::new(
-            VolumeOsdApplication {
-                label: String::new(),
-                percent: audio.volume_percent.min(100),
-                palette,
-            },
-            420,
-            96,
-        );
         #[cfg(target_os = "linux")]
         let (secure_storage_state, secure_storage_query_error) =
             match session_host.secure_storage_state() {
@@ -1095,16 +1186,7 @@ impl LiveShell {
             };
         #[cfg(not(target_os = "linux"))]
         let secure_storage_state = platform::SecureStorageState::Ready;
-        let control_host = ControlCenterHost::new(
-            ControlCenterApp::new(
-                network.clone(),
-                bluetooth.clone(),
-                audio.clone(),
-                workspaces.clone(),
-            ),
-            380,
-            650,
-        );
+        let control_host = ProjectionRecoveryHost::new(ProjectionRecoveryApp::new(), 380, 650);
         let notification_host = NotificationHost::new(NotificationApp::new(palette), 420, 180);
         let desktop_host = nickel_ui::UiHost::new(
             DesktopApplication::new(wallpaper.clone(), palette, file_window_host.clone()),
@@ -1121,46 +1203,106 @@ impl LiveShell {
             1920,
             1080,
         );
-        let launcher_view = LauncherViewState::default();
         let launcher_icons = LauncherIconCache::new();
-        let launcher_host = nickel_ui::UiHost::new(
-            LauncherApplication::new(
-                launcher.clone(),
-                launcher_view.clone(),
-                launcher_icons.clone(),
-                palette,
-            ),
-            920,
-            680,
-        );
-        let run_host = nickel_ui::UiHost::new(RunApplication::new(palette), 620, 150);
-        let (clock, date) = panel_clock_text();
-        let panel_host = nickel_ui::UiHost::new(
-            PanelApplication {
-                keyboard_enabled: false,
-                keyboard_visible: false,
-                groups: Arc::new(launcher.taskbar_applications(&windows)),
-                codex_available: launcher.codex_available(),
-                tray: tray.clone(),
-                tray_icons: tray_icons.clone(),
-                panel_icon: Arc::clone(&panel_icon),
-                codex_icon: Arc::clone(&codex_icon),
-                task_icons: Vec::new(),
-                pet_frame: 0,
-                palette,
-                panel_hover: None,
-                launcher_visible: false,
-                codex_project_menu_visible: false,
-                control_visible: false,
-                clock,
-                date,
-                effects: Vec::new(),
-                task_drag: None,
-            },
-            1920,
-            56,
-        );
-        Ok(Self {
+        let mut plugin_registry = nickel_core::plugins::PluginRegistry::default();
+        plugin_registry.register(crate::plugin_panel::manifest().clone())?;
+        #[cfg(test)]
+        let catalog = nickel_core::plugins::PluginCatalog::default();
+        #[cfg(not(test))]
+        let catalog =
+            nickel_core::plugins::PluginCatalog::discover_default().unwrap_or_else(|error| {
+                tracing::warn!(%error, "could not discover installed plugins");
+                nickel_core::plugins::PluginCatalog::default()
+            });
+        for failure in &catalog.failures {
+            tracing::warn!(plugin = %failure.directory, reason = %failure.reason, "invalid installed plugin");
+        }
+        let mut external_plugin_packages = std::collections::BTreeMap::new();
+        for (id, descriptor) in catalog.packages {
+            if descriptor.manifest.claims_native_shell_surface() {
+                tracing::warn!(plugin = %id, "installed plugin cannot replace a native shell surface");
+                continue;
+            }
+            if plugin_registry.entries().count() >= 63 {
+                tracing::warn!(plugin = %id, "plugin status capacity reached");
+                continue;
+            }
+            match plugin_registry.register(descriptor.manifest.clone()) {
+                Ok(()) => {
+                    external_plugin_packages.insert(id, descriptor.into());
+                }
+                Err(error) => {
+                    tracing::warn!(plugin = %id, %error, "installed plugin was not registered")
+                }
+            }
+        }
+        // Bundled source is an ordinary package, initially disabled. Persisted
+        // activation still goes through the same reviewed lifecycle as disk sources.
+        let package = crate::bundled_plugin_assets::load_package("nickel-default")?;
+        let id = package.manifest.id.clone();
+        if !external_plugin_packages.contains_key(&id) {
+            plugin_registry.register(package.manifest.clone())?;
+            external_plugin_packages.insert(
+                id,
+                nickel_core::plugins::PluginPackageSource::embedded(package),
+            );
+        }
+        let plugin_settings = plugin_registry
+            .entries()
+            .filter(|entry| !entry.manifest.settings.is_empty())
+            .map(|entry| {
+                let values = external_plugin_settings(&entry.manifest).unwrap_or_else(|error| {
+                    tracing::warn!(plugin = %entry.manifest.id, %error, "could not load plugin settings");
+                    nickel_core::plugins::PluginPreferences::default()
+                        .effective(&entry.manifest)
+                });
+                (entry.manifest.id.clone(), values)
+            })
+            .collect();
+        // Unit tests exercise activation in parallel; core storage tests cover
+        // persistence without sharing the user's activation file.
+        #[cfg(test)]
+        let plugin_activation = nickel_core::plugins::PluginActivationSettings::default();
+        #[cfg(not(test))]
+        let plugin_activation = nickel_core::plugins::PluginActivationSettings::load_default()
+            .unwrap_or_else(|error| {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    tracing::warn!(%error, "could not read plugin activation settings");
+                }
+                nickel_core::plugins::PluginActivationSettings::default()
+            });
+        let plugin_panel_host = if plugin_activation.desired_enabled(
+            &crate::plugin_panel::manifest().id,
+            crate::plugin_panel::enabled(),
+        ) {
+            let id = &crate::plugin_panel::manifest().id;
+            plugin_registry.set_enabled(id, true)?;
+            match crate::plugin_panel::PluginPanelApplication::bundled() {
+                Ok(application) => {
+                    plugin_registry.mark_running(id)?;
+                    Some(nickel_ui::UiHost::new(
+                        application,
+                        crate::plugin_panel::surface().width,
+                        crate::plugin_panel::surface().height,
+                    ))
+                }
+                Err(error) => {
+                    tracing::error!(plugin = id, %error, "plugin failed to start");
+                    plugin_registry.mark_failed(id, error)?;
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let launcher_icon_revision = launcher_icons.revision();
+        let mut shell = Self {
+            application_scale_service: Default::default(),
+            appearance_capabilities: Default::default(),
+            wallpaper_chooser: None,
+            wallpaper_chooser_results: Default::default(),
+            preferences_capabilities: Default::default(),
+            preferences_commit_pending: None,
             session_host: session_host.clone(),
             screenshot_capture_pending: false,
             screenshot_output: None,
@@ -1223,23 +1365,59 @@ impl LiveShell {
             audio,
             volume_osd_until: None,
             audio_status_observed: false,
-            volume_osd_host,
+            associations_results: HashMap::new(),
+            plugins_results: HashMap::new(),
+            shell_selection_preview: None,
+            shell_preview_sequence: 0,
+            confirmed_shell_package_id: "nickel-default".into(),
+            settings_navigation: None,
+            settings_navigation_revision: 0,
             launcher_visible: false,
-            run_visible: false,
-            run_host,
+            run_status: HashMap::new(),
             locked: false,
             lock_host,
             lock_change_token: HostChangeToken::default(),
             lock_deadline: None,
             control_visible: false,
             codex_project_menu_visible: false,
-            panel_hover: None,
-            panel_hover_output: None,
-            panel_host,
-            panel_hosts: HashMap::new(),
+            plugin_registry,
+            package_settings_registry: Default::default(),
+            package_settings_runtimes: Default::default(),
+            active_shell_package_id: "nickel-default".into(),
+            package_runtimes: Default::default(),
+            package_settings_generation: 0,
+            package_settings_values: Default::default(),
+            package_settings_value_revisions: Default::default(),
+            package_settings_invoking: false,
+            plugin_settings,
+            external_plugin_packages,
+            application_search: Default::default(),
+            application_catalog_cache: [None, None],
+            #[cfg(test)]
+            application_catalog_builds: 0,
+            feature_client: Default::default(),
+            shortcut_capability_observed: false,
+            primary_panel_key: crate::plugin_panel::surface_key(),
+            plugin_activation_generation: 1,
+            #[cfg(target_os = "linux")]
+            last_published_plugin_status: None,
+            plugin_surface_hosts: {
+                let mut hosts = std::collections::BTreeMap::new();
+                if let Some(host) = plugin_panel_host {
+                    hosts.insert(
+                        crate::plugin_panel::surface_key(),
+                        (crate::plugin_panel::surface().clone(), host),
+                    );
+                }
+                hosts
+            },
+            plugin_pointer_paint: None,
+            plugin_panel_memory: std::collections::BTreeMap::new(),
+            plugin_window_placement_overrides: std::collections::BTreeMap::new(),
+            #[cfg(target_os = "windows")]
+            pending_plugin_surface_focus: None,
             panel_projections: HashMap::new(),
-            panel_change_token: HostChangeToken::default(),
-            panel_deadline: None,
+            clock_deadline: Instant::now() + crate::clock_capabilities::until_next_minute(),
             panel_output: None,
             pending_popover_anchor: None,
             all_windows_on_every_bar: shell_settings.all_windows_on_every_bar,
@@ -1250,6 +1428,7 @@ impl LiveShell {
                 shell_settings.idle_suspend_seconds,
             ),
             preview_group: None,
+            preview_generation: 1,
             preview_pending: None,
             preview_focus_requested: false,
             preview_pointer_inside: false,
@@ -1257,15 +1436,9 @@ impl LiveShell {
             preview_hovered: None,
             preview_images: HashMap::new(),
             preview_refresh_deadline: None,
-            preview_frame: None,
             window_menu: None,
             window_menu_snapshot: None,
             window_menu_generation: 0,
-            window_menu_anchor_x: None,
-            window_menu_anchor_y: None,
-            window_menu_host: None,
-            application_menu_target: None,
-            application_menu_host: None,
             notification_host,
             panel_origin_x: 0,
             panel_origin_y: 0,
@@ -1274,9 +1447,10 @@ impl LiveShell {
             control_deadline: Some(Instant::now()),
             projection_chooser: Default::default(),
             projection_rollback_deadline: None,
-            launcher_view,
+            display_preview: None,
             launcher_icons,
-            launcher_host,
+            launcher_icon_revision,
+
             launcher_status: application_status,
             #[cfg(target_os = "windows")]
             launcher_catalog_generation: 1,
@@ -1288,7 +1462,6 @@ impl LiveShell {
             launcher_preferences_path: None,
             #[cfg(test)]
             launcher_persistence_attempts: 0,
-            secure_storage_override: None,
             secure_storage_state,
             #[cfg(target_os = "linux")]
             secure_storage_query_error,
@@ -1299,6 +1472,7 @@ impl LiveShell {
                 1280,
                 nickel_core::on_screen_keyboard::KEYBOARD_HEIGHT,
             ),
+            keyboard_service_generation: 1,
             keyboard_visible: false,
             keyboard_enabled,
             #[cfg(target_os = "windows")]
@@ -1312,7 +1486,50 @@ impl LiveShell {
             keyboard_gesture_leases: HashMap::new(),
             keyboard_override,
             keyboard_recipient: None,
-        })
+        };
+        if plugin_activation.desired_enabled("nickel-default", true) || safe_mode {
+            shell.set_plugin_enabled("nickel-default", true)?;
+        }
+        #[cfg(not(test))]
+        for id in shell
+            .external_plugin_packages
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>()
+        {
+            if should_auto_start_installed_plugin(
+                &id,
+                plugin_activation.desired_enabled(&id, false),
+                safe_mode,
+            ) {
+                if let Some(descriptor) = shell.external_plugin_packages.get(&id)
+                    && !plugin_activation
+                        .approval_current(&descriptor.manifest, &descriptor.source_digest)
+                {
+                    let reason =
+                        "Plugin package changed; review access in Settings before enabling";
+                    shell.plugin_registry.mark_failed(&id, reason.into())?;
+                    continue;
+                }
+                if let Err(error) = shell.set_plugin_enabled(&id, true) {
+                    tracing::warn!(plugin = %id, %error, "installed plugin could not start");
+                }
+            }
+        }
+        #[cfg(not(test))]
+        if !safe_mode
+            && let Some(selected) = plugin_activation.selected_shell()
+            && selected != "nickel-default"
+            && shell.package_runtimes.contains_key(selected)
+        {
+            if let Err(error) = shell.select_shell_package(selected) {
+                tracing::warn!(%error, "selected shell could not start");
+            } else {
+                shell.confirmed_shell_package_id = selected.into();
+            }
+        }
+        shell.maybe_publish_plugin_status();
+        Ok(shell)
     }
 
     pub fn refresh(&mut self) -> bool {
@@ -1472,16 +1689,6 @@ impl LiveShell {
                 self.close_window_preview();
                 changed = true;
             }
-            if self.application_menu_target.as_ref().is_some_and(|target| {
-                let canonical_item_available = target
-                    .application_id
-                    .as_ref()
-                    .is_some_and(|application| self.launcher.is_pinned(application.as_str()));
-                !target.survives(&self.windows, canonical_item_available)
-            }) {
-                self.close_window_preview();
-                changed = true;
-            }
             if let Some(snapshot) = self.window_menu_snapshot.as_mut()
                 && let Some(window) = self.windows.iter().find(|window| window.id == snapshot.id)
                 && window != snapshot
@@ -1492,6 +1699,7 @@ impl LiveShell {
         }
         if changed {
             redraw.extend([
+                SurfaceRole::Taskbar,
                 SurfaceRole::Panel,
                 SurfaceRole::Launcher,
                 SurfaceRole::WindowPreview,
@@ -1522,12 +1730,12 @@ impl LiveShell {
                     .find(|workspace| workspace.active)
                     .map(|workspace| workspace.id),
             );
-            if self.window_menu.is_none() && self.application_menu_target.is_none() {
+            if self.window_menu.is_none() {
                 self.close_window_preview();
             }
             redraw.extend([
                 SurfaceRole::Desktop,
-                SurfaceRole::Panel,
+                SurfaceRole::Taskbar,
                 SurfaceRole::WindowPreview,
                 SurfaceRole::WindowContextMenu,
             ]);
@@ -1568,11 +1776,16 @@ impl LiveShell {
         if changed {
             redraw.extend([SurfaceRole::WindowPreview, SurfaceRole::WindowContextMenu]);
         }
+        let icon_revision = self.launcher_icons.revision();
+        if icon_revision != self.launcher_icon_revision {
+            self.launcher_icon_revision = icon_revision;
+            redraw.extend([SurfaceRole::Launcher, SurfaceRole::Taskbar]);
+        }
         let tray = normalize_tray_items(self.tray_feed.snapshot());
         if tray != self.tray {
             self.tray = tray;
             self.tray_icons = panel_tray_icons(&self.tray);
-            redraw.push(SurfaceRole::Panel);
+            redraw.push(SurfaceRole::Taskbar);
         }
         let notification = self.notification_feed.snapshot();
         let notification = if notification.as_ref().is_some_and(|item| {
@@ -1595,11 +1808,13 @@ impl LiveShell {
             self.notification_host
                 .application_mut()
                 .sync(self.notification.as_ref(), self.palette);
-            self.notification_host.step(HostBatch {
+            let outcome = self.notification_host.step(HostBatch {
                 events: vec![HostEvent::Poll],
                 ..HostBatch::default()
             });
-            redraw.push(SurfaceRole::Notification);
+            if outcome.changed || self.apply_notification_effects() {
+                redraw.push(SurfaceRole::Notification);
+            }
         }
         redraw
     }
@@ -1635,7 +1850,6 @@ impl LiveShell {
             && secure_storage_state == platform::SecureStorageState::Ready
         {
             self.launcher_status = None;
-            self.secure_storage_override = None;
             changed = true;
         }
         changed
@@ -1646,6 +1860,13 @@ impl LiveShell {
         let mut changed = self.refresh_secure_storage();
         #[cfg(not(target_os = "linux"))]
         let mut changed = false;
+        changed |= self.poll_wallpaper_chooser();
+        changed |= self.appearance_capabilities.refresh_observed();
+        if let Ok(catalog) = self.preferences_catalog() {
+            let previous = self.preferences_capabilities.snapshot(&catalog);
+            let next = self.preferences_capabilities.refresh(&catalog);
+            changed |= previous != next;
+        }
         let shell_settings = ShellSettings::load_default();
         let wallpaper_settings = WallpaperSettings::load_default();
         if self.refresh_configured_wallpaper(wallpaper_settings.image) {
@@ -1700,14 +1921,6 @@ impl LiveShell {
                 self.launcher_catalog_generation.checked_add(1).unwrap_or(0);
         }
         self.launcher_icons.invalidate_application_inventory();
-        let status = self.launcher_status_text();
-        self.launcher_host
-            .application_mut()
-            .sync(&self.launcher, self.palette, status);
-        self.launcher_host.step(nickel_ui::HostBatch {
-            application_changed: true,
-            ..Default::default()
-        });
         (applications, partial)
     }
 
@@ -1737,8 +1950,9 @@ impl LiveShell {
                 changed = true;
             }
         }
-        let palette =
-            ThemePalette::from_appearance(shell_settings.resolve_appearance(Appearance::default()));
+        let palette = ThemePalette::from_appearance(
+            shell_settings.resolve_appearance(crate::appearance_capabilities::system_appearance()),
+        );
         if palette != self.palette {
             self.palette = palette;
             self.lock_host.application_mut().palette = palette;
@@ -1781,14 +1995,6 @@ impl LiveShell {
         self.launcher_icons.begin_visual_generation();
         self.launcher_icons.invalidate_application_inventory();
         self.apply_shell_settings(shell_settings);
-        let status = self.launcher_status_text();
-        self.launcher_host
-            .application_mut()
-            .sync(&self.launcher, self.palette, status);
-        self.launcher_host.step(nickel_ui::HostBatch {
-            application_changed: true,
-            ..Default::default()
-        });
     }
 
     #[cfg(target_os = "windows")]
@@ -1849,11 +2055,11 @@ impl LiveShell {
                 let changed = self.audio != status;
                 self.audio = status;
                 if show {
-                    self.volume_osd_until = Some(Instant::now() + Duration::from_millis(1500));
+                    self.show_volume_osd();
                 } else if !self.audio.available
                     || (activity.availability_changed && !activity.value_changed)
                 {
-                    return self.volume_osd_until.take().is_some() || changed;
+                    return self.hide_volume_osd() || changed;
                 }
                 changed || show
             }
@@ -1904,54 +2110,121 @@ impl LiveShell {
                         .values()
                         .any(|viewport| viewport.host.remote_access_protected())
             }
-            SurfaceRole::Panel => {
-                self.panel_host.remote_access_protected()
+            SurfaceRole::Taskbar => true,
+
+            SurfaceRole::Launcher => true,
+            SurfaceRole::ControlCenter => self
+                .quick_settings_surface_active()
+                .then(|| {
+                    self.plugin_panel_host_ref(&self.active_shell_surface_key("quick-settings"))
+                        .unwrap()
+                        .remote_access_protected()
+                })
+                .unwrap_or_else(|| {
+                    !self
+                        .control_host
+                        .application()
+                        .view_state()
+                        .trusted_visible()
+                        || self.control_host.remote_access_protected()
+                }),
+            SurfaceRole::Notification => {
+                self.trusted_notification_visible()
+                    || self.notification_host.remote_access_protected()
+            }
+            SurfaceRole::VolumeOsd => true,
+            SurfaceRole::WindowPreview => {
+                self.preview_plugin_active()
                     || self
-                        .panel_hosts
-                        .values()
-                        .any(|host| host.remote_access_protected())
+                        .preview_plugin_host_ref()
+                        .is_none_or(|host| host.remote_access_protected())
             }
-            SurfaceRole::Launcher if self.run_visible => self.run_host.remote_access_protected(),
-            SurfaceRole::Launcher => self.launcher_host.remote_access_protected(),
-            SurfaceRole::ControlCenter => self.control_host.remote_access_protected(),
-            SurfaceRole::Notification => self.notification_host.remote_access_protected(),
-            SurfaceRole::VolumeOsd => self.volume_osd_host.remote_access_protected(),
-            SurfaceRole::WindowPreview => self
-                .preview_frame
-                .as_ref()
-                .is_none_or(WindowPreviewFrame::remote_access_protected),
-            SurfaceRole::WindowContextMenu => {
-                if let Some(host) = self.window_menu_host.as_ref() {
-                    host.remote_access_protected()
-                } else if let Some(host) = self.application_menu_host.as_ref() {
-                    host.remote_access_protected()
-                } else {
-                    true
-                }
-            }
+            SurfaceRole::WindowContextMenu => true,
             SurfaceRole::Screenshot => self.screenshot.remote_access_protected(),
             SurfaceRole::OnScreenKeyboard => self.keyboard_host.remote_access_protected(),
             _ => true,
         }
     }
 
+    /// Computed production host layout for the opt-in nested test socket.
+    pub(crate) fn layout_snapshot(
+        &self,
+        role: SurfaceRole,
+        plugin: Option<&nickel_core::plugins::PluginSurfaceKey>,
+        output: Option<&str>,
+    ) -> Option<String> {
+        if self.locked {
+            return None;
+        }
+        let snapshot = match role {
+            SurfaceRole::Desktop => output
+                .filter(|output| *output != self.desktop_active_viewport)
+                .and_then(|output| self.desktop_viewports.get(output))
+                .map(|viewport| viewport.host.layout_snapshot())
+                .or_else(|| Some(self.desktop_host.layout_snapshot())),
+            SurfaceRole::Taskbar => None,
+
+            SurfaceRole::Panel => plugin
+                .and_then(|key| self.plugin_panel_host_ref(key))
+                .map(|host| host.layout_snapshot()),
+            SurfaceRole::Launcher => None,
+            SurfaceRole::ControlCenter => self
+                .plugin_panel_host_ref(&self.active_shell_surface_key("quick-settings"))
+                .map(|host| host.layout_snapshot())
+                .or_else(|| Some(self.control_host.layout_snapshot())),
+            SurfaceRole::Notification => Some(self.notification_host.layout_snapshot()),
+            SurfaceRole::VolumeOsd => None,
+            SurfaceRole::WindowPreview => self
+                .preview_plugin_host_ref()
+                .map(|host| host.layout_snapshot()),
+            SurfaceRole::WindowContextMenu => None,
+            SurfaceRole::Screenshot => plugin
+                .and_then(|key| self.plugin_surface_hosts.get(key))
+                .map(|(_, host)| host.layout_snapshot())
+                .or_else(|| Some(self.screenshot.layout_snapshot())),
+            SurfaceRole::OnScreenKeyboard => Some(self.keyboard_host.layout_snapshot()),
+            _ => None,
+        };
+        snapshot
+    }
+
     pub fn scene(&mut self, role: SurfaceRole, width: u32, height: u32) -> Vec<PaintCommand> {
-        match role {
+        let commands = match role {
             SurfaceRole::Desktop => self.desktop_scene(width, height),
-            SurfaceRole::Panel => self.panel_scene(width, height),
-            SurfaceRole::Launcher if self.run_visible => self.run_scene(width, height),
-            SurfaceRole::Launcher => self.launcher_scene(width, height),
+            SurfaceRole::Taskbar => Vec::new(),
+            SurfaceRole::Panel => unreachable!("plugin panels render through their surface key"),
+            SurfaceRole::Launcher => Vec::new(),
             SurfaceRole::ControlCenter => {
-                self.sync_control_host(width, height);
-                self.control_host.commands().to_vec()
+                if self.quick_settings_surface_active() {
+                    self.plugin_panel_scene(
+                        &self.active_shell_surface_key("quick-settings"),
+                        width,
+                        height,
+                    )
+                    .unwrap_or_default()
+                } else if self
+                    .control_host
+                    .application()
+                    .view_state()
+                    .trusted_visible()
+                {
+                    self.sync_control_host(width, height);
+                    self.control_host.commands().to_vec()
+                } else {
+                    Vec::new()
+                }
             }
             SurfaceRole::Notification => {
-                self.sync_notification_host(width, height);
-                self.notification_host.commands().to_vec()
+                if self.trusted_notification_visible() {
+                    self.sync_notification_host(width, height);
+                    self.notification_host.commands().to_vec()
+                } else {
+                    Vec::new()
+                }
             }
-            SurfaceRole::VolumeOsd => self.volume_osd_scene(width, height),
+            SurfaceRole::VolumeOsd => Vec::new(),
             SurfaceRole::WindowPreview => self.window_preview_scene(),
-            SurfaceRole::WindowContextMenu => self.window_menu_scene(),
+            SurfaceRole::WindowContextMenu => Vec::new(),
             SurfaceRole::Lock => self.lock_scene(width, height),
             SurfaceRole::Screenshot => self.screenshot.scene(width, height, self.palette),
             SurfaceRole::OnScreenKeyboard => {
@@ -1968,7 +2241,9 @@ impl LiveShell {
             SurfaceRole::CodexProjectMenu | SurfaceRole::CodexChat => Vec::new(),
             #[cfg(target_os = "windows")]
             SurfaceRole::TrustedControl => Vec::new(),
-        }
+        };
+        self.maybe_publish_plugin_status();
+        commands
     }
 
     pub fn set_desktop_outputs(&mut self, outputs: Vec<DesktopOutput>) {
@@ -2079,57 +2354,6 @@ impl LiveShell {
         self.desktop_host_event_authorized(ingress, Some(authority))
     }
 
-    #[cfg(target_os = "windows")]
-    pub fn desktop_native_context_menu(
-        &self,
-        width: u32,
-        height: u32,
-    ) -> Option<nickel_ui::OverlayMenu<desktop::DesktopMessage>> {
-        self.desktop_host
-            .application()
-            .frame_overlays(nickel_ui::ViewContext::new(
-                nickel_ui::Rect::new(0.0, 0.0, width as f32, height as f32),
-                nickel_ui::InputModality::Pointer,
-            ))
-            .into_iter()
-            .find_map(|overlay| match overlay {
-                nickel_ui::FrameOverlay::Menu(menu) => Some(menu),
-                _ => None,
-            })
-    }
-
-    #[cfg(target_os = "windows")]
-    pub fn begin_desktop_native_context_menu(&mut self) {
-        self.desktop_host.application_mut().context_popup_detached = true;
-        let outcome = self.desktop_host.step(HostBatch {
-            events: vec![HostEvent::Ui(UiEvent::Dismiss)],
-            application_changed: true,
-            ..HostBatch::default()
-        });
-        self.desktop_change_token = outcome.change_token;
-        self.desktop_deadline = outcome.next_deadline;
-    }
-
-    #[cfg(target_os = "windows")]
-    pub fn finish_desktop_native_context_menu(&mut self, action: Option<desktop::DesktopMessage>) {
-        if let Some(action) = action {
-            self.desktop_host.application_mut().update(action);
-        } else {
-            self.desktop_host
-                .application_mut()
-                .dismiss_context_menu(desktop::DesktopMenuDismissReason::Cancel);
-        }
-        self.desktop_host.application_mut().context_popup_detached = false;
-        self.desktop_overlay_pointer_capture = None;
-        let outcome = self.desktop_host.step(HostBatch {
-            events: vec![HostEvent::Ui(UiEvent::Dismiss)],
-            application_changed: true,
-            ..HostBatch::default()
-        });
-        self.desktop_change_token = outcome.change_token;
-        self.desktop_deadline = outcome.next_deadline;
-    }
-
     pub(crate) fn desktop_host_event_authorized(
         &mut self,
         ingress: HostEvent,
@@ -2138,18 +2362,6 @@ impl LiveShell {
         let event = normalized_input(&ingress)
             .expect("desktop host event must be normalized")
             .clone();
-        #[cfg(target_os = "windows")]
-        if self.desktop_host.application().context_popup_detached
-            && matches!(event, nickel_input::InputEvent::FocusLost { .. })
-        {
-            // The detached popup owns focus while the desktop action still
-            // needs its invocation snapshot. Its completion dismisses the menu.
-            self.desktop_host
-                .application_mut()
-                .cancel_pointer_transaction();
-            self.desktop_overlay_pointer_capture = None;
-            return true;
-        }
         if matches!(
             event,
             nickel_input::InputEvent::Pointer(nickel_input::PointerEvent::Leave { .. })
@@ -2367,7 +2579,8 @@ impl LiveShell {
             }
             _ => false,
         };
-        let changed = changed | (reveal_selection && application.reveal_active());
+        let changed =
+            changed | (reveal_selection && self.desktop_host.application_mut().reveal_active());
         if changed && coalesce_motion {
             self.desktop_application_dirty = true;
         } else if changed {
@@ -2406,7 +2619,7 @@ impl LiveShell {
             }
             ControllerAction::Confirm => {
                 if let Some(id) = application.layout.active() {
-                    application.activate(id);
+                    application.request_activate(id);
                 }
                 true
             }
@@ -2471,36 +2684,2747 @@ impl LiveShell {
 
     pub fn surface_visible(&self, role: SurfaceRole) -> bool {
         match role {
-            SurfaceRole::Desktop | SurfaceRole::Panel => true,
-            SurfaceRole::Launcher => self.launcher_visible,
-            SurfaceRole::ControlCenter => self.control_visible,
-            SurfaceRole::Notification => {
-                self.notification.is_some() || self.notification_history_visible
+            SurfaceRole::Desktop => true,
+            SurfaceRole::Taskbar => false,
+            SurfaceRole::Panel => !self.plugin_surface_hosts.is_empty(),
+            SurfaceRole::Launcher => false,
+            SurfaceRole::ControlCenter => {
+                self.control_visible
+                    && self
+                        .control_host
+                        .application()
+                        .view_state()
+                        .trusted_visible()
             }
-            SurfaceRole::VolumeOsd => self.volume_osd_until.is_some(),
+            SurfaceRole::Notification => self.trusted_notification_visible(),
+            SurfaceRole::VolumeOsd => false,
             SurfaceRole::WindowPreview => {
-                self.preview_group.is_some() || self.task_switcher_group.is_some()
+                self.preview_plugin_host_ref().is_some()
+                    && (self.preview_group.is_some() || self.task_switcher_group.is_some())
             }
-            SurfaceRole::WindowContextMenu => {
-                self.window_menu.is_some() || self.application_menu_target.is_some()
-            }
+            SurfaceRole::WindowContextMenu => false,
             SurfaceRole::CodexProjectMenu => self.codex_project_menu_visible,
             SurfaceRole::Lock => self.locked,
             SurfaceRole::Screenshot => self.screenshot.visible(),
-            SurfaceRole::OnScreenKeyboard => self.keyboard_visible,
+            SurfaceRole::OnScreenKeyboard => false,
             SurfaceRole::CodexChat => true,
             #[cfg(target_os = "windows")]
             SurfaceRole::TrustedControl => false,
         }
     }
 
-    pub fn launcher_surface_size(&self) -> Option<(u32, u32)> {
-        self.run_visible
-            .then_some((RUN_SURFACE_WIDTH, RUN_SURFACE_HEIGHT))
+    pub(crate) fn native_surface_visible(
+        &self,
+        role: SurfaceRole,
+        key: Option<&nickel_core::plugins::PluginSurfaceKey>,
+    ) -> bool {
+        if key == Some(&self.active_shell_surface_key("keyboard")) {
+            return role == SurfaceRole::Panel
+                && self.keyboard_visible
+                && self.keyboard_enabled
+                && self.plugin_surface_matches(&self.active_shell_surface_key("keyboard"));
+        }
+        if role == SurfaceRole::CodexProjectMenu {
+            return self.codex_project_menu_visible
+                && self.launcher.codex_available()
+                && !self.locked;
+        }
+        if role == SurfaceRole::ControlCenter {
+            return self.control_visible
+                && self
+                    .control_host
+                    .application()
+                    .view_state()
+                    .trusted_visible();
+        }
+
+        if role == SurfaceRole::Notification {
+            return self.trusted_notification_visible();
+        }
+        self.surface_visible(role) && key.is_none_or(|key| self.plugin_surface_matches(key))
     }
 
-    pub(crate) fn launcher_preferred_surface_size(&self, maximum: (u32, u32)) -> (u32, u32) {
-        crate::launcher_view::preferred_launcher_surface_size(&self.launcher, self.palette, maximum)
+    pub(crate) fn taskbar_reservation_height(&self) -> u32 {
+        let key = self.taskbar_surface_key();
+        self.shell_panel_surfaces()
+            .into_iter()
+            .find(|(candidate, surface)| {
+                key.as_ref() == Some(candidate) && surface.reserve_work_area
+            })
+            .map_or(0, |(_, surface)| surface.height)
+    }
+
+    pub(crate) fn taskbar_surface_key(&self) -> Option<nickel_core::plugins::PluginSurfaceKey> {
+        let key = self.active_shell_surface_key("taskbar");
+        self.plugin_surface_hosts.contains_key(&key).then_some(key)
+    }
+
+    fn default_shell_surface_key(surface: &str) -> nickel_core::plugins::PluginSurfaceKey {
+        nickel_core::plugins::PluginSurfaceKey {
+            plugin_id: "nickel-default".into(),
+            surface_id: surface.into(),
+        }
+    }
+
+    pub(crate) fn active_shell_surface_key(
+        &self,
+        surface: &str,
+    ) -> nickel_core::plugins::PluginSurfaceKey {
+        nickel_core::plugins::PluginSurfaceKey {
+            plugin_id: self.active_shell_package_id.clone(),
+            surface_id: surface.into(),
+        }
+    }
+
+    pub(crate) fn is_shell_package(&self, id: &str) -> bool {
+        let mut current = Some(id.to_owned());
+        for _ in 0..nickel_core::package_composition::MAX_COMPOSITION_DEPTH {
+            let Some(id) = current else {
+                return false;
+            };
+            let Some(composition) = self
+                .plugin_registry
+                .get(&id)
+                .and_then(|entry| entry.manifest.composition.as_ref())
+            else {
+                return false;
+            };
+            if composition.exports.contains_key("shell") {
+                return true;
+            }
+            current = composition.extends.clone();
+        }
+        false
+    }
+
+    pub(crate) fn shell_package_selected(&self, id: &str) -> bool {
+        self.active_shell_package_id == id
+    }
+
+    pub fn select_shell_package(&mut self, id: &str) -> Result<bool, String> {
+        if !self.is_shell_package(id) {
+            return Err("package does not export a shell".into());
+        }
+        if self.active_shell_package_id == id && self.package_runtimes.contains_key(id) {
+            return Ok(false);
+        }
+        // Construct and validate the requested runtime before retiring the visible shell.
+        self.set_plugin_enabled(id, true)?;
+        if !self.package_runtimes.contains_key(id) {
+            return Err("shell runtime is unavailable".into());
+        }
+        let old = std::mem::replace(&mut self.active_shell_package_id, id.into());
+        let initial = self
+            .external_plugin_packages
+            .get(id)
+            .ok_or("shell package is unavailable")?
+            .manifest
+            .surfaces
+            .iter()
+            .filter(|surface| {
+                surface.initially_open
+                    && matches!(
+                        surface.kind,
+                        nickel_core::plugins::PluginSurfaceKind::Panel
+                            | nickel_core::plugins::PluginSurfaceKind::Dock
+                            | nickel_core::plugins::PluginSurfaceKind::Window
+                    )
+            })
+            .map(|surface| surface.id.clone())
+            .collect::<Vec<_>>();
+        let transition = (|| -> Result<(), String> {
+            for surface in initial {
+                self.show_plugin_window(id, &surface)?;
+            }
+            Ok(())
+        })();
+        if let Err(error) = transition {
+            self.plugin_surface_hosts
+                .retain(|key, _| key.plugin_id != id);
+            self.active_shell_package_id = old;
+            return Err(error);
+        }
+        if old != id {
+            self.retire_preview_plugin_state();
+            self.keyboard_gesture_leases.clear();
+            self.keyboard_host
+                .application_mut()
+                .recipient_changed(false);
+            for (key, (_, host)) in &self.plugin_surface_hosts {
+                if key.plugin_id == old
+                    && let Err(error) = host.application().retire_surface()
+                {
+                    tracing::warn!(plugin = old, %error, "old shell surface could not unmount");
+                }
+            }
+            self.plugin_surface_hosts
+                .retain(|key, _| key.plugin_id != old);
+            self.plugin_window_placement_overrides
+                .retain(|key, _| key.plugin_id != old);
+        }
+        if self.keyboard_visible {
+            if self.active_shell_declares("keyboard") {
+                self.set_default_shell_surface_visible("keyboard", true);
+            } else {
+                self.set_keyboard_visible(false);
+            }
+        }
+        self.plugin_activation_generation =
+            self.plugin_activation_generation.wrapping_add(1).max(1);
+        Ok(true)
+    }
+
+    fn shell_surface_effect_owner(&self, owner: &str) -> String {
+        let mut current = Some(self.active_shell_package_id.clone());
+        for _ in 0..nickel_core::package_composition::MAX_COMPOSITION_DEPTH {
+            let Some(id) = current else {
+                break;
+            };
+            if id == owner {
+                return self.active_shell_package_id.clone();
+            }
+            current = self
+                .plugin_registry
+                .get(&id)
+                .and_then(|entry| entry.manifest.composition.as_ref())
+                .and_then(|composition| composition.extends.clone());
+        }
+        owner.into()
+    }
+
+    fn active_shell_declares(&self, surface: &str) -> bool {
+        self.package_runtimes
+            .contains_key(&self.active_shell_package_id)
+            && self
+                .external_plugin_packages
+                .get(&self.active_shell_package_id)
+                .is_some_and(|source| {
+                    source
+                        .manifest
+                        .surfaces
+                        .iter()
+                        .any(|declaration| declaration.id == surface)
+                })
+    }
+
+    fn show_volume_osd(&mut self) {
+        if self.locked || !self.active_shell_declares("volume-osd") {
+            return;
+        }
+        self.set_default_shell_surface_visible("volume-osd", true);
+        if self.default_shell_surface_visible("volume-osd") {
+            self.volume_osd_until = Some(Instant::now() + Duration::from_millis(1500));
+        }
+    }
+
+    fn hide_volume_osd(&mut self) -> bool {
+        let pending = self.volume_osd_until.take().is_some();
+        (self.active_shell_declares("volume-osd")
+            && self.set_default_shell_surface_visible("volume-osd", false))
+            || pending
+    }
+
+    fn default_shell_surface_visible(&self, surface: &str) -> bool {
+        self.plugin_surface_hosts
+            .contains_key(&self.active_shell_surface_key(surface))
+    }
+
+    fn set_default_shell_surface_visible(&mut self, surface: &str, visible: bool) -> bool {
+        let result = if visible {
+            self.show_plugin_window(&self.active_shell_package_id.clone(), surface)
+        } else {
+            self.close_plugin_window(&self.active_shell_surface_key(surface))
+        };
+        match result {
+            Ok(changed) => changed,
+            Err(error) => {
+                tracing::warn!(surface,%error,"shell package surface visibility failed");
+                false
+            }
+        }
+    }
+
+    pub(crate) fn active_launcher_surface_key(
+        &self,
+    ) -> Option<nickel_core::plugins::PluginSurfaceKey> {
+        let key = self.active_shell_surface_key("launcher");
+        self.plugin_surface_hosts.contains_key(&key).then_some(key)
+    }
+
+    pub fn plugin_registry(&self) -> &nickel_core::plugins::PluginRegistry {
+        &self.plugin_registry
+    }
+
+    pub(crate) fn plugin_panel_surface(&self) -> &nickel_core::plugins::PluginSurface {
+        self.plugin_surface_hosts
+            .get(&self.primary_panel_key)
+            .map(|(surface, _)| surface)
+            .unwrap_or_else(|| crate::plugin_panel::surface())
+    }
+
+    pub(crate) fn plugin_surface_matches(
+        &self,
+        key: &nickel_core::plugins::PluginSurfaceKey,
+    ) -> bool {
+        self.plugin_surface_hosts.contains_key(key)
+            || self
+                .shell_panel_surfaces()
+                .iter()
+                .any(|(candidate, _)| candidate == key)
+    }
+
+    pub(crate) fn plugin_panels(
+        &self,
+    ) -> Vec<(
+        nickel_core::plugins::PluginSurfaceKey,
+        nickel_core::plugins::PluginSurface,
+    )> {
+        let mut panels = Vec::new();
+        if let Some((surface, _)) = self.plugin_surface_hosts.get(&self.primary_panel_key) {
+            panels.push((self.primary_panel_key.clone(), surface.clone()));
+        }
+        panels.extend(
+            self.plugin_surface_hosts
+                .iter()
+                .filter(|(key, _)| {
+                    **key != self.primary_panel_key()
+                        && self.external_plugin_packages.contains_key(&key.plugin_id)
+                })
+                .map(|(key, (surface, _))| (key.clone(), surface.clone())),
+        );
+        panels
+    }
+
+    /// Active ordinary package declarations for compositor-owned output surfaces.
+    pub(crate) fn shell_panel_surfaces(
+        &self,
+    ) -> Vec<(
+        nickel_core::plugins::PluginSurfaceKey,
+        nickel_core::plugins::PluginSurface,
+    )> {
+        let mut panels = Vec::new();
+        panels.extend(self.plugin_panels());
+
+        panels
+    }
+
+    pub(crate) fn shell_fixed_surface_keys(
+        &self,
+    ) -> HashSet<nickel_core::plugins::PluginSurfaceKey> {
+        [self.active_shell_surface_key("window-preview")]
+            .into_iter()
+            .filter(|key| self.plugin_surface_matches(key))
+            .collect()
+    }
+
+    pub(crate) fn plugin_panel_placement(
+        &self,
+        key: &nickel_core::plugins::PluginSurfaceKey,
+    ) -> Option<(
+        nickel_core::plugins::PluginSurfaceKind,
+        u32,
+        nickel_core::plugins::PluginSurfaceAnchor,
+        i32,
+        i32,
+    )> {
+        self.shell_panel_surfaces()
+            .into_iter()
+            .find(|(candidate, _)| candidate == key)
+            .map(|(_, surface)| {
+                let anchor = if *key == self.active_shell_surface_key("keyboard") {
+                    if self.keyboard_dock_top {
+                        nickel_core::plugins::PluginSurfaceAnchor::TopLeft
+                    } else {
+                        nickel_core::plugins::PluginSurfaceAnchor::BottomLeft
+                    }
+                } else {
+                    surface.anchor
+                };
+                (
+                    surface.kind,
+                    surface.bottom_offset,
+                    anchor,
+                    surface.offset_x,
+                    surface.offset_y,
+                )
+            })
+    }
+
+    pub(crate) fn plugin_panel_change_token(
+        &self,
+        key: &nickel_core::plugins::PluginSurfaceKey,
+    ) -> Option<HostChangeToken> {
+        let inspection = self.plugin_panel_host_ref(key)?.inspect();
+        // A settings edit replaces the host, whose generation restarts at zero.
+        // Include the activation revision so the presenter cannot reuse the old frame.
+        Some(HostChangeToken {
+            frame_generation: inspection
+                .frame_generation
+                .wrapping_add(self.plugin_activation_generation.rotate_left(32)),
+            semantic_generation: inspection
+                .semantic_generation
+                .wrapping_add(self.plugin_activation_generation.rotate_left(32)),
+        })
+    }
+
+    pub(crate) fn plugin_panel_title(
+        &self,
+        key: &nickel_core::plugins::PluginSurfaceKey,
+    ) -> Option<&str> {
+        self.plugin_panel_host_ref(key)
+            .map(|host| host.application().title())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn plugin_surface_semantic_nodes(
+        &self,
+        key: &nickel_core::plugins::PluginSurfaceKey,
+    ) -> Option<Vec<nickel_ui::SemanticNodeSnapshot>> {
+        self.plugin_surface_hosts
+            .get(key)
+            .map(|(_, host)| host.semantic_nodes())
+    }
+
+    pub(crate) fn plugin_surface_change_token(
+        &self,
+        key: &nickel_core::plugins::PluginSurfaceKey,
+    ) -> Option<HostChangeToken> {
+        self.plugin_panel_change_token(key)
+    }
+
+    fn external_plugin_windows(&self, plugin_id: &str) -> Option<serde_json::Value> {
+        let package = self.external_plugin_packages.get(plugin_id)?;
+        if !package
+            .manifest
+            .capabilities
+            .contains(&nickel_core::plugins::PluginCapability::WindowsRead)
+        {
+            return None;
+        }
+        Some(serde_json::Value::Array(
+            self.windows
+                .iter()
+                .take(128)
+                .map(|window| {
+                    serde_json::json!({
+                        "id": window.id.0.to_string(),
+                        "applicationId": window.application_id.as_ref().map(|id| id.as_str()),
+                        "title": window.title.chars().take(120).collect::<String>(),
+                        "active": window.active,
+                        "minimized": window.state.minimized,
+                        "maximized": window.state.maximized,
+                        "fullscreen": window.state.fullscreen,
+                        "canMoveToWorkspace": window.state.capabilities.move_workspace,
+                        "canMoveToOutput": window.state.capabilities.move_display,
+                        "canMinimize": window.state.capabilities.minimize,
+                        "canMaximize": window.state.capabilities.maximize,
+                        "canFullscreen": cfg!(target_os = "linux") && window.state.capabilities.fullscreen,
+                        "canSnap": cfg!(target_os = "linux") && window.state.capabilities.maximize && !window.state.fullscreen,
+                        "workspace": window.state.workspace.map(|workspace| workspace.to_string()),
+                        "output": window.state.output,
+                        "canActivate": window.state.capabilities.activate,
+                        "canClose": window.state.capabilities.close,
+                    })
+                })
+                .collect(),
+        ))
+    }
+
+    fn plugin_window_destinations(&self, id: &str) -> Option<serde_json::Value> {
+        self.external_plugin_windows(id)?;
+        Some(
+            serde_json::json!({"workspaces": self.workspaces.iter().take(128).map(|workspace| serde_json::json!({"id": workspace.id.to_string(), "name": format!("Workspace {}", workspace.id)})).collect::<Vec<_>>(), "outputs": self.window_feed.outputs().into_iter().take(128).collect::<Vec<_>>()}),
+        )
+    }
+
+    fn plugin_window_menu(&self, id: &str) -> Option<serde_json::Value> {
+        self.external_plugin_windows(id)?;
+        Some(
+            serde_json::json!({"targetId": self.window_menu.map(|window| window.0.to_string()), "generation": self.window_menu_generation.to_string()}),
+        )
+    }
+
+    fn external_plugin_notifications(&self, plugin_id: &str) -> Option<serde_json::Value> {
+        let package = self.external_plugin_packages.get(plugin_id)?;
+        if !package
+            .manifest
+            .capabilities
+            .contains(&nickel_core::plugins::PluginCapability::NotificationsRead)
+        {
+            return None;
+        }
+        let history = self
+            .notification_feed
+            .history()
+            .into_iter()
+            .filter(|notification| !self.trusted_notification_id(notification.id))
+            .collect::<Vec<_>>();
+        Some(crate::notification::snapshot(
+            self.notification
+                .as_ref()
+                .filter(|notification| !self.trusted_notification_id(notification.id)),
+            &history,
+        ))
+    }
+
+    fn external_plugin_applications(&mut self, plugin_id: &str) -> Option<serde_json::Value> {
+        let package = self.external_plugin_packages.get(plugin_id)?;
+        if !package
+            .manifest
+            .capabilities
+            .contains(&nickel_core::plugins::PluginCapability::ApplicationsRead)
+        {
+            return None;
+        }
+        // Running-only entries include window titles/identities; retain the
+        // separate WindowsRead grant rather than expanding ApplicationsRead.
+        let include_running = package
+            .manifest
+            .capabilities
+            .contains(&nickel_core::plugins::PluginCapability::WindowsRead);
+        let index = usize::from(include_running);
+        let windows = if include_running {
+            self.windows.as_slice()
+        } else {
+            &[]
+        };
+        let revision = self.launcher.taskbar_revision();
+        if let Some(cached) = self.application_catalog_cache[index].as_ref()
+            && Arc::ptr_eq(&cached.launcher_revision, revision)
+            && cached.windows.as_slice() == windows
+        {
+            return Some(cached.value.clone());
+        }
+        let value = crate::application_capabilities::include_running(&self.launcher, windows);
+        #[cfg(test)]
+        {
+            self.application_catalog_builds = self.application_catalog_builds.saturating_add(1);
+        }
+        self.application_catalog_cache[index] = Some(ApplicationCatalogCache {
+            launcher_revision: Arc::clone(revision),
+            windows: windows.to_vec(),
+            value: value.clone(),
+        });
+        Some(value)
+    }
+
+    fn plugin_application_search(&self, plugin_id: &str) -> Option<serde_json::Value> {
+        let package = self.external_plugin_packages.get(plugin_id)?;
+        if !package
+            .manifest
+            .capabilities
+            .contains(&nickel_core::plugins::PluginCapability::ApplicationsRead)
+        {
+            return None;
+        }
+        let mut snapshot = self.application_search.snapshot(&self.launcher, plugin_id);
+        snapshot["status"] = self
+            .launcher_status
+            .as_ref()
+            .map(|status| status.chars().take(160).collect::<String>())
+            .into();
+        snapshot["pinSaveFailed"] = self
+            .launcher_status
+            .as_deref()
+            .is_some_and(|status| status.starts_with("Launcher preferences could not be saved:"))
+            .into();
+        Some(snapshot)
+    }
+
+    fn plugin_application_images(
+        &mut self,
+        catalog: Option<&serde_json::Value>,
+        search: Option<&serde_json::Value>,
+    ) -> crate::plugin_panel::PluginImages {
+        let mut images = crate::plugin_panel::PluginImages::new();
+        let items = catalog
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .chain(
+                search
+                    .and_then(|snapshot| snapshot["results"].as_array())
+                    .into_iter()
+                    .flatten(),
+            );
+        for item in items {
+            let Some(id) = item["id"].as_str() else {
+                continue;
+            };
+            let icon = if let Some(application) = self
+                .launcher
+                .applications()
+                .find(|application| application.id() == id)
+            {
+                self.launcher_icons
+                    .resolve(application)
+                    .unwrap_or_else(launcher_placeholder_icon)
+            } else if let Some(window) = self.windows.iter().find(|window| {
+                window
+                    .application_id
+                    .as_ref()
+                    .is_some_and(|application| application.as_str() == id)
+            }) {
+                self.window_feed
+                    .icon(window.id)
+                    .map(|image| {
+                        self.launcher_icons
+                            .resolve_window_icon(window.id, Arc::new(image))
+                    })
+                    .unwrap_or_else(launcher_placeholder_icon)
+            } else {
+                continue;
+            };
+            images.insert(crate::application_capabilities::icon_asset(id), icon);
+        }
+        images
+    }
+
+    fn preferences_catalog(&self) -> Result<crate::preferences_capabilities::Catalog, String> {
+        crate::preferences_capabilities::Catalog::new(
+            self.launcher
+                .discovered_applications()
+                .filter_map(|application| {
+                    Some((
+                        application.id().to_owned(),
+                        application.launch_command()?.first()?.clone(),
+                    ))
+                }),
+            nickel_platform::installed_icon_themes(),
+        )
+    }
+
+    pub(crate) fn take_preferences_commit(&mut self) -> Option<ShellSettings> {
+        self.preferences_commit_pending.take()
+    }
+
+    fn plugin_preferences(&mut self, plugin_id: &str) -> Option<serde_json::Value> {
+        use nickel_core::plugins::PluginCapability;
+        let manifest = self
+            .external_plugin_packages
+            .get(plugin_id)
+            .map(|package| &package.manifest)
+            .or_else(|| {
+                self.plugin_registry
+                    .get(plugin_id)
+                    .map(|entry| &entry.manifest)
+            })?;
+        if !manifest
+            .capabilities
+            .contains(&PluginCapability::PreferencesRead)
+        {
+            return None;
+        }
+        let writable = !self.locked
+            && manifest
+                .capabilities
+                .contains(&PluginCapability::PreferencesControl);
+        let mut snapshot = match self.preferences_catalog() {
+            Ok(catalog) => self.preferences_capabilities.snapshot(&catalog),
+            Err(reason) => serde_json::json!({"available":false,"reason":reason}),
+        };
+        snapshot["writable"] = writable.into();
+        Some(snapshot)
+    }
+
+    fn plugin_session(&self, plugin_id: &str) -> Option<serde_json::Value> {
+        use nickel_core::plugins::PluginCapability;
+        let entry = self.plugin_registry.get(plugin_id)?;
+        if !entry.desired_enabled
+            || !entry.manifest.capabilities.iter().any(|grant| {
+                matches!(
+                    grant,
+                    PluginCapability::SessionControl | PluginCapability::SessionLogoutRequest
+                )
+            })
+        {
+            return None;
+        }
+        serde_json::to_value(crate::session_capabilities::snapshot(
+            self.locked,
+            &entry.manifest.capabilities,
+        ))
+        .ok()
+    }
+
+    fn wallpaper_chooser_identity(
+        &self,
+        plugin_id: &str,
+    ) -> Option<nickel_core::plugins::PluginManifest> {
+        use nickel_core::plugins::PluginCapability;
+        if self.locked
+            || self
+                .plugin_registry
+                .get(plugin_id)
+                .is_none_or(|entry| !entry.desired_enabled)
+        {
+            return None;
+        }
+        let manifest = self
+            .external_plugin_packages
+            .get(plugin_id)
+            .map(|package| &package.manifest)
+            .or_else(|| {
+                self.plugin_registry
+                    .get(plugin_id)
+                    .map(|entry| &entry.manifest)
+            })?;
+        if !manifest
+            .capabilities
+            .contains(&PluginCapability::WallpaperRead)
+            || !manifest
+                .capabilities
+                .contains(&PluginCapability::WallpaperControl)
+        {
+            return None;
+        }
+        Some(manifest.clone())
+    }
+
+    fn record_wallpaper_chooser_result(&mut self, plugin_id: String, result: serde_json::Value) {
+        if self.wallpaper_chooser_results.len() >= 128
+            && !self.wallpaper_chooser_results.contains_key(&plugin_id)
+        {
+            self.wallpaper_chooser_results.pop_first();
+        }
+        self.wallpaper_chooser_results.insert(plugin_id, result);
+    }
+
+    fn begin_wallpaper_chooser(
+        &mut self,
+        plugin_id: String,
+        effect: crate::appearance_capabilities::AppearanceEffect,
+    ) -> bool {
+        let Some(identity) = self.wallpaper_chooser_identity(&plugin_id) else {
+            return false;
+        };
+        if self.wallpaper_chooser.is_some() {
+            return false;
+        }
+        if effect
+            .validate(&self.appearance_capabilities.refresh("wallpaper"))
+            .is_err()
+        {
+            self.record_wallpaper_chooser_result(
+                plugin_id,
+                serde_json::json!({"status":"rejected","reason":"Wallpaper changed; choose again"}),
+            );
+            return true;
+        }
+        let (sender, receiver) = std::sync::mpsc::channel();
+        match nickel_platform::choose_image_file(Box::new(move |outcome| {
+            let _ = sender.send(outcome);
+        })) {
+            Ok(()) => {
+                self.wallpaper_chooser_results.remove(&plugin_id);
+                self.wallpaper_chooser = Some(WallpaperChooserRequest {
+                    plugin_id,
+                    identity,
+                    activation: self.plugin_activation_generation,
+                    effect,
+                    receiver,
+                });
+            }
+            Err(_) => {
+                self.record_wallpaper_chooser_result(plugin_id, serde_json::json!({"status":"failed","reason":"Native image chooser could not be opened"}));
+            }
+        }
+        true
+    }
+
+    fn poll_wallpaper_chooser(&mut self) -> bool {
+        let Some(request) = &self.wallpaper_chooser else {
+            return false;
+        };
+        let outcome = match request.receiver.try_recv() {
+            Ok(outcome) => outcome,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return false,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                nickel_platform::FileDialogOutcome::Failed(String::new())
+            }
+        };
+        let request = self.wallpaper_chooser.take().unwrap();
+        let authorized = self.wallpaper_chooser_identity(&request.plugin_id).as_ref()
+            == Some(&request.identity)
+            && self.plugin_activation_generation == request.activation;
+        let result = if !authorized {
+            serde_json::json!({"status":"rejected","reason":"Wallpaper permission or package identity changed"})
+        } else {
+            match outcome {
+                nickel_platform::FileDialogOutcome::Cancelled => {
+                    serde_json::json!({"status":"cancelled"})
+                }
+                nickel_platform::FileDialogOutcome::Failed(_) => {
+                    serde_json::json!({"status":"failed","reason":"Native image chooser failed"})
+                }
+                nickel_platform::FileDialogOutcome::Selected(path) => match self
+                    .appearance_capabilities
+                    .commit_chosen(&request.effect, path, || {
+                        if authorized {
+                            Ok(())
+                        } else {
+                            Err("Wallpaper permission changed".into())
+                        }
+                    }) {
+                    Ok(settings) => {
+                        self.refresh_configured_wallpaper(settings.image);
+                        self.desktop_application_dirty = true;
+                        self.appearance_capabilities.wallpaper_reconciled();
+                        serde_json::json!({"status":"applied"})
+                    }
+                    Err(_) => {
+                        serde_json::json!({"status":"rejected","reason":"Image is unavailable, invalid, or wallpaper changed; choose again"})
+                    }
+                },
+            }
+        };
+        self.record_wallpaper_chooser_result(request.plugin_id, result);
+        true
+    }
+
+    fn feature_snapshot(&self) -> serde_json::Value {
+        let keyboard = self.session_host.keyboard_snapshot().ok();
+        let override_active = self.keyboard_override
+            != nickel_core::on_screen_keyboard::KeyboardOverride::None
+            || keyboard
+                .as_ref()
+                .is_some_and(|keyboard| keyboard.environment_override);
+        let runtime = self.launcher.codex_projection().map(|projection| {
+            nickel_core::optional_features::OptionalFeatureRuntime {
+                codex_generation: projection.generation,
+                codex_support: projection.support,
+                codex_installation: projection.installation,
+                codex_health: projection.health,
+                diagnostic: projection.reason.clone(),
+                ..Default::default()
+            }
+        });
+        self.feature_client.read(
+            keyboard.as_ref(),
+            override_active,
+            cfg!(any(target_os = "linux", target_os = "windows")),
+            if cfg!(target_os = "linux") {
+                runtime.as_ref()
+            } else {
+                None
+            },
+        )
+    }
+    fn plugin_features(&self, id: &str, shortcuts: bool) -> Option<serde_json::Value> {
+        let manifest = self
+            .external_plugin_packages
+            .get(id)
+            .map(|package| &package.manifest)
+            .or_else(|| self.plugin_registry.get(id).map(|entry| &entry.manifest))?;
+        let capability = if shortcuts {
+            nickel_core::plugins::PluginCapability::ShortcutsRead
+        } else {
+            nickel_core::plugins::PluginCapability::FeaturesRead
+        };
+        manifest.capabilities.contains(&capability).then(|| {
+            if shortcuts {
+                crate::shortcut_capabilities::snapshot(
+                    self.shortcut_capability_observed
+                        && self.shortcut_capability_status.is_none()
+                        && !self.locked,
+                    self.shortcut_capability_status.as_deref(),
+                )
+            } else {
+                let mut snapshot = self.feature_snapshot();
+                if self.locked
+                    || !self.session_host.feature_preference_writes_allowed()
+                    || !manifest
+                        .capabilities
+                        .contains(&nickel_core::plugins::PluginCapability::FeaturesControl)
+                {
+                    snapshot["operations"] = serde_json::json!({});
+                }
+                snapshot
+            }
+        })
+    }
+
+    fn plugin_appearance(&mut self, plugin_id: &str, wallpaper: bool) -> Option<serde_json::Value> {
+        use nickel_core::plugins::PluginCapability;
+        let manifest = self
+            .external_plugin_packages
+            .get(plugin_id)
+            .map(|package| &package.manifest)
+            .or_else(|| {
+                self.plugin_registry
+                    .get(plugin_id)
+                    .map(|entry| &entry.manifest)
+            })?;
+        let read = if wallpaper {
+            PluginCapability::WallpaperRead
+        } else {
+            PluginCapability::AppearanceRead
+        };
+        let control = if wallpaper {
+            PluginCapability::WallpaperControl
+        } else {
+            PluginCapability::AppearanceControl
+        };
+        if !manifest.capabilities.contains(&read) {
+            return None;
+        }
+        let can_write = manifest.capabilities.contains(&control) && !self.locked;
+        let mut snapshot = self.appearance_capabilities.snapshot(if wallpaper {
+            "wallpaper"
+        } else {
+            "appearance"
+        });
+        snapshot["writable"] = can_write.into();
+        if wallpaper {
+            snapshot["chooser"] = serde_json::json!({"available": cfg!(any(target_os="linux", target_os="windows")), "pending":self.wallpaper_chooser.is_some(), "result":self.wallpaper_chooser_results.get(plugin_id)});
+        }
+        Some(snapshot)
+    }
+
+    fn plugin_connectivity(&self, plugin_id: &str, wifi: bool) -> Option<serde_json::Value> {
+        let manifest = self
+            .external_plugin_packages
+            .get(plugin_id)
+            .map(|package| &package.manifest)
+            .or_else(|| {
+                self.plugin_registry
+                    .get(plugin_id)
+                    .map(|entry| &entry.manifest)
+            })?;
+        let capability = if wifi {
+            nickel_core::plugins::PluginCapability::NetworkRead
+        } else {
+            nickel_core::plugins::PluginCapability::BluetoothRead
+        };
+        manifest.capabilities.contains(&capability).then(|| {
+            let snapshot = if wifi {
+                crate::connectivity_capabilities::wifi_snapshot(&self.network)
+            } else {
+                crate::connectivity_capabilities::bluetooth_snapshot(&self.bluetooth)
+            };
+            let control = if wifi {
+                nickel_core::plugins::PluginCapability::NetworkControl
+            } else {
+                nickel_core::plugins::PluginCapability::BluetoothControl
+            };
+            crate::connectivity_capabilities::restrict_controls(
+                snapshot,
+                !self.locked && manifest.capabilities.contains(&control),
+            )
+        })
+    }
+
+    fn plugin_management(&self, plugin_id: &str) -> Option<serde_json::Value> {
+        use nickel_core::plugins::PluginCapability;
+        let manifest = &self.plugin_registry.get(plugin_id)?.manifest;
+        manifest
+            .capabilities
+            .contains(&PluginCapability::PluginsRead)
+            .then(|| {
+                let mut snapshot = crate::plugins_capabilities::snapshot(
+                    &self.plugin_status_snapshot(),
+                    manifest
+                        .capabilities
+                        .contains(&PluginCapability::PluginsControl)
+                        && !self.locked,
+                    self.plugins_results.get(plugin_id),
+                );
+                if let Some(plugins) = snapshot["plugins"].as_array_mut() {
+                    for plugin in plugins {
+                        let id = plugin["id"].as_str().unwrap_or("").to_owned();
+                        plugin["shell"] = serde_json::json!(self.is_shell_package(&id));
+                        plugin["selected"] = serde_json::json!(id == self.active_shell_package_id);
+                    }
+                }
+                snapshot["selectedShell"] = serde_json::json!(self.active_shell_package_id);
+                snapshot["shellPreview"] = self.shell_preview_snapshot(plugin_id);
+                snapshot
+            })
+    }
+
+    fn plugin_associations(&self, plugin_id: &str) -> Option<serde_json::Value> {
+        let manifest = self
+            .external_plugin_packages
+            .get(plugin_id)
+            .map(|package| &package.manifest)
+            .or_else(|| {
+                self.plugin_registry
+                    .get(plugin_id)
+                    .map(|entry| &entry.manifest)
+            })?;
+        manifest
+            .capabilities
+            .contains(&nickel_core::plugins::PluginCapability::AssociationsRead)
+            .then(|| {
+                let mut snapshot = crate::associations_capabilities::snapshot(
+                    self.associations_results.get(plugin_id),
+                );
+                let writable = !self.locked
+                    && manifest
+                        .capabilities
+                        .contains(&nickel_core::plugins::PluginCapability::AssociationsControl);
+                snapshot["writable"] = writable.into();
+                if !writable {
+                    snapshot["operations"]["setDefault"] = false.into();
+                    snapshot["operations"]["openSystemSettings"] = false.into();
+                }
+                snapshot
+            })
+    }
+
+    fn plugin_audio(&self, plugin_id: &str) -> Option<serde_json::Value> {
+        let manifest = self
+            .external_plugin_packages
+            .get(plugin_id)
+            .map(|package| &package.manifest)
+            .or_else(|| {
+                self.plugin_registry
+                    .get(plugin_id)
+                    .map(|entry| &entry.manifest)
+            })?;
+        manifest
+            .capabilities
+            .contains(&nickel_core::plugins::PluginCapability::AudioRead)
+            .then(|| crate::audio_capabilities::snapshot(&self.audio, self.locked))
+    }
+
+    fn plugin_keyboard_snapshot(&self, id: &str) -> Option<serde_json::Value> {
+        let manifest = self
+            .external_plugin_packages
+            .get(id)
+            .map(|package| &package.manifest)
+            .or_else(|| self.plugin_registry.get(id).map(|entry| &entry.manifest))?;
+        manifest
+            .capabilities
+            .contains(&nickel_core::plugins::PluginCapability::OnScreenKeyboardRead)
+            .then(|| {
+                let mut snapshot = self.keyboard_service_snapshot();
+                let granted = self.public_native_granted(id, nickel_core::plugins::PluginCapability::OnScreenKeyboardInput) && snapshot["available"] == true;
+                snapshot["operations"] = serde_json::json!({"press":granted && snapshot["recipientAvailable"] == true,"hide":granted,"toggleDock":granted,"holdModifiers":granted,"resize":granted});
+                snapshot
+            })
+    }
+
+    fn plugin_workspace_snapshot(&self, id: &str) -> Option<serde_json::Value> {
+        let manifest = self
+            .external_plugin_packages
+            .get(id)
+            .map(|package| &package.manifest)
+            .or_else(|| self.plugin_registry.get(id).map(|entry| &entry.manifest))?;
+        manifest
+            .capabilities
+            .contains(&nickel_core::plugins::PluginCapability::WorkspacesRead)
+            .then(|| {
+                crate::workspace_capabilities::snapshot(
+                    &self.workspaces,
+                    cfg!(target_os = "linux")
+                        && !self.locked
+                        && manifest
+                            .capabilities
+                            .contains(&nickel_core::plugins::PluginCapability::WorkspacesSwitch),
+                )
+            })
+    }
+    fn plugin_desktop_snapshot(&self, id: &str) -> Option<serde_json::Value> {
+        let manifest = self
+            .external_plugin_packages
+            .get(id)
+            .map(|package| &package.manifest)
+            .or_else(|| self.plugin_registry.get(id).map(|entry| &entry.manifest))?;
+        manifest.capabilities.contains(&nickel_core::plugins::PluginCapability::DesktopControl).then(||serde_json::json!({"available":cfg!(target_os="linux"),"operations":{"toggleShowDesktop":cfg!(target_os="linux")&&!self.locked}}))
+    }
+    fn public_native_granted(
+        &self,
+        id: &str,
+        capability: nickel_core::plugins::PluginCapability,
+    ) -> bool {
+        !self.locked
+            && self.plugin_registry.get(id).is_some_and(|entry| {
+                entry.desired_enabled
+                    && entry.health == nickel_core::plugins::PluginHealth::Running
+                    && entry.manifest.capabilities.contains(&capability)
+            })
+    }
+    fn plugin_displays(&self, plugin_id: &str) -> Option<serde_json::Value> {
+        let manifest = self
+            .external_plugin_packages
+            .get(plugin_id)
+            .map(|package| &package.manifest)
+            .or_else(|| {
+                self.plugin_registry
+                    .get(plugin_id)
+                    .map(|entry| &entry.manifest)
+            })?;
+        if !manifest
+            .capabilities
+            .contains(&nickel_core::plugins::PluginCapability::DisplayControl)
+        {
+            return None;
+        }
+        #[cfg(target_os = "linux")]
+        {
+            return Some(match self.session_host.projection_outputs() {
+                Ok(outputs) => serde_json::json!({"available": true, "outputs": outputs,
+                    "revision": crate::display_capabilities::revision(&outputs),
+                    "projectionModes": if !self.control_host.application().view_state().trusted_visible() {crate::display_capabilities::projection_modes(&outputs)} else {serde_json::json!([])},
+                    "application_scale": self.application_scale_service.snapshot(),
+                    "operations": {"setOrientation": true, "setApplicationScale": true, "identify": true},
+                    "pending_confirmation": self.display_preview.is_some(),
+                    "can_confirm": self.display_preview.as_ref().is_some_and(|preview| preview.owner == plugin_id && Instant::now() < preview.deadline && output_layout_from_snapshot(&outputs) == preview.applied),
+                    "can_revert": self.display_preview.as_ref().is_some_and(|preview| preview.owner == plugin_id && (output_layout_from_snapshot(&outputs) == preview.applied || output_layout_from_snapshot(&outputs) == preview.previous)),
+                    "transforms": ["normal","rotate90","rotate180","rotate270","flipped","flipped90","flipped180","flipped270"]}),
+                Err(error) => {
+                    serde_json::json!({"available": false, "reason": error, "outputs": [], "application_scale": self.application_scale_service.snapshot(), "operations": {"setApplicationScale": true, "identify": false}})
+                }
+            });
+        }
+        #[cfg(target_os = "windows")]
+        {
+            let read = crate::windows_plugin_display::read(plugin_id);
+            return Some(serde_json::json!({
+                "available": read.available,
+                "reason": read.reason,
+                "outputs": read.outputs,
+                "projectionModes": [],
+                "revision": read.revision,
+                "pending_confirmation": read.pending_confirmation,
+                "can_confirm": read.can_confirm,
+                "can_revert": read.can_revert,
+                "application_scale": self.application_scale_service.snapshot(),
+                "operations": {"setOrientation": read.available, "setApplicationScale": true, "identify": false},
+                "transforms": ["normal","rotate90","rotate180","rotate270"],
+            }));
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+        Some(serde_json::json!({
+            "available": false,
+            "reason": "display layout control is unavailable on this platform",
+            "outputs": [],
+        }))
+    }
+
+    fn plugin_navigation(&self, id: &str) -> Option<serde_json::Value> {
+        self.plugin_registry
+            .get(id)
+            .filter(|entry| {
+                entry
+                    .manifest
+                    .capabilities
+                    .contains(&nickel_core::plugins::PluginCapability::SettingsRead)
+            })
+            .and_then(|_| self.settings_navigation.clone())
+    }
+
+    fn plugin_system_metadata() -> serde_json::Value {
+        serde_json::json!({"available":true,"version":env!("CARGO_PKG_VERSION"),"platform":std::env::consts::OS,"architecture":std::env::consts::ARCH})
+    }
+
+    fn plugin_owner_resource_fields(&mut self, id: &str) -> Vec<(&'static str, serde_json::Value)> {
+        let tray = self
+            .plugin_registry
+            .get(id)
+            .filter(|entry| {
+                entry
+                    .manifest
+                    .capabilities
+                    .contains(&nickel_core::plugins::PluginCapability::TrayRead)
+            })
+            .map(|_| {
+                serde_json::Value::Array(self.tray.iter().take(128).map(|item|
+                serde_json::json!({"id":item.id,"title":item.title,"icon":false})).collect())
+            });
+        [
+            ("clock", Some(crate::clock_capabilities::snapshot())),
+            ("run", self.plugin_run_snapshot(id)),
+            ("windows", self.external_plugin_windows(id)),
+            ("windowMenu", self.plugin_window_menu(id)),
+            ("windowDestinations", self.plugin_window_destinations(id)),
+            ("windowPreviews", self.plugin_window_previews(id)),
+            ("applications", self.external_plugin_applications(id)),
+            ("applicationSearch", self.plugin_application_search(id)),
+            ("notifications", self.external_plugin_notifications(id)),
+            ("audio", self.plugin_audio(id)),
+            ("tray", tray),
+            ("associations", self.plugin_associations(id)),
+            ("plugins", self.plugin_management(id)),
+            ("preferences", self.plugin_preferences(id)),
+            ("appearance", self.plugin_appearance(id, false)),
+            ("wallpaper", self.plugin_appearance(id, true)),
+            ("session", self.plugin_session(id)),
+            ("features", self.plugin_features(id, false)),
+            ("shortcuts", self.plugin_features(id, true)),
+            ("system", Some(Self::plugin_system_metadata())),
+            ("navigation", self.plugin_navigation(id)),
+            ("wifi", self.plugin_connectivity(id, true)),
+            ("bluetooth", self.plugin_connectivity(id, false)),
+            ("displays", self.plugin_displays(id)),
+            ("keyboard", self.plugin_keyboard_snapshot(id)),
+            ("workspaces", self.plugin_workspace_snapshot(id)),
+            ("desktop", self.plugin_desktop_snapshot(id)),
+        ]
+        .into_iter()
+        .filter_map(|(name, value)| value.map(|value| (name, value)))
+        .collect()
+    }
+
+    pub(crate) fn plugin_panel_scene(
+        &mut self,
+        key: &nickel_core::plugins::PluginSurfaceKey,
+        width: u32,
+        height: u32,
+    ) -> Option<Vec<PaintCommand>> {
+        self.plugin_panel_scene_in_viewport(key, None, width, height)
+    }
+
+    fn plugin_panel_scene_in_viewport(
+        &mut self,
+        key: &nickel_core::plugins::PluginSurfaceKey,
+        output: Option<&str>,
+        width: u32,
+        height: u32,
+    ) -> Option<Vec<PaintCommand>> {
+        let replicated_surface = self.plugin_surface_hosts.get(key).map(|(surface, _)| {
+            (
+                surface.output == nickel_core::plugins::PluginOutputScope::All,
+                surface.width,
+                surface.height,
+            )
+        })?;
+        let desktop = self.desktop_host.application();
+        let output = output.or(Some(desktop.active_output.as_str()));
+        let available = desktop
+            .outputs
+            .iter()
+            .find(|candidate| Some(candidate.id.as_str()) == output);
+        let viewport = if replicated_surface.0 {
+            serde_json::json!({
+                "width": replicated_surface.1, "height": replicated_surface.2,
+                "output": null, "availableWidth": null, "availableHeight": null,
+            })
+        } else {
+            serde_json::json!({
+                "width": width, "height": height, "output": output,
+                "availableWidth": available.map(|output| output.work_area.width),
+                "availableHeight": available.map(|output| output.work_area.height),
+            })
+        };
+        let dependency_ids = self
+            .plugin_panel_host_for(key)?
+            .application()
+            .composition_dependency_ids();
+        let dependency_fields = dependency_ids
+            .into_iter()
+            .map(|id| {
+                let mut fields = self.plugin_owner_resource_fields(&id);
+                fields.push(("viewport", viewport.clone()));
+                (id, fields)
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let window_previews = self.plugin_window_previews(&key.plugin_id);
+        let preview_images = self.plugin_window_preview_images(&key.plugin_id);
+        let windows = self.external_plugin_windows(&key.plugin_id);
+        let window_menu = self.plugin_window_menu(&key.plugin_id);
+        let window_destinations = self.plugin_window_destinations(&key.plugin_id);
+        let applications = self.external_plugin_applications(&key.plugin_id);
+        let application_search = self.plugin_application_search(&key.plugin_id);
+        let features = self.plugin_features(&key.plugin_id, false);
+        let shortcuts = self.plugin_features(&key.plugin_id, true);
+        let mut application_images =
+            self.plugin_application_images(applications.as_ref(), application_search.as_ref());
+        application_images.insert("codex".into(), (u16::MAX, self.codex_icon.clone()));
+        let clock = crate::clock_capabilities::snapshot();
+        let notifications = self.external_plugin_notifications(&key.plugin_id);
+        let tray = self.plugin_registry.get(&key.plugin_id)
+            .filter(|entry| entry.manifest.capabilities.contains(&nickel_core::plugins::PluginCapability::TrayRead))
+            .map(|_| serde_json::Value::Array(self.tray.iter().take(128).map(|item| serde_json::json!({"id":item.id,"title":item.title,"icon":false})).collect()));
+        let audio = self.plugin_audio(&key.plugin_id);
+        let associations = self.plugin_associations(&key.plugin_id);
+        let plugins = self.plugin_management(&key.plugin_id);
+        let preferences = self.plugin_preferences(&key.plugin_id);
+        let appearance = self.plugin_appearance(&key.plugin_id, false);
+        let wallpaper = self.plugin_appearance(&key.plugin_id, true);
+        let session = self.plugin_session(&key.plugin_id);
+        if wallpaper.is_some() {
+            application_images.extend(self.appearance_capabilities.wallpaper_images.clone());
+        }
+        let system = Self::plugin_system_metadata();
+        let navigation = self.plugin_navigation(&key.plugin_id);
+        let wifi = self.plugin_connectivity(&key.plugin_id, true);
+        let bluetooth = self.plugin_connectivity(&key.plugin_id, false);
+        let displays = self.plugin_displays(&key.plugin_id);
+        let workspaces = self.plugin_workspace_snapshot(&key.plugin_id);
+        let desktop = self.plugin_desktop_snapshot(&key.plugin_id);
+        let keyboard_data = self.plugin_keyboard_snapshot(&key.plugin_id);
+        let result = (|| {
+            let host = self.plugin_panel_host_for(key)?;
+            let projected = (|| -> Result<bool, String> {
+                application_images.extend(preview_images);
+                let fields = [
+                    ("viewport", Some(&viewport)),
+                    ("clock", Some(&clock)),
+                    ("keyboard", keyboard_data.as_ref()),
+                    ("windows", windows.as_ref()),
+                    ("windowMenu", window_menu.as_ref()),
+                    ("windowDestinations", window_destinations.as_ref()),
+                    ("windowPreviews", window_previews.as_ref()),
+                    ("applications", applications.as_ref()),
+                    ("applicationSearch", application_search.as_ref()),
+                    ("features", features.as_ref()),
+                    ("shortcuts", shortcuts.as_ref()),
+                    ("notifications", notifications.as_ref()),
+                    ("audio", audio.as_ref()),
+                    ("tray", tray.as_ref()),
+                    ("associations", associations.as_ref()),
+                    ("plugins", plugins.as_ref()),
+                    ("preferences", preferences.as_ref()),
+                    ("appearance", appearance.as_ref()),
+                    ("wallpaper", wallpaper.as_ref()),
+                    ("session", session.as_ref()),
+                    ("system", Some(&system)),
+                    ("navigation", navigation.as_ref()),
+                    ("wifi", wifi.as_ref()),
+                    ("bluetooth", bluetooth.as_ref()),
+                    ("displays", displays.as_ref()),
+                    ("workspaces", workspaces.as_ref()),
+                    ("desktop", desktop.as_ref()),
+                ]
+                .into_iter()
+                .filter_map(|(field, value)| value.map(|value| (field, value)))
+                .collect::<Vec<_>>();
+                let resource_changed = host.application_mut().sync_host_data_fields(&fields)?;
+                let dependency_changed = host
+                    .application_mut()
+                    .sync_composition_dependency_fields(&dependency_fields)?;
+                let application_images_changed =
+                    if applications.is_some() || window_previews.is_some() {
+                        host.application_mut()
+                            .sync_application_images(application_images)
+                    } else {
+                        false
+                    };
+                if resource_changed || dependency_changed || application_images_changed {
+                    tracing::warn!(
+                        surface = %key.surface_id,
+                        resource_changed,
+                        dependency_changed,
+                        application_images_changed,
+                        "plugin projection change source"
+                    );
+                }
+                Ok(resource_changed || dependency_changed || application_images_changed)
+            })();
+            let projected = match projected {
+                Ok(changed) => changed,
+                Err(error) => return Some(Err(error)),
+            };
+            Some(
+                render_plugin_host(
+                    host,
+                    None,
+                    HostBatch {
+                        application_changed: projected,
+                        surface_size: Some((width, height)),
+                        ..HostBatch::default()
+                    },
+                )
+                .map(|(commands, bytes)| (commands, bytes, host.application_mut().take_effects())),
+            )
+        })()?;
+        match result {
+            Ok((commands, bytes, effects)) => {
+                self.record_plugin_panel_memory(key, bytes);
+                if let Err(error) = self.reconcile_plugin_surface_root(key) {
+                    self.fail_plugin_panel_runtime(&key.plugin_id, error);
+                    return None;
+                }
+                self.apply_plugin_effects(effects);
+                Some(commands)
+            }
+            Err(error) => {
+                self.fail_plugin_panel_runtime(&key.plugin_id, error);
+                None
+            }
+        }
+    }
+
+    pub(crate) fn plugin_panel_scene_for_output(
+        &mut self,
+        key: &nickel_core::plugins::PluginSurfaceKey,
+        output: Option<&str>,
+        width: u32,
+        height: u32,
+    ) -> Option<Vec<PaintCommand>> {
+        self.plugin_panel_scene_in_viewport(key, output, width, height)
+    }
+
+    pub(crate) fn plugin_surface_scene_for_output(
+        &mut self,
+        key: &nickel_core::plugins::PluginSurfaceKey,
+        output: Option<&str>,
+        width: u32,
+        height: u32,
+    ) -> Option<Vec<PaintCommand>> {
+        self.plugin_panel_scene_for_output(key, output, width, height)
+    }
+
+    fn record_plugin_panel_memory(
+        &mut self,
+        key: &nickel_core::plugins::PluginSurfaceKey,
+        bytes: u64,
+    ) {
+        self.plugin_panel_memory.insert(key.clone(), bytes);
+        let total = self
+            .plugin_panel_memory
+            .iter()
+            .filter(|(surface, _)| surface.plugin_id == key.plugin_id)
+            .map(|(_, bytes)| *bytes)
+            .fold(0_u64, u64::saturating_add);
+        let _ = self.plugin_registry.record_memory(
+            &key.plugin_id,
+            nickel_core::plugins::PluginMemory {
+                native_ui_bytes: Some(total),
+                ..Default::default()
+            },
+        );
+        self.maybe_publish_plugin_status();
+    }
+
+    pub(crate) fn close_plugin_window(
+        &mut self,
+        key: &nickel_core::plugins::PluginSurfaceKey,
+    ) -> Result<bool, String> {
+        if !self
+            .plugin_panel_placement(key)
+            .is_some_and(|(kind, _, _, _, _)| {
+                matches!(
+                    kind,
+                    nickel_core::plugins::PluginSurfaceKind::Window
+                        | nickel_core::plugins::PluginSurfaceKind::Dialog
+                        | nickel_core::plugins::PluginSurfaceKind::Overlay
+                )
+            })
+        {
+            return Ok(false);
+        }
+        let owned_dialogs = self
+            .plugin_panels()
+            .into_iter()
+            .filter(|(surface, placement)| {
+                surface.plugin_id == key.plugin_id
+                    && placement.kind == nickel_core::plugins::PluginSurfaceKind::Dialog
+                    && placement.owner.as_deref() == Some(key.surface_id.as_str())
+            })
+            .map(|(surface, _)| surface)
+            .collect::<Vec<_>>();
+        for dialog in owned_dialogs {
+            self.close_plugin_window(&dialog)?;
+        }
+        // Surface visibility does not determine package lifetime. The shared
+        // runtime remains owned until explicit disable or runtime failure.
+        if let Some(host) = self.plugin_panel_host_for(key) {
+            host.application().retire_surface()?;
+        }
+        if self.primary_panel_key == *key {
+            self.plugin_surface_hosts.remove(key);
+            self.primary_panel_key = crate::plugin_panel::surface_key();
+        } else {
+            self.plugin_surface_hosts.remove(key);
+        }
+        self.plugin_panel_memory.remove(key);
+        self.plugin_window_placement_overrides.remove(key);
+        let remaining_bytes = self
+            .plugin_panel_memory
+            .iter()
+            .filter(|(surface, _)| surface.plugin_id == key.plugin_id)
+            .map(|(_, bytes)| *bytes)
+            .fold(0_u64, u64::saturating_add);
+        self.plugin_registry.record_memory(
+            &key.plugin_id,
+            nickel_core::plugins::PluginMemory {
+                native_ui_bytes: Some(remaining_bytes),
+                ..Default::default()
+            },
+        )?;
+        self.plugin_activation_generation =
+            self.plugin_activation_generation.wrapping_add(1).max(1);
+        self.maybe_publish_plugin_status();
+        Ok(true)
+    }
+
+    pub(crate) fn set_plugin_window_placement(
+        &mut self,
+        id: &str,
+        surface_id: &str,
+        anchor: nickel_core::plugins::PluginSurfaceAnchor,
+        offset_x: i32,
+        offset_y: i32,
+    ) -> Result<bool, String> {
+        let entry = self
+            .plugin_registry
+            .get(id)
+            .ok_or_else(|| format!("unknown plugin {id:?}"))?;
+        if !entry.desired_enabled || entry.health != nickel_core::plugins::PluginHealth::Running {
+            return Err(format!("plugin {id:?} is not running"));
+        }
+        let declared = self
+            .external_plugin_packages
+            .get(id)
+            .is_some_and(|package| {
+                package.manifest.surfaces.iter().any(|surface| {
+                    surface.id == surface_id
+                        && surface.kind == nickel_core::plugins::PluginSurfaceKind::Window
+                })
+            });
+        if !declared || !(-8192..=8192).contains(&offset_x) || !(-8192..=8192).contains(&offset_y) {
+            return Err(format!("plugin {id:?} cannot place window {surface_id:?}"));
+        }
+        let key = nickel_core::plugins::PluginSurfaceKey {
+            plugin_id: id.to_owned(),
+            surface_id: surface_id.to_owned(),
+        };
+        let surface = &mut self
+            .plugin_surface_hosts
+            .get_mut(&key)
+            .ok_or_else(|| format!("plugin window {surface_id:?} is not open"))?
+            .0;
+        if surface.kind != nickel_core::plugins::PluginSurfaceKind::Window {
+            return Err(format!("plugin surface {surface_id:?} is not a window"));
+        }
+        if (surface.anchor, surface.offset_x, surface.offset_y) == (anchor, offset_x, offset_y) {
+            return Ok(false);
+        }
+        surface.anchor = anchor;
+        surface.offset_x = offset_x;
+        surface.offset_y = offset_y;
+        self.plugin_window_placement_overrides
+            .insert(key, (anchor, offset_x, offset_y));
+        Ok(true)
+    }
+
+    fn focus_plugin_window(&mut self, id: &str, surface_id: &str) -> Result<bool, String> {
+        let entry = self
+            .plugin_registry
+            .get(id)
+            .ok_or_else(|| format!("unknown plugin {id:?}"))?;
+        if !entry.desired_enabled || entry.health != nickel_core::plugins::PluginHealth::Running {
+            return Err(format!("plugin {id:?} is not running"));
+        }
+        let declared = self
+            .external_plugin_packages
+            .get(id)
+            .is_some_and(|package| {
+                package.manifest.surfaces.iter().any(|surface| {
+                    surface.id == surface_id
+                        && !surface.passive
+                        && matches!(
+                            surface.kind,
+                            nickel_core::plugins::PluginSurfaceKind::Window
+                                | nickel_core::plugins::PluginSurfaceKind::Dialog
+                                | nickel_core::plugins::PluginSurfaceKind::Overlay
+                        )
+                })
+            });
+        let key = nickel_core::plugins::PluginSurfaceKey {
+            plugin_id: id.to_owned(),
+            surface_id: surface_id.to_owned(),
+        };
+        if !declared || self.locked || !self.plugin_surface_hosts.contains_key(&key) {
+            return Err(format!(
+                "plugin surface {id:?}/{surface_id:?} is unavailable for focus"
+            ));
+        }
+        #[cfg(target_os = "linux")]
+        return Ok(self.send_session_command(
+            "plugin-surface-focus",
+            ShellCommand::FocusPluginSurface { key },
+        ));
+        #[cfg(target_os = "windows")]
+        {
+            self.pending_plugin_surface_focus = Some(key);
+            Ok(true)
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(crate) fn take_pending_plugin_surface_focus(
+        &mut self,
+    ) -> Option<nickel_core::plugins::PluginSurfaceKey> {
+        self.pending_plugin_surface_focus.take()
+    }
+
+    pub(crate) fn show_plugin_window(
+        &mut self,
+        id: &str,
+        surface_id: &str,
+    ) -> Result<bool, String> {
+        if self.is_shell_package(id) && !self.shell_package_selected(id) {
+            return Err("shell package is not selected".into());
+        }
+        let entry = self
+            .plugin_registry
+            .get(id)
+            .ok_or_else(|| format!("unknown plugin {id:?}"))?;
+        if !entry.desired_enabled || entry.health != nickel_core::plugins::PluginHealth::Running {
+            return Err(format!("plugin {id:?} is not running"));
+        }
+        let descriptor = self
+            .external_plugin_packages
+            .get(id)
+            .ok_or_else(|| format!("plugin {id:?} is not an installed package"))?;
+        let surface = descriptor
+            .manifest
+            .surfaces
+            .iter()
+            .find(|surface| {
+                surface.id == surface_id
+                    && matches!(
+                        surface.kind,
+                        nickel_core::plugins::PluginSurfaceKind::Panel
+                            | nickel_core::plugins::PluginSurfaceKind::Dock
+                            | nickel_core::plugins::PluginSurfaceKind::Window
+                            | nickel_core::plugins::PluginSurfaceKind::Dialog
+                            | nickel_core::plugins::PluginSurfaceKind::Overlay
+                    )
+            })
+            .cloned()
+            .ok_or_else(|| {
+                format!("plugin {id:?} has no declared window, dialog, or overlay {surface_id:?}")
+            })?;
+        let key = nickel_core::plugins::PluginSurfaceKey {
+            plugin_id: id.to_owned(),
+            surface_id: surface_id.to_owned(),
+        };
+        if self.plugin_surface_matches(&key) {
+            return Ok(false);
+        }
+        if let Some(owner) = &surface.owner {
+            let owner_key = nickel_core::plugins::PluginSurfaceKey {
+                plugin_id: id.to_owned(),
+                surface_id: owner.clone(),
+            };
+            if !self.plugin_surface_matches(&owner_key) {
+                return Err(format!("dialog owner {owner:?} is closed"));
+            }
+        }
+        let package = descriptor.load()?;
+        let settings = self
+            .plugin_settings
+            .get(id)
+            .cloned()
+            .map(Ok)
+            .unwrap_or_else(|| external_plugin_settings(&package.manifest))?;
+        let runtime = self
+            .package_runtimes
+            .get(id)
+            .cloned()
+            .ok_or_else(|| format!("plugin {id:?} has no live package runtime"))?;
+        let application = match runtime {
+            RetainedPackageRuntime::Ordinary(runtime) => {
+                crate::plugin_panel::PluginPanelApplication::from_package_surface_with_runtime(
+                    &package,
+                    &settings,
+                    &surface,
+                    crate::plugin_panel::package_images(&package)?,
+                    Some(runtime),
+                )?
+            }
+            RetainedPackageRuntime::Composed(host) if !self.is_shell_package(id) => {
+                let owner = host.borrow().resolution().active.clone();
+                let runtime = host.borrow().shared_owner_runtime(&owner)?;
+                crate::plugin_panel::PluginPanelApplication::from_package_surface_with_runtime(
+                    &package,
+                    &settings,
+                    &surface,
+                    crate::plugin_panel::package_images(&package)?,
+                    Some(runtime),
+                )?
+            }
+            RetainedPackageRuntime::Composed(host) => {
+                let catalog = self.composition_catalog(id, &package)?;
+                let snapshots = self.composition_snapshots(&catalog, &surface);
+                crate::plugin_panel::PluginPanelApplication::from_composed_surface(
+                    &catalog,
+                    id,
+                    &snapshots,
+                    &surface,
+                    Some(host),
+                )?
+            }
+        };
+        let surface = application.resolved_surface(&surface)?;
+        let host = nickel_ui::UiHost::new(application, surface.width, surface.height);
+        if self.primary_panel_host_ref().is_none() {
+            self.primary_panel_key = key.clone();
+        }
+        self.plugin_surface_hosts.insert(key, (surface, host));
+        self.plugin_activation_generation =
+            self.plugin_activation_generation.wrapping_add(1).max(1);
+        self.maybe_publish_plugin_status();
+        Ok(true)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn lock_password_len(&self) -> usize {
+        self.lock_host.application().password.len()
+    }
+
+    pub fn plugin_status_snapshot(&self) -> nickel_session_protocol::PluginStatusSnapshot {
+        use nickel_core::plugins::PluginHealth;
+        use nickel_session_protocol::{
+            PluginMemorySnapshot, PluginRuntimeHealth, PluginSettingKind, PluginSettingStatus,
+            PluginStatus, PluginStatusSnapshot,
+        };
+
+        PluginStatusSnapshot {
+            activation_generation: self.plugin_activation_generation,
+            plugins: self
+                .plugin_registry
+                .entries()
+                .map(|entry| PluginStatus {
+                    id: entry.manifest.id.clone(),
+                    name: entry.manifest.name.clone(),
+                    author: entry.manifest.author.clone(),
+                    version: entry.manifest.version.clone(),
+                    desired_enabled: entry.desired_enabled,
+                    health: match &entry.health {
+                        PluginHealth::Disabled => PluginRuntimeHealth::Disabled,
+                        PluginHealth::Starting => PluginRuntimeHealth::Starting,
+                        PluginHealth::Running => PluginRuntimeHealth::Running,
+                        PluginHealth::Failed(error) => {
+                            PluginRuntimeHealth::Failed(error.chars().take(256).collect())
+                        }
+                    },
+                    capabilities: entry
+                        .manifest
+                        .capabilities
+                        .iter()
+                        .map(|capability| capability.as_str().to_owned())
+                        .collect(),
+                    surfaces: entry
+                        .manifest
+                        .surfaces
+                        .iter()
+                        .map(|surface| match &surface.owner {
+                            Some(owner) => format!(
+                                "{}: {} (owned by {})",
+                                surface.id,
+                                surface.kind.as_str(),
+                                owner
+                            ),
+                            None => format!("{}: {}", surface.id, surface.kind.as_str()),
+                        })
+                        .collect(),
+                    composition: entry
+                        .manifest
+                        .composition
+                        .as_ref()
+                        .map(|composition| {
+                            composition
+                                .contributions
+                                .iter()
+                                .map(|entry| {
+                                    format!("Contributes {} to {}", entry.id, entry.collection)
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    settings: entry
+                        .manifest
+                        .settings
+                        .iter()
+                        .map(|setting| PluginSettingStatus {
+                            id: setting.id.clone(),
+                            label: setting.label.clone(),
+                            description: setting.description.clone(),
+                            kind: match &setting.kind {
+                                nickel_core::plugins::PluginSettingKind::Boolean { .. } => {
+                                    PluginSettingKind::Boolean
+                                }
+                                nickel_core::plugins::PluginSettingKind::Integer {
+                                    min,
+                                    max,
+                                    ..
+                                } => PluginSettingKind::Integer {
+                                    min: *min,
+                                    max: *max,
+                                },
+                                nickel_core::plugins::PluginSettingKind::Text {
+                                    max_length,
+                                    ..
+                                } => PluginSettingKind::Text {
+                                    max_length: *max_length,
+                                },
+                                nickel_core::plugins::PluginSettingKind::Choice {
+                                    options, ..
+                                } => PluginSettingKind::Choice {
+                                    options: options.clone(),
+                                },
+                            },
+                            value: self
+                                .plugin_settings
+                                .get(&entry.manifest.id)
+                                .and_then(|values| values.get(&setting.id))
+                                .cloned()
+                                .unwrap_or_else(|| setting.kind.default_value()),
+                        })
+                        .collect(),
+                    memory: PluginMemorySnapshot {
+                        js_heap_bytes: entry.memory.js_heap_bytes,
+                        native_ui_bytes: entry.memory.native_ui_bytes,
+                        texture_bytes: entry.memory.texture_bytes,
+                        tracked_peak_bytes: entry.tracked_peak_bytes,
+                        timers: entry.memory.timers,
+                        subscriptions: entry.memory.subscriptions,
+                    },
+                })
+                .collect(),
+        }
+    }
+
+    // A provider may have no visible surface. Execute through the ordinary
+    // package application so callback requests retain manifest effect validation.
+    // No native host or visible surface is installed for this evaluation.
+    fn invoke_hidden_package_setting(
+        &mut self,
+        provider: &str,
+        id: &str,
+        value: &serde_json::Value,
+    ) -> Result<Vec<crate::plugin_panel::PluginEffect>, String> {
+        let manifest = self
+            .plugin_registry
+            .get(provider)
+            .filter(|entry| entry.desired_enabled)
+            .ok_or("Settings provider is unavailable")?
+            .manifest
+            .clone();
+        let runtime = self
+            .package_settings_runtimes
+            .get(provider)
+            .cloned()
+            .ok_or("Settings provider runtime is unavailable")?;
+        let fields = self.plugin_owner_resource_fields(provider);
+        let mut data: serde_json::Value = runtime
+            .borrow_mut()
+            .eval_json("JSON.stringify(nickel.data)")?;
+        let object = data
+            .as_object_mut()
+            .ok_or("provider snapshot must be an object")?;
+        object.remove("__componentProps");
+        for (name, value) in fields {
+            object.insert(name.into(), value);
+        }
+        runtime.borrow_mut().set_data(&data.to_string())?;
+        if let Some(RetainedPackageRuntime::Composed(host)) =
+            self.package_runtimes.get(&self.active_shell_package_id)
+        {
+            let mut host = host.borrow_mut();
+            let owner = host
+                .participating_owners()
+                .find(|owner| owner.id == provider)
+                .cloned();
+            if let Some(owner) = owner {
+                if std::rc::Rc::ptr_eq(&runtime, &host.shared_owner_runtime(&owner)?) {
+                    host.update_snapshot(&owner, &data)?;
+                }
+            }
+        }
+        runtime.borrow_mut().begin_transaction()?;
+        let result = (|| {
+            runtime.borrow_mut().invoke_setting(provider, id, value)?;
+            let effects = runtime.borrow_mut().take_effects()?;
+            crate::plugin_panel::PluginPanelApplication::validate_provider_effects(
+                &manifest,
+                runtime.clone(),
+                effects,
+                &data,
+            )
+        })();
+        runtime.borrow_mut().finish_transaction(result.is_ok())?;
+        result
+    }
+
+    fn refresh_package_settings(&mut self) {
+        let mut runtimes = std::collections::BTreeMap::new();
+        for (id, retained) in &self.package_runtimes {
+            runtimes.extend(retained.contexts(id));
+        }
+        for (key, (_, host)) in &self.plugin_surface_hosts {
+            runtimes.insert(key.plugin_id.clone(), host.application().shared_runtime());
+        }
+        // The selected shell's contexts own its provider registrations. An
+        // inactive shell's duplicate dependency instance cannot replace them.
+        if let Some(retained) = self.package_runtimes.get(&self.active_shell_package_id) {
+            runtimes.extend(retained.contexts(&self.active_shell_package_id));
+        }
+        let retired = self
+            .package_settings_runtimes
+            .keys()
+            .filter(|id| !runtimes.contains_key(*id))
+            .cloned()
+            .collect::<Vec<_>>();
+        for id in retired {
+            self.package_settings_registry.retire_provider(&id);
+            self.package_settings_runtimes.remove(&id);
+            self.package_settings_values.remove(&id);
+            self.package_settings_value_revisions.remove(&id);
+            self.associations_results.remove(&id);
+            self.plugins_results.remove(&id);
+        }
+        let mut changed_runtime = false;
+        for (id, runtime) in &runtimes {
+            if self
+                .package_settings_runtimes
+                .get(id)
+                .is_some_and(|previous| std::rc::Rc::ptr_eq(previous, runtime))
+            {
+                continue;
+            }
+            self.associations_results.remove(id);
+            self.plugins_results.remove(id);
+            match runtime
+                .borrow_mut()
+                .publish_settings(&mut self.package_settings_registry, id)
+            {
+                Ok(()) => {
+                    self.package_settings_runtimes
+                        .insert(id.clone(), runtime.clone());
+                    changed_runtime = true;
+                    self.package_settings_value_revisions.remove(id);
+                    self.package_settings_values.remove(id);
+                }
+                Err(error) => {
+                    self.package_settings_registry.retire_provider(id);
+                    self.package_settings_values.remove(id);
+                    self.package_settings_value_revisions.remove(id);
+                    tracing::warn!(plugin_id = %id, %error, "package Settings registration rejected");
+                }
+            }
+        }
+        let mut values_changed = false;
+        for (id, runtime) in &self.package_settings_runtimes {
+            let revision = runtime.borrow().settings_revision();
+            if self.package_settings_value_revisions.get(id) == Some(&revision) {
+                continue;
+            }
+            self.package_settings_value_revisions
+                .insert(id.clone(), revision);
+            match runtime
+                .borrow_mut()
+                .read_settings_values(&self.package_settings_registry)
+            {
+                Ok(values) => {
+                    if self.package_settings_values.get(id) != Some(&values) {
+                        self.package_settings_values.insert(id.clone(), values);
+                        values_changed = true;
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(plugin_id = %id, %error, "package Settings value snapshot rejected")
+                }
+            }
+        }
+        let generation = self
+            .package_settings_registry
+            .settings_snapshot()
+            .generation;
+        if changed_runtime || values_changed || generation != self.package_settings_generation {
+            for (id, runtime) in runtimes {
+                if let Err(error) = runtime
+                    .borrow_mut()
+                    .set_settings_registry(&self.package_settings_registry)
+                {
+                    tracing::warn!(plugin_id = %id, %error, "package Settings snapshot failed");
+                }
+            }
+            for runtime in self.package_settings_runtimes.values() {
+                if let Err(error) = runtime
+                    .borrow_mut()
+                    .set_settings_values(&self.package_settings_values)
+                {
+                    tracing::warn!(%error, "package Settings values failed");
+                }
+            }
+            for (_, host) in self.plugin_surface_hosts.values_mut() {
+                match host.application_mut().refresh_settings_render() {
+                    Ok(changed) => {
+                        host.step(HostBatch {
+                            application_changed: changed,
+                            ..HostBatch::default()
+                        });
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "package Settings surface refresh rejected")
+                    }
+                }
+            }
+            self.package_settings_generation = generation;
+        }
+    }
+
+    fn maybe_publish_plugin_status(&mut self) {
+        self.refresh_package_settings();
+        #[cfg(target_os = "linux")]
+        {
+            let snapshot = self.plugin_status_snapshot();
+            if self.last_published_plugin_status.as_ref() == Some(&snapshot) {
+                return;
+            }
+            if self.send_session_command(
+                "publish-plugin-status",
+                ShellCommand::PublishPluginStatus {
+                    snapshot: snapshot.clone(),
+                },
+            ) {
+                self.last_published_plugin_status = Some(snapshot);
+            }
+        }
+    }
+
+    fn propagate_composed_settings(
+        &mut self,
+        id: &str,
+        values: &std::collections::BTreeMap<String, serde_json::Value>,
+    ) -> Result<(), String> {
+        let composed = self
+            .package_runtimes
+            .values()
+            .filter_map(|runtime| {
+                let RetainedPackageRuntime::Composed(host) = runtime else {
+                    return None;
+                };
+                let owner = host
+                    .borrow()
+                    .participating_owners()
+                    .find(|owner| owner.id == id)
+                    .cloned()?;
+                Some((host.clone(), owner))
+            })
+            .collect::<Vec<_>>();
+        for (host, owner) in &composed {
+            let mut host = host.borrow_mut();
+            let mut data = host.snapshot(owner)?.clone();
+            data["settings"] = serde_json::to_value(&values).map_err(|error| error.to_string())?;
+            host.update_snapshot(owner, &data)?;
+        }
+        for (_, host) in self.plugin_surface_hosts.values_mut() {
+            if host
+                .application()
+                .shared_composition_runtime()
+                .is_some_and(|runtime| {
+                    composed
+                        .iter()
+                        .any(|(candidate, _)| std::rc::Rc::ptr_eq(candidate, &runtime))
+                })
+            {
+                let changed = host.application_mut().refresh_composition_snapshots()?;
+                host.step(HostBatch {
+                    application_changed: changed,
+                    ..HostBatch::default()
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Applies a declared preference and refreshes an active installed plugin.
+    pub fn set_plugin_setting(
+        &mut self,
+        id: &str,
+        key: &str,
+        value: serde_json::Value,
+    ) -> Result<bool, String> {
+        let entry = self
+            .plugin_registry
+            .get(id)
+            .ok_or_else(|| format!("unknown plugin {id:?}"))?;
+        let manifest = entry.manifest.clone();
+        let setting = manifest
+            .settings
+            .iter()
+            .find(|setting| setting.id == key)
+            .ok_or_else(|| format!("unknown setting {key:?}"))?;
+        if !setting.kind.accepts(&value) {
+            return Err(format!("invalid value for setting {key:?}"));
+        }
+        let mut values = self.plugin_settings.get(id).cloned().unwrap_or_else(|| {
+            manifest
+                .settings
+                .iter()
+                .map(|setting| (setting.id.clone(), setting.kind.default_value()))
+                .collect()
+        });
+        if values.get(key) == Some(&value) {
+            return Ok(false);
+        }
+        values.insert(key.to_owned(), value.clone());
+        if matches!(
+            self.package_runtimes.get(id),
+            Some(RetainedPackageRuntime::Composed(_))
+        ) {
+            #[cfg(not(test))]
+            nickel_core::plugins::PluginPreferences::update_default(&manifest, key, value)
+                .map_err(|error| format!("could not save plugin setting: {error}"))?;
+            self.plugin_settings.insert(id.to_owned(), values.clone());
+            self.propagate_composed_settings(id, &values)?;
+            self.plugin_activation_generation =
+                self.plugin_activation_generation.wrapping_add(1).max(1);
+            self.maybe_publish_plugin_status();
+            return Ok(true);
+        }
+        let mut replacement_runtime = None;
+        let replacement = if entry.desired_enabled {
+            self.external_plugin_packages
+                .get(id)
+                .map(|descriptor| {
+                    let package = descriptor.load()?;
+                    let active_ids = self
+                            .plugin_panels()
+                            .into_iter()
+                            .filter(|(surface, _)| surface.plugin_id == id)
+                            .map(|(surface, _)| surface.surface_id)
+                            .collect::<std::collections::HashSet<_>>();
+                        let first_surface = package
+                            .manifest
+                            .surfaces
+                            .iter()
+                            .find(|surface| {
+                                active_ids.contains(&surface.id)
+                                    && !matches!(
+                                        surface.kind,
+                                        nickel_core::plugins::PluginSurfaceKind::Dialog
+                                            | nickel_core::plugins::PluginSurfaceKind::Overlay
+                                    )
+                            })
+                            .or_else(|| package.manifest.surfaces.first())
+                            .ok_or("installed plugin has no declared surface")?;
+                        let runtime = crate::plugin_panel::PluginPanelApplication::shared_package_runtime(
+                            &package,
+                            &values,
+                            first_surface,
+                        )?;
+                        replacement_runtime = Some(runtime.clone());
+                        let images = crate::plugin_panel::package_images(&package)?;
+                        package
+                            .manifest
+                            .surfaces
+                            .iter()
+                            .filter(|surface| active_ids.contains(&surface.id))
+                            .map(|surface| {
+                                crate::plugin_panel::PluginPanelApplication::from_package_surface_with_runtime(
+                                    &package, &values, surface, images.clone(), Some(runtime.clone()),
+                                )
+                                .map(|application| (Some(surface.id.clone()), application))
+                            })
+                            .collect::<Result<Vec<_>, String>>()
+                })
+                .transpose()?
+        } else {
+            None
+        };
+        #[cfg(not(test))]
+        nickel_core::plugins::PluginPreferences::update_default(&manifest, key, value)
+            .map_err(|error| format!("could not save plugin setting: {error}"))?;
+        self.plugin_settings.insert(id.to_owned(), values.clone());
+        self.propagate_composed_settings(id, &values)?;
+        if let Some(runtime) = replacement_runtime {
+            self.package_runtimes
+                .insert(id.to_owned(), RetainedPackageRuntime::Ordinary(runtime));
+        }
+        let mut replaced_panels = false;
+        if let Some(replacements) = replacement {
+            replaced_panels = replacements
+                .iter()
+                .any(|(surface_id, _)| surface_id.is_some());
+            for (surface_id, application) in replacements {
+                if let Some(surface_id) = surface_id {
+                    let grant = manifest
+                        .surfaces
+                        .iter()
+                        .find(|surface| surface.id == surface_id)
+                        .expect("replacement surface belongs to the validated manifest");
+                    let mut resolved = application.resolved_surface(grant)?;
+                    let key = nickel_core::plugins::PluginSurfaceKey {
+                        plugin_id: id.to_owned(),
+                        surface_id: surface_id.clone(),
+                    };
+                    if resolved.kind == nickel_core::plugins::PluginSurfaceKind::Window
+                        && let Some((anchor, offset_x, offset_y)) =
+                            self.plugin_window_placement_overrides.get(&key).copied()
+                    {
+                        resolved.anchor = anchor;
+                        resolved.offset_x = offset_x;
+                        resolved.offset_y = offset_y;
+                    }
+                    if let Some((surface, host)) = self.plugin_surface_hosts.get_mut(&key) {
+                        *surface = resolved.clone();
+                        *host =
+                            nickel_ui::UiHost::new(application, resolved.width, resolved.height);
+                    }
+                }
+            }
+            self.plugin_panel_memory
+                .retain(|key, _| key.plugin_id != id);
+            if replaced_panels {
+                let _ = self.plugin_registry.record_memory(
+                    id,
+                    nickel_core::plugins::PluginMemory {
+                        native_ui_bytes: Some(0),
+                        ..Default::default()
+                    },
+                );
+            }
+        }
+        self.plugin_activation_generation =
+            self.plugin_activation_generation.wrapping_add(1).max(1);
+        if replaced_panels {
+            for (surface, placement) in self
+                .plugin_panels()
+                .into_iter()
+                .filter(|(surface, _)| surface.plugin_id == id)
+            {
+                let _ = self.plugin_panel_scene(&surface, placement.width, placement.height);
+            }
+        }
+        self.maybe_publish_plugin_status();
+        Ok(true)
+    }
+
+    /// Retire a failed installed runtime while preserving its desired activation.
+    fn fail_installed_plugin_runtime(&mut self, id: &str, error: String) -> bool {
+        if self.is_shell_package(id) {
+            self.cancel_keyboard_gestures();
+        }
+        if !self.external_plugin_packages.contains_key(id)
+            || !self
+                .plugin_registry
+                .get(id)
+                .is_some_and(|entry| entry.health == nickel_core::plugins::PluginHealth::Running)
+        {
+            return false;
+        }
+        tracing::warn!(plugin = id, %error, "installed plugin runtime failed");
+        let _ = self.plugin_registry.mark_failed(id, error);
+        if id == self.active_shell_package_id {
+            self.retire_preview_plugin_state();
+        }
+        self.package_runtimes.remove(id);
+        self.retire_installed_composition_owner(id);
+        if let Err(error) = self.reconcile_installed_contributors() {
+            tracing::warn!(%error,"failed contributor retirement refresh failed");
+        }
+        self.application_search.retire(id);
+        self.plugin_surface_hosts
+            .retain(|key, _| key.plugin_id != id);
+        self.plugin_panel_memory
+            .retain(|key, _| key.plugin_id != id);
+        self.plugin_window_placement_overrides
+            .retain(|key, _| key.plugin_id != id);
+        if self.primary_panel_key.plugin_id == id {
+            self.plugin_surface_hosts.remove(&self.primary_panel_key());
+            self.primary_panel_key = crate::plugin_panel::surface_key();
+        }
+        self.plugin_activation_generation =
+            self.plugin_activation_generation.wrapping_add(1).max(1);
+        if self
+            .shell_selection_preview
+            .as_ref()
+            .is_some_and(|preview| preview.selected == id || preview.owner == id)
+        {
+            self.recover_pending_shell("The preview shell or its requesting provider failed.");
+        }
+        self.maybe_publish_plugin_status();
+        true
+    }
+
+    /// Fail one first-party runtime, retire its owned state, then publish one
+    /// activation change. Desired enablement stays intact for Settings retry.
+    fn fail_bundled_plugin_runtime(&mut self, id: &str, error: String, retire: fn(&mut Self)) {
+        if !self
+            .plugin_registry
+            .get(id)
+            .is_some_and(|entry| entry.health == nickel_core::plugins::PluginHealth::Running)
+        {
+            return;
+        }
+        tracing::warn!(plugin = id, %error, "bundled plugin runtime failed");
+        let _ = self.plugin_registry.mark_failed(id, error);
+        self.application_search.retire(id);
+        retire(self);
+        self.plugin_activation_generation =
+            self.plugin_activation_generation.wrapping_add(1).max(1);
+        self.maybe_publish_plugin_status();
+    }
+
+    fn retire_development_panel_plugin_state(&mut self) {
+        let id = &crate::plugin_panel::manifest().id;
+        self.plugin_surface_hosts
+            .retain(|key, _| key.plugin_id != *id);
+        self.plugin_panel_memory
+            .retain(|key, _| key.plugin_id != *id);
+    }
+
+    fn fail_plugin_panel_runtime(&mut self, id: &str, error: String) -> bool {
+        let retire = if id == crate::plugin_panel::manifest().id {
+            Self::retire_development_panel_plugin_state as fn(&mut Self)
+        } else {
+            return self.fail_installed_plugin_runtime(id, error);
+        };
+        self.fail_bundled_plugin_runtime(id, error, retire);
+        true
+    }
+
+    fn retire_preview_plugin_state(&mut self) {
+        let key = self.active_shell_surface_key("window-preview");
+        self.plugin_surface_hosts.remove(&key);
+        self.plugin_panel_memory.remove(&key);
+        let preview_was_open = self.preview_group.is_some() || self.task_switcher_group.is_some();
+        if self.task_switcher_group.is_some() {
+            self.apply_task_switch_action(nickel_core::hotkeys::HotkeyAction::CancelSwitch);
+        }
+        if preview_was_open {
+            self.close_window_preview();
+        } else {
+            self.preview_pending = None;
+        }
+    }
+
+    /// Starts or retires a plugin instance after Settings has shown its grants.
+    fn composition_catalog(
+        &self,
+        active: &str,
+        package: &nickel_core::plugins::PluginPackage,
+    ) -> Result<std::collections::BTreeMap<String, nickel_core::plugins::PluginPackage>, String>
+    {
+        let mut catalog = std::collections::BTreeMap::from([(active.to_owned(), package.clone())]);
+        let mut next = package
+            .manifest
+            .composition
+            .as_ref()
+            .and_then(|composition| composition.extends.clone());
+        while let Some(base) = next {
+            if catalog.contains_key(&base) {
+                return Err("shell inheritance cycle".into());
+            }
+            if catalog.len() >= nickel_core::package_composition::MAX_COMPOSITION_DEPTH {
+                return Err("shell inheritance exceeds package limit".into());
+            }
+            let entry = self
+                .plugin_registry
+                .get(&base)
+                .ok_or("shell base package is not installed")?;
+            if !entry.desired_enabled {
+                return Err(format!("shell base package {base:?} is disabled"));
+            }
+            let dependency = self
+                .external_plugin_packages
+                .get(&base)
+                .ok_or("shell base package is not an installed Twinkle package")?
+                .load()?;
+            next = dependency
+                .manifest
+                .composition
+                .as_ref()
+                .and_then(|composition| composition.extends.clone());
+            catalog.insert(base, dependency);
+        }
+        let approvals =
+            nickel_core::plugins::PluginActivationSettings::load_default().unwrap_or_default();
+        for entry in self.plugin_registry.entries() {
+            if !entry.desired_enabled
+                || entry.health != nickel_core::plugins::PluginHealth::Running
+                || catalog.contains_key(&entry.manifest.id)
+            {
+                continue;
+            }
+            let Some(descriptor) = self.external_plugin_packages.get(&entry.manifest.id) else {
+                continue;
+            };
+            if descriptor.manifest.composition.is_none() {
+                continue;
+            }
+            #[cfg(not(test))]
+            if !approvals.approval_current(&descriptor.manifest, &descriptor.source_digest) {
+                continue;
+            }
+            catalog.insert(entry.manifest.id.clone(), descriptor.load()?);
+        }
+        let _ = approvals;
+        Ok(catalog)
+    }
+
+    fn retire_installed_composition_owner(&mut self, id: &str) {
+        // Providers can own a context without owning a native surface.
+        for retained in self.package_runtimes.values() {
+            if let RetainedPackageRuntime::Composed(host) = retained {
+                let owners = host
+                    .borrow()
+                    .participating_owners()
+                    .filter(|owner| owner.id == id)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                for owner in owners {
+                    host.borrow_mut().retire(&owner);
+                }
+            }
+        }
+        for (_, host) in self.plugin_surface_hosts.values_mut() {
+            host.application_mut().retire_composition_owner(id);
+        }
+    }
+
+    fn composition_contexts(
+        &self,
+    ) -> std::collections::BTreeMap<
+        nickel_core::package_composition::PackageIdentity,
+        nickel_plugin_runtime::composition_runtime::ProviderContext,
+    > {
+        let mut contexts = std::collections::BTreeMap::new();
+        for retained in self.package_runtimes.values() {
+            if let RetainedPackageRuntime::Composed(host) = retained {
+                let host = host.borrow();
+                for owner in host.participating_owners() {
+                    if let Ok(context) = host.provider_context(owner) {
+                        contexts.entry(owner.clone()).or_insert(context);
+                    }
+                }
+            }
+        }
+        contexts
+    }
+
+    fn reconcile_installed_contributors(&mut self) -> Result<(), String> {
+        let contexts = self.composition_contexts();
+        let hosts = self
+            .package_runtimes
+            .iter()
+            .filter_map(|(id, retained)| match retained {
+                RetainedPackageRuntime::Composed(host) => Some((id.clone(), host.clone())),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        for (active, host) in hosts {
+            let Some(descriptor) = self.external_plugin_packages.get(&active) else {
+                continue;
+            };
+            let package = descriptor.load()?;
+            let catalog = self.composition_catalog(&active, &package)?;
+            host.borrow_mut().sync_contributors(&catalog, &contexts)?;
+            for (key, (_, surface)) in &mut self.plugin_surface_hosts {
+                if key.plugin_id == active {
+                    surface
+                        .application_mut()
+                        .refresh_composition_catalog(&catalog)?;
+                    surface.step(HostBatch {
+                        application_changed: true,
+                        ..Default::default()
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn composition_snapshots(
+        &self,
+        catalog: &std::collections::BTreeMap<String, nickel_core::plugins::PluginPackage>,
+        surface: &nickel_core::plugins::PluginSurface,
+    ) -> std::collections::BTreeMap<
+        nickel_core::package_composition::PackageIdentity,
+        serde_json::Value,
+    > {
+        catalog
+            .values()
+            .filter_map(|package| {
+                let composition = package.manifest.composition.as_ref()?;
+                let owner = nickel_core::package_composition::PackageIdentity {
+                    id: composition.id.clone(),
+                    version: composition.version.parse().ok()?,
+                };
+                let values = self
+                    .plugin_settings
+                    .get(&package.manifest.id)
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        package
+                            .manifest
+                            .settings
+                            .iter()
+                            .map(|setting| (setting.id.clone(), setting.kind.default_value()))
+                            .collect()
+                    });
+                let data = crate::plugin_panel::PluginPanelApplication::package_surface_data(
+                    package, &values, surface,
+                );
+                Some((
+                    owner,
+                    serde_json::from_str(&data).expect("package surface data is JSON"),
+                ))
+            })
+            .collect()
+    }
+
+    pub fn set_plugin_enabled(&mut self, id: &str, enabled: bool) -> Result<bool, String> {
+        let Some(entry) = self.plugin_registry.get(id) else {
+            return Err(format!("unknown plugin {id:?}"));
+        };
+        if entry.desired_enabled == enabled {
+            return Ok(false);
+        }
+        let external_panel = if enabled {
+            if let Some(descriptor) = self.external_plugin_packages.get(id) {
+                let surfaces = &descriptor.manifest.surfaces;
+                Some(
+                    if surfaces.is_empty() && descriptor.manifest.composition.is_some() {
+                        descriptor.load().and_then(|package| {
+                            crate::plugin_panel::PluginPanelApplication::validate_provider_resources(&package)?;
+                            let catalog=self.composition_catalog(id,&package)?;
+                            let snapshots=catalog.values().filter_map(|package| {
+                                let c=package.manifest.composition.as_ref()?;
+                                let owner=nickel_core::package_composition::PackageIdentity {id:c.id.clone(),version:c.version.parse().ok()?};
+                                let settings=self.plugin_settings.get(&c.id).cloned().unwrap_or_else(||package.manifest.settings.iter().map(|setting|(setting.id.clone(),setting.kind.default_value())).collect());
+                                Some((owner,serde_json::json!({"settings":settings})))
+                            }).collect();
+                            let host=nickel_plugin_runtime::composition_runtime::ShellCompositionRuntime::new_with_contexts(&catalog,id,&snapshots,&self.composition_contexts())?;
+                            Ok((RetainedPackageRuntime::Composed(std::rc::Rc::new(std::cell::RefCell::new(host))),Vec::new()))
+                        })
+                    } else if !surfaces.is_empty()
+                        && surfaces.iter().all(|surface| {
+                            matches!(
+                                surface.kind,
+                                nickel_core::plugins::PluginSurfaceKind::Panel
+                                    | nickel_core::plugins::PluginSurfaceKind::Dock
+                                    | nickel_core::plugins::PluginSurfaceKind::Window
+                                    | nickel_core::plugins::PluginSurfaceKind::Dialog
+                                    | nickel_core::plugins::PluginSurfaceKind::Overlay
+                            )
+                        })
+                        && surfaces.iter().any(|surface| {
+                            !matches!(
+                                surface.kind,
+                                nickel_core::plugins::PluginSurfaceKind::Dialog
+                                    | nickel_core::plugins::PluginSurfaceKind::Overlay
+                            )
+                        })
+                    {
+                        descriptor.load().and_then(|package| {
+                            if package.manifest.composition.as_ref().is_some_and(|composition| composition.extends.is_some() || composition.exports.contains_key("shell")) {
+                                let catalog = self.composition_catalog(id, &package)?;
+                                let first = surfaces.iter().find(|surface| !matches!(surface.kind, nickel_core::plugins::PluginSurfaceKind::Dialog | nickel_core::plugins::PluginSurfaceKind::Overlay)).ok_or("composed package has no ordinary surface")?;
+                                let snapshots = self.composition_snapshots(&catalog, first);
+                                let shared = std::rc::Rc::new(std::cell::RefCell::new(nickel_plugin_runtime::composition_runtime::ShellCompositionRuntime::new_with_contexts(&catalog, id, &snapshots, &self.composition_contexts())?));
+                                let mut applications = Vec::new();
+                                for surface in surfaces.iter().filter(|surface| surface.initially_open && (!self.is_shell_package(id) || self.shell_package_selected(id)) && !matches!(surface.kind,
+                                    nickel_core::plugins::PluginSurfaceKind::Dialog | nickel_core::plugins::PluginSurfaceKind::Overlay)) {
+                                    let snapshots = self.composition_snapshots(&catalog, surface);
+                                    let application = crate::plugin_panel::PluginPanelApplication::from_composed_surface(&catalog, id, &snapshots, surface, Some(shared.clone()))?;
+                                    let resolved = application.resolved_surface(surface)?;
+                                    applications.push((application, resolved));
+                                }
+                                return Ok((RetainedPackageRuntime::Composed(shared), applications));
+                            }
+                            if package.manifest.composition.is_some() {
+                                crate::plugin_panel::PluginPanelApplication::validate_provider_resources(&package)?;
+                                let catalog=self.composition_catalog(id,&package)?;
+                                let first=surfaces.iter().find(|surface|!matches!(surface.kind,nickel_core::plugins::PluginSurfaceKind::Dialog|nickel_core::plugins::PluginSurfaceKind::Overlay)).ok_or("provider has no ordinary surface")?;
+                                let snapshots=self.composition_snapshots(&catalog,first);
+                                let shared=std::rc::Rc::new(std::cell::RefCell::new(nickel_plugin_runtime::composition_runtime::ShellCompositionRuntime::new_with_contexts(&catalog,id,&snapshots,&self.composition_contexts())?));
+                                let owner=shared.borrow().resolution().active.clone();let runtime=shared.borrow().shared_owner_runtime(&owner)?;
+                                let settings=self.plugin_settings.get(id).cloned().map(Ok).unwrap_or_else(||external_plugin_settings(&package.manifest))?;
+                                let images=crate::plugin_panel::package_images(&package)?;
+                                let panels=surfaces.iter().filter(|surface|surface.initially_open&&!matches!(surface.kind,nickel_core::plugins::PluginSurfaceKind::Dialog|nickel_core::plugins::PluginSurfaceKind::Overlay)).map(|surface|{
+                                    let application=crate::plugin_panel::PluginPanelApplication::from_package_surface_with_runtime(&package,&settings,surface,images.clone(),Some(runtime.clone()))?;
+                                    let resolved=application.resolved_surface(surface)?;Ok((application,resolved))
+                                }).collect::<Result<Vec<_>,String>>()?;
+                                return Ok((RetainedPackageRuntime::Composed(shared),panels));
+                            }
+                            crate::plugin_panel::PluginPanelApplication::validate_package(
+                                &package,
+                            )?;
+                            let settings = self
+                                .plugin_settings
+                                .get(id)
+                                .cloned()
+                                .map(Ok)
+                                .unwrap_or_else(|| external_plugin_settings(&package.manifest))?;
+                            let images = crate::plugin_panel::package_images(&package)?;
+                            let first_surface = surfaces.iter().find(|surface| {
+                                !matches!(
+                                    surface.kind,
+                                    nickel_core::plugins::PluginSurfaceKind::Dialog
+                                        | nickel_core::plugins::PluginSurfaceKind::Overlay
+                                )
+                            }).expect("validated package has an ordinary surface");
+                            let runtime = crate::plugin_panel::PluginPanelApplication::shared_package_runtime(
+                                &package,
+                                &settings,
+                                first_surface,
+                            )?;
+                            let panels = surfaces
+                                .iter()
+                                .filter(|surface| {
+                                    surface.initially_open && (!self.is_shell_package(id) || self.shell_package_selected(id)) && !matches!(
+                                        surface.kind,
+                                        nickel_core::plugins::PluginSurfaceKind::Dialog
+                                            | nickel_core::plugins::PluginSurfaceKind::Overlay
+                                    )
+                                })
+                                .map(|surface| {
+                                    crate::plugin_panel::PluginPanelApplication::from_package_surface_with_runtime(
+                                        &package, &settings, surface, images.clone(), Some(runtime.clone()),
+                                    )
+                                    .and_then(|application| {
+                                        let resolved = application.resolved_surface(surface)?;
+                                        Ok((application, resolved))
+                                    })
+                                })
+                                .collect::<Result<Vec<_>, _>>()?;
+                            Ok((RetainedPackageRuntime::Ordinary(runtime), panels))
+                        })
+                    } else {
+                        Err("installed plugin needs a panel, dock, or window to open its declared transient surfaces".into())
+                    },
+                )
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        #[cfg(not(test))]
+        if self.external_plugin_packages.contains_key(id) {
+            nickel_core::plugins::PluginActivationSettings::update_manifest_default(
+                &entry.manifest,
+                &self
+                    .external_plugin_packages
+                    .get(id)
+                    .expect("installed plugin descriptor exists")
+                    .source_digest,
+                enabled,
+            )
+            .map_err(|error| format!("could not save plugin activation: {error}"))?;
+        } else {
+            nickel_core::plugins::PluginActivationSettings::update_default(id, enabled)
+                .map_err(|error| format!("could not save plugin activation: {error}"))?;
+        }
+        self.plugin_registry.set_enabled(id, enabled)?;
+        if !enabled && self.is_shell_package(id) {
+            self.cancel_keyboard_gestures();
+        }
+        if !enabled {
+            self.retire_installed_composition_owner(id);
+        }
+
+        self.plugin_activation_generation =
+            self.plugin_activation_generation.wrapping_add(1).max(1);
+        if !enabled {
+            if id == self.active_shell_package_id {
+                self.retire_preview_plugin_state();
+            }
+            self.run_status.remove(id);
+            self.package_runtimes.remove(id);
+            self.application_search.retire(id);
+            self.plugin_surface_hosts
+                .retain(|key, _| key.plugin_id != id);
+            self.plugin_panel_memory
+                .retain(|key, _| key.plugin_id != id);
+            self.plugin_window_placement_overrides
+                .retain(|key, _| key.plugin_id != id);
+            if id == self.primary_panel_key.plugin_id {
+                self.primary_panel_key = crate::plugin_panel::surface_key();
+            }
+            if let Err(error) = self.reconcile_installed_contributors() {
+                tracing::warn!(%error,"contributor retirement refresh failed");
+            }
+            if self
+                .shell_selection_preview
+                .as_ref()
+                .is_some_and(|preview| preview.selected == id || preview.owner == id)
+            {
+                self.recover_pending_shell(
+                    "The preview shell or its requesting provider was disabled.",
+                );
+            }
+            self.maybe_publish_plugin_status();
+            return Ok(true);
+        }
+        let started = if let Some(external_panel) = external_panel {
+            external_panel.map(|(runtime, panels)| {
+                self.package_runtimes.insert(id.to_owned(), runtime);
+                for (application, surface) in panels {
+                    if self.is_shell_package(id) && !self.shell_package_selected(id) {
+                        continue;
+                    }
+                    let host = nickel_ui::UiHost::new(application, surface.width, surface.height);
+                    let key = nickel_core::plugins::PluginSurfaceKey {
+                        plugin_id: id.to_owned(),
+                        surface_id: surface.id.clone(),
+                    };
+                    if self.primary_panel_host_ref().is_none() {
+                        self.primary_panel_key = key.clone();
+                    }
+                    self.plugin_surface_hosts.insert(key, (surface, host));
+                }
+            })
+        } else if id == crate::plugin_panel::manifest().id {
+            crate::plugin_panel::PluginPanelApplication::bundled().map(|application| {
+                let surface = crate::plugin_panel::surface().clone();
+                let host = nickel_ui::UiHost::new(application, surface.width, surface.height);
+                if self.primary_panel_host_ref().is_none() {
+                    self.primary_panel_key = crate::plugin_panel::surface_key();
+                }
+                self.plugin_surface_hosts.insert(
+                    nickel_core::plugins::PluginSurfaceKey {
+                        plugin_id: id.to_owned(),
+                        surface_id: surface.id.clone(),
+                    },
+                    (surface, host),
+                );
+            })
+        } else {
+            Err(format!("plugin {id:?} has no runtime host"))
+        };
+        let result = match started {
+            Ok(()) => self.plugin_registry.mark_running(id).map(|()| true),
+            Err(error) => {
+                self.plugin_registry.mark_failed(id, error.clone())?;
+                Err(error)
+            }
+        };
+        if result.is_ok() {
+            if self.plugin_registry.get(id).is_some_and(|entry| {
+                entry.manifest.surfaces.is_empty() && entry.manifest.composition.is_some()
+            }) {
+                let _ = self.plugin_registry.record_memory(
+                    id,
+                    nickel_core::plugins::PluginMemory {
+                        native_ui_bytes: Some(0),
+                        texture_bytes: Some(0),
+                        ..Default::default()
+                    },
+                );
+            }
+            if let Err(error) = self.reconcile_installed_contributors() {
+                tracing::warn!(%error,"contributor admission refresh failed");
+            }
+        }
+        self.maybe_publish_plugin_status();
+        result
+    }
+
+    pub(crate) fn notification_preferred_surface_size(
+        &self,
+        maximum: (u32, u32),
+    ) -> Option<(u32, u32)> {
+        if self.notification_history_visible {
+            return None;
+        }
+        self.notification.as_ref().map(|notification| {
+            crate::notification_view::preferred_notification_surface_size(
+                notification,
+                self.palette,
+                maximum,
+            )
+        })
     }
 
     pub fn next_host_deadline(&self) -> Option<Instant> {
@@ -2526,24 +5450,29 @@ impl LiveShell {
                 .min(),
         );
         push("on-screen-keyboard", Some(self.keyboard_deadline));
-        push("launcher-preferences", self.launcher_preference_deadline);
+        push("clock", Some(self.clock_deadline));
         push(
-            "panel",
-            self.panel_hosts
-                .values()
-                .filter_map(|host| host.next_deadline())
-                .chain(self.panel_host.next_deadline())
-                .chain(self.panel_deadline)
-                .min(),
+            "shell-selection-preview",
+            self.shell_selection_preview
+                .as_ref()
+                .map(|preview| preview.deadline),
         );
+        push("launcher-preferences", self.launcher_preference_deadline);
         push("lock", self.lock_deadline);
         push("control", self.control_deadline);
+        push(
+            "plugin-surface",
+            self.plugin_surface_hosts
+                .values()
+                .filter_map(|(_, host)| host.next_deadline())
+                .min(),
+        );
         push("screenshot", self.screenshot.next_deadline());
         push(
             "window-preview-host",
-            self.preview_frame
-                .as_ref()
-                .and_then(WindowPreviewFrame::next_deadline),
+            self.preview_plugin_host_ref()
+                .filter(|_| self.preview_plugin_active())
+                .and_then(|host| host.next_deadline()),
         );
         push(
             "window-preview-open",
@@ -2552,6 +5481,12 @@ impl LiveShell {
         push("window-preview-close", self.preview_leave_deadline);
         push("task-switcher-peek", self.task_switcher.peek_deadline());
         push("volume-osd", self.volume_osd_until);
+        push(
+            "display-preview",
+            self.display_preview
+                .as_ref()
+                .map(|preview| preview.deadline),
+        );
         sources
     }
 
@@ -2562,25 +5497,39 @@ impl LiveShell {
         };
         match role {
             SurfaceRole::Desktop => Some(self.desktop_change_token),
-            SurfaceRole::Panel => Some(self.panel_change_token),
+            SurfaceRole::Taskbar => None,
+            SurfaceRole::Panel => self
+                .primary_panel_host_ref()
+                .map(|host| host_token(host.inspect())),
             SurfaceRole::Lock => Some(self.lock_change_token),
-            SurfaceRole::Launcher if self.run_visible => Some(host_token(self.run_host.inspect())),
-            SurfaceRole::Launcher => Some(host_token(self.launcher_host.inspect())),
-            SurfaceRole::ControlCenter => Some(self.control_change_token),
-            SurfaceRole::Notification => Some(host_token(self.notification_host.inspect())),
-            SurfaceRole::VolumeOsd => None,
-            SurfaceRole::WindowPreview => {
-                self.preview_frame.as_ref().map(|host| host.change_token())
+            SurfaceRole::Launcher => None,
+            SurfaceRole::ControlCenter => self
+                .quick_settings_surface_active()
+                .then(|| {
+                    host_token(
+                        self.plugin_panel_host_ref(
+                            &self.active_shell_surface_key("quick-settings"),
+                        )
+                        .unwrap()
+                        .inspect(),
+                    )
+                })
+                .or(Some(self.control_change_token)),
+            SurfaceRole::Notification => {
+                let trusted = self.trusted_notification_visible();
+                let inspection = self.notification_host.inspect();
+                let mut token = host_token(inspection);
+                if trusted {
+                    token.frame_generation = token.frame_generation.wrapping_add(1_u64 << 63);
+                    token.semantic_generation = token.semantic_generation.wrapping_add(1_u64 << 63);
+                }
+                Some(token)
             }
-            SurfaceRole::WindowContextMenu => self
-                .window_menu_host
-                .as_ref()
-                .map(|host| host_token(host.inspect()))
-                .or_else(|| {
-                    self.application_menu_host
-                        .as_ref()
-                        .map(|host| host_token(host.inspect()))
-                }),
+            SurfaceRole::VolumeOsd => None,
+            SurfaceRole::WindowPreview => self
+                .preview_plugin_active()
+                .then(|| host_token(self.preview_plugin_host_ref().unwrap().inspect())),
+            SurfaceRole::WindowContextMenu => None,
             SurfaceRole::Screenshot => Some(self.screenshot.change_token()),
             SurfaceRole::OnScreenKeyboard => Some(host_token(self.keyboard_host.inspect())),
             SurfaceRole::CodexProjectMenu | SurfaceRole::CodexChat => None,
@@ -2589,140 +5538,14 @@ impl LiveShell {
         }
     }
 
-    pub fn launcher_host_input(
-        &mut self,
-        input: nickel_input::InputEvent,
-        clipboard_text: Option<String>,
-        width: u32,
-        height: u32,
-    ) -> nickel_ui::HostEventOutcome {
-        let recipient = if self.run_visible {
-            self.run_host.inspect()
-        } else {
-            self.launcher_host.inspect()
-        };
-        let (event, authority) =
-            internal_normalized_ingress(input, clipboard_text, "launcher", recipient, None);
-        self.launcher_host_event_with_authority(event, width, height, None, Some(authority))
-    }
-
-    pub(crate) fn launcher_host_event_with_clipboard_limit(
-        &mut self,
-        event: HostEvent,
-        width: u32,
-        height: u32,
-        limit: Option<usize>,
-    ) -> nickel_ui::HostEventOutcome {
-        self.launcher_host_event_with_authority(event, width, height, limit, None)
-    }
-
-    pub(crate) fn launcher_host_event_with_authority(
-        &mut self,
-        event: HostEvent,
-        width: u32,
-        height: u32,
-        limit: Option<usize>,
-        authority: Option<nickel_ui::NormalizedIngressAuthority>,
-    ) -> nickel_ui::HostEventOutcome {
-        if self.run_visible {
-            let outcome = self.run_host.step(HostBatch {
-                clipboard_text_limit: limit,
-                surface_size: Some((width, height)),
-                events: vec![event],
-                normalized_authorities: authority.into_iter().collect(),
-                ..HostBatch::default()
-            });
-            self.apply_run_effects();
-            self.host_runtime_samples.record(outcome.telemetry);
-            return outcome;
-        }
-        let status = self.launcher_status_text();
-        self.launcher_host
-            .application_mut()
-            .sync(&self.launcher, self.palette, status);
-        let outcome = self.launcher_host.step(HostBatch {
-            clipboard_text_limit: limit,
-            surface_size: Some((width, height)),
-            events: vec![event],
-            normalized_authorities: authority.into_iter().collect(),
-            ..HostBatch::default()
-        });
-        let actions = self.launcher_host.application_mut().take_effects();
-        for action in actions {
-            self.apply_launcher_action(action);
-        }
-        self.host_runtime_samples.record(outcome.telemetry);
-        outcome
-    }
-
-    #[cfg(any(test, target_os = "linux"))]
-    pub fn launcher_host_controller(
-        &mut self,
-        action: ControllerAction,
-        family: nickel_ui::ControllerFamily,
-    ) -> bool {
-        if self.run_visible {
-            let event = launcher_controller_host_event(
-                action,
-                self.run_host.inspect().open_overlay.is_some(),
-            );
-            let outcome = self.run_host.step(HostBatch {
-                events: vec![event],
-                ..HostBatch::default()
-            });
-            if action == ControllerAction::Confirm
-                && outcome.text_input_active
-                && self.run_host.controller_targets_text_input()
-            {
-                self.set_keyboard_visible(true);
-            }
-            self.apply_run_effects();
-            self.host_runtime_samples.record(outcome.telemetry);
-            return outcome.changed;
-        }
-        let status = self.launcher_status_text();
-        self.launcher_host
-            .application_mut()
-            .sync(&self.launcher, self.palette, status);
-        self.launcher_host
-            .application_mut()
-            .set_controller_family(family);
-        let event = launcher_controller_host_event(
-            action,
-            self.launcher_host.inspect().open_overlay.is_some(),
-        );
-        let outcome = self.launcher_host.step(HostBatch {
-            events: vec![event],
-            ..HostBatch::default()
-        });
-        if action == ControllerAction::Confirm
-            && outcome.text_input_active
-            && self.launcher_host.controller_targets_text_input()
-        {
-            self.set_keyboard_visible(true);
-        }
-        let actions = self.launcher_host.application_mut().take_effects();
-        for action in actions {
-            self.apply_launcher_action(action);
-        }
-        self.host_runtime_samples.record(outcome.telemetry);
-        outcome.changed
-    }
-
-    pub fn set_launcher_controller_family(&mut self, family: nickel_ui::ControllerFamily) {
-        self.launcher_host
-            .application_mut()
-            .set_controller_family(family);
-        self.launcher_host.step(HostBatch {
-            application_changed: true,
-            ..HostBatch::default()
-        });
-    }
-
     pub fn poll_host_deadlines(&mut self, now: Instant) -> Vec<SurfaceRole> {
         let mut changed = Vec::new();
+        if now >= self.clock_deadline {
+            self.clock_deadline = now + crate::clock_capabilities::until_next_minute();
+            changed.push(SurfaceRole::Panel);
+        }
         if self.poll_launcher_preferences() {
-            changed.extend([SurfaceRole::Launcher, SurfaceRole::Panel]);
+            changed.extend([SurfaceRole::Launcher, SurfaceRole::Taskbar]);
         }
 
         let mut due_desktop_outputs = self
@@ -2756,35 +5579,6 @@ impl LiveShell {
         if desktop_changed {
             changed.push(SurfaceRole::Desktop);
         }
-        let input_output = self.panel_output.clone();
-        let mut due_panels = self
-            .panel_hosts
-            .iter()
-            .filter(|(_, host)| host.next_deadline().is_some_and(|deadline| now >= deadline))
-            .map(|(output, _)| output.clone())
-            .collect::<Vec<_>>();
-        if self
-            .panel_deadline
-            .into_iter()
-            .chain(self.panel_host.next_deadline())
-            .any(|deadline| now >= deadline)
-        {
-            due_panels.push(input_output.clone());
-        }
-        for output in due_panels {
-            self.switch_panel_output(output);
-            let outcome = self.panel_host.step(HostBatch {
-                now: Some(now),
-                events: vec![HostEvent::Poll],
-                ..HostBatch::default()
-            });
-            self.panel_change_token = outcome.change_token;
-            self.panel_deadline = outcome.next_deadline;
-            if outcome.changed | self.apply_panel_effects() {
-                changed.push(SurfaceRole::Panel);
-            }
-        }
-        self.switch_panel_output(input_output);
         if self.lock_deadline.is_some_and(|deadline| now >= deadline) {
             let outcome = self.lock_host.step(HostBatch {
                 now: Some(now),
@@ -2811,27 +5605,49 @@ impl LiveShell {
                 changed.push(SurfaceRole::ControlCenter);
             }
         }
-        if self
-            .preview_frame
-            .as_ref()
-            .and_then(WindowPreviewFrame::next_deadline)
-            .is_some_and(|deadline| now >= deadline)
-            && let Some(frame) = self.preview_frame.as_mut()
-            && frame
-                .step(HostBatch {
-                    now: Some(now),
-                    events: vec![HostEvent::Poll],
-                    ..HostBatch::default()
-                })
-                .changed
-        {
-            changed.push(SurfaceRole::WindowPreview);
+        let due_plugin_surfaces = self
+            .plugin_surface_hosts
+            .iter()
+            .filter(|(_, (_, host))| host.next_deadline().is_some_and(|deadline| now >= deadline))
+            .map(|(key, (surface, _))| (key.clone(), (surface.width, surface.height)))
+            .collect::<Vec<_>>();
+        for (key, size) in due_plugin_surfaces {
+            let outcome = self.plugin_surface_host_event(&key, HostEvent::Poll, size, None, None);
+            if outcome.changed {
+                changed.push(self.plugin_surface_redraw_role(&key));
+            }
         }
         changed
     }
 
+    fn plugin_surface_redraw_role(
+        &self,
+        key: &nickel_core::plugins::PluginSurfaceKey,
+    ) -> SurfaceRole {
+        if self.taskbar_surface_key().as_ref() == Some(key) {
+            return SurfaceRole::Taskbar;
+        }
+        match key.surface_id.as_str() {
+            "launcher" => SurfaceRole::Launcher,
+            "quick-settings" => SurfaceRole::ControlCenter,
+            "notifications" => SurfaceRole::Notification,
+            "volume-osd" => SurfaceRole::VolumeOsd,
+            "window-preview" => SurfaceRole::WindowPreview,
+            "window-menu" => SurfaceRole::WindowContextMenu,
+            "keyboard" => SurfaceRole::OnScreenKeyboard,
+            _ => SurfaceRole::Panel,
+        }
+    }
+
     pub fn poll_deadlines(&mut self, now: Instant) -> ShellDeadlineOutcome {
+        let shell_recovered = self
+            .shell_selection_preview
+            .as_ref()
+            .is_some_and(|preview| now >= preview.deadline)
+            && self.recover_pending_shell("Shell preview expired without confirmation.");
+        let settings_changed = self.dispatch_pending_desktop_settings();
         let mut outcome = ShellDeadlineOutcome {
+            visibility_changed: settings_changed || shell_recovered,
             redraw: self.poll_host_deadlines(now),
             ..ShellDeadlineOutcome::default()
         };
@@ -2839,7 +5655,7 @@ impl LiveShell {
             let visible = self.keyboard_visible;
             if self.refresh_keyboard() {
                 outcome.redraw.push(SurfaceRole::OnScreenKeyboard);
-                outcome.redraw.push(SurfaceRole::Panel);
+                outcome.redraw.push(SurfaceRole::Taskbar);
             }
             outcome.visibility_changed |= visible != self.keyboard_visible;
             self.keyboard_deadline =
@@ -2884,7 +5700,7 @@ impl LiveShell {
             .volume_osd_until
             .is_some_and(|deadline| now >= deadline)
         {
-            self.volume_osd_until = None;
+            self.hide_volume_osd();
             outcome.visibility_changed = true;
         }
         if self
@@ -2894,13 +5710,27 @@ impl LiveShell {
             self.rollback_projection();
             outcome.visibility_changed = true;
         }
+        if self
+            .display_preview
+            .as_ref()
+            .is_some_and(|preview| now >= preview.deadline)
+        {
+            let reverted = self.revert_plugin_display_layout(None);
+            outcome.visibility_changed |= reverted;
+            if !reverted {
+                if let Some(preview) = self.display_preview.as_mut() {
+                    preview.deadline = now + Duration::from_secs(1);
+                }
+            }
+        }
         outcome
     }
 
     pub fn notification_click(&mut self, x: f32, y: f32, width: u32, height: u32) -> bool {
-        if self.notification.is_none() && !self.notification_history_visible {
+        if !self.surface_visible(SurfaceRole::Notification) {
             return false;
         }
+
         self.sync_notification_host(width, height);
         let point = Point { x, y };
         let outcome = self.notification_host.step(HostBatch {
@@ -2910,22 +5740,19 @@ impl LiveShell {
             ],
             ..HostBatch::default()
         });
-        if outcome.effects.is_empty() {
-            self.notification_host.application_mut().request_dismiss();
-        }
-        self.apply_notification_effects()
+        outcome.changed | self.apply_notification_effects()
     }
 
-    #[cfg(test)]
     pub(crate) fn notification_host_input(
         &mut self,
         input: nickel_input::InputEvent,
         width: u32,
         height: u32,
     ) -> bool {
-        if self.notification.is_none() && !self.notification_history_visible {
+        if !self.surface_visible(SurfaceRole::Notification) {
             return false;
         }
+
         self.sync_notification_host(width, height);
         let (ingress, authority) = internal_normalized_ingress(
             input,
@@ -2944,9 +5771,10 @@ impl LiveShell {
         height: u32,
         authority: Option<nickel_ui::NormalizedIngressAuthority>,
     ) -> bool {
-        if self.notification.is_none() && !self.notification_history_visible {
+        if !self.surface_visible(SurfaceRole::Notification) {
             return false;
         }
+
         self.sync_notification_host(width, height);
         let outcome = self.notification_host.step(HostBatch {
             events: vec![ingress],
@@ -2957,10 +5785,9 @@ impl LiveShell {
     }
 
     pub fn notification_key(&mut self, key: Option<KeyCode>) -> bool {
-        if self.notification.is_none() && !self.notification_history_visible {
+        if !self.surface_visible(SurfaceRole::Notification) {
             return false;
         }
-        self.sync_notification_host(420, 180);
         let event = match key {
             Some(KeyCode::Escape) => HostEvent::Shortcut(Shortcut::Escape),
             Some(KeyCode::ArrowLeft | KeyCode::ArrowUp) => {
@@ -2974,6 +5801,8 @@ impl LiveShell {
             }
             _ => return false,
         };
+
+        self.sync_notification_host(420, 180);
         self.notification_host.step(HostBatch {
             events: vec![event],
             ..HostBatch::default()
@@ -2983,15 +5812,16 @@ impl LiveShell {
     }
 
     pub fn notification_controller(&mut self, action: ControllerAction) -> bool {
-        if self.notification.is_none() && !self.notification_history_visible {
+        if !self.surface_visible(SurfaceRole::Notification) {
             return false;
         }
-        self.sync_notification_host(420, 180);
         let event = if action == ControllerAction::Cancel {
             HostEvent::Shortcut(Shortcut::Escape)
         } else {
             HostEvent::Controller(action)
         };
+
+        self.sync_notification_host(420, 180);
         let outcome = self.notification_host.step(HostBatch {
             events: vec![event],
             ..HostBatch::default()
@@ -3000,57 +5830,1015 @@ impl LiveShell {
         outcome.changed
     }
 
-    pub fn panel_click(&mut self, x: f32, width: u32, secondary: bool) -> bool {
-        let application_changed = self.sync_panel_host();
-        let events = if secondary {
-            vec![HostEvent::Ui(UiEvent::PointerContext(Point { x, y: 28.0 }))]
-        } else {
-            vec![
-                HostEvent::Ui(UiEvent::PointerPressed(Point { x, y: 28.0 })),
-                HostEvent::Ui(UiEvent::PointerReleased(Point { x, y: 28.0 })),
-            ]
+    fn primary_panel_key(&self) -> nickel_core::plugins::PluginSurfaceKey {
+        self.primary_panel_key.clone()
+    }
+
+    fn primary_panel_host_ref(
+        &self,
+    ) -> Option<&nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>> {
+        self.plugin_panel_host_ref(&self.primary_panel_key())
+    }
+
+    fn plugin_panel_host_for(
+        &mut self,
+        key: &nickel_core::plugins::PluginSurfaceKey,
+    ) -> Option<&mut nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>> {
+        self.plugin_surface_hosts.get_mut(key).map(|(_, host)| host)
+    }
+
+    fn plugin_panel_host_ref(
+        &self,
+        key: &nickel_core::plugins::PluginSurfaceKey,
+    ) -> Option<&nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>> {
+        self.plugin_surface_hosts.get(key).map(|(_, host)| host)
+    }
+
+    fn preview_plugin_host_ref(
+        &self,
+    ) -> Option<&nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>> {
+        self.plugin_panel_host_ref(&self.active_shell_surface_key("window-preview"))
+    }
+
+    fn reconcile_plugin_surface_root(
+        &mut self,
+        key: &nickel_core::plugins::PluginSurfaceKey,
+    ) -> Result<bool, String> {
+        let Some(grant) = self
+            .external_plugin_packages
+            .get(&key.plugin_id)
+            .map(|package| &package.manifest)
+            .or_else(|| {
+                self.plugin_registry
+                    .get(&key.plugin_id)
+                    .map(|entry| &entry.manifest)
+            })
+            .and_then(|manifest| {
+                manifest
+                    .surfaces
+                    .iter()
+                    .find(|surface| surface.id == key.surface_id)
+            })
+            .cloned()
+        else {
+            return Ok(false);
         };
-        let outcome = self.panel_host.step(HostBatch {
-            application_changed,
-            surface_size: Some((width, 56)),
-            events,
-            ..HostBatch::default()
-        });
-        self.panel_change_token = outcome.change_token;
-        self.panel_deadline = outcome.next_deadline;
-        self.apply_panel_effects()
+        let Some(host) = self.plugin_panel_host_for(key) else {
+            return Ok(false);
+        };
+        let mut resolved = host.application().resolved_surface(&grant)?;
+        if resolved.kind == nickel_core::plugins::PluginSurfaceKind::Window
+            && let Some((anchor, offset_x, offset_y)) =
+                self.plugin_window_placement_overrides.get(key).copied()
+        {
+            resolved.anchor = anchor;
+            resolved.offset_x = offset_x;
+            resolved.offset_y = offset_y;
+        }
+        let current = &mut self
+            .plugin_surface_hosts
+            .get_mut(key)
+            .ok_or("plugin surface host disappeared")?
+            .0;
+        if *current == resolved {
+            return Ok(false);
+        }
+        *current = resolved;
+        Ok(true)
     }
 
-    pub fn panel_controller(&mut self, action: ControllerAction, width: u32) -> bool {
-        let application_changed = self.sync_panel_host();
-        let outcome = self.panel_host.step(HostBatch {
-            application_changed,
-            surface_size: Some((width, 56)),
-            events: vec![HostEvent::Controller(action)],
-            ..HostBatch::default()
-        });
-        self.panel_change_token = outcome.change_token;
-        self.panel_deadline = outcome.next_deadline;
-        self.apply_panel_effects();
-        outcome.changed
+    fn step_generic_plugin_surface(
+        &mut self,
+        key: &nickel_core::plugins::PluginSurfaceKey,
+        batch: HostBatch,
+        keyboard_epoch: Option<u64>,
+    ) -> bool {
+        self.plugin_pointer_paint = None;
+        let pointer_only = passive_pointer_batch(&batch);
+        let result = {
+            let Some(host) = self.plugin_panel_host_for(key) else {
+                return false;
+            };
+            step_plugin_host(host, None, batch).map(|(outcome, _)| {
+                let paint_only = pointer_only
+                    && outcome.messages.is_empty()
+                    && matches!(
+                        outcome.invalidation,
+                        nickel_ui::Invalidation::None | nickel_ui::Invalidation::Paint
+                    );
+                (
+                    outcome.changed,
+                    paint_only,
+                    host.application_mut().take_effects(),
+                )
+            })
+        };
+        let (changed, paint_only, effects) = match result {
+            Ok(result) => result,
+            Err(error) => return self.fail_plugin_panel_runtime(&key.plugin_id, error),
+        };
+        if paint_only && effects.is_empty() {
+            self.plugin_pointer_paint = Some(key.clone());
+            return changed;
+        }
+        let root_changed = match self.reconcile_plugin_surface_root(key) {
+            Ok(changed) => changed,
+            Err(error) => return self.fail_plugin_panel_runtime(&key.plugin_id, error),
+        };
+        changed
+            | root_changed
+            | self.apply_plugin_effects_with_keyboard_epoch(effects, keyboard_epoch)
     }
 
-    pub(crate) fn panel_host_ui(&mut self, event: UiEvent, width: u32) -> bool {
-        let application_changed = self.sync_panel_host();
-        let outcome = self.panel_host.step(HostBatch {
-            application_changed,
-            surface_size: Some((width, 56)),
-            events: vec![HostEvent::Ui(event)],
-            ..HostBatch::default()
-        });
-        self.panel_change_token = outcome.change_token;
-        self.panel_deadline = outcome.next_deadline;
-        outcome.changed | self.apply_panel_effects()
+    /// Consume immediately after routing a pointer batch, before any data update.
+    pub(crate) fn take_plugin_pointer_paint(
+        &mut self,
+        key: &nickel_core::plugins::PluginSurfaceKey,
+    ) -> Option<Vec<PaintCommand>> {
+        (self.plugin_pointer_paint.take().as_ref() == Some(key))
+            .then(|| {
+                self.plugin_panel_host_ref(key)
+                    .map(|host| host.commands().to_vec())
+            })
+            .flatten()
     }
 
-    pub(crate) fn launcher_host_ui(&mut self, event: UiEvent, width: u32, height: u32) -> bool {
-        self.launcher_host_event_with_clipboard_limit(HostEvent::Ui(event), width, height, None)
-            .changed
+    pub(crate) fn plugin_panel_host_input_for(
+        &mut self,
+        key: &nickel_core::plugins::PluginSurfaceKey,
+        input: nickel_input::InputEvent,
+        width: u32,
+        height: u32,
+    ) -> bool {
+        if *key == self.active_shell_surface_key("keyboard")
+            && !self.native_surface_visible(SurfaceRole::Panel, Some(key))
+        {
+            return false;
+        }
+        let keyboard_epoch = (*key == self.active_shell_surface_key("keyboard"))
+            .then(|| self.keyboard_gesture_epoch(&input))
+            .flatten();
+
+        let (event, authority) = {
+            let Some(host) = self.plugin_panel_host_for(key) else {
+                return false;
+            };
+            internal_normalized_ingress(input, None, "plugin-panel", host.inspect(), None)
+        };
+        self.step_generic_plugin_surface(
+            key,
+            HostBatch {
+                surface_size: Some((width, height)),
+                events: vec![event],
+                normalized_authorities: vec![authority],
+                ..HostBatch::default()
+            },
+            keyboard_epoch,
+        )
+    }
+
+    pub(crate) fn plugin_panel_host_controller_for(
+        &mut self,
+        key: &nickel_core::plugins::PluginSurfaceKey,
+        action: ControllerAction,
+        width: u32,
+        height: u32,
+    ) -> bool {
+        if *key == self.active_shell_surface_key("keyboard") && action == ControllerAction::Cancel {
+            return self.set_keyboard_visible(false);
+        }
+        let keyboard_epoch = (*key == self.active_shell_surface_key("keyboard"))
+            .then(|| {
+                self.keyboard_recipient
+                    .as_ref()
+                    .map(|snapshot| snapshot.epoch)
+            })
+            .flatten();
+
+        self.step_generic_plugin_surface(
+            key,
+            HostBatch {
+                surface_size: Some((width, height)),
+                events: vec![HostEvent::Controller(action)],
+                ..HostBatch::default()
+            },
+            keyboard_epoch,
+        )
+    }
+
+    pub(crate) fn plugin_panel_host_window_focus_for(
+        &mut self,
+        key: &nickel_core::plugins::PluginSurfaceKey,
+        focused: bool,
+        width: u32,
+        height: u32,
+    ) -> bool {
+        self.step_generic_plugin_surface(
+            key,
+            HostBatch {
+                surface_size: Some((width, height)),
+                window_focused: Some(focused),
+                ..HostBatch::default()
+            },
+            None,
+        )
+    }
+
+    pub(crate) fn plugin_panel_host_ui_for(
+        &mut self,
+        key: &nickel_core::plugins::PluginSurfaceKey,
+        event: UiEvent,
+        width: u32,
+        height: u32,
+    ) -> bool {
+        let keyboard_epoch = (*key == self.active_shell_surface_key("keyboard")
+            && matches!(&event, UiEvent::AccessibilityActivate(_)))
+        .then(|| {
+            self.keyboard_recipient
+                .as_ref()
+                .map(|snapshot| snapshot.epoch)
+        })
+        .flatten();
+
+        self.step_generic_plugin_surface(
+            key,
+            HostBatch {
+                surface_size: Some((width, height)),
+                events: vec![HostEvent::Ui(event)],
+                ..HostBatch::default()
+            },
+            keyboard_epoch,
+        )
+    }
+
+    fn apply_plugin_effects(&mut self, effects: Vec<crate::plugin_panel::PluginEffect>) -> bool {
+        self.apply_plugin_effects_with_keyboard_epoch(effects, None)
+    }
+
+    fn apply_plugin_effects_with_keyboard_epoch(
+        &mut self,
+        effects: Vec<crate::plugin_panel::PluginEffect>,
+        keyboard_epoch: Option<u64>,
+    ) -> bool {
+        let mut changed = false;
+        for effect in effects {
+            match effect {
+                crate::plugin_panel::PluginEffect::SetApplicationScale { plugin_id, effect } => {
+                    let granted = self.plugin_display_control_granted(&plugin_id) && !self.locked;
+                    if granted {
+                        // The transaction is synchronous: this owner cannot process
+                        // a grant change until every guarded journal/native step ends.
+                        match self.application_scale_service.execute(&effect, || {
+                            if granted {
+                                Ok(())
+                            } else {
+                                Err("display control grant was retired".into())
+                            }
+                        }) {
+                            Ok(()) => changed = true,
+                            Err(error) => {
+                                tracing::warn!(%error, "application scale capability rejected");
+                                changed = true;
+                            }
+                        }
+                    }
+                }
+                crate::plugin_panel::PluginEffect::IdentifyDisplays {
+                    plugin_id,
+                    revision,
+                } => {
+                    if self.plugin_display_control_granted(&plugin_id) && !self.locked {
+                        let snapshot = self
+                            .plugin_displays(&plugin_id)
+                            .unwrap_or(serde_json::Value::Null);
+                        if snapshot["revision"].as_str() == Some(&revision)
+                            && snapshot["operations"]["identify"] == true
+                        {
+                            #[cfg(target_os = "linux")]
+                            {
+                                changed |= self.send_session_command(
+                                    "identify-plugin-displays",
+                                    ShellCommand::IdentifyOutputs,
+                                );
+                            }
+                        }
+                    }
+                }
+                crate::plugin_panel::PluginEffect::SetDisplayLayout {
+                    plugin_id,
+                    layout,
+                    revision,
+                } => {
+                    if self.plugin_display_control_granted(&plugin_id) && !self.locked {
+                        changed |= self.preview_plugin_display_layout(plugin_id, layout, &revision);
+                    }
+                }
+                crate::plugin_panel::PluginEffect::ConfirmDisplayLayout { plugin_id } => {
+                    if self.plugin_display_control_granted(&plugin_id) && !self.locked {
+                        changed |= self.confirm_plugin_display_layout(&plugin_id);
+                    }
+                }
+                crate::plugin_panel::PluginEffect::RevertDisplayLayout { plugin_id } => {
+                    if self.plugin_display_control_granted(&plugin_id) && !self.locked {
+                        changed |= self.revert_plugin_display_layout(Some(&plugin_id));
+                    }
+                }
+                effect @ crate::plugin_panel::PluginEffect::Keyboard { .. } => {
+                    changed |= self.apply_keyboard_plugin_effect(effect, keyboard_epoch);
+                }
+                crate::plugin_panel::PluginEffect::ShowLauncher => {
+                    changed |= self.global_shortcut(platform::GlobalShortcut::ShowLauncher);
+                }
+                crate::plugin_panel::PluginEffect::ShowSettings(screen) => {
+                    changed |= self.launch_settings(screen.as_deref());
+                }
+                crate::plugin_panel::PluginEffect::ShowPluginSurface {
+                    plugin_id,
+                    surface_id,
+                } => match self
+                    .show_plugin_window(&self.shell_surface_effect_owner(&plugin_id), &surface_id)
+                {
+                    Ok(shown) => changed |= shown,
+                    Err(error) => {
+                        tracing::warn!(plugin = plugin_id, surface = surface_id, %error, "plugin window request failed");
+                    }
+                },
+                crate::plugin_panel::PluginEffect::HidePluginSurface {
+                    plugin_id,
+                    surface_id,
+                } => {
+                    let key = nickel_core::plugins::PluginSurfaceKey {
+                        plugin_id: self.shell_surface_effect_owner(&plugin_id),
+                        surface_id,
+                    };
+                    match self.close_plugin_window(&key) {
+                        Ok(closed) => changed |= closed,
+                        Err(error) => {
+                            tracing::warn!(plugin = key.plugin_id, surface = key.surface_id, %error, "plugin transient surface close failed");
+                        }
+                    }
+                }
+                crate::plugin_panel::PluginEffect::FocusPluginSurface {
+                    plugin_id,
+                    surface_id,
+                } => match self
+                    .focus_plugin_window(&self.shell_surface_effect_owner(&plugin_id), &surface_id)
+                {
+                    Ok(focused) => changed |= focused,
+                    Err(error) => {
+                        tracing::warn!(plugin = plugin_id, surface = surface_id, %error, "plugin surface focus request failed");
+                    }
+                },
+                crate::plugin_panel::PluginEffect::SetPluginSurfacePlacement {
+                    plugin_id,
+                    surface_id,
+                    anchor,
+                    offset_x,
+                    offset_y,
+                } => match self.set_plugin_window_placement(
+                    &self.shell_surface_effect_owner(&plugin_id),
+                    &surface_id,
+                    anchor,
+                    offset_x,
+                    offset_y,
+                ) {
+                    Ok(moved) => changed |= moved,
+                    Err(error) => {
+                        tracing::warn!(plugin = plugin_id, surface = surface_id, %error, "plugin window placement request failed");
+                    }
+                },
+                crate::plugin_panel::PluginEffect::InvokeRegisteredSetting {
+                    caller,
+                    provider,
+                    id,
+                    value,
+                } => {
+                    let granted = self.plugin_registry.get(&caller).is_some_and(|entry| {
+                        entry.desired_enabled
+                            && entry
+                                .manifest
+                                .capabilities
+                                .contains(&nickel_core::plugins::PluginCapability::SettingsWrite)
+                    });
+                    let valid = self
+                        .package_settings_registry
+                        .settings_snapshot()
+                        .settings
+                        .iter()
+                        .any(|setting| {
+                            setting.provider_package == provider
+                                && setting.registration.id == id
+                                && setting.registration.accepts_value(&value)
+                        });
+                    if !granted || !valid || self.package_settings_invoking {
+                        continue;
+                    }
+                    let result = Some(self.invoke_hidden_package_setting(&provider, &id, &value));
+                    if let Some(Ok(effects)) = result {
+                        self.package_settings_invoking = true;
+                        changed |= self.apply_plugin_effects(effects);
+                        self.package_settings_invoking = false;
+                    }
+                }
+                crate::plugin_panel::PluginEffect::SetPluginSetting {
+                    plugin_id,
+                    key,
+                    value,
+                } => {
+                    let granted = self.plugin_registry.get(&plugin_id).is_some_and(|entry| {
+                        entry.desired_enabled
+                            && entry
+                                .manifest
+                                .capabilities
+                                .contains(&nickel_core::plugins::PluginCapability::SettingsWrite)
+                    });
+                    if !granted {
+                        tracing::warn!(
+                            plugin = plugin_id,
+                            setting = key,
+                            "plugin setting grant is unavailable"
+                        );
+                        continue;
+                    }
+                    match self.set_plugin_setting(&plugin_id, &key, value) {
+                        Ok(updated) => changed |= updated,
+                        Err(error) => {
+                            tracing::warn!(plugin = plugin_id, setting = key, %error, "plugin setting failed");
+                        }
+                    }
+                }
+                crate::plugin_panel::PluginEffect::RunExecute { plugin_id, execute } => {
+                    let revision = crate::run_capabilities::revision(
+                        &plugin_id,
+                        self.plugin_activation_generation,
+                    );
+                    if !self.native_ui_service_granted(
+                        &plugin_id,
+                        nickel_core::plugins::PluginCapability::RunCommand,
+                    ) || !execute.is_current(&revision)
+                    {
+                        continue;
+                    }
+                    match platform::execute_run_command(&execute.command) {
+                        Ok(()) => {
+                            self.run_status
+                                .insert(plugin_id, "Command submitted".into());
+                            changed = true;
+                        }
+                        Err(error) => {
+                            self.run_status.insert(
+                                plugin_id,
+                                format!("Could not run command: {}", launch_error_summary(&error)),
+                            );
+                            changed = true;
+                        }
+                    }
+                }
+                crate::plugin_panel::PluginEffect::ToggleLauncher => {
+                    self.request_launcher_toggle();
+                    changed = true;
+                }
+                crate::plugin_panel::PluginEffect::ToggleControlCenter => {
+                    self.set_control_visible(!self.default_shell_surface_visible("quick-settings"));
+                    changed = true;
+                }
+                crate::plugin_panel::PluginEffect::ShowControlCenter => {
+                    self.control_host.application_mut().dismiss();
+                    self.set_control_visible(true);
+                    if self.control_visible {
+                        self.set_launcher_visible(false);
+                    }
+                    changed = true;
+                }
+                crate::plugin_panel::PluginEffect::ActivateWindow(window) => {
+                    if self
+                        .windows
+                        .iter()
+                        .any(|current| current.id == window && current.state.capabilities.activate)
+                    {
+                        changed |= self.try_send_window_action(window, WindowAction::Activate);
+                    }
+                }
+                crate::plugin_panel::PluginEffect::CloseWindow(window) => {
+                    if self
+                        .windows
+                        .iter()
+                        .any(|current| current.id == window && current.state.capabilities.close)
+                    {
+                        changed |= self.try_send_window_action(window, WindowAction::Close);
+                    }
+                }
+                crate::plugin_panel::PluginEffect::WindowOperation {
+                    plugin_id,
+                    operation,
+                    restore_focus,
+                    destination,
+                    window,
+                } => {
+                    if self.native_ui_service_granted(
+                        &plugin_id,
+                        nickel_core::plugins::PluginCapability::WindowsContext,
+                    ) {
+                        if operation == "windows.dismissMenu" && !self.locked {
+                            self.dismiss_window_menu_with_focus(restore_focus);
+                            changed = true;
+                        } else {
+                            changed |=
+                                self.apply_public_window_operation(&operation, window, destination);
+                        }
+                    }
+                }
+                crate::plugin_panel::PluginEffect::ToggleOnScreenKeyboard { plugin_id } => {
+                    if self.native_ui_service_granted(
+                        &plugin_id,
+                        nickel_core::plugins::PluginCapability::OnScreenKeyboardShow,
+                    ) && self.keyboard_enabled
+                    {
+                        changed |= self.set_keyboard_visible(!self.keyboard_visible);
+                    }
+                }
+                crate::plugin_panel::PluginEffect::ProjectsVisibility { plugin_id, toggle } => {
+                    if self.native_ui_service_granted(
+                        &plugin_id,
+                        nickel_core::plugins::PluginCapability::ProjectsMenuShow,
+                    ) {
+                        changed |= self.show_projects_menu(toggle);
+                    }
+                }
+                crate::plugin_panel::PluginEffect::MoveApplicationPin { id, direction } => {
+                    if matches!(direction, -1 | 1)
+                        && self.launcher.is_pinned(&id)
+                        && self.launcher.move_pin(&id, isize::from(direction))
+                    {
+                        self.persist_launcher_preferences();
+                        changed = true;
+                    }
+                }
+
+                crate::plugin_panel::PluginEffect::ActivateTrayItem { id } => {
+                    if self.tray.iter().take(128).any(|item| item.id == id) {
+                        self.tray_feed.activate(&id);
+                        changed = true;
+                    }
+                }
+                crate::plugin_panel::PluginEffect::ContextTrayItem { id } => {
+                    if self.tray.iter().take(128).any(|item| item.id == id) {
+                        self.tray_feed.context_menu(&id);
+                        changed = true;
+                    }
+                }
+                crate::plugin_panel::PluginEffect::Feature { plugin_id, effect } => {
+                    let check = || -> Result<(), String> {
+                        if self.locked
+                            || !self.session_host.feature_preference_writes_allowed()
+                            || !self.plugin_registry.get(&plugin_id).is_some_and(|entry| {
+                                entry.desired_enabled
+                                    && entry.health == nickel_core::plugins::PluginHealth::Running
+                                    && entry.manifest.capabilities.contains(
+                                        &nickel_core::plugins::PluginCapability::FeaturesControl,
+                                    )
+                            })
+                        {
+                            return Err("feature authority is unavailable".into());
+                        }
+                        effect.validate(&self.feature_snapshot())
+                    };
+                    let result = nickel_core::optional_features::settings_path()
+                        .map_err(|error| error.to_string())
+                        .and_then(|path| {
+                            crate::feature_capabilities::FeatureClient::apply(
+                                &effect,
+                                path,
+                                &self.feature_snapshot(),
+                                check,
+                            )
+                        })
+                        .and_then(|settings| {
+                            self.session_host.optional_features_committed(
+                                settings.codex_generation,
+                                settings.on_screen_keyboard_generation,
+                            ).map_err(|error|if effect.commits_preference(){format!("Saved; native runtime has not applied the preference: {error}")}else{error})
+                        });
+                    self.feature_client.record(result);
+                    self.refresh_keyboard();
+                    changed = true;
+                }
+                crate::plugin_panel::PluginEffect::SearchApplications { plugin_id, query } => {
+                    let granted = self.plugin_registry.get(&plugin_id).is_some_and(|entry| {
+                        entry.desired_enabled
+                            && entry.health == nickel_core::plugins::PluginHealth::Running
+                            && entry
+                                .manifest
+                                .capabilities
+                                .contains(&nickel_core::plugins::PluginCapability::ApplicationsRead)
+                    });
+                    if granted && !self.locked {
+                        match self.application_search.set_query(&plugin_id, query) {
+                            Ok(()) => changed = true,
+                            Err(error) => tracing::warn!(%error, "application search rejected"),
+                        }
+                    }
+                }
+                crate::plugin_panel::PluginEffect::LaunchApplication { id } => {
+                    if self
+                        .launcher
+                        .applications()
+                        .any(|application| application.id() == id)
+                    {
+                        self.launch_application_by_id(&id);
+                        changed = true;
+                    }
+                }
+
+                crate::plugin_panel::PluginEffect::ToggleApplicationPin { id } => {
+                    if self.launcher.is_pinned(&id)
+                        || self
+                            .launcher
+                            .applications()
+                            .any(|application| application.id() == id)
+                        || self.windows.iter().any(|window| {
+                            window
+                                .application_id
+                                .as_ref()
+                                .is_some_and(|application| application.as_str() == id)
+                        })
+                    {
+                        self.toggle_application_pin(&id);
+                        changed = true;
+                    }
+                }
+                crate::plugin_panel::PluginEffect::RetryApplicationPinSave => {
+                    if self.launcher_status.as_deref().is_some_and(|status| {
+                        status.starts_with("Launcher preferences could not be saved:")
+                    }) {
+                        self.persist_launcher_preferences();
+                        changed = true;
+                    }
+                }
+
+                crate::plugin_panel::PluginEffect::SessionOperation { plugin_id, request } => {
+                    let admitted = self
+                        .plugin_registry
+                        .get(&plugin_id)
+                        .filter(|entry| entry.desired_enabled)
+                        .and_then(|entry| {
+                            crate::session_capabilities::snapshot(
+                                self.locked,
+                                &entry.manifest.capabilities,
+                            )
+                            .validate(&request, &entry.manifest.capabilities)
+                            .ok()
+                        });
+                    if let Some(action) = admitted {
+                        if self.task_switcher.session().is_some() {
+                            self.apply_task_switch_action(
+                                nickel_core::hotkeys::HotkeyAction::CancelSwitch,
+                            );
+                        }
+                        changed |= self.send_session_command(
+                            "plugin-session-operation",
+                            ShellCommand::SessionAction(action.native()),
+                        );
+                    }
+                }
+
+                crate::plugin_panel::PluginEffect::InvokeNotification { plugin_id, id, key } => {
+                    if self.notification_action_granted(&plugin_id, id)
+                        && self.notification_feed.history().iter().any(|item| {
+                            item.id == id && item.actions.iter().any(|action| action.key == key)
+                        })
+                    {
+                        self.notification_feed.invoke(id, &key);
+                        self.notification_feed.dismiss(id);
+                        if self.notification.as_ref().is_some_and(|item| item.id == id) {
+                            self.notification = None;
+                        }
+                        changed = true;
+                    }
+                }
+                crate::plugin_panel::PluginEffect::DismissNotification { plugin_id, id } => {
+                    if self.notification_action_granted(&plugin_id, id) {
+                        self.notification_feed.dismiss(id);
+                        if self.notification.as_ref().is_some_and(|item| item.id == id) {
+                            self.notification = None;
+                        }
+                        changed = true;
+                    }
+                }
+                crate::plugin_panel::PluginEffect::ShellPreviewDecision { plugin_id, effect } => {
+                    let result = self
+                        .plugin_registry
+                        .get(&plugin_id)
+                        .filter(|entry| {
+                            entry.desired_enabled
+                                && entry.health == nickel_core::plugins::PluginHealth::Running
+                        })
+                        .and_then(|_| self.plugin_management(&plugin_id))
+                        .ok_or("shell preview grant is unavailable".to_owned())
+                        .and_then(|snapshot| effect.validate(&snapshot))
+                        .and_then(|()| {
+                            if effect.confirm {
+                                self.confirm_shell_preview(Some(&plugin_id), effect.token)
+                            } else {
+                                self.revert_shell_preview(
+                                    Some(&plugin_id),
+                                    effect.token,
+                                    "The previous shell was restored.",
+                                )
+                            }
+                        });
+                    if let Err(error) = result {
+                        self.plugins_results.insert(
+                            plugin_id,
+                            serde_json::json!({"status":"rejected","detail":error}),
+                        );
+                    }
+                    changed = true;
+                }
+                crate::plugin_panel::PluginEffect::ShellSelection { plugin_id, effect } => {
+                    let result = self
+                        .plugin_registry
+                        .get(&plugin_id)
+                        .filter(|entry| {
+                            entry.desired_enabled
+                                && entry.health == nickel_core::plugins::PluginHealth::Running
+                        })
+                        .and_then(|_| self.plugin_management(&plugin_id))
+                        .ok_or("shell selection grant is unavailable".to_owned())
+                        .and_then(|snapshot| effect.validate(&snapshot))
+                        .and_then(|()| self.begin_shell_preview(&plugin_id, &effect.id));
+                    self.plugins_results.insert(
+                        plugin_id,
+                        match result {
+                            Ok(_) => {
+                                serde_json::json!({"status":if self.shell_selection_preview.is_some(){"preview"}else{"confirmed"},"selectedShell":effect.id})
+                            }
+                            Err(error) => serde_json::json!({"status":"rejected","detail":error}),
+                        },
+                    );
+                    changed = true;
+                }
+                crate::plugin_panel::PluginEffect::PluginsSetting { plugin_id, effect } => {
+                    let result = self
+                        .plugin_registry
+                        .get(&plugin_id)
+                        .filter(|entry| {
+                            entry.desired_enabled
+                                && entry.health == nickel_core::plugins::PluginHealth::Running
+                        })
+                        .and_then(|_| self.plugin_management(&plugin_id))
+                        .ok_or_else(|| "plugin management is unavailable".to_owned())
+                        .and_then(|snapshot| effect.validate(&snapshot))
+                        .and_then(|()| {
+                            self.set_plugin_setting(&effect.id, &effect.key, effect.value)
+                        });
+                    let value = match result {
+                        Ok(_) => {
+                            serde_json::json!({"status":"applied","id":effect.id,"key":effect.key})
+                        }
+                        Err(error) => {
+                            serde_json::json!({"status":"rejected","detail":error.chars().take(512).collect::<String>()})
+                        }
+                    };
+                    self.plugins_results.insert(plugin_id, value);
+                    changed = true;
+                }
+                crate::plugin_panel::PluginEffect::Plugins { plugin_id, effect } => {
+                    let result = self
+                        .plugin_registry
+                        .get(&plugin_id)
+                        .filter(|entry| {
+                            entry.desired_enabled
+                                && entry.health == nickel_core::plugins::PluginHealth::Running
+                        })
+                        .and_then(|_| self.plugin_management(&plugin_id))
+                        .ok_or_else(|| "plugin management read grant is unavailable".to_owned())
+                        .and_then(|snapshot| effect.validate(&snapshot))
+                        .and_then(|()| self.set_plugin_enabled(&effect.id, effect.enabled));
+                    let value = match result {
+                        Ok(_changed_state) => {
+                            serde_json::json!({"status":"applied","id":effect.id,"enabled":effect.enabled})
+                        }
+                        Err(error) => {
+                            serde_json::json!({"status":"rejected","detail":error.chars().take(512).collect::<String>()})
+                        }
+                    };
+                    self.plugins_results.insert(plugin_id, value);
+                    changed = true;
+                }
+                crate::plugin_panel::PluginEffect::Associations { plugin_id, effect } => {
+                    let granted = self.external_plugin_packages.get(&plugin_id).map(|package| &package.manifest)
+                        .or_else(|| self.plugin_registry.get(&plugin_id).map(|entry| &entry.manifest))
+                        .is_some_and(|manifest| manifest.capabilities.contains(&effect.capability())
+                            && (!matches!(effect, crate::associations_capabilities::AssociationsEffect::SetDefault { .. })
+                                || manifest.capabilities.contains(&nickel_core::plugins::PluginCapability::AssociationsRead)));
+                    if granted && !self.locked {
+                        let result = effect.execute_native().unwrap_or_else(|error| serde_json::json!({"status":"rejected","detail":error.chars().take(512).collect::<String>()}));
+                        self.associations_results.insert(plugin_id, result);
+                        changed = true;
+                    }
+                }
+                crate::plugin_panel::PluginEffect::Preferences { plugin_id, effect } => {
+                    use nickel_core::plugins::PluginCapability;
+                    let granted = !self.locked
+                        && self
+                            .external_plugin_packages
+                            .get(&plugin_id)
+                            .map(|package| &package.manifest)
+                            .or_else(|| {
+                                self.plugin_registry
+                                    .get(&plugin_id)
+                                    .map(|entry| &entry.manifest)
+                            })
+                            .is_some_and(|manifest| {
+                                manifest
+                                    .capabilities
+                                    .contains(&PluginCapability::PreferencesRead)
+                                    && manifest.capabilities.contains(&effect.capability())
+                            });
+                    if granted {
+                        let result = self.preferences_catalog().and_then(|catalog| {
+                            self.preferences_capabilities
+                                .execute(&effect, &catalog, || {
+                                    if granted {
+                                        Ok(())
+                                    } else {
+                                        Err("preferences grant was retired".into())
+                                    }
+                                })
+                        });
+                        match result {
+                            Ok(settings) => {
+                                self.preferences_commit_pending = Some(settings.clone());
+                                self.launcher_icons.begin_visual_generation();
+                                self.launcher_icons.invalidate_application_inventory();
+                                self.apply_shell_settings(settings);
+                                changed = true;
+                            }
+                            Err(error) => tracing::warn!(%error, "preferences capability rejected"),
+                        }
+                    }
+                }
+                crate::plugin_panel::PluginEffect::Appearance { plugin_id, effect } => {
+                    if matches!(
+                        effect,
+                        crate::appearance_capabilities::AppearanceEffect::ChooseImage { .. }
+                    ) {
+                        changed |= self.begin_wallpaper_chooser(plugin_id, effect);
+                        continue;
+                    }
+                    let granted = self
+                        .external_plugin_packages
+                        .get(&plugin_id)
+                        .map(|package| &package.manifest)
+                        .or_else(|| {
+                            self.plugin_registry
+                                .get(&plugin_id)
+                                .map(|entry| &entry.manifest)
+                        })
+                        .is_some_and(|manifest| {
+                            manifest.capabilities.contains(&effect.capability())
+                                && manifest.capabilities.contains(&effect.read_capability())
+                        });
+                    if granted && !self.locked {
+                        match self.appearance_capabilities.execute(&effect, || {
+                            if granted {
+                                Ok(())
+                            } else {
+                                Err("appearance grant was retired".into())
+                            }
+                        }) {
+                            Ok(
+                                crate::appearance_capabilities::CommittedAppearance::Appearance(
+                                    settings,
+                                ),
+                            ) => {
+                                changed |= self.apply_shell_settings(settings);
+                            }
+                            Ok(crate::appearance_capabilities::CommittedAppearance::Wallpaper(
+                                settings,
+                            )) => {
+                                self.refresh_configured_wallpaper(settings.image);
+                                self.desktop_application_dirty = true;
+                                self.appearance_capabilities.wallpaper_reconciled();
+                                changed = true;
+                            }
+                            Err(error) => tracing::warn!(%error, "appearance capability rejected"),
+                        }
+                    }
+                }
+                crate::plugin_panel::PluginEffect::Connectivity { plugin_id, effect } => {
+                    let granted = self
+                        .external_plugin_packages
+                        .get(&plugin_id)
+                        .map(|package| &package.manifest)
+                        .or_else(|| {
+                            self.plugin_registry
+                                .get(&plugin_id)
+                                .map(|entry| &entry.manifest)
+                        })
+                        .is_some_and(|manifest| {
+                            manifest.capabilities.contains(&effect.capability())
+                        });
+                    if granted && !self.locked {
+                        match effect.execute() {
+                            Ok(success) => {
+                                log_control_result("connectivity-capability", success);
+                                changed |= success;
+                            }
+                            Err(error) => {
+                                tracing::warn!(%error, "connectivity capability rejected")
+                            }
+                        }
+                    }
+                }
+                crate::plugin_panel::PluginEffect::Workspace { plugin_id, effect } => {
+                    if self.public_native_granted(&plugin_id, effect.capability())
+                        && self
+                            .plugin_workspace_snapshot(&plugin_id)
+                            .is_some_and(|snapshot| effect.validate(&snapshot).is_ok())
+                    {
+                        let command = match effect.operation.as_str() {
+                            "workspaces.switch" => {
+                                ShellCommand::SwitchWorkspace(effect.id.unwrap())
+                            }
+                            "workspaces.create" => ShellCommand::CreateWorkspace,
+                            "workspaces.remove" => {
+                                ShellCommand::RemoveWorkspace(effect.id.unwrap())
+                            }
+                            _ => continue,
+                        };
+                        changed |= self.send_session_command("plugin-workspaces", command);
+                        changed |= self.refresh();
+                    }
+                }
+                crate::plugin_panel::PluginEffect::ToggleShowDesktop { plugin_id } => {
+                    if cfg!(target_os = "linux")
+                        && self.public_native_granted(
+                            &plugin_id,
+                            nickel_core::plugins::PluginCapability::DesktopControl,
+                        )
+                    {
+                        changed |= self.send_session_command(
+                            "plugin-show-desktop",
+                            ShellCommand::ToggleShowDesktop,
+                        );
+                        changed |= self.refresh();
+                    }
+                }
+                crate::plugin_panel::PluginEffect::PreviewDisplayProjection {
+                    plugin_id,
+                    mode,
+                    revision,
+                } => {
+                    if self.plugin_display_control_granted(&plugin_id)
+                        && !self.locked
+                        && self.projection_chooser.pending().is_none()
+                    {
+                        #[cfg(target_os = "linux")]
+                        if let Ok(outputs) = self.session_host.projection_outputs() {
+                            if let Some(layout) =
+                                crate::display_capabilities::projection_layout(&outputs, mode)
+                            {
+                                changed |= self
+                                    .preview_plugin_display_layout(plugin_id, layout, &revision);
+                            }
+                        }
+                        #[cfg(not(target_os = "linux"))]
+                        let _ = (mode, revision);
+                    }
+                }
+                crate::plugin_panel::PluginEffect::WindowPreviewRequest {
+                    plugin_id,
+                    revision,
+                    action,
+                } => {
+                    if self
+                        .plugin_window_previews(&plugin_id)
+                        .and_then(|v| {
+                            v.get("revision")
+                                .and_then(serde_json::Value::as_str)
+                                .map(str::to_owned)
+                        })
+                        .as_deref()
+                        == Some(&revision)
+                        && self.plugin_registry.get(&plugin_id).is_some_and(|entry| {
+                            entry.manifest.capabilities.contains(&match action {
+                                PreviewAction::Activate(_) => {
+                                    nickel_core::plugins::PluginCapability::WindowsFocus
+                                }
+                                _ => nickel_core::plugins::PluginCapability::WindowsContext,
+                            })
+                        })
+                        && self.preview_plugin_action_allowed(action)
+                    {
+                        self.apply_preview_action(action);
+                        changed = true;
+                    }
+                }
+            }
+        }
+        changed
     }
 
     pub(crate) fn control_host_event(
@@ -3072,6 +6860,23 @@ impl LiveShell {
         if !self.control_visible {
             return Default::default();
         }
+        if self.quick_settings_surface_active() {
+            return self.plugin_surface_host_event(
+                &self.active_shell_surface_key("quick-settings"),
+                event,
+                size,
+                limit,
+                authority,
+            );
+        }
+        if !self
+            .control_host
+            .application()
+            .view_state()
+            .trusted_visible()
+        {
+            return Default::default();
+        }
         self.sync_control_host(size.0, size.1);
         let mut outcome = self.control_host.step(HostBatch {
             surface_size: Some(size),
@@ -3089,11 +6894,34 @@ impl LiveShell {
     }
 
     #[cfg(target_os = "linux")]
+    pub(crate) fn plugin_surface_field_lease(
+        &self,
+        key: &nickel_core::plugins::PluginSurfaceKey,
+    ) -> Option<(nickel_ui::UiId, u64)> {
+        let inspection = self.plugin_panel_host_ref(key)?.inspect();
+        Some((
+            inspection.keyboard_focus?,
+            inspection.keyboard_focus_generation,
+        ))
+    }
+
+    #[cfg(target_os = "linux")]
     pub(crate) fn shell_field_lease(&self, role: SurfaceRole) -> Option<(nickel_ui::UiId, u64)> {
         let inspection = match role {
-            SurfaceRole::Launcher if self.run_visible => self.run_host.inspect(),
-            SurfaceRole::Launcher => self.launcher_host.inspect(),
-            SurfaceRole::ControlCenter => self.control_host.inspect(),
+            SurfaceRole::ControlCenter => self
+                .quick_settings_surface_active()
+                .then(|| {
+                    self.plugin_panel_host_ref(&self.active_shell_surface_key("quick-settings"))
+                        .unwrap()
+                        .inspect()
+                })
+                .or_else(|| {
+                    self.control_host
+                        .application()
+                        .view_state()
+                        .trusted_visible()
+                        .then(|| self.control_host.inspect())
+                })?,
             _ => return None,
         };
         Some((
@@ -3113,11 +6941,25 @@ impl LiveShell {
         height: u32,
     ) -> bool {
         match role {
-            SurfaceRole::Panel => self.panel_host_ui(event, width),
-            SurfaceRole::Launcher => self.launcher_host_ui(event, width, height),
+            SurfaceRole::Taskbar => false,
+            // Plugin panels always carry a surface key and use
+            // `plugin_panel_host_ui_for` at the compositor boundary.
+            SurfaceRole::Panel => false,
+            SurfaceRole::Launcher => false,
             SurfaceRole::ControlCenter => {
-                if !self.control_visible {
+                if !self.control_visible || !self.control_surface_available() {
                     return false;
+                }
+                if self.quick_settings_surface_active() {
+                    return self
+                        .plugin_surface_host_event(
+                            &self.active_shell_surface_key("quick-settings"),
+                            HostEvent::Ui(event),
+                            (width, height),
+                            None,
+                            None,
+                        )
+                        .changed;
                 }
                 self.sync_control_host(width, height);
                 let changed = self.step_control_host(HostBatch {
@@ -3129,9 +6971,10 @@ impl LiveShell {
                 changed
             }
             SurfaceRole::Notification => {
-                if self.notification.is_none() && !self.notification_history_visible {
+                if !self.surface_visible(SurfaceRole::Notification) {
                     return false;
                 }
+
                 self.sync_notification_host(width, height);
                 let outcome = self.notification_host.step(HostBatch {
                     surface_size: Some((width, height)),
@@ -3141,64 +6984,12 @@ impl LiveShell {
                 outcome.changed | self.apply_notification_effects()
             }
             SurfaceRole::WindowPreview => {
-                let Some(frame) = self.preview_frame.as_mut() else {
-                    return false;
-                };
-                let outcome = frame.step(HostBatch {
-                    surface_size: Some((width, height)),
-                    events: vec![HostEvent::Ui(event)],
-                    ..HostBatch::default()
-                });
-                let actions = frame.take_actions();
-                for action in actions {
-                    self.apply_preview_action(action);
-                }
-                outcome.changed
+                self.preview_plugin_active()
+                    && self
+                        .preview_plugin_event(HostEvent::Ui(event), (width, height), None)
+                        .changed
             }
-            SurfaceRole::WindowContextMenu => {
-                if matches!(
-                    event,
-                    UiEvent::KeyboardNavigateBack | UiEvent::ControllerBack
-                ) {
-                    return self.window_menu_host_key(Some(KeyCode::Escape));
-                }
-                if self.application_menu_target.is_some() {
-                    if self.application_menu_host.is_none() {
-                        let _ = self.application_menu_scene();
-                    }
-                    let Some(host) = self.application_menu_host.as_mut() else {
-                        return false;
-                    };
-                    let outcome = host.step(HostBatch {
-                        surface_size: Some((width, height)),
-                        events: vec![HostEvent::Ui(event)],
-                        ..HostBatch::default()
-                    });
-                    let effects = host.application_mut().take_effects();
-                    for effect in effects {
-                        self.apply_application_menu_action(effect);
-                        self.close_window_preview();
-                    }
-                    return outcome.changed;
-                }
-                if self.window_menu_host.is_none() {
-                    let _ = self.window_menu_scene();
-                }
-                let Some(host) = self.window_menu_host.as_mut() else {
-                    return false;
-                };
-                let outcome = host.step(HostBatch {
-                    surface_size: Some((width, height)),
-                    events: vec![HostEvent::Ui(event)],
-                    ..HostBatch::default()
-                });
-                let effects = host.application_mut().take_effects();
-                for effect in effects {
-                    self.apply_window_menu_action(effect);
-                    self.close_window_preview();
-                }
-                outcome.changed
-            }
+            SurfaceRole::WindowContextMenu => false,
             SurfaceRole::Lock => {
                 if !self.locked {
                     return false;
@@ -3258,31 +7049,8 @@ impl LiveShell {
             SurfaceRole::Screenshot => {
                 self.screenshot_host_event(HostEvent::Shortcut(shortcut), width, height)
             }
-            SurfaceRole::Launcher => {
-                let outcome = self.launcher_host_event_with_clipboard_limit(
-                    HostEvent::Shortcut(shortcut),
-                    width,
-                    height,
-                    None,
-                );
-                // Native scene input is queued before this host can report whether
-                // Submit was handled. Perform the activation fallback here, at
-                // the launcher owner, so dashboard rows receive Enter too.
-                if shortcut == Shortcut::Submit && !outcome.changed {
-                    self.launcher_host_event_with_clipboard_limit(
-                        HostEvent::Ui(UiEvent::KeyboardNavigateActivate),
-                        width,
-                        height,
-                        None,
-                    )
-                    .changed
-                } else {
-                    outcome.changed
-                }
-            }
-            SurfaceRole::WindowContextMenu => {
-                self.window_menu_host_event(HostEvent::Shortcut(shortcut), width, height)
-            }
+            SurfaceRole::Launcher => false,
+            SurfaceRole::WindowContextMenu => false,
             SurfaceRole::Lock if self.locked => {
                 let outcome = self.lock_host.step(HostBatch {
                     surface_size: Some((width, height)),
@@ -3297,134 +7065,19 @@ impl LiveShell {
         }
     }
 
-    fn apply_panel_action(&mut self, action: PanelAction) {
-        let anchored_role = match &action {
-            PanelAction::Codex => Some((ShellRole::ProjectMenu, "panel-codex")),
-            PanelAction::Control => Some((ShellRole::ControlCenter, "panel-control")),
-            _ => None,
-        };
-        if anchored_role.is_some() {
-            self.pending_popover_anchor = None;
-        }
-        if let Some((role, control)) = anchored_role
-            && let (Some(output), Some(target)) = (
-                self.panel_output.clone(),
-                self.panel_host
-                    .semantic_targets_for_message(&action)
-                    .into_iter()
-                    .next(),
-            )
-        {
-            self.pending_popover_anchor = Some(PendingPopoverAnchor {
-                role,
-                control: control.to_owned(),
-                output,
-                bounds: target.bounds,
-            });
-        }
-        match action {
-            PanelAction::Launcher => self.set_launcher_visible(!self.launcher_visible),
-            PanelAction::OnScreenKeyboard => {
-                self.set_keyboard_visible(!self.keyboard_visible);
-            }
-            PanelAction::Task(index) => {
-                let groups = self.panel_groups();
-                if let Some(window) = groups.get(index).and_then(|group| group.windows.last()) {
-                    let _ = self.send_session_command(
-                        "activate-window",
-                        ShellCommand::WindowAction {
-                            window: window.id,
-                            action: WindowAction::Activate,
-                        },
-                    );
-                    self.close_window_preview();
-                } else if let Some(application_id) = groups
-                    .get(index)
-                    .filter(|group| group.available)
-                    .and_then(|group| group.application_id.as_ref())
-                {
-                    self.launch_application_by_id(application_id.as_str());
-                }
-            }
-            PanelAction::TaskContext(index) => {
-                let groups = self.panel_groups();
-                let Some(group) = groups.get(index) else {
-                    return;
-                };
-                let target = ApplicationMenuTarget::capture(&group.window_group());
-                let pinned = target
-                    .application_id
-                    .as_ref()
-                    .is_some_and(|id| self.launcher.is_pinned(id.as_str()));
-                if application_menu_entries(&target, pinned).is_empty() {
-                    return;
-                }
-                self.close_window_preview();
-                self.window_menu_generation = self.window_menu_generation.saturating_add(1);
-                self.application_menu_target = Some(target);
-                self.application_menu_host = None;
-                let x = self
-                    .panel_host
-                    .semantic_targets_for_message(&PanelAction::Task(index))
-                    .into_iter()
-                    .next()
-                    .map(|target| target.bounds.origin.x.round() as i32)
-                    .unwrap_or((PANEL_ITEM_WIDTH * (index + 1) as f32).round() as i32);
-                self.window_menu_anchor_x = Some(self.panel_origin_x + x);
-                self.window_menu_anchor_y = Some(self.panel_origin_y);
-                let _ = self.send_session_command(
-                    "show-context-menu",
-                    ShellCommand::ShowContextMenu {
-                        x: self.panel_origin_x + x,
-                        y: self.panel_origin_y,
-                        width: MENU_WIDTH as i32,
-                        height: self.window_context_menu_height(),
-                    },
-                );
-                #[cfg(target_os = "linux")]
-                let _ =
-                    self.send_session_command("focus-context-menu", ShellCommand::FocusContextMenu);
-            }
-            PanelAction::ToggleTaskPin(id) => {
-                self.launcher.toggle_pin(&id);
-                self.persist_launcher_preferences();
-            }
-            PanelAction::MoveTaskPinLeft(id) => {
-                if self.launcher.move_pin(&id, -1) {
-                    self.persist_launcher_preferences();
-                }
-            }
-            PanelAction::MoveTaskPinRight(id) => {
-                if self.launcher.move_pin(&id, 1) {
-                    self.persist_launcher_preferences();
-                }
-            }
-            // Drag gestures are reduced by `PanelApplication` into a typed move action.
-            PanelAction::TaskDrag(_, _) => {}
-            PanelAction::Codex => {
-                if !self.launcher.codex_available() {
-                    self.codex_project_menu_visible = false;
-                    return;
-                }
-                if self.launcher_visible {
-                    self.set_launcher_visible(false);
-                }
-                self.codex_project_menu_visible = !self.codex_project_menu_visible;
-            }
-            PanelAction::Tray(id) => self.tray_feed.activate(&id),
-            PanelAction::TrayContext(id) => self.tray_feed.context_menu(&id),
-            PanelAction::Control => {
-                if self.launcher_visible {
-                    self.set_launcher_visible(false);
-                }
-                if !self.control_visible {
-                    let _ = self
-                        .control_host
-                        .adopt_input_modality(self.panel_host.inspect().modality);
-                }
-                self.set_control_visible(!self.control_visible);
-            }
-        }
+    #[cfg(any(target_os = "linux", test))]
+    fn semantic_panel_output(&self, requested: Option<&String>) -> Option<String> {
+        requested.cloned().or_else(|| self.panel_output.clone())
+    }
+
+    #[cfg(any(target_os = "linux", test))]
+    fn semantic_panel_host(
+        &self,
+        _output: &Option<String>,
+    ) -> Option<&nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>> {
+        self.taskbar_surface_key()
+            .as_ref()
+            .and_then(|key| self.plugin_panel_host_ref(key))
     }
 
     /// Resolves a test/accessibility semantic target from the same live group
@@ -3437,6 +7090,28 @@ impl LiveShell {
     ) -> Option<ResolvedShellTarget> {
         match target {
             ShellSemanticTarget::OnScreenKeyboard { key } => {
+                let plugin_key = self.active_shell_surface_key("keyboard");
+                if self.keyboard_visible
+                    && self.plugin_surface_matches(&plugin_key)
+                    && let Some((_, host)) = self.plugin_surface_hosts.get(&plugin_key)
+                {
+                    let button = match key.as_str() {
+                        "osk-hide" => "osk-plugin-hide",
+                        "osk-larger" => "osk-plugin-larger",
+                        "osk-smaller" => "osk-plugin-smaller",
+                        "osk-dock" => "osk-plugin-dock",
+                        "osk-persistent-modifiers" => "osk-plugin-hold",
+                        key => key,
+                    };
+                    let bounds = taskbar_plugin_control_bounds(host, button)?;
+                    return Some(ResolvedShellTarget {
+                        role: ShellRole::OnScreenKeyboard,
+                        output: None,
+                        x: (bounds.origin.x + bounds.size.width / 2.0).round() as i32,
+                        y: (bounds.origin.y + bounds.size.height / 2.0).round() as i32,
+                        interaction: PointerInteraction::LeftClick,
+                    });
+                }
                 use nickel_core::on_screen_keyboard::{
                     KeyboardPanel, compact_us_keyboard_rows, us_keyboard_rows,
                 };
@@ -3481,69 +7156,37 @@ impl LiveShell {
                 })
             }
             ShellSemanticTarget::OnScreenKeyboardToggle => {
-                let target = self
-                    .panel_host
-                    .semantic_targets_for_message(&PanelAction::OnScreenKeyboard)
-                    .into_iter()
-                    .next()?;
+                let output = self.semantic_panel_output(None);
+                let host = self.semantic_panel_host(&output)?;
+                let bounds = taskbar_plugin_control_bounds(host, "taskbar-keyboard")?;
                 Some(ResolvedShellTarget {
                     role: ShellRole::Panel,
-                    output: self.panel_output.clone(),
-                    x: (target.bounds.origin.x + target.bounds.size.width / 2.0).round() as i32,
-                    y: (target.bounds.origin.y + target.bounds.size.height / 2.0).round() as i32,
+                    output,
+                    x: (bounds.origin.x + bounds.size.width / 2.0).round() as i32,
+                    y: (bounds.origin.y + bounds.size.height / 2.0).round() as i32,
                     interaction: PointerInteraction::LeftClick,
                 })
             }
-            ShellSemanticTarget::PanelApplication {
-                application_id,
-                output,
-                interaction,
-            } => {
-                let host = if output.is_none() || output == &self.panel_output {
-                    &self.panel_host
-                } else if let Some(host) = self.panel_hosts.get(output) {
-                    host
-                } else if self.panel_output.is_none() && self.panel_hosts.is_empty() {
-                    // The legacy single-panel presenter has no named output
-                    // host. Its requested output is a native routing hint.
-                    &self.panel_host
-                } else {
-                    return None;
-                };
-                let groups = &host.application().groups;
-                let index = groups.iter().take(12).position(|group| {
-                    group
-                        .application_id
-                        .as_ref()
-                        .is_some_and(|id| id.as_str() == application_id)
-                })?;
-                let bounds = host
-                    .semantic_targets_for_message(&PanelAction::Task(index))
-                    .into_iter()
-                    .next()?
-                    .bounds;
+
+            ShellSemanticTarget::PanelControlCenter { output } => {
+                let output = self.semantic_panel_output(output.as_ref());
+                let plugin_host = self.semantic_panel_host(&output)?;
+                let bounds = taskbar_plugin_control_bounds(plugin_host, "taskbar-control")?;
                 Some(ResolvedShellTarget {
                     role: ShellRole::Panel,
-                    output: output.clone(),
+                    output,
                     x: (bounds.origin.x + bounds.size.width / 2.0).round() as i32,
                     y: (bounds.origin.y + bounds.size.height / 2.0).round() as i32,
-                    interaction: *interaction,
+                    interaction: PointerInteraction::LeftClick,
                 })
             }
-            ShellSemanticTarget::PanelControlCenter { output } => {
-                let host = if output.is_none() || output == &self.panel_output {
-                    &self.panel_host
-                } else {
-                    self.panel_hosts.get(output)?
-                };
-                let bounds = host
-                    .semantic_targets_for_message(&PanelAction::Control)
-                    .into_iter()
-                    .next()?
-                    .bounds;
+            ShellSemanticTarget::PanelCodex { output } => {
+                let output = self.semantic_panel_output(output.as_ref());
+                let plugin_host = self.semantic_panel_host(&output)?;
+                let bounds = taskbar_plugin_control_bounds(plugin_host, "taskbar-codex")?;
                 Some(ResolvedShellTarget {
                     role: ShellRole::Panel,
-                    output: output.clone(),
+                    output,
                     x: (bounds.origin.x + bounds.size.width / 2.0).round() as i32,
                     y: (bounds.origin.y + bounds.size.height / 2.0).round() as i32,
                     interaction: PointerInteraction::LeftClick,
@@ -3553,14 +7196,16 @@ impl LiveShell {
                 if !self.control_visible {
                     return None;
                 }
-                let bounds = self
-                    .control_host
-                    .semantic_targets_for_message(&ControlAction::SessionAction(
-                        crate::platform::SessionAction::Lock,
-                    ))
-                    .into_iter()
-                    .next()?
-                    .bounds;
+                let bounds = if self.quick_settings_surface_active() {
+                    taskbar_plugin_control_bounds(
+                        self.plugin_panel_host_ref(
+                            &self.active_shell_surface_key("quick-settings"),
+                        )?,
+                        "session-lock",
+                    )?
+                } else {
+                    return None;
+                };
                 Some(ResolvedShellTarget {
                     role: ShellRole::ControlCenter,
                     output: None,
@@ -3578,10 +7223,7 @@ impl LiveShell {
                     PreviewTargetAction::Close => PreviewAction::Close(window),
                     PreviewTargetAction::OpenMenu => PreviewAction::OpenMenu(window),
                 };
-                let bounds = self
-                    .preview_frame
-                    .as_ref()?
-                    .semantic_bounds(preview_action)?;
+                let bounds = self.preview_plugin_bounds(preview_action)?;
                 let point = Point {
                     x: bounds.origin.x + bounds.size.width / 2.0,
                     y: bounds.origin.y + bounds.size.height / 2.0,
@@ -3600,33 +7242,10 @@ impl LiveShell {
                     },
                 })
             }
-            ShellSemanticTarget::WindowMenu { window, action } => {
-                let window = crate::model::WindowId(window.0);
-                let menu_action = match action {
-                    WindowMenuTargetAction::Close => MenuAction::Close(window),
-                    WindowMenuTargetAction::MaximizeRestore => MenuAction::MaximizeRestore(window),
-                    WindowMenuTargetAction::Minimize => MenuAction::Minimize(window),
-                };
-                let bounds = self
-                    .window_menu_host
-                    .as_ref()?
-                    .semantic_targets_for_message(&menu_action)
-                    .into_iter()
-                    .next()?
-                    .bounds;
-                let point = Point {
-                    x: bounds.origin.x + bounds.size.width / 2.0,
-                    y: bounds.origin.y + bounds.size.height / 2.0,
-                };
-                Some(ResolvedShellTarget {
-                    role: ShellRole::ContextMenu,
-                    output: None,
-                    x: point.x.round() as i32,
-                    y: point.y.round() as i32,
-                    interaction: PointerInteraction::LeftClick,
-                })
-            }
-            ShellSemanticTarget::Screenshot { .. } => None,
+
+            ShellSemanticTarget::PanelApplication { .. }
+            | ShellSemanticTarget::WindowMenu { .. }
+            | ShellSemanticTarget::Screenshot { .. } => None,
         }
     }
 
@@ -3636,67 +7255,6 @@ impl LiveShell {
         action: nickel_session_protocol::ScreenshotTargetAction,
     ) -> bool {
         self.screenshot.perform_semantic_action(action)
-    }
-
-    pub fn panel_pointer_moved(&mut self, x: f32, width: u32) -> bool {
-        let application_changed = self.sync_panel_host();
-        self.panel_host.step(HostBatch {
-            application_changed,
-            surface_size: Some((width, 56)),
-            events: vec![HostEvent::Ui(UiEvent::PointerMoved(Point { x, y: 28.0 }))],
-            ..HostBatch::default()
-        });
-        let hovered_action = self
-            .panel_host
-            .inspect()
-            .pointer_hover
-            .as_ref()
-            .and_then(|target| self.panel_host.message_for_semantic_target(target))
-            .cloned();
-        let hovered = hovered_action
-            .as_ref()
-            .and_then(|action| self.panel_hover_for_action(action));
-        let changed = hovered != self.panel_hover;
-        self.panel_hover = hovered;
-        self.panel_hover_output.clone_from(&self.panel_output);
-        if let Some(PanelHover::Task(index)) = hovered {
-            if self.preview_group != Some(index)
-                && self.preview_pending.map(|(pending, _)| pending) != Some(index)
-            {
-                self.preview_pending = Some((index, Instant::now() + PREVIEW_HOVER_DELAY));
-            }
-            self.preview_leave_deadline = None;
-        } else {
-            self.preview_pending = None;
-            if self.preview_group.is_some() && !self.preview_pointer_inside {
-                self.preview_leave_deadline = Some(Instant::now() + PREVIEW_LEAVE_DELAY);
-            }
-        }
-        changed
-    }
-
-    fn panel_hover_for_action(&self, action: &PanelAction) -> Option<PanelHover> {
-        Some(match action {
-            PanelAction::OnScreenKeyboard => PanelHover::OnScreenKeyboard,
-            PanelAction::Launcher => PanelHover::Launcher,
-            PanelAction::Task(index)
-            | PanelAction::TaskContext(index)
-            | PanelAction::TaskDrag(index, _) => PanelHover::Task(*index),
-            PanelAction::ToggleTaskPin(_)
-            | PanelAction::MoveTaskPinLeft(_)
-            | PanelAction::MoveTaskPinRight(_) => return None,
-            PanelAction::Codex => PanelHover::Codex,
-            PanelAction::Tray(id) | PanelAction::TrayContext(id) => self
-                .tray
-                .iter()
-                .rev()
-                .take(4)
-                .rev()
-                .position(|item| item.id == id.as_str())
-                .map(PanelHover::Tray)
-                .unwrap_or(PanelHover::Tray(0)),
-            PanelAction::Control => PanelHover::Control,
-        })
     }
 
     pub fn set_panel_origin_x(&mut self, origin_x: i32) {
@@ -3711,46 +7269,14 @@ impl LiveShell {
         self.switch_panel_output(Some(output.into()));
     }
 
+    pub(crate) fn active_plugin_output(&self) -> Option<&str> {
+        self.panel_output
+            .as_deref()
+            .or(Some(self.desktop_host.application().active_output.as_str()))
+    }
+
     fn switch_panel_output(&mut self, output: Option<String>) {
-        if self.panel_output == output {
-            return;
-        }
-        let next = self.panel_hosts.remove(&output).unwrap_or_else(|| {
-            let mut application = self.panel_host.application().clone();
-            application.effects.clear();
-            application.task_drag = None;
-            application.panel_hover = None;
-            nickel_ui::UiHost::new(application, 1920, 56)
-        });
-        let previous = std::mem::replace(&mut self.panel_host, next);
-        if self.panel_hosts.len() >= 32 {
-            self.panel_hosts.clear();
-        }
-        self.panel_hosts
-            .insert(std::mem::replace(&mut self.panel_output, output), previous);
-        self.panel_deadline = self.panel_host.next_deadline();
-    }
-
-    /// Render a concrete output without transferring popover/input ownership.
-    pub fn panel_scene_for_output(
-        &mut self,
-        output: Option<&str>,
-        width: u32,
-        height: u32,
-    ) -> Vec<PaintCommand> {
-        let input_output = self.panel_output.clone();
-        let input_change_token = self.panel_change_token;
-        self.switch_panel_output(output.map(str::to_owned));
-        let scene = self.panel_scene(width, height);
-        self.switch_panel_output(input_output);
-        self.panel_change_token = input_change_token;
-        scene
-    }
-
-    fn visible_panel_hover(&self) -> Option<PanelHover> {
-        (self.panel_hover_output == self.panel_output)
-            .then_some(self.panel_hover)
-            .flatten()
+        self.panel_output = output;
     }
 
     #[cfg(any(target_os = "linux", test))]
@@ -3813,36 +7339,48 @@ impl LiveShell {
         self.window_feed.primary_output()
     }
 
-    pub fn panel_pointer_left(&mut self) -> bool {
-        if self.panel_hover.is_none() || self.panel_hover_output != self.panel_output {
-            return false;
-        }
-        self.panel_hover = None;
-        self.panel_hover_output = None;
-        self.preview_pending = None;
-        if self.preview_group.is_some() && !self.preview_pointer_inside {
-            self.preview_leave_deadline = Some(Instant::now() + PREVIEW_LEAVE_DELAY);
-        }
-        true
-    }
-
     pub fn preview_controller(&mut self, action: ControllerAction) -> bool {
-        if self.window_menu.is_some() || self.application_menu_target.is_some() {
-            return self.window_menu_host_controller(action);
+        if self.task_switcher_group.is_some() && self.preview_plugin_active() {
+            use nickel_core::hotkeys::HotkeyAction;
+            return match action {
+                ControllerAction::Left | ControllerAction::Up => {
+                    self.apply_task_switch_action(HotkeyAction::SwitchPrevious)
+                }
+                ControllerAction::Right | ControllerAction::Down => {
+                    self.apply_task_switch_action(HotkeyAction::SwitchNext)
+                }
+                ControllerAction::Confirm => {
+                    self.apply_task_switch_action(HotkeyAction::CommitSwitch)
+                }
+                ControllerAction::Cancel => {
+                    self.apply_task_switch_action(HotkeyAction::CancelSwitch)
+                }
+                _ => false,
+            };
         }
-        let Some(frame) = self.preview_frame.as_mut() else {
-            return false;
-        };
-        let primed = action != ControllerAction::Cancel && frame.ensure_controller_selection();
-        let outcome = frame.step(HostBatch {
-            events: vec![HostEvent::Controller(action)],
-            ..HostBatch::default()
-        });
-        let actions = frame.take_actions();
-        for action in actions {
-            self.apply_preview_action(action);
+        if self.preview_plugin_active() {
+            if action == ControllerAction::Cancel {
+                self.close_window_preview();
+                return true;
+            }
+            let Some(size) = self.preview_plugin_size() else {
+                return false;
+            };
+            if self
+                .preview_plugin_host_ref()
+                .is_some_and(|host| host.inspect().controller_target.is_none())
+            {
+                self.preview_plugin_event(
+                    HostEvent::Controller(ControllerAction::Right),
+                    size,
+                    None,
+                );
+            }
+            return self
+                .preview_plugin_event(HostEvent::Controller(action), size, None)
+                .changed;
         }
-        outcome.changed || primed
+        false
     }
 
     pub fn panel_pointer_entered(&mut self) -> bool {
@@ -3869,44 +7407,82 @@ impl LiveShell {
     }
 
     pub fn preview_pointer_moved(&mut self, x: f32, y: f32) -> bool {
-        let hovered = self
-            .preview_frame
-            .as_mut()
-            .and_then(|frame| frame.transition_pointer_hover(Point { x, y }));
-        if hovered == self.preview_hovered {
-            return false;
+        if self.preview_plugin_active() {
+            let Some(size) = self.preview_plugin_size() else {
+                return false;
+            };
+            let event_changed = self
+                .preview_plugin_event(
+                    HostEvent::Ui(UiEvent::PointerMoved(Point { x, y })),
+                    size,
+                    None,
+                )
+                .changed;
+            let group = self.preview_plugin_group();
+            let hovered = group.and_then(|group| {
+                let limit = if self.task_switcher_group.is_some() {
+                    5
+                } else {
+                    12
+                };
+                group.windows.iter().take(limit).find_map(|window| {
+                    let bounds = self.preview_plugin_bounds(PreviewAction::Activate(window.id))?;
+                    (x >= bounds.origin.x
+                        && y >= bounds.origin.y
+                        && x < bounds.origin.x + bounds.size.width
+                        && y < bounds.origin.y + bounds.size.height)
+                        .then_some(window.id)
+                })
+            });
+            if hovered == self.preview_hovered {
+                return event_changed;
+            }
+            self.preview_hovered = hovered;
+            let command = hovered.map_or(
+                ShellCommand::ClearWindowHighlight,
+                ShellCommand::HighlightWindow,
+            );
+            let _ = self.send_session_command("highlight-preview-window", command);
+            return true;
         }
-        self.preview_hovered = hovered;
-        let command = hovered.map_or(
-            ShellCommand::ClearWindowHighlight,
-            ShellCommand::HighlightWindow,
-        );
-        let _ = self.send_session_command("highlight-preview-window", command);
-        true
+        false
     }
 
     pub fn preview_click(&mut self, x: f32, y: f32, right_click: bool) -> bool {
-        let Some(action) = self
-            .preview_frame
-            .as_mut()
-            .and_then(|frame| frame.transition_pointer(Point { x, y }, right_click))
-        else {
-            return false;
-        };
-        self.apply_preview_action(action);
-        true
+        if self.preview_plugin_active() {
+            let Some(size) = self.preview_plugin_size() else {
+                return false;
+            };
+            let point = Point { x, y };
+            if right_click {
+                return self
+                    .preview_plugin_event(HostEvent::Ui(UiEvent::PointerContext(point)), size, None)
+                    .changed;
+            }
+            let pressed = self
+                .preview_plugin_event(HostEvent::Ui(UiEvent::PointerPressed(point)), size, None)
+                .changed;
+            let released = self
+                .preview_plugin_event(HostEvent::Ui(UiEvent::PointerReleased(point)), size, None)
+                .changed;
+            return pressed || released;
+        }
+        false
     }
 
     pub fn preview_host_input(
         &mut self,
         input: nickel_input::InputEvent,
     ) -> nickel_ui::HostEventOutcome {
-        let Some(frame) = self.preview_frame.as_ref() else {
-            return nickel_ui::HostEventOutcome::default();
-        };
-        let (ingress, authority) =
-            internal_normalized_ingress(input, None, "window-preview", frame.inspect(), None);
-        self.preview_host_event_authorized(ingress, Some(authority))
+        if self.preview_plugin_active() {
+            let Some(host) = self.preview_plugin_host_ref() else {
+                return Default::default();
+            };
+            let (ingress, authority) =
+                internal_normalized_ingress(input, None, "window-preview", host.inspect(), None);
+            return self.preview_host_event_authorized(ingress, Some(authority));
+        }
+        Default::default()
     }
 
     pub(crate) fn preview_host_event_authorized(
@@ -3914,26 +7490,24 @@ impl LiveShell {
         ingress: HostEvent,
         authority: Option<nickel_ui::NormalizedIngressAuthority>,
     ) -> nickel_ui::HostEventOutcome {
-        let Some(frame) = self.preview_frame.as_mut() else {
-            return nickel_ui::HostEventOutcome::default();
-        };
-        let outcome = frame.step(HostBatch {
-            events: vec![ingress],
-            normalized_authorities: authority.into_iter().collect(),
-            ..HostBatch::default()
-        });
-        let actions = frame.take_actions();
-        for action in actions {
-            self.apply_preview_action(action);
+        if self.preview_plugin_active() {
+            let Some(size) = self.preview_plugin_size() else {
+                return Default::default();
+            };
+            return self.preview_plugin_event(ingress, size, authority);
         }
-        outcome
+        Default::default()
     }
 
     fn apply_preview_action(&mut self, action: PreviewAction) {
         match action {
             PreviewAction::Activate(window) => {
                 self.send_window_action(window, WindowAction::Activate);
-                self.close_window_preview();
+                if self.task_switcher_group.is_some() {
+                    self.apply_task_switch_action(nickel_core::hotkeys::HotkeyAction::CancelSwitch);
+                } else {
+                    self.close_window_preview();
+                }
             }
             PreviewAction::Close(window) => {
                 self.send_window_action(window, WindowAction::Close);
@@ -3944,411 +7518,198 @@ impl LiveShell {
                     .and_then(|index| {
                         let groups = self.panel_groups();
                         let group = groups.get(index)?;
-                        let (width, _) = preview_dimensions(group.windows.len());
+                        let (width, _) = preview_dimensions(group.windows.len().min(12));
                         let preview_origin = self.preview_origin_x(index, width);
-                        let card = self
-                            .preview_frame
-                            .as_ref()?
-                            .semantic_bounds(PreviewAction::Activate(window))?;
+                        let card = self.preview_plugin_bounds(PreviewAction::Activate(window))?;
                         Some(preview_origin + card.origin.x.round() as i32)
                     })
                     .unwrap_or(self.panel_origin_x);
-                self.application_menu_target = None;
-                self.application_menu_host = None;
-                self.window_menu_generation = self.window_menu_generation.saturating_add(1);
-                self.window_menu = Some(window);
-                self.window_menu_snapshot = self
-                    .windows
-                    .iter()
-                    .find(|candidate| candidate.id == window)
-                    .cloned();
-                self.window_menu_host = None;
-                self.window_menu_anchor_x = Some(x);
-                self.window_menu_anchor_y = Some(self.panel_origin_y);
-                let _ = self.send_session_command(
-                    "show-context-menu",
-                    ShellCommand::ShowContextMenu {
-                        x,
-                        y: self.panel_origin_y,
-                        width: MENU_WIDTH as i32,
-                        height: self.window_context_menu_height(),
-                    },
-                );
-                #[cfg(target_os = "linux")]
-                let _ =
-                    self.send_session_command("focus-context-menu", ShellCommand::FocusContextMenu);
+                self.open_window_menu_at(window.0, x, self.panel_origin_y);
             }
-            PreviewAction::Dismiss => self.close_window_preview(),
         }
     }
 
     pub fn preview_key(&mut self, key: Option<KeyCode>) -> bool {
-        if self.window_menu.is_some() || self.application_menu_target.is_some() {
-            return self.window_menu_host_key(key);
-        }
-        let Some(frame) = self.preview_frame.as_mut() else {
-            return false;
-        };
-        if !matches!(key, Some(KeyCode::Escape) | None) {
-            let _ = frame.ensure_controller_selection();
-        }
-        match key {
-            Some(KeyCode::Escape) => {
-                frame.step(HostBatch {
-                    events: vec![HostEvent::Shortcut(Shortcut::Escape)],
-                    ..HostBatch::default()
-                });
-                let dismissed = frame.take_actions().contains(&PreviewAction::Dismiss);
-                if dismissed {
-                    self.close_window_preview();
+        if self.task_switcher_group.is_some() && self.preview_plugin_active() {
+            use nickel_core::hotkeys::HotkeyAction;
+            return match key {
+                Some(KeyCode::Escape) => self.apply_task_switch_action(HotkeyAction::CancelSwitch),
+                Some(KeyCode::ArrowLeft | KeyCode::ArrowUp) => {
+                    self.apply_task_switch_action(HotkeyAction::SwitchPrevious)
                 }
-                #[cfg(target_os = "linux")]
-                let _ = self.send_session_command(
-                    "restore-application-focus",
-                    ShellCommand::RestoreApplicationFocus,
-                );
-            }
-            Some(KeyCode::ArrowLeft | KeyCode::ArrowUp) => {
-                frame.step(HostBatch {
-                    events: vec![HostEvent::Controller(ControllerAction::Left)],
-                    ..HostBatch::default()
-                });
-                self.preview_hovered = frame.controller_selected_window();
-                if let Some(window) = self.preview_hovered {
-                    let _ = self.send_session_command(
-                        "highlight-preview-window",
-                        ShellCommand::HighlightWindow(window),
-                    );
-                }
-            }
-            Some(KeyCode::ArrowRight | KeyCode::ArrowDown | KeyCode::Tab) => {
-                frame.step(HostBatch {
-                    events: vec![HostEvent::Controller(ControllerAction::Right)],
-                    ..HostBatch::default()
-                });
-                self.preview_hovered = frame.controller_selected_window();
-                if let Some(window) = self.preview_hovered {
-                    let _ = self.send_session_command(
-                        "highlight-preview-window",
-                        ShellCommand::HighlightWindow(window),
-                    );
-                }
-            }
-            Some(KeyCode::Delete) => {
-                if !frame.close_controller_selected() {
-                    return false;
-                }
-                for action in frame.take_actions() {
-                    self.apply_preview_action(action);
-                }
-            }
-            Some(KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::Space) => {
-                frame.step(HostBatch {
-                    events: vec![HostEvent::Controller(ControllerAction::Confirm)],
-                    ..HostBatch::default()
-                });
-                let actions = frame.take_actions();
-                for action in actions {
-                    if let PreviewAction::Activate(window) = action {
-                        self.send_window_action(window, WindowAction::Activate);
-                        self.close_window_preview();
-                    }
-                }
-            }
-            _ => return false,
-        }
-        true
-    }
-
-    fn apply_window_menu_action(&mut self, action: MenuAction) {
-        if !matches!(
-            action,
-            MenuAction::Dismiss
-                | MenuAction::ShowWorkspaces
-                | MenuAction::ShowDisplays
-                | MenuAction::Back
-        ) {
-            let Some(captured) = self.window_menu_snapshot.as_ref() else {
-                return;
-            };
-            let Some(current) = self.windows.iter().find(|window| window.id == captured.id) else {
-                return;
-            };
-            if !window_menu_action_is_current(captured, current, &action) {
-                return;
-            }
-        }
-        let dispatched = match action {
-            MenuAction::Dismiss => {
-                self.dismiss_window_menu();
-                return;
-            }
-            MenuAction::ShowWorkspaces | MenuAction::ShowDisplays | MenuAction::Back => return,
-            MenuAction::Activate(window) => {
-                self.try_send_window_action(window, WindowAction::Activate)
-            }
-            MenuAction::Close(window) => self.try_send_window_action(window, WindowAction::Close),
-            MenuAction::MaximizeRestore(window) => {
-                self.try_send_window_action(window, WindowAction::Maximize)
-            }
-            MenuAction::Minimize(window) => {
-                self.try_send_window_action(window, WindowAction::Minimize)
-            }
-            MenuAction::FullscreenRestore(window) => {
-                self.try_send_window_action(window, WindowAction::Fullscreen)
-            }
-            MenuAction::SnapLeading(window) => {
-                self.try_send_window_action(window, WindowAction::SnapLeading)
-            }
-            MenuAction::SnapTrailing(window) => {
-                self.try_send_window_action(window, WindowAction::SnapTrailing)
-            }
-            MenuAction::MoveToWorkspace(window, workspace) => self.send_session_command(
-                "move-window-to-workspace",
-                ShellCommand::MoveWindowToWorkspace { window, workspace },
-            ),
-            MenuAction::MoveToDisplay(window, output) => self.send_session_command(
-                "move-window-to-display",
-                ShellCommand::MoveWindowToDisplay { window, output },
-            ),
-        };
-        if dispatched {
-            self.dismiss_window_menu();
-        }
-    }
-
-    fn apply_application_menu_action(&mut self, action: ApplicationMenuAction) {
-        match action {
-            ApplicationMenuAction::Dismiss => self.dismiss_window_menu(),
-            ApplicationMenuAction::TogglePin(application) => {
-                let Some(target) = self.application_menu_target.as_ref() else {
-                    return;
-                };
-                let canonical_item_available = target
-                    .application_id
-                    .as_ref()
-                    .is_some_and(|id| self.launcher.is_pinned(id.as_str()));
-                if target.application_id.as_ref() != Some(&application)
-                    || !target.survives(&self.windows, canonical_item_available)
-                {
-                    return;
-                }
-                self.apply_launcher_action(LauncherAction::TogglePin(
-                    application.as_str().to_owned(),
-                ));
-                self.dismiss_window_menu();
-            }
-            ApplicationMenuAction::CloseAll => {
-                let Some(target) = self.application_menu_target.as_ref() else {
-                    return;
-                };
-                let targets = validated_application_close_targets(target, &self.windows);
-                let mut dispatched = false;
-                for window in targets {
-                    dispatched |= self.try_send_window_action(window, WindowAction::Close);
-                }
-                if dispatched {
-                    self.dismiss_window_menu();
-                }
-            }
-        }
-    }
-
-    pub fn window_menu_host_input(
-        &mut self,
-        input: nickel_input::InputEvent,
-        width: u32,
-        height: u32,
-    ) -> bool {
-        let recipient = self
-            .application_menu_host
-            .as_ref()
-            .map(|host| host.inspect())
-            .or_else(|| self.window_menu_host.as_ref().map(|host| host.inspect()))
-            .unwrap_or_else(|| self.launcher_host.inspect());
-        let (event, authority) =
-            internal_normalized_ingress(input, None, "window-menu", recipient, None);
-        self.window_menu_host_event_authorized(event, width, height, Some(authority))
-    }
-
-    pub(crate) fn window_menu_host_event(
-        &mut self,
-        event: HostEvent,
-        width: u32,
-        height: u32,
-    ) -> bool {
-        self.window_menu_host_event_authorized(event, width, height, None)
-    }
-
-    pub(crate) fn window_menu_host_event_authorized(
-        &mut self,
-        event: HostEvent,
-        width: u32,
-        height: u32,
-        authority: Option<nickel_ui::NormalizedIngressAuthority>,
-    ) -> bool {
-        if self.application_menu_target.is_some() {
-            if self.application_menu_host.is_none() {
-                let _ = self.application_menu_scene();
-            }
-            let Some(host) = self.application_menu_host.as_mut() else {
-                return false;
-            };
-            let outcome = host.step(HostBatch {
-                surface_size: Some((width, height)),
-                events: vec![event],
-                normalized_authorities: authority.into_iter().collect(),
-                ..HostBatch::default()
-            });
-            let actions = host.application_mut().take_effects();
-            for action in actions {
-                self.apply_application_menu_action(action);
-                self.close_window_preview();
-            }
-            return outcome.changed;
-        }
-        if self.window_menu_host.is_none() {
-            let _ = self.window_menu_scene();
-        }
-        let Some(host) = self.window_menu_host.as_mut() else {
-            return false;
-        };
-        let outcome = host.step(HostBatch {
-            surface_size: Some((width, height)),
-            events: vec![event],
-            normalized_authorities: authority.into_iter().collect(),
-            ..HostBatch::default()
-        });
-        for failure in &outcome.failures {
-            tracing::warn!(
-                ?failure,
-                "window context menu host reported recoverable failure"
-            );
-        }
-        let actions = host.application_mut().take_effects();
-        for action in actions {
-            self.apply_window_menu_action(action);
-            self.close_window_preview();
-        }
-        outcome.changed
-    }
-
-    pub fn window_menu_host_key(&mut self, key: Option<KeyCode>) -> bool {
-        if self.application_menu_target.is_some() {
-            if self.application_menu_host.is_none() {
-                let _ = self.application_menu_scene();
-            }
-            let event = match key {
-                Some(KeyCode::Escape) => HostEvent::Shortcut(Shortcut::Escape),
-                Some(KeyCode::ArrowUp | KeyCode::ArrowLeft) => {
-                    HostEvent::Controller(ControllerAction::Up)
-                }
-                Some(KeyCode::ArrowDown | KeyCode::ArrowRight | KeyCode::Tab) => {
-                    HostEvent::Controller(ControllerAction::Down)
+                Some(KeyCode::ArrowRight | KeyCode::ArrowDown | KeyCode::Tab) => {
+                    self.apply_task_switch_action(HotkeyAction::SwitchNext)
                 }
                 Some(KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::Space) => {
-                    HostEvent::Controller(ControllerAction::Confirm)
+                    self.apply_task_switch_action(HotkeyAction::CommitSwitch)
+                }
+                Some(KeyCode::Delete) => {
+                    let Some(window) = self.task_switcher.selected().copied() else {
+                        return false;
+                    };
+                    if self.preview_plugin_action_allowed(PreviewAction::Close(window)) {
+                        self.apply_preview_action(PreviewAction::Close(window));
+                        true
+                    } else {
+                        false
+                    }
+                }
+                _ => false,
+            };
+        }
+        if self.preview_plugin_active() {
+            let Some(size) = self.preview_plugin_size() else {
+                return false;
+            };
+            match key {
+                Some(KeyCode::Escape) => {
+                    self.close_window_preview();
+                    #[cfg(target_os = "linux")]
+                    let _ = self.send_session_command(
+                        "restore-application-focus",
+                        ShellCommand::RestoreApplicationFocus,
+                    );
+                    return true;
+                }
+                Some(KeyCode::ArrowLeft | KeyCode::ArrowUp) => {
+                    return self
+                        .preview_plugin_event(
+                            HostEvent::Controller(ControllerAction::Left),
+                            size,
+                            None,
+                        )
+                        .changed;
+                }
+                Some(KeyCode::ArrowRight | KeyCode::ArrowDown | KeyCode::Tab) => {
+                    return self
+                        .preview_plugin_event(
+                            HostEvent::Controller(ControllerAction::Right),
+                            size,
+                            None,
+                        )
+                        .changed;
+                }
+                Some(KeyCode::Delete) => {
+                    let Some(window) = self.preview_plugin_selected_window() else {
+                        return false;
+                    };
+                    if self.preview_plugin_action_allowed(PreviewAction::Close(window)) {
+                        self.apply_preview_action(PreviewAction::Close(window));
+                        return true;
+                    }
+                    return false;
+                }
+                Some(KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::Space) => {
+                    return self
+                        .preview_plugin_event(
+                            HostEvent::Controller(ControllerAction::Confirm),
+                            size,
+                            None,
+                        )
+                        .changed;
                 }
                 _ => return false,
-            };
-            let Some(host) = self.application_menu_host.as_mut() else {
-                return false;
-            };
-            let outcome = host.step(HostBatch {
-                events: vec![event],
-                ..HostBatch::default()
-            });
-            let actions = host.application_mut().take_effects();
-            for action in actions {
-                self.apply_application_menu_action(action);
-                self.close_window_preview();
             }
-            if key == Some(KeyCode::Escape) {
-                self.dismiss_window_menu();
-            }
-            return outcome.changed;
         }
-        if self.window_menu_host.is_none() {
-            let _ = self.window_menu_scene();
-        }
-        let event = match key {
-            Some(KeyCode::Escape) => HostEvent::Shortcut(Shortcut::Escape),
-            Some(KeyCode::ArrowUp | KeyCode::ArrowLeft) => {
-                HostEvent::Controller(ControllerAction::Up)
-            }
-            Some(KeyCode::ArrowDown | KeyCode::ArrowRight | KeyCode::Tab) => {
-                HostEvent::Controller(ControllerAction::Down)
-            }
-            Some(KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::Space) => {
-                HostEvent::Controller(ControllerAction::Confirm)
-            }
-            _ => return false,
-        };
-        let Some(host) = self.window_menu_host.as_mut() else {
-            return false;
-        };
-        let outcome = host.step(HostBatch {
-            events: vec![event],
-            ..HostBatch::default()
-        });
-        for failure in &outcome.failures {
-            tracing::warn!(
-                ?failure,
-                "window context menu host reported recoverable failure"
-            );
-        }
-        let actions = host.application_mut().take_effects();
-        for action in actions {
-            self.apply_window_menu_action(action);
-            self.close_window_preview();
-        }
-        if key == Some(KeyCode::Escape) {
-            self.dismiss_window_menu();
-        }
-        outcome.changed
+        false
     }
 
-    pub fn window_menu_host_controller(&mut self, action: ControllerAction) -> bool {
-        if self.application_menu_target.is_some() {
-            if self.application_menu_host.is_none() {
-                let _ = self.application_menu_scene();
-            }
-            let Some(host) = self.application_menu_host.as_mut() else {
-                return false;
-            };
-            let outcome = host.step(HostBatch {
-                events: vec![HostEvent::Controller(action)],
-                ..HostBatch::default()
-            });
-            let effects = host.application_mut().take_effects();
-            for effect in effects {
-                self.apply_application_menu_action(effect);
-                self.close_window_preview();
-            }
-            if action == ControllerAction::Cancel {
-                self.dismiss_window_menu();
-            }
-            return outcome.changed;
+    fn apply_public_window_operation(
+        &mut self,
+        operation: &str,
+        window: Option<crate::model::WindowId>,
+        destination: Option<String>,
+    ) -> bool {
+        if self.locked {
+            return false;
         }
-        if self.window_menu_host.is_none() {
-            let _ = self.window_menu_scene();
+        if operation == "windows.dismissMenu" {
+            self.dismiss_window_menu();
+            return true;
         }
-        let Some(host) = self.window_menu_host.as_mut() else {
+        let Some(window) = window else {
             return false;
         };
-        let outcome = host.step(HostBatch {
-            events: vec![HostEvent::Controller(action)],
-            ..HostBatch::default()
-        });
-        let effects = host.application_mut().take_effects();
-        for effect in effects {
-            self.apply_window_menu_action(effect);
-            self.close_window_preview();
+        let Some(current) = self.windows.iter().find(|current| current.id == window) else {
+            return false;
+        };
+        if operation == "windows.showMenu" {
+            return self.open_window_menu_at(window.0, self.panel_origin_x, self.panel_origin_y);
         }
-        if action == ControllerAction::Cancel {
-            self.dismiss_window_menu();
+        let state = &current.state;
+        let action = match operation {
+            "windows.minimize" if state.capabilities.minimize && !state.minimized => {
+                Some(WindowAction::Minimize)
+            }
+            "windows.maximize" if state.capabilities.maximize && !state.maximized => {
+                Some(WindowAction::Maximize)
+            }
+            "windows.toggleMaximize" if state.capabilities.maximize => Some(WindowAction::Maximize),
+            "windows.restore" if state.minimized && state.capabilities.activate => {
+                Some(WindowAction::Activate)
+            }
+            "windows.restore"
+                if state.fullscreen
+                    && cfg!(target_os = "linux")
+                    && state.capabilities.fullscreen =>
+            {
+                Some(WindowAction::Fullscreen)
+            }
+            "windows.restore" if state.maximized && state.capabilities.maximize => {
+                Some(WindowAction::Maximize)
+            }
+            "windows.toggleFullscreen"
+                if cfg!(target_os = "linux") && state.capabilities.fullscreen =>
+            {
+                Some(WindowAction::Fullscreen)
+            }
+            "windows.snapLeading"
+                if cfg!(target_os = "linux")
+                    && state.capabilities.maximize
+                    && !state.fullscreen =>
+            {
+                Some(WindowAction::SnapLeading)
+            }
+            "windows.snapTrailing"
+                if cfg!(target_os = "linux")
+                    && state.capabilities.maximize
+                    && !state.fullscreen =>
+            {
+                Some(WindowAction::SnapTrailing)
+            }
+            _ => None,
+        };
+        if let Some(action) = action {
+            return self.try_send_window_action(window, action);
         }
-        outcome.changed
+        match (operation, destination) {
+            ("windows.moveToWorkspace", Some(destination)) if state.capabilities.move_workspace => {
+                let Ok(workspace) = destination.parse::<u64>() else {
+                    return false;
+                };
+                if !self
+                    .workspaces
+                    .iter()
+                    .any(|candidate| candidate.id == workspace)
+                {
+                    return false;
+                }
+                self.send_session_command(
+                    "move-window-to-workspace",
+                    ShellCommand::MoveWindowToWorkspace { window, workspace },
+                )
+            }
+            ("windows.moveToOutput", Some(output)) if state.capabilities.move_display => {
+                if !self.window_feed.outputs().contains(&output) {
+                    return false;
+                }
+                self.send_session_command(
+                    "move-window-to-display",
+                    ShellCommand::MoveWindowToDisplay { window, output },
+                )
+            }
+            _ => false,
+        }
     }
 
     pub fn sync_transient_overlays(&mut self) {
@@ -4356,15 +7717,20 @@ impl LiveShell {
             let windows = group
                 .windows
                 .iter()
+                .take(5)
                 .map(|window| window.id)
                 .collect::<Vec<_>>();
             let (width, height) = task_switcher_dimensions(windows.len());
+            #[cfg(any(target_os = "windows", test))]
+            let thumbnail_bounds = self.preview_thumbnail_bounds(&windows).unwrap_or_default();
             let _ = self.send_session_command(
                 "show-task-switcher",
                 ShellCommand::ShowTaskSwitcher {
                     width: width as i32,
                     height: height as i32,
                     windows,
+                    #[cfg(any(target_os = "windows", test))]
+                    thumbnail_bounds,
                 },
             );
         } else if let Some(index) = self.preview_group {
@@ -4373,10 +7739,13 @@ impl LiveShell {
                 let windows = group
                     .windows
                     .iter()
+                    .take(12)
                     .map(|window| window.id)
                     .collect::<Vec<_>>();
                 let (width, height) = preview_dimensions(windows.len());
                 let x = self.preview_origin_x(index, width);
+                #[cfg(any(target_os = "windows", test))]
+                let thumbnail_bounds = self.preview_thumbnail_bounds(&windows).unwrap_or_default();
                 let _ = self.send_session_command(
                     "show-preview",
                     ShellCommand::ShowPreview {
@@ -4385,6 +7754,8 @@ impl LiveShell {
                         width: width as i32,
                         height: height as i32,
                         windows,
+                        #[cfg(any(target_os = "windows", test))]
+                        thumbnail_bounds,
                     },
                 );
                 if self.preview_focus_requested {
@@ -4394,55 +7765,10 @@ impl LiveShell {
                 }
             }
         }
-        if self.window_menu.is_some() || self.application_menu_target.is_some() {
-            let x = self.window_menu_anchor_x.unwrap_or(self.panel_origin_x);
-            let y = self.window_menu_anchor_y.unwrap_or(self.panel_origin_y);
-            let _ = self.send_session_command(
-                "show-context-menu",
-                ShellCommand::ShowContextMenu {
-                    x,
-                    y,
-                    width: MENU_WIDTH as i32,
-                    height: self.window_context_menu_height(),
-                },
-            );
-        }
     }
 
-    fn preview_origin_x(&self, index: usize, width: u32) -> i32 {
-        let control_bounds = self
-            .panel_host
-            .semantic_targets_for_message(&PanelAction::Task(index))
-            .into_iter()
-            .next()
-            .map(|target| target.bounds)
-            .unwrap_or_else(|| {
-                Rect::new(
-                    PANEL_ITEM_WIDTH + index as f32 * PANEL_ITEM_WIDTH,
-                    0.0,
-                    PANEL_ITEM_WIDTH,
-                    PANEL_ITEM_WIDTH,
-                )
-            });
-        TaskbarPreviewAnchor::new(self.panel_origin_x, control_bounds).preview_origin_x(width)
-    }
-
-    fn window_context_menu_height(&self) -> i32 {
-        if let Some(target) = &self.application_menu_target {
-            let pinned = target
-                .application_id
-                .as_ref()
-                .is_some_and(|id| self.launcher.is_pinned(id.as_str()));
-            return menu_height_for_rows(application_menu_entries(target, pinned).len()) as i32;
-        }
-        let Some(window) = self.window_menu_snapshot.as_ref().or_else(|| {
-            self.window_menu
-                .and_then(|id| self.windows.iter().find(|candidate| candidate.id == id))
-        }) else {
-            return menu_height(&self.workspaces) as i32;
-        };
-        let outputs = self.window_feed.outputs();
-        menu_height_for_rows(window_menu_max_rows(window, &self.workspaces, &outputs)) as i32
+    fn preview_origin_x(&self, _index: usize, width: u32) -> i32 {
+        self.panel_origin_x - (width / 2) as i32
     }
 
     fn send_window_action(&self, window: crate::model::WindowId, action: WindowAction) {
@@ -4457,8 +7783,7 @@ impl LiveShell {
     }
 
     fn open_window_preview(&mut self, index: usize) {
-        if self.preview_group == Some(index) {
-            self.preview_pending = None;
+        if self.locked || !self.active_shell_declares("window-preview") {
             return;
         }
         let groups = self.panel_groups();
@@ -4468,18 +7793,22 @@ impl LiveShell {
         {
             return;
         }
+        self.set_default_shell_surface_visible("window-preview", true);
+        if self.preview_plugin_host_ref().is_none() {
+            return;
+        }
+        if self.preview_group == Some(index) {
+            self.preview_pending = None;
+            return;
+        }
         self.preview_pending = None;
         self.preview_group = Some(index);
+        self.preview_generation = self.preview_generation.wrapping_add(1).max(1);
         self.preview_images.clear();
         self.preview_refresh_deadline = None;
         self.preview_hovered = None;
         self.window_menu = None;
         self.window_menu_snapshot = None;
-        self.window_menu_anchor_x = None;
-        self.window_menu_anchor_y = None;
-        self.window_menu_host = None;
-        self.application_menu_target = None;
-        self.application_menu_host = None;
     }
 
     #[cfg(target_os = "linux")]
@@ -4537,6 +7866,8 @@ impl LiveShell {
     }
 
     fn close_window_preview(&mut self) {
+        self.set_default_shell_surface_visible("window-menu", false);
+        self.preview_generation = self.preview_generation.wrapping_add(1).max(1);
         self.preview_group = None;
         self.preview_pending = None;
         self.preview_focus_requested = false;
@@ -4545,23 +7876,29 @@ impl LiveShell {
         self.preview_hovered = None;
         self.preview_images.clear();
         self.preview_refresh_deadline = None;
-        self.preview_frame = None;
+        self.clear_preview_plugin_payload();
         self.window_menu = None;
         self.window_menu_snapshot = None;
-        self.window_menu_anchor_x = None;
-        self.window_menu_anchor_y = None;
-        self.window_menu_host = None;
-        self.application_menu_target = None;
-        self.application_menu_host = None;
+
         let _ =
             self.send_session_command("clear-window-highlight", ShellCommand::ClearWindowHighlight);
-        let _ = self.send_session_command("hide-context-menu", ShellCommand::HideContextMenu);
+    }
+
+    fn clear_preview_plugin_payload(&mut self) {
+        if self.task_switcher_group.is_none() && self.preview_group.is_none() {
+            self.set_default_shell_surface_visible("window-preview", false);
+        }
     }
 
     fn dismiss_window_menu(&mut self) {
-        let focused_menu = self.window_menu.is_some() || self.application_menu_target.is_some();
+        self.dismiss_window_menu_with_focus(true);
+    }
+
+    fn dismiss_window_menu_with_focus(&mut self, restore_focus: bool) {
+        self.set_default_shell_surface_visible("window-menu", false);
+        let focused_menu = self.window_menu.is_some();
         self.close_window_preview();
-        if focused_menu {
+        if focused_menu && restore_focus {
             #[cfg(target_os = "linux")]
             let _ = self.send_session_command(
                 "restore-window-menu-focus",
@@ -4573,8 +7910,41 @@ impl LiveShell {
     pub fn global_shortcut(&mut self, shortcut: platform::GlobalShortcut) -> bool {
         match shortcut {
             platform::GlobalShortcut::ReloadShellSettings => self.refresh_system(),
+            platform::GlobalShortcut::SetPluginEnabled {
+                id,
+                enabled,
+                observed_generation,
+            } => {
+                if observed_generation != self.plugin_activation_generation {
+                    return false;
+                }
+                match self.set_plugin_enabled(&id, enabled) {
+                    Ok(changed) => changed,
+                    Err(error) => {
+                        tracing::warn!(plugin = id, %error, "plugin activation failed");
+                        true
+                    }
+                }
+            }
+            platform::GlobalShortcut::SetPluginSetting {
+                id,
+                key,
+                value,
+                observed_generation,
+            } => {
+                if observed_generation != self.plugin_activation_generation {
+                    return false;
+                }
+                match self.set_plugin_setting(&id, &key, value) {
+                    Ok(changed) => changed,
+                    Err(error) => {
+                        tracing::warn!(plugin = id, setting = key, %error, "plugin setting failed");
+                        true
+                    }
+                }
+            }
             platform::GlobalShortcut::ToggleLauncher => {
-                self.apply_launcher_signal(!self.launcher_visible);
+                self.apply_launcher_signal(!self.default_shell_surface_visible("launcher"));
                 true
             }
             platform::GlobalShortcut::ShowLauncher => {
@@ -4613,6 +7983,14 @@ impl LiveShell {
                 #[cfg(not(target_os = "windows"))]
                 {
                     self.locked = locked;
+                    if locked {
+                        self.recover_pending_shell(
+                            "The shell preview ended when the session locked.",
+                        );
+                    }
+                    if locked {
+                        self.hide_volume_osd();
+                    }
                     let application = self.lock_host.application_mut();
                     application.password.zeroize();
                     application.status = None;
@@ -4620,6 +7998,8 @@ impl LiveShell {
                         self.desktop_host
                             .application_mut()
                             .dismiss_context_menu(desktop::DesktopMenuDismissReason::FocusDeparted);
+                        self.set_default_shell_surface_visible("launcher", false);
+                        self.set_default_shell_surface_visible("quick-settings", false);
                         self.launcher_visible = false;
                         self.control_visible = false;
                         self.codex_project_menu_visible = false;
@@ -4628,37 +8008,34 @@ impl LiveShell {
                     true
                 }
             }
-            platform::GlobalShortcut::ShowRun => self.set_run_visible(true),
-            platform::GlobalShortcut::OpenFiles => self.launch_named_application("Nickel File"),
-            platform::GlobalShortcut::OpenSettings => {
-                self.launch_named_application("Nickel Settings")
+            platform::GlobalShortcut::ShowRun => {
+                self.set_default_shell_surface_visible("run", true)
             }
+            platform::GlobalShortcut::OpenFiles => self.launch_named_application("Nickel File"),
+            platform::GlobalShortcut::OpenSettings => self.launch_settings(None),
             platform::GlobalShortcut::ShowControlCenter => {
-                self.control_host.application_mut().show_control_center();
+                self.control_host.application_mut().dismiss();
                 self.set_control_visible(true);
                 true
             }
             platform::GlobalShortcut::ShowNotifications => {
+                if !self.trusted_notification_visible() {
+                    return false;
+                }
                 let history = self.notification_feed.history();
                 self.notification_host
                     .application_mut()
                     .sync_history(&history, self.palette);
                 self.notification = history.first().cloned();
                 self.notification_history_visible = true;
-                #[cfg(target_os = "linux")]
-                let _ = self.send_session_command(
-                    "focus-notifications",
-                    ShellCommand::SetShellRoleVisible {
-                        role: nickel_session_protocol::ShellRole::Notification,
-                        visible: true,
-                    },
-                );
                 true
             }
             platform::GlobalShortcut::ShowDesktop => {
                 self.send_session_command("toggle-show-desktop", ShellCommand::ToggleShowDesktop)
             }
             platform::GlobalShortcut::ProjectDisplays => {
+                self.rollback_projection();
+                self.revert_plugin_display_layout(None);
                 self.control_host
                     .application_mut()
                     .show_projection_chooser();
@@ -4683,7 +8060,7 @@ impl LiveShell {
                     || matches!(control,
                         nickel_session_protocol::ConsumerControl::VolumeDown if self.audio.volume_percent == 0);
                 if at_limit && self.audio_status_observed && self.audio.available {
-                    self.volume_osd_until = Some(Instant::now() + Duration::from_millis(1500));
+                    self.show_volume_osd();
                     true
                 } else {
                     false
@@ -4710,8 +8087,11 @@ impl LiveShell {
                         });
                     }
                 }
-                self.volume_osd_until =
-                    available.then(|| Instant::now() + Duration::from_millis(1500));
+                if available {
+                    self.show_volume_osd();
+                } else {
+                    self.hide_volume_osd();
+                }
                 true
             }
             platform::GlobalShortcut::Screenshot(platform::ScreenshotAction::ActiveWindow) => {
@@ -4819,8 +8199,8 @@ impl LiveShell {
                         ShellCommand::ShowTaskSwitcherPeek { window: None },
                     );
                     self.task_switcher_group = None;
-                    self.preview_frame = None;
                     self.preview_images.clear();
+                    self.clear_preview_plugin_payload();
                 }
                 TaskSwitchEffect::SelectPreview(_) => {
                     #[cfg(target_os = "windows")]
@@ -4839,6 +8219,10 @@ impl LiveShell {
     }
 
     fn rebuild_task_switcher_preview(&mut self) {
+        self.preview_generation = self.preview_generation.wrapping_add(1).max(1);
+        if self.active_shell_declares("window-preview") && !self.locked {
+            self.set_default_shell_surface_visible("window-preview", true);
+        }
         let visible = self.task_switcher.visible_range(5);
         let ids = self.task_switcher.candidates()[visible].to_vec();
         let windows = ids
@@ -4874,25 +8258,16 @@ impl LiveShell {
                     || viewport.overlay_pointer_capture.is_some()
             })
             || self.desktop_overlay_pointer_capture.is_some()
-            || self.volume_osd_host.pointer_interaction_active()
-            || self.run_host.pointer_interaction_active()
-            || self.lock_host.pointer_interaction_active()
-            || self.panel_host.pointer_interaction_active()
             || self
-                .panel_hosts
+                .plugin_surface_hosts
                 .values()
-                .any(|host| host.pointer_interaction_active())
-            || self
-                .window_menu_host
-                .as_ref()
-                .is_some_and(|host| host.pointer_interaction_active())
-            || self
-                .application_menu_host
-                .as_ref()
-                .is_some_and(|host| host.pointer_interaction_active())
+                .any(|(_, host)| host.pointer_interaction_active())
+            || self.lock_host.pointer_interaction_active()
             || self.notification_host.pointer_interaction_active()
             || self.control_host.pointer_interaction_active()
-            || self.launcher_host.pointer_interaction_active()
+            || self
+                .plugin_panel_host_ref(&self.active_shell_surface_key("quick-settings"))
+                .is_some_and(|host| host.pointer_interaction_active())
             || self.keyboard_host.pointer_interaction_active()
             || self.keyboard_resize.is_some()
             || !self.keyboard_gesture_leases.is_empty()
@@ -4905,20 +8280,9 @@ impl LiveShell {
     /// compositor has already changed visibility. Shell-originated input must instead send the
     /// visibility request to the compositor before mirroring the resulting state.
     pub fn request_launcher_toggle(&mut self) -> bool {
-        let visible = !self.launcher_visible;
-        let command = if visible {
-            ShellCommand::ShowFromController
-        } else {
-            ShellCommand::Hide
-        };
-        if !self.send_session_command("controller-launcher-visibility", command) {
-            self.launcher_status = Some("Nickel could not update the launcher.".to_owned());
-            return false;
-        }
-        self.clear_launcher_visibility_error();
-        self.apply_session_launcher_visibility(visible);
-        platform::launcher_visibility_applied(visible);
-        self.launcher_visible == visible
+        let visible = !self.default_shell_surface_visible("launcher");
+        self.set_launcher_visible(visible);
+        self.default_shell_surface_visible("launcher") == visible
     }
 
     pub fn capture_screenshot(&mut self) -> bool {
@@ -4977,6 +8341,11 @@ impl LiveShell {
                 }
             },
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn request_native_screenshot_fixture(&mut self) {
+        self.screenshot.request_capture();
     }
 
     #[cfg(any(test, target_os = "linux"))]
@@ -5045,7 +8414,6 @@ impl LiveShell {
         }
     }
 
-    #[cfg(any(test, target_os = "linux"))]
     pub fn screenshot_controller(&mut self, action: ControllerAction) -> bool {
         if !self.screenshot.visible() {
             return false;
@@ -5072,60 +8440,52 @@ impl LiveShell {
     }
 
     fn set_launcher_visible(&mut self, visible: bool) {
-        if !self.send_session_command(
-            "launcher-visibility",
-            if visible {
-                ShellCommand::Show
-            } else {
-                ShellCommand::Hide
-            },
-        ) {
-            self.launcher_status = Some("Nickel could not update the launcher.".to_owned());
-            return;
-        }
-        self.clear_launcher_visibility_error();
-        if self.session_host.stages_effects() {
-            return;
-        }
-        self.run_visible = false;
-        self.apply_session_launcher_visibility(visible);
-        platform::launcher_visibility_applied(visible);
-    }
-
-    fn clear_launcher_visibility_error(&mut self) {
-        if self.launcher_status.as_deref() == Some("Nickel could not update the launcher.") {
-            self.launcher_status = None;
-        }
-    }
-
-    fn set_run_visible(&mut self, visible: bool) -> bool {
-        self.set_launcher_visible(visible);
-        if self.launcher_visible != visible {
-            return false;
-        }
-        self.run_visible = visible;
         if visible {
-            self.run_host.application_mut().status = None;
-            self.run_host.step(HostBatch {
-                application_changed: true,
-                ..HostBatch::default()
-            });
-            if let Ok(field) = self
-                .run_host
-                .query_unique(&nickel_ui::SemanticSelector::Role(SemanticRole::TextField))
-            {
-                let _ = self.run_host.request_focus(field.id);
-            }
+            self.set_default_shell_surface_visible("quick-settings", false);
         }
-        true
+        self.set_default_shell_surface_visible("launcher", visible);
+    }
+
+    pub(crate) fn launcher_intent_visible(&self) -> bool {
+        self.active_launcher_surface_key().is_some()
+    }
+
+    pub(crate) fn can_show_launcher(&self) -> bool {
+        self.active_shell_declares("launcher")
     }
 
     fn set_control_visible(&mut self, visible: bool) {
+        if !visible && self.shell_selection_preview.is_some() {
+            self.recover_pending_shell("Shell preview dismissed.");
+            return;
+        }
+        if !self
+            .control_host
+            .application()
+            .view_state()
+            .trusted_visible()
+        {
+            if visible {
+                self.set_default_shell_surface_visible("launcher", false);
+            }
+            self.set_default_shell_surface_visible("quick-settings", visible);
+            return;
+        }
+
+        if visible && !self.control_surface_available() {
+            return;
+        }
         #[cfg(target_os = "linux")]
         if !self.send_session_command(
             "control-center-focus",
             if visible {
-                ShellCommand::FocusControlCenter
+                if self.quick_settings_surface_active() {
+                    ShellCommand::FocusPluginSurface {
+                        key: self.active_shell_surface_key("quick-settings"),
+                    }
+                } else {
+                    ShellCommand::FocusControlCenter
+                }
             } else {
                 ShellCommand::RestoreApplicationFocus
             },
@@ -5140,65 +8500,46 @@ impl LiveShell {
     }
 
     pub(crate) fn apply_control_visibility(&mut self, visible: bool) {
+        if !visible && self.shell_selection_preview.is_some() {
+            self.recover_pending_shell("Shell preview dismissed.");
+            return;
+        }
         self.control_visible = visible;
         if !visible {
-            self.control_host.application_mut().show_control_center();
+            self.control_host.application_mut().dismiss();
         }
     }
 
     fn apply_launcher_signal(&mut self, visible: bool) {
-        #[cfg(target_os = "linux")]
-        self.apply_session_launcher_visibility(visible);
-        #[cfg(not(target_os = "linux"))]
         self.set_launcher_visible(visible);
     }
 
     pub(crate) fn apply_session_launcher_visibility(&mut self, visible: bool) {
-        self.launcher_visible = visible;
-        if visible {
-            self.control_visible = false;
-            self.focus_launcher();
-        } else {
-            self.run_visible = false;
-            self.launcher.clear();
-            self.launcher.set_view(LauncherView::Favorites);
-            self.launcher_view.dashboard_selected = 0;
-            self.launcher_view.dashboard_narrow_page = DashboardNarrowPage::Primary;
-        }
-    }
-
-    pub fn focus_launcher(&mut self) -> bool {
-        if self.run_visible {
-            return self
-                .run_host
-                .step(HostBatch {
-                    window_focused: Some(true),
-                    ..HostBatch::default()
-                })
-                .changed;
-        }
-        let status = self.launcher_status_text();
-        self.launcher_host
-            .application_mut()
-            .sync(&self.launcher, self.palette, status);
-        let mut changed = self
-            .launcher_host
-            .step(HostBatch {
-                application_changed: true,
-                window_focused: Some(true),
-                ..HostBatch::default()
-            })
-            .changed;
-        if let Ok(search) = self
-            .launcher_host
-            .query_unique(&nickel_ui::SemanticSelector::Role(SemanticRole::TextField))
-        {
-            changed |= self.launcher_host.request_focus(search.id).changed;
-        }
-        changed
+        self.set_default_shell_surface_visible("launcher", visible);
     }
 
     pub fn control_click(&mut self, x: f32, y: f32, width: u32, height: u32) -> bool {
+        if !self.control_surface_available() {
+            return false;
+        }
+        if self.quick_settings_surface_active() {
+            let point = Point { x, y };
+            let pressed = self.plugin_surface_host_event(
+                &self.active_shell_surface_key("quick-settings"),
+                HostEvent::Ui(UiEvent::PointerPressed(point)),
+                (width, height),
+                None,
+                None,
+            );
+            let released = self.plugin_surface_host_event(
+                &self.active_shell_surface_key("quick-settings"),
+                HostEvent::Ui(UiEvent::PointerReleased(point)),
+                (width, height),
+                None,
+                None,
+            );
+            return pressed.changed || released.changed;
+        }
         self.sync_control_host(width, height);
         let point = Point { x, y };
         self.step_control_host(HostBatch {
@@ -5213,7 +8554,7 @@ impl LiveShell {
     }
 
     pub fn control_key(&mut self, key: Option<KeyCode>, width: u32, height: u32) -> bool {
-        if !self.control_visible {
+        if !self.control_visible || !self.control_surface_available() {
             return false;
         }
         self.sync_control_host(width, height);
@@ -5229,6 +8570,17 @@ impl LiveShell {
             Some(KeyCode::Enter | KeyCode::NumpadEnter) => ControllerAction::Confirm,
             _ => return false,
         };
+        if self.quick_settings_surface_active() {
+            return self
+                .plugin_surface_host_event(
+                    &self.active_shell_surface_key("quick-settings"),
+                    HostEvent::Controller(action),
+                    (width, height),
+                    None,
+                    None,
+                )
+                .changed;
+        }
         self.step_control_host(HostBatch {
             events: vec![HostEvent::Controller(action)],
             ..HostBatch::default()
@@ -5243,8 +8595,24 @@ impl LiveShell {
         width: u32,
         height: u32,
     ) -> bool {
-        if !self.control_visible {
+        if !self.control_visible || !self.control_surface_available() {
             return false;
+        }
+        if self.quick_settings_surface_active() {
+            let changed = self
+                .plugin_surface_host_event(
+                    &self.active_shell_surface_key("quick-settings"),
+                    HostEvent::Controller(action),
+                    (width, height),
+                    None,
+                    None,
+                )
+                .changed;
+            let dismissed = action == ControllerAction::Cancel && self.control_visible;
+            if dismissed {
+                self.set_control_visible(false);
+            }
+            return changed || dismissed;
         }
         self.sync_control_host(width, height);
         let changed = self.step_control_host(HostBatch {
@@ -5263,25 +8631,16 @@ impl LiveShell {
     /// whichever application was active before this surface opened.
     pub(crate) fn dismiss_ephemeral_on_focus_loss(&mut self, role: SurfaceRole) -> bool {
         match role {
-            SurfaceRole::Launcher => {
-                if !self.launcher_visible {
-                    return false;
-                }
-                // Focus already moved to the destination. Do not use the
-                // explicit Hide command, which restores the pre-launcher
-                // window as though the user had cancelled the launcher.
-                self.apply_session_launcher_visibility(false);
-                true
-            }
+            SurfaceRole::ControlCenter if self.shell_selection_preview.is_some() => false,
             SurfaceRole::ControlCenter => {
-                self.control_host.application_mut().show_control_center();
+                self.control_host.application_mut().dismiss();
                 std::mem::replace(&mut self.control_visible, false)
             }
             SurfaceRole::CodexProjectMenu => {
                 std::mem::replace(&mut self.codex_project_menu_visible, false)
             }
             SurfaceRole::WindowContextMenu => {
-                let visible = self.window_menu.is_some() || self.application_menu_target.is_some();
+                let visible = self.window_menu.is_some();
                 if visible {
                     self.close_window_preview();
                 }
@@ -5294,11 +8653,6 @@ impl LiveShell {
     #[allow(dead_code)]
     pub fn hide_overlay(&mut self, role: SurfaceRole) -> bool {
         match role {
-            SurfaceRole::Launcher if self.launcher_visible => {
-                self.apply_session_launcher_visibility(false);
-                let _ = self.send_session_command("hide-launcher", ShellCommand::Hide);
-                true
-            }
             SurfaceRole::ControlCenter if self.control_visible => {
                 self.set_control_visible(false);
                 true
@@ -5332,13 +8686,6 @@ impl LiveShell {
         false
     }
 
-    fn launch_result(&mut self, index: usize) {
-        let Some(application) = self.launcher.result_at(index).cloned() else {
-            return;
-        };
-        self.launch_application(application);
-    }
-
     fn launch_application_by_id(&mut self, id: &str) {
         let Some(application) = self
             .launcher
@@ -5368,6 +8715,42 @@ impl LiveShell {
         true
     }
 
+    fn launch_settings(&mut self, screen: Option<&str>) -> bool {
+        self.request_settings_navigation(screen, None);
+        self.set_default_shell_surface_visible("launcher", false);
+        self.set_default_shell_surface_visible("settings", true)
+    }
+
+    fn request_settings_navigation(&mut self, screen: Option<&str>, output: Option<&str>) {
+        let destination = match screen {
+            Some("display") => "displays",
+            Some("network") => "wifi",
+            Some("nickel-bar") => "shell-preferences",
+            Some("keyboard-shortcuts") => "keyboard-shortcuts",
+            Some(other) => other,
+            None => return,
+        };
+        self.settings_navigation_revision =
+            self.settings_navigation_revision.wrapping_add(1).max(1);
+        self.settings_navigation = Some(
+            serde_json::json!({"destination":destination,"revision":self.settings_navigation_revision.to_string(),"output":output}),
+        );
+    }
+
+    fn dispatch_pending_desktop_settings(&mut self) -> bool {
+        let Some(destination) = self.desktop_host.application_mut().pending_settings.take() else {
+            return false;
+        };
+        match destination {
+            SettingsDestination::Appearance => self.launch_settings(Some("appearance")),
+            SettingsDestination::Display { output } => {
+                self.launch_settings(Some("displays"));
+                self.request_settings_navigation(Some("displays"), Some(&output));
+                true
+            }
+        }
+    }
+
     fn open_active_window_menu(&mut self) -> bool {
         self.open_active_window_menu_at(self.panel_origin_x, self.panel_origin_y)
     }
@@ -5385,22 +8768,11 @@ impl LiveShell {
         true
     }
 
-    pub(crate) fn window_menu_geometry(&self) -> Option<(i32, i32, u32, u32)> {
-        (self.window_menu.is_some() || self.application_menu_target.is_some()).then(|| {
-            (
-                self.window_menu_anchor_x.unwrap_or(self.panel_origin_x),
-                self.window_menu_anchor_y.unwrap_or(self.panel_origin_y),
-                MENU_WIDTH.ceil() as u32,
-                self.window_context_menu_height().max(1) as u32,
-            )
-        })
-    }
-
     pub(crate) fn preview_geometry(&mut self) -> Option<(i32, i32, u32, u32)> {
         let index = self.preview_group?;
         let groups = self.panel_groups();
         let group = groups.get(index)?;
-        let (width, height) = preview_dimensions(group.windows.len());
+        let (width, height) = preview_dimensions(group.windows.len().min(12));
         Some((
             self.preview_origin_x(index, width),
             self.panel_origin_y,
@@ -5422,6 +8794,9 @@ impl LiveShell {
     }
 
     pub(crate) fn open_window_menu_at(&mut self, id: u64, x: i32, y: i32) -> bool {
+        if self.locked || !self.active_shell_declares("window-menu") {
+            return false;
+        }
         let Some(snapshot) = self
             .windows
             .iter()
@@ -5430,27 +8805,46 @@ impl LiveShell {
         else {
             return false;
         };
+        if !self.set_default_shell_surface_visible("window-menu", true)
+            && !self.default_shell_surface_visible("window-menu")
+        {
+            return false;
+        }
         self.window_menu_generation = self.window_menu_generation.saturating_add(1);
         self.window_menu = Some(snapshot.id);
         self.window_menu_snapshot = Some(snapshot);
-        self.window_menu_host = None;
-        self.window_menu_anchor_x = Some(x);
-        self.window_menu_anchor_y = Some(y);
-        let sent = self.send_session_command(
-            "show-context-menu",
-            ShellCommand::ShowContextMenu {
-                x,
-                y,
-                width: MENU_WIDTH as i32,
-                height: self.window_context_menu_height(),
-            },
+        let owner = self.active_shell_package_id.clone();
+        let _ = self.set_plugin_window_placement(
+            &owner,
+            "window-menu",
+            nickel_core::plugins::PluginSurfaceAnchor::TopLeft,
+            x.clamp(-8192, 8192),
+            y.clamp(-8192, 8192),
         );
-        #[cfg(target_os = "linux")]
-        let _ = self.send_session_command("focus-context-menu", ShellCommand::FocusContextMenu);
-        sent
+        let _ = self.focus_plugin_window(&owner, "window-menu");
+        true
     }
 
     fn launch_application(&mut self, application: Application) {
+        #[cfg(target_os = "linux")]
+        {
+            let secure_storage_state = self.session_host.secure_storage_state().unwrap_or_else(
+                |error| {
+                    tracing::warn!(%error, "secure-storage query failed before application launch");
+                    platform::SecureStorageState::ControlUnavailable
+                },
+            );
+            if !platform::secure_storage_allows_application_launch(secure_storage_state) {
+                if let Err(error) = self.session_host.request_secure_storage_retry() {
+                    tracing::warn!(%error, "secure-storage retry command failed");
+                }
+                self.launcher_status = Some(format!(
+                    "Secure storage is not ready. {} will remain blocked until your existing wallet is available.",
+                    application.name()
+                ));
+                return;
+            }
+        }
         if application.id().starts_with("place:")
             && let Some(path) = application
                 .launch_command()
@@ -5477,29 +8871,6 @@ impl LiveShell {
             }
             return;
         }
-        #[cfg(target_os = "linux")]
-        if platform::application_requires_secure_storage(&application)
-            && self
-                .session_host
-                .secure_storage_state()
-                .unwrap_or_else(|error| {
-                    tracing::warn!(%error, "secure-storage query failed before application launch");
-                    platform::SecureStorageState::ControlUnavailable
-                })
-                != platform::SecureStorageState::Ready
-            && self.secure_storage_override.as_deref() != Some(application.id())
-        {
-            if let Err(error) = self.session_host.request_secure_storage_retry() {
-                tracing::warn!(%error, "secure-storage retry command failed");
-            }
-            self.secure_storage_override = Some(application.id().to_owned());
-            self.launcher_status = Some(format!(
-                "Secure storage is not ready. Activate {} again to launch without credentials.",
-                application.name()
-            ));
-            return;
-        }
-        self.secure_storage_override = None;
         self.launcher_status = None;
         #[cfg(target_os = "linux")]
         let result = if application.name() == "Nickel Settings" {
@@ -5547,9 +8918,8 @@ impl LiveShell {
             application.wallpaper_generation = application.wallpaper_generation.wrapping_add(1);
         }
         application.palette = self.palette;
-        let icons_changed = application.prepare_icons();
         let application_changed =
-            self.desktop_application_dirty || wallpaper_changed || palette_changed || icons_changed;
+            self.desktop_application_dirty || wallpaper_changed || palette_changed;
         let outcome = self.desktop_host.step(HostBatch {
             application_changed,
             surface_size: Some((width, height)),
@@ -5612,41 +8982,6 @@ impl LiveShell {
         } else {
             false
         }
-    }
-
-    fn volume_osd_scene(&mut self, width: u32, height: u32) -> Vec<PaintCommand> {
-        let percent = self.audio.volume_percent.min(100);
-        let mut label = if self.audio.muted {
-            "Muted".to_owned()
-        } else {
-            format!("Volume {percent}%")
-        };
-        let output = if self.locked {
-            Some("Audio output")
-        } else {
-            self.audio
-                .devices
-                .iter()
-                .find(|device| device.is_default)
-                .map(|device| device.name.as_str())
-        };
-        if let Some(output) = output {
-            label.push_str(" · ");
-            label.push_str(output);
-        }
-        let application = self.volume_osd_host.application_mut();
-        let changed = application.label != label
-            || application.percent != percent
-            || application.palette != self.palette;
-        application.label = label;
-        application.percent = percent;
-        application.palette = self.palette;
-        self.volume_osd_host.step(HostBatch {
-            application_changed: changed,
-            surface_size: Some((width, height)),
-            ..HostBatch::default()
-        });
-        self.volume_osd_host.commands().to_vec()
     }
 
     fn lock_scene(&mut self, width: u32, height: u32) -> Vec<PaintCommand> {
@@ -5783,7 +9118,12 @@ impl LiveShell {
 
     fn sync_notification_host(&mut self, width: u32, height: u32) {
         if self.notification_history_visible {
-            let history = self.notification_feed.history();
+            let history = self
+                .notification_feed
+                .history()
+                .into_iter()
+                .filter(|item| self.trusted_notification_id(item.id))
+                .collect::<Vec<_>>();
             self.notification_host
                 .application_mut()
                 .sync_history(&history, self.palette);
@@ -5797,6 +9137,70 @@ impl LiveShell {
             events: vec![HostEvent::Poll],
             ..HostBatch::default()
         });
+    }
+
+    fn plugin_run_snapshot(&self, id: &str) -> Option<serde_json::Value> {
+        self.native_ui_service_granted(id, nickel_core::plugins::PluginCapability::RunCommand).then(|| serde_json::json!({
+            "available":true,"revision":crate::run_capabilities::revision(id,self.plugin_activation_generation),"status":self.run_status.get(id)
+        }))
+    }
+
+    fn native_ui_service_granted(
+        &self,
+        plugin_id: &str,
+        grant: nickel_core::plugins::PluginCapability,
+    ) -> bool {
+        !self.locked
+            && self.plugin_registry.get(plugin_id).is_some_and(|entry| {
+                entry.desired_enabled
+                    && entry.health == nickel_core::plugins::PluginHealth::Running
+                    && entry.manifest.capabilities.contains(&grant)
+            })
+    }
+
+    fn show_projects_menu(&mut self, toggle: bool) -> bool {
+        if !self.launcher.codex_available() || self.locked {
+            return false;
+        }
+        let visible = !toggle || !self.codex_project_menu_visible;
+        let changed = self.codex_project_menu_visible != visible;
+        if visible {
+            self.set_launcher_visible(false);
+        }
+        self.codex_project_menu_visible = visible;
+        changed
+    }
+
+    fn notification_action_granted(&self, plugin_id: &str, id: u32) -> bool {
+        !self.locked
+            && !self.trusted_notification_id(id)
+            && self
+                .notification_feed
+                .history()
+                .iter()
+                .any(|item| item.id == id)
+            && self.plugin_registry.get(plugin_id).is_some_and(|entry| {
+                entry.desired_enabled
+                    && entry.health == nickel_core::plugins::PluginHealth::Running
+                    && entry
+                        .manifest
+                        .capabilities
+                        .contains(&nickel_core::plugins::PluginCapability::NotificationsAct)
+            })
+    }
+
+    fn trusted_notification_id(&self, id: u32) -> bool {
+        self.remote_lease_notifications.contains_key(&id)
+            || self.codex_approval_notifications.contains_key(&id)
+    }
+
+    fn trusted_notification_visible(&self) -> bool {
+        self.notification
+            .as_ref()
+            .is_some_and(|notification| self.trusted_notification_id(notification.id))
+            || (self.notification_history_visible
+                && (!self.remote_lease_notifications.is_empty()
+                    || !self.codex_approval_notifications.is_empty()))
     }
 
     fn apply_notification_effects(&mut self) -> bool {
@@ -6239,220 +9643,234 @@ impl LiveShell {
     }
 
     fn window_preview_scene(&mut self) -> Vec<PaintCommand> {
-        let group = self.task_switcher_group.clone().or_else(|| {
+        if !self.preview_plugin_active() {
+            return Vec::new();
+        }
+        let Some(group) = self.preview_plugin_group() else {
+            return Vec::new();
+        };
+        let (width, height) = if self.task_switcher_group.is_some() {
+            task_switcher_dimensions(group.windows.len().min(5))
+        } else {
+            preview_dimensions(group.windows.len().min(12))
+        };
+        self.plugin_panel_scene(
+            &self.active_shell_surface_key("window-preview"),
+            width,
+            height,
+        )
+        .unwrap_or_default()
+    }
+
+    fn preview_plugin_active(&self) -> bool {
+        self.preview_plugin_host_ref().is_some()
+            && (self.preview_group.is_some() || self.task_switcher_group.is_some())
+    }
+
+    fn preview_plugin_group(&mut self) -> Option<crate::model::WindowGroup> {
+        self.task_switcher_group.clone().or_else(|| {
             self.preview_group.and_then(|index| {
                 self.panel_groups()
                     .get(index)
                     .map(|task| task.window_group())
             })
-        });
-        let Some(group) = group else {
-            self.preview_frame = None;
-            return Vec::new();
-        };
-        let theme = self.semantic_theme();
-        if let Some(frame) = self.preview_frame.as_mut() {
-            frame.sync(&group, &self.preview_images, self.preview_hovered, theme);
-        } else {
-            self.preview_frame = Some(build_preview_frame(
-                &group,
-                &self.preview_images,
-                self.preview_hovered,
-                theme,
-            ));
-        }
-        self.preview_frame.as_ref().map_or_else(Vec::new, |frame| {
-            let _change_token = frame.change_token();
-            frame.commands().to_vec()
         })
     }
 
-    fn window_menu_scene(&mut self) -> Vec<PaintCommand> {
-        if self.application_menu_target.is_some() {
-            return self.application_menu_scene();
+    fn preview_plugin_action_allowed(&mut self, action: PreviewAction) -> bool {
+        if self.locked || !self.preview_plugin_active() {
+            return false;
         }
-        if self.window_menu.is_none() && self.window_menu_snapshot.is_none() {
-            self.window_menu_host = None;
-            return Vec::new();
-        }
-        let Some(snapshot) = self.window_menu_snapshot.clone().or_else(|| {
-            self.window_menu.and_then(|window| {
-                self.windows
-                    .iter()
-                    .find(|candidate| candidate.id == window)
-                    .cloned()
-            })
-        }) else {
-            self.close_window_preview();
-            return Vec::new();
+        let (PreviewAction::Activate(id) | PreviewAction::Close(id) | PreviewAction::OpenMenu(id)) =
+            action;
+        let Some(group) = self.preview_plugin_group() else {
+            return false;
         };
-        self.window_menu_snapshot
-            .get_or_insert_with(|| snapshot.clone());
-        let outputs = self.window_feed.outputs();
-        let height =
-            menu_height_for_rows(window_menu_max_rows(&snapshot, &self.workspaces, &outputs))
-                .ceil()
-                .max(1.0) as u32;
-        let host = self.window_menu_host.get_or_insert_with(|| {
-            nickel_ui::UiHost::new(
-                WindowMenuApp::new(
-                    snapshot.clone(),
-                    self.workspaces.clone(),
-                    outputs.clone(),
-                    self.palette,
-                ),
-                MENU_WIDTH.ceil() as u32,
-                height,
-            )
-        });
-        host.application_mut()
-            .sync(&snapshot, &self.workspaces, &outputs, self.palette);
-        host.step(HostBatch {
-            surface_size: Some((MENU_WIDTH.ceil() as u32, height)),
-            events: vec![HostEvent::Poll],
-            ..HostBatch::default()
-        });
-        host.commands().to_vec()
-    }
-
-    fn application_menu_scene(&mut self) -> Vec<PaintCommand> {
-        let Some(target) = self.application_menu_target.clone() else {
-            self.application_menu_host = None;
-            return Vec::new();
+        let limit = if self.task_switcher_group.is_some() {
+            5
+        } else {
+            12
         };
-        let pinned = target
-            .application_id
-            .as_ref()
-            .is_some_and(|id| self.launcher.is_pinned(id.as_str()));
-        let height = menu_height_for_rows(application_menu_entries(&target, pinned).len())
-            .ceil()
-            .max(1.0) as u32;
-        let host = self.application_menu_host.get_or_insert_with(|| {
-            nickel_ui::UiHost::new(
-                ApplicationMenuApp::new(target, pinned, self.palette),
-                MENU_WIDTH.ceil() as u32,
-                height,
-            )
-        });
-        host.application_mut().sync(pinned, self.palette);
-        host.step(HostBatch {
-            surface_size: Some((MENU_WIDTH.ceil() as u32, height)),
-            events: vec![HostEvent::Poll],
-            ..HostBatch::default()
-        });
-        host.commands().to_vec()
-    }
-
-    fn launcher_scene(&mut self, width: u32, height: u32) -> Vec<PaintCommand> {
-        let status = self.launcher_status_text();
-        self.launcher_host
-            .application_mut()
-            .sync(&self.launcher, self.palette, status);
-        self.launcher_host.step(HostBatch {
-            surface_size: Some((width, height)),
-            events: vec![HostEvent::Poll],
-            ..HostBatch::default()
-        });
-        for action in self.launcher_host.application_mut().take_effects() {
-            self.apply_launcher_action(action);
+        let Some(projected) = group
+            .windows
+            .iter()
+            .take(limit)
+            .find(|window| window.id == id)
+        else {
+            return false;
+        };
+        let Some(current) = self.windows.iter().find(|window| window.id == id) else {
+            return false;
+        };
+        if current.application_id != projected.application_id {
+            return false;
         }
-        self.launcher_host.commands().to_vec()
+        match action {
+            PreviewAction::Activate(_) => current.state.capabilities.activate,
+            PreviewAction::Close(_) => current.state.capabilities.close,
+            PreviewAction::OpenMenu(_) => true,
+        }
     }
 
-    fn run_scene(&mut self, width: u32, height: u32) -> Vec<PaintCommand> {
-        self.run_host.application_mut().palette = self.palette;
-        self.run_host.step(HostBatch {
-            surface_size: Some((width, height)),
-            events: vec![HostEvent::Poll],
-            ..HostBatch::default()
-        });
-        self.apply_run_effects();
-        self.run_host.commands().to_vec()
-    }
-
-    fn apply_run_effects(&mut self) {
-        for effect in self.run_host.application_mut().take_effects() {
-            match effect {
-                RunEffect::Submit(command) => match platform::execute_run_command(&command) {
-                    Ok(()) => {
-                        self.run_host.application_mut().command.clear();
-                        self.set_launcher_visible(false);
-                    }
-                    Err(error) => {
-                        let app = self.run_host.application_mut();
-                        app.status = Some(format!(
-                            "Could not run command: {}",
-                            launch_error_summary(&error)
-                        ));
-                        app.dirty = true;
-                    }
-                },
-                RunEffect::Dismiss => self.set_launcher_visible(false),
+    fn preview_plugin_bounds(&self, action: PreviewAction) -> Option<Rect> {
+        let id = match action {
+            PreviewAction::Activate(window) | PreviewAction::OpenMenu(window) => {
+                format!("preview-window-{}", window.0)
             }
-        }
+            PreviewAction::Close(window) => format!("preview-close-{}", window.0),
+        };
+        let host = self.preview_plugin_host_ref()?;
+        let message = host.application().button_message(&id)?;
+        host.semantic_targets_for_message(&message)
+            .into_iter()
+            .next()
+            .map(|target| target.bounds)
     }
 
-    fn launcher_status_text(&self) -> Option<String> {
-        self.launcher_status
-            .as_deref()
-            .or(self.shortcut_action_status.as_deref())
-            .or(self.shortcut_capability_status.as_deref())
-            .or_else(|| secure_storage_status_label(self.secure_storage_state))
-            .or_else(|| {
-                session_feed_status_label(self.window_feed_status, self.workspace_feed_status)
+    #[cfg(any(target_os = "windows", test))]
+    fn preview_thumbnail_bounds(
+        &mut self,
+        windows: &[crate::model::WindowId],
+    ) -> Option<Vec<crate::platform::PreviewThumbnailBounds>> {
+        // The preview can open before its first paint. Resolve the JSX tree now
+        // so the native thumbnail uses the same image-button geometry.
+        let _ = self.window_preview_scene();
+        let (width, height) = self.preview_plugin_size()?;
+        windows
+            .iter()
+            .map(|window| {
+                let bounds = self.preview_plugin_bounds(PreviewAction::Activate(*window))?;
+                let x = bounds.origin.x;
+                let y = bounds.origin.y;
+                let right = x + bounds.size.width;
+                let bottom = y + bounds.size.height;
+                if ![x, y, right, bottom].into_iter().all(f32::is_finite) {
+                    return None;
+                }
+                let left = (x.floor() as i32).clamp(0, width as i32);
+                let top = (y.floor() as i32).clamp(0, height as i32);
+                let right = (right.ceil() as i32).clamp(0, width as i32);
+                let bottom = (bottom.ceil() as i32).clamp(0, height as i32);
+                (right > left && bottom > top).then_some(crate::platform::PreviewThumbnailBounds {
+                    left,
+                    top,
+                    right,
+                    bottom,
+                })
             })
-            .map(str::to_owned)
+            .collect()
+    }
+
+    fn preview_plugin_size(&mut self) -> Option<(u32, u32)> {
+        let group = self.preview_plugin_group()?;
+        Some(if self.task_switcher_group.is_some() {
+            task_switcher_dimensions(group.windows.len().min(5))
+        } else {
+            preview_dimensions(group.windows.len().min(12))
+        })
+    }
+
+    fn preview_plugin_selected_window(&mut self) -> Option<crate::model::WindowId> {
+        let selected = self
+            .preview_plugin_host_ref()?
+            .inspect()
+            .controller_target?;
+        let group = self.preview_plugin_group()?;
+        let limit = if self.task_switcher_group.is_some() {
+            5
+        } else {
+            12
+        };
+        group.windows.iter().take(limit).find_map(|window| {
+            let message = self
+                .preview_plugin_host_ref()?
+                .application()
+                .button_message(&format!("preview-window-{}", window.id.0))?;
+            self.preview_plugin_host_ref()?
+                .semantic_targets_for_message(&message)
+                .iter()
+                .any(|target| target.id == selected)
+                .then_some(window.id)
+        })
+    }
+
+    fn plugin_window_previews(&mut self, id: &str) -> Option<serde_json::Value> {
+        if !self
+            .plugin_registry
+            .get(id)
+            .is_some_and(|entry| entry.health == nickel_core::plugins::PluginHealth::Running)
+            || !self
+                .external_plugin_packages
+                .get(id)?
+                .manifest
+                .capabilities
+                .contains(&nickel_core::plugins::PluginCapability::WindowsRead)
+        {
+            return None;
+        }
+        if self.locked {
+            return Some(serde_json::json!({"available":false,"windows":[]}));
+        }
+        let group = self.preview_plugin_group();
+        let switcher = self.task_switcher_group.is_some();
+        let selected = self.task_switcher.selected().copied();
+        Some(crate::window_preview_capabilities::snapshot(
+            group.as_ref(),
+            switcher,
+            selected,
+            self.plugin_activation_generation,
+            self.preview_generation,
+        ))
+    }
+
+    fn plugin_window_preview_images(&mut self, id: &str) -> crate::plugin_panel::PluginImages {
+        if self.locked || self.plugin_window_previews(id).is_none() {
+            return Default::default();
+        }
+        let Some(group) = self.preview_plugin_group() else {
+            return Default::default();
+        };
+        group
+            .windows
+            .iter()
+            .take(if self.task_switcher_group.is_some() {
+                5
+            } else {
+                12
+            })
+            .enumerate()
+            .filter_map(|(index, window)| {
+                self.preview_images.get(&window.id).map(|image| {
+                    (
+                        format!("window:{}", window.id.0),
+                        (0x7000 + index as u16, Arc::clone(image)),
+                    )
+                })
+            })
+            .collect()
+    }
+
+    fn preview_plugin_event(
+        &mut self,
+        event: HostEvent,
+        size: (u32, u32),
+        authority: Option<nickel_ui::NormalizedIngressAuthority>,
+    ) -> nickel_ui::HostEventOutcome {
+        self.plugin_surface_host_event(
+            &self.active_shell_surface_key("window-preview"),
+            event,
+            size,
+            None,
+            authority,
+        )
     }
 
     pub fn set_global_shortcut_capability(
         &mut self,
         capability: &nickel_input::global::ShortcutCapability,
     ) {
+        self.shortcut_capability_observed = true;
         self.shortcut_capability_status = shortcut_capability_status(capability);
-    }
-
-    fn panel_scene(&mut self, width: u32, height: u32) -> Vec<PaintCommand> {
-        let had_project_pet = self
-            .panel_host
-            .application()
-            .groups
-            .iter()
-            .take(12)
-            .any(|group| {
-                group
-                    .application_id
-                    .as_ref()
-                    .is_some_and(|id| id.as_str().starts_with("io.nickel.codex.project."))
-            });
-        let application_changed = self.sync_panel_host();
-        let has_project_pet = self
-            .panel_host
-            .application()
-            .groups
-            .iter()
-            .take(12)
-            .any(|group| {
-                group
-                    .application_id
-                    .as_ref()
-                    .is_some_and(|id| id.as_str().starts_with("io.nickel.codex.project."))
-            });
-        let outcome = self.panel_host.step(HostBatch {
-            application_changed,
-            surface_size: Some((width, height)),
-            // A previously minute-based clock deadline must be replaced with the
-            // animation cadence as soon as the first Codex project appears.
-            events: if has_project_pet && !had_project_pet {
-                vec![HostEvent::Poll]
-            } else {
-                Vec::new()
-            },
-            ..HostBatch::default()
-        });
-        self.panel_change_token = outcome.change_token;
-        self.panel_deadline = outcome.next_deadline;
-        self.apply_panel_effects();
-        self.panel_host.commands().to_vec()
     }
 
     fn panel_groups(&mut self) -> Arc<Vec<crate::launcher::TaskbarApplication>> {
@@ -6500,115 +9918,11 @@ impl LiveShell {
         {
             self.switch_panel_output(None);
         }
-        self.panel_hosts.retain(|output, _| {
-            output
-                .as_ref()
-                .is_none_or(|name| outputs.iter().any(|output| &output.name == name))
-        });
         self.panel_projections.retain(|output, _| {
             output
                 .as_ref()
                 .is_none_or(|name| outputs.iter().any(|output| &output.name == name))
         });
-    }
-
-    fn sync_panel_host(&mut self) -> bool {
-        let groups = self.panel_groups();
-        let tasks_changed = !Arc::ptr_eq(&groups, &self.panel_host.application().groups);
-        let pet_frame = self.panel_host.application().pet_frame;
-        let task_icons: Vec<Option<(u16, Arc<image::RgbaImage>)>> = groups
-            .iter()
-            .take(12)
-            .map(|group| {
-                // Project identity takes precedence over the generic Codex icon and
-                // is shared by every window in the same project group.
-                if let Some(pet) = group
-                    .application_id
-                    .as_ref()
-                    .and_then(|id| crate::icons::codex_pet(id.as_str(), pet_frame))
-                {
-                    return Some(pet);
-                }
-                group
-                    .application_id
-                    .as_ref()
-                    .and_then(|id| self.launcher.application(id))
-                    .and_then(|application| self.launcher_icons.resolve(application))
-                    .or_else(|| {
-                        group
-                            .application_id
-                            .as_ref()
-                            .is_some_and(|id| id.as_str().starts_with("io.nickel.codex.project."))
-                            .then(|| (0x3002, Arc::clone(&self.codex_icon)))
-                    })
-                    .or_else(|| {
-                        group
-                            .application_id
-                            .as_ref()
-                            .and_then(|id| crate::icons::nickel_application(id.as_str()))
-                    })
-                    .or_else(|| crate::icons::nickel_application(&group.application_name))
-                    .or_else(|| {
-                        group.windows.first().and_then(|window| {
-                            self.window_icons.get(&window.id).cloned().map(|icon| {
-                                self.launcher_icons.resolve_window_icon(window.id, icon)
-                            })
-                        })
-                    })
-            })
-            .collect();
-        let visible_panel_hover = self.visible_panel_hover();
-        let application = self.panel_host.application_mut();
-        let keyboard_changed = application.keyboard_enabled != self.keyboard_enabled
-            || application.keyboard_visible != self.keyboard_visible;
-        application.keyboard_enabled = self.keyboard_enabled;
-        application.keyboard_visible = self.keyboard_visible;
-        let task_icons_changed = application.task_icons.len() != task_icons.len()
-            || application
-                .task_icons
-                .iter()
-                .zip(&task_icons)
-                .any(|(current, next)| match (current, next) {
-                    (Some((current_id, current)), Some((next_id, next))) => {
-                        current_id != next_id || !Arc::ptr_eq(current, next)
-                    }
-                    (None, None) => false,
-                    _ => true,
-                });
-        let application_changed = application.palette != self.palette
-            || tasks_changed
-            || application.tray != self.tray
-            || application.panel_hover != visible_panel_hover
-            || application.launcher_visible != self.launcher_visible
-            || application.codex_project_menu_visible != self.codex_project_menu_visible
-            || application.control_visible != self.control_visible
-            || application.codex_available != self.launcher.codex_available()
-            || task_icons_changed
-            || keyboard_changed;
-        application.codex_available = self.launcher.codex_available();
-        application.groups = groups;
-        if application.tray != self.tray {
-            application.tray.clone_from(&self.tray);
-        }
-        application.tray_icons.clone_from(&self.tray_icons);
-        application.panel_icon = Arc::clone(&self.panel_icon);
-        application.codex_icon = Arc::clone(&self.codex_icon);
-        application.task_icons = task_icons;
-        application.palette = self.palette;
-        application.panel_hover = visible_panel_hover;
-        application.launcher_visible = self.launcher_visible;
-        application.codex_project_menu_visible = self.codex_project_menu_visible;
-        application.control_visible = self.control_visible;
-        application_changed
-    }
-
-    fn apply_panel_effects(&mut self) -> bool {
-        let effects = std::mem::take(&mut self.panel_host.application_mut().effects);
-        let changed = !effects.is_empty();
-        for action in effects {
-            self.apply_panel_action(action);
-        }
-        changed
     }
 }
 
@@ -6668,18 +9982,64 @@ impl LiveShell {
             .application_mut()
             .set_palette(self.palette);
         let supported_projection_modes = supported_projection_modes(self.session_host.as_ref());
-        self.control_host.application_mut().sync(
-            &self.network,
-            &self.bluetooth,
-            &self.audio,
-            &self.workspaces,
-            &supported_projection_modes,
-        );
+        self.control_host
+            .application_mut()
+            .sync_projection_modes(&supported_projection_modes);
         self.step_control_host(HostBatch {
             surface_size: Some((width, height)),
             events: vec![HostEvent::Poll],
             ..HostBatch::default()
         });
+    }
+
+    fn quick_settings_surface_active(&self) -> bool {
+        self.plugin_panel_host_ref(&self.active_shell_surface_key("quick-settings"))
+            .is_some()
+            && !self
+                .control_host
+                .application()
+                .view_state()
+                .trusted_visible()
+    }
+
+    pub(crate) fn control_surface_available(&self) -> bool {
+        self.active_shell_declares("quick-settings")
+            || self
+                .control_host
+                .application()
+                .view_state()
+                .trusted_visible()
+    }
+
+    pub(crate) fn plugin_surface_host_event(
+        &mut self,
+        key: &nickel_core::plugins::PluginSurfaceKey,
+        event: HostEvent,
+        size: (u32, u32),
+        limit: Option<usize>,
+        authority: Option<nickel_ui::NormalizedIngressAuthority>,
+    ) -> nickel_ui::HostEventOutcome {
+        let batch = HostBatch {
+            surface_size: Some(size),
+            clipboard_text_limit: limit,
+            events: vec![event],
+            normalized_authorities: authority.into_iter().collect(),
+            ..HostBatch::default()
+        };
+        if !passive_pointer_batch(&batch) {
+            let _ = self.plugin_panel_scene(key, size.0, size.1);
+        }
+        let Some(host) = self.plugin_panel_host_for(key) else {
+            return nickel_ui::HostEventOutcome::default();
+        };
+        let mut outcome = host.step(batch);
+        let effects = host.application_mut().take_effects();
+        if let Some(error) = host.application_mut().take_runtime_failure() {
+            self.fail_plugin_panel_runtime(&key.plugin_id, error);
+            return nickel_ui::HostEventOutcome::default();
+        }
+        outcome.changed |= self.apply_plugin_effects(effects);
+        outcome
     }
 
     fn step_control_host(&mut self, batch: HostBatch) -> bool {
@@ -6698,105 +10058,9 @@ impl LiveShell {
         }
     }
 
-    fn apply_launcher_action(&mut self, action: LauncherAction) {
-        let Some(effect) =
-            reduce_launcher_action(&mut self.launcher, &mut self.launcher_view, action)
-        else {
-            return;
-        };
-        self.apply_launcher_effect(effect);
-    }
-
-    fn apply_launcher_effect(&mut self, effect: LauncherShellEffect) {
-        match effect {
-            LauncherShellEffect::ActivateResult(index) => self.launch_result(index),
-            LauncherShellEffect::TogglePin(id) => {
-                self.launcher.toggle_pin(&id);
-                self.persist_launcher_preferences();
-            }
-            LauncherShellEffect::RetryPreferencePersistence => {
-                self.persist_launcher_preferences();
-            }
-            LauncherShellEffect::LaunchApplication(id) => self.launch_application_by_id(&id),
-            LauncherShellEffect::OpenProject(id) => {
-                self.set_launcher_visible(false);
-                self.requested_codex_project = Some(id);
-            }
-            LauncherShellEffect::SeeAllProjects => {
-                self.set_launcher_visible(false);
-                self.codex_project_menu_visible = true;
-            }
-            LauncherShellEffect::OpenSettings(destination) => {
-                let screen = match destination {
-                    crate::launcher::SettingsDestination::Nickel => "appearance",
-                    crate::launcher::SettingsDestination::KeyboardShortcuts => "keyboard-shortcuts",
-                    crate::launcher::SettingsDestination::About => "about",
-                };
-                #[cfg(target_os = "windows")]
-                {
-                    let result = std::env::current_exe()
-                        .map(|path| path.with_file_name("nickel-settings.exe"))
-                        .and_then(|path| {
-                            std::process::Command::new(path)
-                                .args(["--screen", screen])
-                                .spawn()
-                        });
-                    match result {
-                        Ok(_) => self.set_launcher_visible(false),
-                        Err(error) => {
-                            tracing::warn!(%error, "failed to launch Nickel Settings");
-                            self.launcher_status =
-                                Some(format!("Could not launch Nickel Settings: {error}"));
-                        }
-                    }
-                }
-                #[cfg(not(target_os = "windows"))]
-                {
-                    let application = self
-                        .launcher
-                        .applications()
-                        .find(|application| application.name() == "Nickel Settings")
-                        .cloned();
-                    if let Some(application) = application {
-                        let application = match application.launch_command() {
-                            Some(command) => {
-                                let mut command = command.to_vec();
-                                command.extend(["--screen".into(), screen.into()]);
-                                Application::new(
-                                    application.id().to_owned(),
-                                    application.name().to_owned(),
-                                    application.icon().map(str::to_owned),
-                                    application.icon_path().map(std::path::Path::to_owned),
-                                    Some(command),
-                                )
-                            }
-                            _ => application,
-                        };
-                        self.launch_application(application);
-                    }
-                }
-            }
-            LauncherShellEffect::OpenAccount => {
-                self.set_control_visible(true);
-                if self.control_visible {
-                    self.set_launcher_visible(false);
-                }
-            }
-            LauncherShellEffect::RequestLogout => {
-                self.set_control_visible(true);
-                if self.control_visible {
-                    self.set_launcher_visible(false);
-                    self.control_host
-                        .application_mut()
-                        .request_session_action(platform::SessionAction::LogOut);
-                    self.step_control_host(HostBatch {
-                        events: vec![HostEvent::Poll],
-                        ..HostBatch::default()
-                    });
-                }
-            }
-            LauncherShellEffect::Dismiss => self.set_launcher_visible(false),
-        }
+    fn toggle_application_pin(&mut self, id: &str) {
+        self.launcher.toggle_pin(id);
+        self.persist_launcher_preferences();
     }
 
     fn persist_launcher_preferences(&mut self) {
@@ -6903,85 +10167,12 @@ impl LiveShell {
         self.launcher_preference_persistence
             .replace_committed(preferences.clone())?;
         self.launcher.set_preferences(preferences);
-        self.launcher_host
-            .application_mut()
-            .sync(&self.launcher, self.palette, None);
-        self.launcher_host.step(HostBatch {
-            application_changed: true,
-            ..HostBatch::default()
-        });
         let _ = self.refresh_fast_changes();
         Ok(())
     }
 
     fn apply_control_action(&mut self, action: ControlAction) {
         match action {
-            ControlAction::ToggleWifiSection | ControlAction::WifiScroll => {}
-            ControlAction::SetWifiEnabled(enabled) => {
-                log_control_result("set-wifi-enabled", platform::set_wifi_enabled(enabled));
-            }
-            ControlAction::ActivateWifi { id } => {
-                log_control_result(
-                    "activate-wifi-network",
-                    platform::activate_wifi_network(&id),
-                );
-            }
-            ControlAction::ToggleBluetoothSection | ControlAction::BluetoothScroll => {}
-            ControlAction::SetBluetoothPowered(powered) => {
-                log_control_result(
-                    "set-bluetooth-powered",
-                    platform::set_bluetooth_powered(powered),
-                );
-            }
-            ControlAction::SetBluetoothDiscovery(discovering) => {
-                log_control_result(
-                    "set-bluetooth-discovery",
-                    platform::set_bluetooth_discovery(discovering),
-                );
-            }
-            ControlAction::ToggleBluetoothDevice { id } => {
-                log_control_result(
-                    "toggle-bluetooth-device",
-                    platform::toggle_bluetooth_device(&id),
-                );
-            }
-            ControlAction::ToggleAudioSection | ControlAction::AudioScroll => {}
-            ControlAction::SetAudioMuted(muted) => {
-                if platform::audio_status().muted != muted {
-                    platform::handle_consumer_control(
-                        nickel_session_protocol::ConsumerControl::VolumeMute,
-                    );
-                }
-            }
-            ControlAction::SetAudioVolume(volume) => {
-                log_control_result("set-audio-volume", platform::set_audio_volume(volume));
-            }
-            ControlAction::SelectAudioDevice { id } => {
-                log_control_result("select-audio-device", platform::select_audio_device(&id));
-            }
-            ControlAction::SwitchWorkspace(workspace) => {
-                let _ = self.send_session_command(
-                    "switch-workspace",
-                    ShellCommand::SwitchWorkspace(workspace),
-                );
-            }
-            ControlAction::CreateWorkspace => {
-                let _ =
-                    self.send_session_command("create-workspace", ShellCommand::CreateWorkspace);
-            }
-            ControlAction::ToggleShowDesktop => {
-                let _ = self
-                    .send_session_command("toggle-show-desktop", ShellCommand::ToggleShowDesktop);
-            }
-            ControlAction::ShowNotifications => {
-                self.global_shortcut(platform::GlobalShortcut::ShowNotifications);
-            }
-            ControlAction::RemoveWorkspace(workspace) => {
-                let _ = self.send_session_command(
-                    "remove-workspace",
-                    ShellCommand::RemoveWorkspace(workspace),
-                );
-            }
             ControlAction::PreviewProjection(mode) => {
                 if !self.preview_projection(mode) {
                     self.control_host
@@ -6989,21 +10180,26 @@ impl LiveShell {
                         .projection_preview_failed();
                 }
             }
+            ControlAction::ConfirmShellPreview(token) => {
+                if let Err(error) = self.confirm_shell_preview(None, token) {
+                    tracing::warn!(%error,"trusted shell confirmation failed");
+                }
+            }
+            ControlAction::RevertShellPreview(token) => {
+                if !self.locked {
+                    let _ = self.revert_shell_preview(
+                        None,
+                        token,
+                        "The previous shell was restored from trusted recovery.",
+                    );
+                }
+            }
             ControlAction::ConfirmProjection => {
                 self.projection_chooser.confirm();
                 self.projection_rollback_deadline = None;
             }
             ControlAction::CancelProjection => self.rollback_projection(),
-            ControlAction::RequestSessionAction(_)
-            | ControlAction::CancelSessionAction
-            | ControlAction::ConfirmSessionAction => {}
-            ControlAction::SessionAction(action) => {
-                if self.task_switcher.session().is_some() {
-                    self.apply_task_switch_action(nickel_core::hotkeys::HotkeyAction::CancelSwitch);
-                }
-                let _ = self
-                    .send_session_command("session-action", ShellCommand::SessionAction(action));
-            }
+            _ => {}
         }
         let _ = self.refresh();
     }
@@ -7012,6 +10208,9 @@ impl LiveShell {
         &mut self,
         mode: nickel_core::display_projection::ProjectionMode,
     ) -> bool {
+        if self.shell_selection_preview.is_some() {
+            return false;
+        }
         #[cfg(target_os = "linux")]
         {
             use nickel_core::display_projection::{
@@ -7073,6 +10272,7 @@ impl LiveShell {
                         enabled: entry.enabled,
                         scale_120: entry.scale.units(),
                         mode: None,
+                        transform: None,
                     })
                     .collect(),
             };
@@ -7121,11 +10321,182 @@ impl LiveShell {
                         enabled: entry.enabled,
                         scale_120: entry.scale.units(),
                         mode: None,
+                        transform: None,
                     })
                     .collect(),
             };
             let _ = self
                 .send_session_command("rollback-projection", ShellCommand::ApplyOutputs(layout));
+        }
+    }
+
+    fn plugin_display_control_granted(&self, plugin_id: &str) -> bool {
+        self.external_plugin_packages
+            .get(plugin_id)
+            .map(|package| &package.manifest)
+            .or_else(|| {
+                self.plugin_registry
+                    .get(plugin_id)
+                    .map(|entry| &entry.manifest)
+            })
+            .is_some_and(|manifest| {
+                manifest
+                    .capabilities
+                    .contains(&nickel_core::plugins::PluginCapability::DisplayControl)
+            })
+    }
+
+    fn preview_plugin_display_layout(
+        &mut self,
+        plugin_id: String,
+        layout: nickel_session_protocol::OutputLayout,
+        expected_revision: &str,
+    ) -> bool {
+        if self.shell_selection_preview.is_some() {
+            return false;
+        }
+        #[cfg(target_os = "linux")]
+        {
+            if self
+                .control_host
+                .application()
+                .view_state()
+                .trusted_visible()
+                || self.display_preview.is_some()
+                || self.projection_rollback_deadline.is_some()
+            {
+                return false;
+            }
+            let Ok(outputs) = self.session_host.projection_outputs() else {
+                return false;
+            };
+            if crate::display_capabilities::revision(&outputs) != expected_revision {
+                return false;
+            }
+            if validate_plugin_display_layout(&outputs, &layout).is_err() {
+                return false;
+            }
+            let previous = output_layout_from_snapshot(&outputs);
+            if validate_plugin_display_layout(&outputs, &previous).is_err() {
+                return false;
+            }
+            if self.send_session_command(
+                "preview-plugin-display-layout",
+                ShellCommand::ApplyOutputs(layout.clone()),
+            ) {
+                self.display_preview = Some(DisplayPreview {
+                    owner: plugin_id,
+                    previous,
+                    applied: normalized_output_layout_with_modes(layout, &outputs),
+                    deadline: Instant::now() + Duration::from_secs(15),
+                });
+                return true;
+            }
+            false
+        }
+        #[cfg(target_os = "windows")]
+        {
+            match crate::windows_plugin_display::set_layout(&plugin_id, &layout, expected_revision)
+            {
+                Ok(()) => true,
+                Err(error) => {
+                    tracing::warn!(%error, "plugin display layout preview failed");
+                    false
+                }
+            }
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+        {
+            let _ = (plugin_id, layout, expected_revision);
+            false
+        }
+    }
+
+    fn confirm_plugin_display_layout(&mut self, plugin_id: &str) -> bool {
+        #[cfg(target_os = "windows")]
+        {
+            return match crate::windows_plugin_display::confirm(plugin_id) {
+                Ok(()) => true,
+                Err(error) => {
+                    tracing::warn!(%error, "plugin display layout confirmation failed");
+                    false
+                }
+            };
+        }
+        if self
+            .display_preview
+            .as_ref()
+            .is_some_and(|preview| preview.owner == plugin_id && Instant::now() < preview.deadline)
+        {
+            #[cfg(target_os = "linux")]
+            {
+                let Ok(outputs) = self.session_host.projection_outputs() else {
+                    return false;
+                };
+                if self
+                    .display_preview
+                    .as_ref()
+                    .is_none_or(|preview| output_layout_from_snapshot(&outputs) != preview.applied)
+                {
+                    return false;
+                }
+            }
+            self.display_preview = None;
+            return true;
+        }
+        false
+    }
+
+    fn revert_plugin_display_layout(&mut self, plugin_id: Option<&str>) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            let Some(preview) = self.display_preview.as_ref() else {
+                return false;
+            };
+            if plugin_id.is_some_and(|owner| owner != preview.owner) {
+                return false;
+            }
+            let Ok(outputs) = self.session_host.projection_outputs() else {
+                return false;
+            };
+            // A separate display owner may have changed the topology during the
+            // preview. Never overwrite a layout that is no longer our preview.
+            let current = output_layout_from_snapshot(&outputs);
+            if current != preview.applied && current != preview.previous {
+                self.display_preview = None;
+                return false;
+            }
+            if validate_plugin_display_layout(&outputs, &preview.previous).is_err() {
+                self.display_preview = None;
+                return false;
+            }
+            let previous = preview.previous.clone();
+            if self.send_session_command(
+                "revert-plugin-display-layout",
+                ShellCommand::ApplyOutputs(previous),
+            ) {
+                self.display_preview = None;
+                return true;
+            }
+            false
+        }
+        #[cfg(target_os = "windows")]
+        {
+            let Some(plugin_id) = plugin_id else {
+                return false;
+            };
+            match crate::windows_plugin_display::revert(plugin_id) {
+                Ok(()) => true,
+                Err(error) => {
+                    tracing::warn!(%error, "plugin display layout recovery failed");
+                    false
+                }
+            }
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+        {
+            let _ = plugin_id;
+            false
         }
     }
 
@@ -7154,43 +10525,6 @@ fn log_control_result(operation: &'static str, succeeded: bool) {
     }
 }
 
-fn secure_storage_status_label(state: platform::SecureStorageState) -> Option<&'static str> {
-    match state {
-        platform::SecureStorageState::Starting => Some("Secure storage is starting…"),
-        platform::SecureStorageState::Locked => Some("Secure storage is locked."),
-        platform::SecureStorageState::PromptRequired => {
-            Some("Secure storage is waiting for its unlock prompt.")
-        }
-        platform::SecureStorageState::Unavailable => Some("Secure storage is unavailable."),
-        platform::SecureStorageState::UnavailableReason(reason) => Some(match reason {
-            nickel_session_protocol::SecureStorageUnavailableReason::Connection => {
-                "Secure storage cannot connect to the session bus."
-            }
-            nickel_session_protocol::SecureStorageUnavailableReason::MissingDefaultCollection => {
-                "Secure storage has no default collection."
-            }
-            nickel_session_protocol::SecureStorageUnavailableReason::PromptTimedOut => {
-                "The secure-storage unlock prompt timed out."
-            }
-            nickel_session_protocol::SecureStorageUnavailableReason::ProviderDisappeared => {
-                "The secure-storage provider disappeared."
-            }
-            nickel_session_protocol::SecureStorageUnavailableReason::ProviderConfiguration
-            | nickel_session_protocol::SecureStorageUnavailableReason::UnexpectedProvider => {
-                "The secure-storage provider configuration is invalid."
-            }
-            nickel_session_protocol::SecureStorageUnavailableReason::Protocol
-            | nickel_session_protocol::SecureStorageUnavailableReason::ReadinessCheck => {
-                "Secure storage failed its readiness check."
-            }
-        }),
-        platform::SecureStorageState::ControlUnavailable => {
-            Some("Nickel cannot reach the session service.")
-        }
-        platform::SecureStorageState::Ready => None,
-    }
-}
-
 fn update_feed_status(current: &mut FeedStatus, next: FeedStatus, feed: &'static str) -> bool {
     if *current == next {
         return false;
@@ -7198,22 +10532,6 @@ fn update_feed_status(current: &mut FeedStatus, next: FeedStatus, feed: &'static
     tracing::info!(feed, status = ?next, "shell feed state changed");
     *current = next;
     true
-}
-
-fn session_feed_status_label(
-    window_status: FeedStatus,
-    workspace_status: FeedStatus,
-) -> Option<&'static str> {
-    match (window_status, workspace_status) {
-        (FeedStatus::Loading, FeedStatus::Loading) => Some("Loading session data…"),
-        (FeedStatus::Loading, _) => Some("Loading session windows…"),
-        (_, FeedStatus::Loading) => Some("Loading session workspaces…"),
-        (FeedStatus::Disconnected, _) => Some("Session window data is disconnected."),
-        (_, FeedStatus::Disconnected) => Some("Session workspace data is disconnected."),
-        (FeedStatus::Failed, _) => Some("Session window data failed to load."),
-        (_, FeedStatus::Failed) => Some("Session workspace data failed to load."),
-        (FeedStatus::Ready, FeedStatus::Ready) => None,
-    }
 }
 
 fn application_discovery_status_label(
@@ -7411,75 +10729,6 @@ fn retain_preview_generation(
             .take(PREVIEW_CACHE_CAPACITY)
             .any(|candidate| candidate.id == *window)
     });
-}
-
-#[cfg(test)]
-mod run_application_tests {
-    use super::*;
-
-    fn application() -> RunApplication {
-        RunApplication::new(ThemePalette::from_appearance(Appearance::default()))
-    }
-
-    #[test]
-    fn command_input_is_unicode_safe_and_bounded() {
-        let mut app = application();
-        app.update(RunAction::SetCommand("🦀".repeat(RUN_COMMAND_LIMIT + 2)));
-
-        assert_eq!(app.command.chars().count(), RUN_COMMAND_LIMIT);
-        assert!(app.poll());
-    }
-
-    #[test]
-    fn submit_and_escape_emit_typed_boundary_effects() {
-        let mut app = application();
-        app.update(RunAction::SetCommand("  cargo test  ".into()));
-
-        assert!(app.shortcut_outcome(Shortcut::Submit).changed);
-        assert_eq!(app.take_effects(), [RunEffect::Submit("cargo test".into())]);
-        assert!(app.shortcut_outcome(Shortcut::Escape).changed);
-        assert_eq!(app.take_effects(), [RunEffect::Dismiss]);
-    }
-
-    #[test]
-    fn empty_command_does_not_cross_the_launch_boundary() {
-        let mut app = application();
-        app.update(RunAction::SetCommand("   ".into()));
-        assert!(app.shortcut_outcome(Shortcut::Submit).changed);
-        assert!(app.take_effects().is_empty());
-    }
-
-    #[test]
-    fn compact_run_surface_keeps_the_editor_and_submit_action_visible() {
-        let mut host = nickel_ui::UiHost::new(application(), RUN_SURFACE_WIDTH, RUN_SURFACE_HEIGHT);
-        host.step(HostBatch {
-            application_changed: true,
-            surface_size: Some((RUN_SURFACE_WIDTH, RUN_SURFACE_HEIGHT)),
-            events: vec![HostEvent::Poll],
-            ..HostBatch::default()
-        });
-
-        let field = host
-            .query_unique(&nickel_ui::SemanticSelector::Role(SemanticRole::TextField))
-            .expect("run command field");
-        let submit = host
-            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
-                role: SemanticRole::Button,
-                name: "Run".into(),
-            })
-            .expect("run submit button");
-        assert!(field.bounds.size.height > 0.0);
-        assert_eq!(submit.bounds.size.height, 36.0);
-        assert!(field.bounds.origin.y + field.bounds.size.height <= RUN_SURFACE_HEIGHT as f32);
-        assert!(submit.bounds.origin.y + submit.bounds.size.height <= RUN_SURFACE_HEIGHT as f32);
-        let focus = host.request_focus(field.id);
-        assert!(focus.changed && focus.failures.is_empty());
-        assert!(
-            host.query_unique(&nickel_ui::SemanticSelector::Role(SemanticRole::TextField))
-                .unwrap()
-                .focused
-        );
-    }
 }
 
 #[cfg(test)]

@@ -382,7 +382,7 @@ mod tests {
         let panel = runtime.insert_scene(
             Vec::new(),
             InternalSurfacePlacement {
-                role: InternalSurfaceRole::Panel,
+                role: InternalSurfaceRole::Taskbar,
                 geometry: (0, 0, 800, 48),
                 output: None,
             },
@@ -514,7 +514,7 @@ mod tests {
         let panel = runtime.insert_scene(
             Vec::new(),
             InternalSurfacePlacement {
-                role: InternalSurfaceRole::Panel,
+                role: InternalSurfaceRole::Taskbar,
                 geometry: (-800, -120, 800, 56),
                 output: Some("left".into()),
             },
@@ -597,7 +597,7 @@ mod tests {
         let panel = runtime.insert_scene(
             Vec::new(),
             InternalSurfacePlacement {
-                role: InternalSurfaceRole::Panel,
+                role: InternalSurfaceRole::Taskbar,
                 geometry: (-800, -120, 800, 56),
                 output: Some("left".into()),
             },
@@ -1351,7 +1351,7 @@ impl InternalUiRuntime {
             .filter(|surface| {
                 surface.visible
                     && surface.external_scene.is_some()
-                    && surface.placement.role == InternalSurfaceRole::Panel
+                    && surface.placement.role == InternalSurfaceRole::Taskbar
             })
             .map(|surface| surface.placement.clone());
         if let (
@@ -1388,7 +1388,7 @@ impl InternalUiRuntime {
                     // its events on the generic route until it supports normalized input.
                     && !matches!(
                         surface.placement.role,
-                        InternalSurfaceRole::Panel | InternalSurfaceRole::PassiveOverlay
+                        InternalSurfaceRole::Taskbar | InternalSurfaceRole::PassiveOverlay
                     )
             })
             .map(|surface| surface.placement.clone());

@@ -4,6 +4,190 @@ use crate::session::SessionAuthorityRequest;
 static CONTROL_SOCKET_GENERATION: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
+fn shell_surface_identity_valid(identity: &nickel_session_protocol::ShellSurfaceIdentity) -> bool {
+    let output_scoped = matches!(
+        identity.role,
+        ShellRole::Desktop | ShellRole::Panel | ShellRole::PluginSurface | ShellRole::Lock
+    );
+    identity
+        .application_id
+        .starts_with(nickel_session_protocol::SHELL_SURFACE_APPLICATION_ID_PREFIX)
+        && identity.application_id.len() <= nickel_session_protocol::MAX_WINDOW_APP_ID_BYTES
+        && identity.output.is_some() == output_scoped
+        && (identity.role != ShellRole::PluginSurface || identity.plugin_surface.is_some())
+        && (matches!(
+            identity.role,
+            ShellRole::PluginSurface | ShellRole::Panel | ShellRole::VolumeOsd | ShellRole::Preview
+        ) || identity.plugin_surface.is_none())
+        && (identity.role != ShellRole::VolumeOsd
+            || identity.plugin_surface.as_ref().is_none_or(|surface| {
+                surface.kind == nickel_session_protocol::PluginSurfacePlacementKind::Overlay
+                    && surface.bottom_offset == 0
+            }))
+        && (identity.role != ShellRole::Preview
+            || identity.plugin_surface.as_ref().is_none_or(|surface| {
+                surface.kind == nickel_session_protocol::PluginSurfacePlacementKind::Overlay
+                    && surface.bottom_offset == 0
+            }))
+        && (identity.role != ShellRole::Panel
+            || identity.plugin_surface.as_ref().is_none_or(|surface| {
+                surface.kind == nickel_session_protocol::PluginSurfacePlacementKind::Panel
+                    && surface.bottom_offset == 0
+            }))
+        && identity.plugin_surface.as_ref().is_none_or(|surface| {
+            !surface.plugin_id.is_empty()
+                && surface.plugin_id.len() <= 128
+                && !surface.surface_id.is_empty()
+                && surface.surface_id.len() <= 128
+                && (1..=8192).contains(&surface.width)
+                && (1..=8192).contains(&surface.height)
+                && surface.bottom_offset <= 8192
+                && (-8192..=8192).contains(&surface.offset_x)
+                && (-8192..=8192).contains(&surface.offset_y)
+                && (matches!(
+                    surface.kind,
+                    nickel_session_protocol::PluginSurfacePlacementKind::Panel
+                        | nickel_session_protocol::PluginSurfacePlacementKind::Dock
+                ) || surface.bottom_offset == 0)
+                && (matches!(
+                    surface.kind,
+                    nickel_session_protocol::PluginSurfacePlacementKind::Window
+                        | nickel_session_protocol::PluginSurfacePlacementKind::Dialog
+                        | nickel_session_protocol::PluginSurfacePlacementKind::Overlay
+                ) || (surface.anchor == nickel_session_protocol::PluginSurfaceAnchor::Center
+                    && surface.offset_x == 0
+                    && surface.offset_y == 0))
+                && (!surface.passive
+                    || surface.kind == nickel_session_protocol::PluginSurfacePlacementKind::Overlay)
+        })
+}
+
+#[cfg(test)]
+mod shell_surface_identity_tests {
+    use super::shell_surface_identity_valid;
+    use nickel_session_protocol::{
+        PluginSurfacePlacement, PluginSurfacePlacementKind, ShellRole, ShellSurfaceIdentity,
+    };
+
+    #[test]
+    fn reserved_panel_accepts_keyed_identity_and_rejects_dock_placement() {
+        let mut identity = ShellSurfaceIdentity {
+            application_id: "io.nickel.shell.surface.42.9".into(),
+            role: ShellRole::Panel,
+            output: Some("DP-1".into()),
+            plugin_surface: Some(PluginSurfacePlacement {
+                plugin_id: "org.nickel.taskbar".into(),
+                surface_id: "main".into(),
+                kind: PluginSurfacePlacementKind::Panel,
+                width: 1920,
+                height: 56,
+                bottom_offset: 0,
+                anchor: nickel_session_protocol::PluginSurfaceAnchor::Center,
+                offset_x: 0,
+                offset_y: 0,
+                passive: false,
+            }),
+        };
+        assert!(shell_surface_identity_valid(&identity));
+
+        let placement = identity.plugin_surface.as_mut().unwrap();
+        placement.kind = PluginSurfacePlacementKind::Dock;
+        assert!(!shell_surface_identity_valid(&identity));
+        let placement = identity.plugin_surface.as_mut().unwrap();
+        placement.kind = PluginSurfacePlacementKind::Panel;
+        placement.bottom_offset = 24;
+        assert!(!shell_surface_identity_valid(&identity));
+        identity.role = ShellRole::PluginSurface;
+        assert!(shell_surface_identity_valid(&identity));
+    }
+
+    #[test]
+    fn anchored_plugin_overlay_is_valid_but_panel_anchor_is_rejected() {
+        let mut identity = ShellSurfaceIdentity {
+            application_id: "io.nickel.shell.surface.42.13".into(),
+            role: ShellRole::PluginSurface,
+            output: Some("DP-1".into()),
+            plugin_surface: Some(PluginSurfacePlacement {
+                plugin_id: "org.example.notice".into(),
+                surface_id: "main".into(),
+                kind: PluginSurfacePlacementKind::Overlay,
+                width: 420,
+                height: 180,
+                bottom_offset: 0,
+                anchor: nickel_session_protocol::PluginSurfaceAnchor::TopRight,
+                offset_x: -18,
+                offset_y: 24,
+                passive: true,
+            }),
+        };
+        assert!(shell_surface_identity_valid(&identity));
+        identity.plugin_surface.as_mut().unwrap().kind = PluginSurfacePlacementKind::Panel;
+        assert!(!shell_surface_identity_valid(&identity));
+        identity.plugin_surface.as_mut().unwrap().kind = PluginSurfacePlacementKind::Overlay;
+        identity.plugin_surface.as_mut().unwrap().offset_y = 8193;
+        assert!(!shell_surface_identity_valid(&identity));
+    }
+
+    #[test]
+    fn desktop_accepts_only_native_placement() {
+        let mut identity = ShellSurfaceIdentity {
+            application_id: "io.nickel.shell.surface.42.10".into(),
+            role: ShellRole::Desktop,
+            output: Some("DP-1".into()),
+            plugin_surface: None,
+        };
+        assert!(shell_surface_identity_valid(&identity));
+        identity.plugin_surface = Some(PluginSurfacePlacement {
+            plugin_id: "org.example.desktop".into(),
+            surface_id: "main".into(),
+            kind: PluginSurfacePlacementKind::Desktop,
+            width: 800,
+            height: 600,
+            bottom_offset: 0,
+            anchor: nickel_session_protocol::PluginSurfaceAnchor::Center,
+            offset_x: 0,
+            offset_y: 0,
+            passive: false,
+        });
+        assert!(!shell_surface_identity_valid(&identity));
+    }
+
+    #[test]
+    fn preview_accepts_only_overlay_plugin_placement() {
+        let package = crate::bundled_plugin_assets::load_package("nickel-default").unwrap();
+        let key = nickel_core::plugins::PluginSurfaceKey {
+            plugin_id: package.manifest.id.clone(),
+            surface_id: "window-preview".into(),
+        };
+        let surface = package
+            .manifest
+            .surfaces
+            .iter()
+            .find(|s| s.id == "window-preview")
+            .unwrap();
+        let mut identity = ShellSurfaceIdentity {
+            application_id: "io.nickel.shell.surface.42.12".into(),
+            role: ShellRole::Preview,
+            output: None,
+            plugin_surface: Some(PluginSurfacePlacement {
+                plugin_id: key.plugin_id,
+                surface_id: key.surface_id,
+                kind: PluginSurfacePlacementKind::Overlay,
+                width: surface.width,
+                height: surface.height,
+                bottom_offset: 0,
+                anchor: nickel_session_protocol::PluginSurfaceAnchor::Center,
+                offset_x: 0,
+                offset_y: 0,
+                passive: false,
+            }),
+        };
+        assert!(shell_surface_identity_valid(&identity));
+        identity.plugin_surface.as_mut().unwrap().kind = PluginSurfacePlacementKind::Panel;
+        assert!(!shell_surface_identity_valid(&identity));
+    }
+}
+
 fn remote_capability(
     capability: nickel_remote_control::Capability,
 ) -> nickel_session_protocol::RemoteCapability {
@@ -719,6 +903,9 @@ impl NickelSession {
                     }
                     self.launcher_subscribers.push(path.to_path_buf());
                 }
+                if control.authenticated_shell_pids.contains(&peer_pid) {
+                    self.plugin_shell_subscriber = Some(path.to_path_buf());
+                }
                 ServerMessage::Event(SessionEvent::Snapshot(self.protocol_snapshot()))
             }
             Request::ControllerHost(request) => {
@@ -770,6 +957,32 @@ impl NickelSession {
                     Err(error) => protocol_error(ErrorCode::InvalidRequest, error),
                 }
             }
+            SessionAuthorityRequest::OptionalFeaturesCommitted {
+                codex_generation,
+                keyboard_generation,
+            } => {
+                let settings = match nickel_core::optional_features::settings_path()
+                    .map_err(|error| error.to_string())
+                    .and_then(|path| crate::feature_capabilities::read_settings(&path))
+                {
+                    Ok(settings) => settings,
+                    Err(error) => return protocol_error(ErrorCode::InvalidRequest, error),
+                };
+                if self.locked
+                    || settings.codex_generation != codex_generation
+                    || settings.on_screen_keyboard_generation != keyboard_generation
+                {
+                    return protocol_error(
+                        ErrorCode::InvalidRequest,
+                        "feature preference changed or session is locked",
+                    );
+                }
+                self.notify_shell_settings_changed();
+                match self.apply_remote_codex_preference(&settings) {
+                    Ok(()) => ServerMessage::Ack,
+                    Err(error) => protocol_error(ErrorCode::InvalidRequest, error),
+                }
+            }
             SessionAuthorityRequest::Query(query) => self.handle_protocol_query(query),
             SessionAuthorityRequest::Command(command) => {
                 self.handle_protocol_command(command, None, 0)
@@ -791,6 +1004,15 @@ impl NickelSession {
             ),
             Query::Outputs => ServerMessage::Outputs(self.protocol_outputs()),
             Query::ShellSurfaces => ServerMessage::ShellSurfaces(self.protocol_shell_surfaces()),
+            Query::UiLayouts if self.test_control_enabled => {
+                ServerMessage::UiLayouts(self.protocol_ui_layouts())
+            }
+            Query::UiLayout { surface, offset } if self.test_control_enabled => {
+                match self.protocol_ui_layout(&surface, offset) {
+                    Ok(snapshot) => ServerMessage::UiLayout(snapshot),
+                    Err(message) => protocol_error(ErrorCode::InvalidRequest, &message),
+                }
+            }
             Query::ShellReadiness => ServerMessage::ShellReadiness(self.protocol_shell_readiness()),
             Query::LauncherVisibility => ServerMessage::LauncherVisibility {
                 visible: self.launcher_visibility.is_visible(),
@@ -824,6 +1046,7 @@ impl NickelSession {
                     .as_ref()
                     .map(crate::session::backend::udev::UdevData::identify_badge_diagnostics)
                     .unwrap_or_default();
+                let shell_timer = self.internal_shell_timer_counters();
                 ServerMessage::CacheDiagnostics(Box::new(
                     nickel_session_protocol::CacheDiagnostics {
                         internal_ui_surfaces: u16::try_from(internal_ui.surfaces)
@@ -861,6 +1084,11 @@ impl NickelSession {
                         )
                         .unwrap_or(u16::MAX),
                         internal_shell_wallpaper_bytes: shell_images.wallpaper_bytes as u64,
+                        internal_shell_timer_armed: shell_timer.armed,
+                        internal_shell_timer_cancelled: shell_timer.cancelled,
+                        internal_shell_timer_fired: shell_timer.fired,
+                        internal_shell_timer_polls: shell_timer.polls,
+                        internal_shell_timer_redraw_requests: shell_timer.redraw_requests,
                         preview_entries: u16::try_from(self.preview_frames.len())
                             .unwrap_or(u16::MAX),
                         native_preview_work: {
@@ -965,6 +1193,18 @@ impl NickelSession {
                 let _ = self.refresh_output_topology_generation();
                 ServerMessage::ShellBehavior(self.protocol_shell_behavior())
             }
+            Query::Plugins => {
+                let snapshot = self
+                    .internal_shell
+                    .as_ref()
+                    .map(|coordinator| coordinator.plugin_status_snapshot())
+                    .or_else(|| self.plugin_status.clone())
+                    .unwrap_or_else(|| nickel_session_protocol::PluginStatusSnapshot {
+                        activation_generation: 0,
+                        plugins: Vec::new(),
+                    });
+                ServerMessage::Plugins(snapshot)
+            }
             Query::RemoteControl => self.remote_control_snapshot(),
             Query::Preview { window } => {
                 let id = WindowId(window.0);
@@ -997,7 +1237,10 @@ impl NickelSession {
                         "shell semantic target is unavailable",
                     )
                 }),
-            Query::ShellSemanticTarget { .. } | Query::ShellRuntimeDiagnostics => protocol_error(
+            Query::ShellSemanticTarget { .. }
+            | Query::ShellRuntimeDiagnostics
+            | Query::UiLayouts
+            | Query::UiLayout { .. } => protocol_error(
                 ErrorCode::InvalidRequest,
                 "shell-only query is unavailable on this control endpoint",
             ),
@@ -1084,17 +1327,7 @@ impl NickelSession {
                     .retain(|pending| pending.generation != generation);
             }
             SessionCommand::RegisterShellSurface { mut identity } => {
-                let output_scoped = matches!(
-                    identity.role,
-                    ShellRole::Desktop | ShellRole::Panel | ShellRole::Lock
-                );
-                if !identity
-                    .application_id
-                    .starts_with(nickel_session_protocol::SHELL_SURFACE_APPLICATION_ID_PREFIX)
-                    || identity.application_id.len()
-                        > nickel_session_protocol::MAX_WINDOW_APP_ID_BYTES
-                    || identity.output.is_some() != output_scoped
-                {
+                if !shell_surface_identity_valid(&identity) {
                     return protocol_error(
                         ErrorCode::InvalidRequest,
                         "invalid shell surface identity",
@@ -1115,7 +1348,18 @@ impl NickelSession {
                     return protocol_error(ErrorCode::ResourceLimit, "shell surface limit reached");
                 }
                 self.shell_surface_identities
-                    .insert(identity.application_id.clone(), identity);
+                    .insert(identity.application_id.clone(), identity.clone());
+                if matches!(identity.role, ShellRole::PluginSurface | ShellRole::Panel) {
+                    for registration in &mut self.registered_shell_role_slots {
+                        if registration.application_id.as_deref()
+                            == Some(identity.application_id.as_str())
+                        {
+                            registration.output = identity.output.clone();
+                            registration.plugin_surface = identity.plugin_surface.clone();
+                        }
+                    }
+                    self.relayout_shell_surfaces();
+                }
             }
             SessionCommand::RequestOnScreenKeyboard => self.request_on_screen_keyboard(),
             SessionCommand::ConfigureOnScreenKeyboard {
@@ -1141,11 +1385,166 @@ impl NickelSession {
                 }
             }
             SessionCommand::ReloadShellSettings => {
+                let settings = match nickel_core::optional_features::settings_path()
+                    .map_err(|error| error.to_string())
+                    .and_then(|path| crate::feature_capabilities::read_settings(&path))
+                {
+                    Ok(settings) => settings,
+                    Err(error) => return protocol_error(ErrorCode::InvalidRequest, error),
+                };
+                if !self.locked {
+                    if let Err(error) = self.apply_remote_codex_preference(&settings) {
+                        return protocol_error(ErrorCode::InvalidRequest, error);
+                    }
+                }
                 self.apply_configured_workspace_count();
                 self.notify_shell_settings_changed();
             }
             SessionCommand::ApplyShellBehavior { transaction } => {
                 return self.apply_shell_behavior_transaction(transaction);
+            }
+            SessionCommand::PublishPluginStatus { snapshot } => {
+                if snapshot.plugins.len() > 64
+                    || snapshot.plugins.iter().any(|plugin| {
+                        plugin.id.len() > 96
+                            || plugin.name.len() > 120
+                            || plugin
+                                .author
+                                .as_ref()
+                                .is_some_and(|author| author.len() > 120)
+                            || plugin
+                                .version
+                                .as_ref()
+                                .is_some_and(|version| version.len() > 64)
+                            || plugin.capabilities.len() > 32
+                            || plugin.surfaces.len() > 32
+                            || plugin.settings.len() > 32
+                            || plugin.settings.iter().any(|setting| {
+                                setting.id.len() > 96
+                                    || setting.label.len() > 80
+                                    || setting.description.len() > 256
+                                    || !matches!(
+                                        setting.value,
+                                        serde_json::Value::Bool(_)
+                                            | serde_json::Value::Number(_)
+                                            | serde_json::Value::String(_)
+                                    )
+                            })
+                    })
+                {
+                    return protocol_error(
+                        ErrorCode::ResourceLimit,
+                        "plugin status exceeds limits",
+                    );
+                }
+                self.plugin_status = Some(snapshot.clone());
+                self.notify_plugin_event(SessionEvent::PluginsChanged(snapshot));
+            }
+            SessionCommand::SetPluginEnabled {
+                id,
+                enabled,
+                observed_generation,
+            } => {
+                if let Some(coordinator) = self.internal_shell.as_mut() {
+                    if coordinator.plugin_status_snapshot().activation_generation
+                        != observed_generation
+                    {
+                        return protocol_error(
+                            ErrorCode::InvalidRequest,
+                            "plugin status changed; refresh Settings",
+                        );
+                    }
+                    let changed = coordinator.set_plugin_enabled(&id, enabled);
+                    let snapshot = coordinator.plugin_status_snapshot();
+                    self.plugin_status = Some(snapshot.clone());
+                    self.notify_plugin_event(SessionEvent::PluginsChanged(snapshot.clone()));
+                    if changed.is_ok() {
+                        self.reconcile_internal_shell_outputs();
+                    }
+                    return changed.map_or_else(
+                        |reason| protocol_error(ErrorCode::InvalidRequest, reason),
+                        |_| ServerMessage::Plugins(snapshot),
+                    );
+                }
+                let Some(status) = &self.plugin_status else {
+                    return protocol_error(
+                        ErrorCode::InvalidRequest,
+                        "plugin status is unavailable",
+                    );
+                };
+                if status.activation_generation != observed_generation {
+                    return protocol_error(
+                        ErrorCode::InvalidRequest,
+                        "plugin status changed; refresh Settings",
+                    );
+                }
+                if !status.plugins.iter().any(|plugin| plugin.id == id) {
+                    return protocol_error(ErrorCode::InvalidRequest, "unknown plugin");
+                }
+                if !self.request_plugin_activation(SessionEvent::PluginActivationRequested {
+                    id,
+                    enabled,
+                    observed_generation,
+                }) {
+                    return protocol_error(ErrorCode::Internal, "shell subscriber is unavailable");
+                }
+            }
+            SessionCommand::SetPluginSetting {
+                id,
+                key,
+                value,
+                observed_generation,
+            } => {
+                let current = self.internal_shell.as_ref().map_or_else(
+                    || {
+                        self.plugin_status
+                            .as_ref()
+                            .map(|status| status.activation_generation)
+                    },
+                    |coordinator| Some(coordinator.plugin_status_snapshot().activation_generation),
+                );
+                if current != Some(observed_generation) {
+                    return protocol_error(
+                        ErrorCode::InvalidRequest,
+                        "plugin status changed; refresh Settings",
+                    );
+                }
+                if let Some(coordinator) = self.internal_shell.as_mut() {
+                    let changed = match coordinator.set_plugin_setting(&id, &key, value) {
+                        Ok(changed) => changed,
+                        Err(reason) => return protocol_error(ErrorCode::InvalidRequest, reason),
+                    };
+                    let snapshot = coordinator.plugin_status_snapshot();
+                    self.plugin_status = Some(snapshot.clone());
+                    self.notify_plugin_event(SessionEvent::PluginsChanged(snapshot.clone()));
+                    if changed {
+                        self.request_output_redraw();
+                    }
+                    return ServerMessage::Plugins(snapshot);
+                }
+                let Some(setting) = self.plugin_status.as_ref().and_then(|status| {
+                    status
+                        .plugins
+                        .iter()
+                        .find(|plugin| plugin.id == id)
+                        .and_then(|plugin| plugin.settings.iter().find(|setting| setting.id == key))
+                }) else {
+                    return protocol_error(ErrorCode::InvalidRequest, "unknown plugin setting");
+                };
+                if !setting.kind.accepts(&value) {
+                    return protocol_error(
+                        ErrorCode::InvalidRequest,
+                        "invalid plugin setting value",
+                    );
+                }
+                if !self.request_plugin_activation(SessionEvent::PluginSettingRequested {
+                    id,
+                    key,
+                    value,
+                    observed_generation,
+                }) {
+                    return protocol_error(ErrorCode::Internal, "shell subscriber is unavailable");
+                }
             }
             SessionCommand::ApplyRemoteControl {
                 requested_enabled,
@@ -1356,6 +1755,18 @@ impl NickelSession {
             SessionCommand::ShowAnchoredShellRole { role, anchor } => {
                 self.show_anchored_shell_role(role, anchor);
             }
+            SessionCommand::ShowAnchoredPluginSurface {
+                plugin_id,
+                surface_id,
+                anchor,
+            } => {
+                if !self.show_anchored_plugin_surface(&plugin_id, &surface_id, anchor) {
+                    return protocol_error(
+                        ErrorCode::InvalidRequest,
+                        "plugin popover surface is unavailable",
+                    );
+                }
+            }
             SessionCommand::LogOut => {
                 self.remote_control.shutdown_session();
                 self.sync_remote_control_indicators();
@@ -1435,11 +1846,75 @@ impl NickelSession {
                         "role does not accept ordinary shell focus",
                     );
                 }
+                if role == nickel_session_protocol::ShellRole::ControlCenter
+                    && self
+                        .internal_shell
+                        .as_ref()
+                        .is_some_and(|shell| !shell.can_show_control_center())
+                {
+                    return ServerMessage::Ack;
+                }
+                if role == nickel_session_protocol::ShellRole::ControlCenter
+                    && let Some(shell) = self.internal_shell.as_mut()
+                {
+                    shell.apply_control_visibility(true);
+                    self.sync_internal_shell();
+                }
                 self.focus_shell_role(role);
             }
-            SessionCommand::RestoreApplicationFocus => self.restore_application_focus(),
+            SessionCommand::FocusPluginSurface {
+                plugin_id,
+                surface_id,
+            } => {
+                let key = nickel_core::plugins::PluginSurfaceKey {
+                    plugin_id,
+                    surface_id,
+                };
+                let registered = self.internal_shell.as_ref().is_some_and(|shell| {
+                    shell
+                        .surfaces()
+                        .iter()
+                        .any(|surface| surface.plugin.as_ref() == Some(&key))
+                }) || self.registered_shell_role_slots.iter().any(|slot| {
+                    slot.role == nickel_session_protocol::ShellRole::PluginSurface
+                        && slot.plugin_surface.as_ref().is_some_and(|placement| {
+                            placement.plugin_id == key.plugin_id
+                                && placement.surface_id == key.surface_id
+                        })
+                });
+                if !registered {
+                    return protocol_error(
+                        ErrorCode::InvalidRequest,
+                        "plugin surface is unavailable for focus",
+                    );
+                }
+                if self
+                    .internal_shell
+                    .as_ref()
+                    .is_some_and(|shell| key == shell.active_shell_surface_key("quick-settings"))
+                    && let Some(shell) = self.internal_shell.as_mut()
+                {
+                    shell.apply_control_visibility(true);
+                    self.sync_internal_shell();
+                }
+                if !self.focus_plugin_surface(&key.plugin_id, &key.surface_id) {
+                    self.pending_plugin_focus = Some(key);
+                }
+            }
+            SessionCommand::RestoreApplicationFocus => {
+                if let Some(shell) = self.internal_shell.as_mut() {
+                    shell.apply_control_visibility(false);
+                    self.sync_internal_shell();
+                }
+                self.restore_application_focus();
+            }
             SessionCommand::IdentifyOutputs => self.begin_output_identification(),
             SessionCommand::CaptureOutput { path, output } => {
+                tracing::trace!(
+                    ?output,
+                    internal = source.is_none(),
+                    "native output capture command received"
+                );
                 if path.is_empty() {
                     return protocol_error(ErrorCode::InvalidRequest, "capture path is empty");
                 }
@@ -1458,7 +1933,7 @@ impl NickelSession {
                 self.output_capture_name = output;
                 self.output_capture_reply_path = source.map(PathBuf::from);
                 self.output_capture_request_id = Some(request_id);
-                self.request_output_redraw();
+                self.request_capture_redraw();
             }
             SessionCommand::ApplyOutputs { layout } => {
                 if let Err(error) = self.apply_output_layout(layout) {
@@ -1619,6 +2094,7 @@ impl NickelSession {
                     false
                 }
             };
+            tracing::trace!(completed, "native output capture completion delivered");
             if completed {
                 self.wake_internal_shell();
             }
@@ -2023,6 +2499,112 @@ impl NickelSession {
         outputs
     }
 
+    fn protocol_ui_layouts(&self) -> Vec<nickel_session_protocol::UiLayoutSurfaceSnapshot> {
+        if self.locked {
+            return Vec::new();
+        }
+        self.internal_ui
+            .layout_surface_ids()
+            .filter(|id| !self.internal_ui.remote_access_protected(*id))
+            .filter_map(|id| {
+                let placement = self.internal_ui.placement(id)?;
+                let (x, y, width, height) = placement.geometry;
+                let shell_entry = self.internal_shell.as_ref().and_then(|shell| {
+                    shell
+                        .surfaces()
+                        .iter()
+                        .find(|surface| self.internal_shell_surfaces.get(&surface.id) == Some(&id))
+                        .map(|surface| (shell, surface))
+                });
+                let plugin = shell_entry
+                    .and_then(|(shell, surface)| shell.surface_plugin_identity(surface))
+                    .map(|key| nickel_session_protocol::PluginSurfaceIdentity {
+                        plugin_id: key.plugin_id,
+                        surface_id: key.surface_id,
+                    });
+                let role = shell_entry
+                    .filter(|_| plugin.is_none())
+                    .map(|(_, surface)| format!("{:?}", surface.role))
+                    .unwrap_or_else(|| format!("{:?}", placement.role));
+                let node_count = shell_entry
+                    .and_then(|(shell, surface)| shell.layout_snapshot(surface.id))
+                    .map_or_else(
+                        || self.internal_ui.layout_node_count(id).unwrap_or(0),
+                        |layout| layout.lines().count(),
+                    );
+                Some(nickel_session_protocol::UiLayoutSurfaceSnapshot {
+                    id: format!("internal:{}", id.snapshot_token()),
+                    title: self.internal_ui.title(id)?.chars().take(128).collect(),
+                    role,
+                    visible: self.internal_ui.is_visible(id),
+                    geometry: ProtocolGeometry {
+                        x,
+                        y,
+                        width: i32::try_from(width).unwrap_or(i32::MAX),
+                        height: i32::try_from(height).unwrap_or(i32::MAX),
+                    },
+                    node_count,
+                    plugin,
+                })
+            })
+            .collect()
+    }
+
+    fn protocol_ui_layout(
+        &self,
+        surface: &str,
+        offset: usize,
+    ) -> Result<nickel_session_protocol::UiLayoutSnapshot, String> {
+        let summary = self
+            .protocol_ui_layouts()
+            .into_iter()
+            .find(|entry| entry.id == surface)
+            .ok_or("layout surface is unavailable")?;
+        let token = surface
+            .strip_prefix("internal:")
+            .and_then(|token| token.parse::<u64>().ok())
+            .ok_or("invalid layout surface identity")?;
+        let id = self
+            .internal_ui
+            .layout_surface_ids()
+            .find(|id| id.snapshot_token() == token)
+            .ok_or("layout surface has retired")?;
+        let layout = self
+            .internal_shell
+            .as_ref()
+            .and_then(|shell| {
+                shell
+                    .surfaces()
+                    .iter()
+                    .find(|entry| self.internal_shell_surfaces.get(&entry.id) == Some(&id))
+                    .and_then(|entry| shell.layout_snapshot(entry.id))
+            })
+            .or_else(|| self.internal_ui.layout_snapshot(id))
+            .ok_or("computed layout is unavailable")?;
+        const PAGE_NODES: usize = 128;
+        let total_nodes = layout.lines().count();
+        if offset > total_nodes {
+            return Err("computed layout offset exceeds node count".into());
+        }
+        let mut page = String::new();
+        let mut count = 0;
+        for line in layout.lines().skip(offset).take(PAGE_NODES) {
+            page.push_str(line);
+            page.push('\n');
+            count += 1;
+        }
+        if page.len() > 150_000 {
+            return Err("computed layout page exceeds the test socket response limit".into());
+        }
+        Ok(nickel_session_protocol::UiLayoutSnapshot {
+            surface: summary,
+            layout: page,
+            offset,
+            total_nodes,
+            next_offset: (offset + count < total_nodes).then_some(offset + count),
+        })
+    }
+
     pub(crate) fn protocol_shell_surfaces(&self) -> Vec<ShellSurfaceSnapshot> {
         if let Some(shell) = &self.internal_shell {
             return shell
@@ -2031,7 +2613,13 @@ impl NickelSession {
                 .filter_map(|surface| {
                     let role = match surface.role {
                         crate::winit_shell::SurfaceRole::Desktop => ShellRole::Desktop,
-                        crate::winit_shell::SurfaceRole::Panel => ShellRole::Panel,
+                        crate::winit_shell::SurfaceRole::Taskbar => ShellRole::Panel,
+                        crate::winit_shell::SurfaceRole::Panel
+                            if shell.is_reserved_panel_surface_id(surface.id) =>
+                        {
+                            ShellRole::Panel
+                        }
+                        crate::winit_shell::SurfaceRole::Panel => ShellRole::PluginSurface,
                         crate::winit_shell::SurfaceRole::Launcher => ShellRole::Launcher,
                         crate::winit_shell::SurfaceRole::ControlCenter => ShellRole::ControlCenter,
                         crate::winit_shell::SurfaceRole::Notification => ShellRole::Notification,
@@ -2048,49 +2636,35 @@ impl NickelSession {
                         }
                         crate::winit_shell::SurfaceRole::CodexChat => return None,
                     };
-                    // The Codex menu is hosted by InternalUiRuntime. The shell
-                    // coordinator's role slot is only a visibility placeholder.
-                    let geometry = if surface.role
-                        == crate::winit_shell::SurfaceRole::CodexProjectMenu
-                    {
-                        self.internal_codex
-                            .as_ref()
-                            .and_then(crate::internal_codex::InternalCodexHost::project_menu)
-                            .filter(|id| self.internal_ui.is_visible(*id))
-                            .and_then(|id| self.internal_ui.placement(id))
-                            .map(|placement| ProtocolGeometry {
-                                x: placement.geometry.0,
-                                y: placement.geometry.1,
-                                width: i32::try_from(placement.geometry.2).unwrap_or(i32::MAX),
-                                height: i32::try_from(placement.geometry.3).unwrap_or(i32::MAX),
-                            })
-                    } else {
-                        shell.visible(surface.id).then(|| {
-                            self.internal_shell_surfaces
-                                .get(&surface.id)
-                                .and_then(|runtime| self.internal_ui.placement(*runtime))
-                                .map_or(
-                                    ProtocolGeometry {
-                                        x: 0,
-                                        y: 0,
-                                        width: i32::try_from(surface.size.0).unwrap_or(i32::MAX),
-                                        height: i32::try_from(surface.size.1).unwrap_or(i32::MAX),
-                                    },
-                                    |placement| ProtocolGeometry {
-                                        x: placement.geometry.0,
-                                        y: placement.geometry.1,
-                                        width: i32::try_from(placement.geometry.2)
-                                            .unwrap_or(i32::MAX),
-                                        height: i32::try_from(placement.geometry.3)
-                                            .unwrap_or(i32::MAX),
-                                    },
-                                )
-                        })
-                    };
+                    let geometry = shell.visible(surface.id).then(|| {
+                        self.internal_shell_surfaces
+                            .get(&surface.id)
+                            .and_then(|runtime| self.internal_ui.placement(*runtime))
+                            .map_or(
+                                ProtocolGeometry {
+                                    x: 0,
+                                    y: 0,
+                                    width: i32::try_from(surface.size.0).unwrap_or(i32::MAX),
+                                    height: i32::try_from(surface.size.1).unwrap_or(i32::MAX),
+                                },
+                                |placement| ProtocolGeometry {
+                                    x: placement.geometry.0,
+                                    y: placement.geometry.1,
+                                    width: i32::try_from(placement.geometry.2).unwrap_or(i32::MAX),
+                                    height: i32::try_from(placement.geometry.3).unwrap_or(i32::MAX),
+                                },
+                            )
+                    });
                     Some(ShellSurfaceSnapshot {
                         role,
                         geometry,
                         output: surface.output.clone(),
+                        plugin: shell.surface_plugin_identity(surface).map(|key| {
+                            nickel_session_protocol::PluginSurfaceIdentity {
+                                plugin_id: key.plugin_id,
+                                surface_id: key.surface_id,
+                            }
+                        }),
                     })
                 })
                 .collect();
@@ -2146,6 +2720,15 @@ impl NickelSession {
                     role,
                     geometry,
                     output,
+                    plugin: self
+                        .registered_shell_role_slots
+                        .iter()
+                        .find(|registration| registration.surface == surface.id())
+                        .and_then(|registration| registration.plugin_surface.as_ref())
+                        .map(|placement| nickel_session_protocol::PluginSurfaceIdentity {
+                            plugin_id: placement.plugin_id.clone(),
+                            surface_id: placement.surface_id.clone(),
+                        }),
                 })
             })
             .take(nickel_session_protocol::MAX_WINDOWS)
@@ -2163,6 +2746,12 @@ impl NickelSession {
                     role: registration.role,
                     geometry: None,
                     output: registration.output.clone(),
+                    plugin: registration.plugin_surface.as_ref().map(|placement| {
+                        nickel_session_protocol::PluginSurfaceIdentity {
+                            plugin_id: placement.plugin_id.clone(),
+                            surface_id: placement.surface_id.clone(),
+                        }
+                    }),
                 });
             }
         }
@@ -2173,7 +2762,24 @@ impl NickelSession {
         &self,
     ) -> nickel_session_protocol::ShellReadinessSnapshot {
         if let Some(shell) = &self.internal_shell {
-            let outputs = u16::try_from(self.space.outputs().count()).unwrap_or(u16::MAX);
+            let output_names = self
+                .internal_outputs()
+                .into_iter()
+                .map(|(output, _, _)| output.name)
+                .collect::<Vec<_>>();
+            let outputs = u16::try_from(output_names.len()).unwrap_or(u16::MAX);
+            let expected_panels = shell.expected_reserved_panel_instances(&output_names);
+            let actual_panels = shell
+                .surfaces()
+                .iter()
+                .filter_map(|surface| {
+                    let key = surface.plugin.as_ref()?;
+                    if !shell.plugin_panel_reserves_work_area(key) {
+                        return None;
+                    }
+                    Some((surface.output.clone()?, key.clone()))
+                })
+                .collect::<HashSet<_>>();
             let count = |role| {
                 u16::try_from(
                     shell
@@ -2185,9 +2791,36 @@ impl NickelSession {
                 .unwrap_or(u16::MAX)
             };
             let desktops = count(crate::winit_shell::SurfaceRole::Desktop);
-            let panels = count(crate::winit_shell::SurfaceRole::Panel);
+            let panels = u16::try_from(
+                shell
+                    .surfaces()
+                    .iter()
+                    .filter(|surface| {
+                        surface
+                            .plugin
+                            .as_ref()
+                            .is_some_and(|key| shell.plugin_panel_reserves_work_area(key))
+                    })
+                    .count(),
+            )
+            .unwrap_or(u16::MAX);
             let locks = count(crate::winit_shell::SurfaceRole::Lock);
             let launchers = count(crate::winit_shell::SurfaceRole::Launcher);
+            let output_set = output_names.into_iter().collect::<HashSet<_>>();
+            let surface_outputs = |role| {
+                shell
+                    .surfaces()
+                    .iter()
+                    .filter(|surface| surface.role == role)
+                    .filter_map(|surface| surface.output.clone())
+                    .collect::<HashSet<_>>()
+            };
+            let output_roles_ready = desktops == outputs
+                && locks == outputs
+                && surface_outputs(crate::winit_shell::SurfaceRole::Desktop) == output_set
+                && surface_outputs(crate::winit_shell::SurfaceRole::Lock) == output_set
+                && usize::from(panels) == expected_panels.len()
+                && actual_panels == expected_panels;
             return nickel_session_protocol::ShellReadinessSnapshot {
                 expected_shell_pid: None,
                 authenticated_shell_pid: None,
@@ -2197,13 +2830,9 @@ impl NickelSession {
                 locks,
                 launchers,
                 required_singletons_ready: true,
-                output_roles_ready: desktops == outputs && locks == outputs && panels > 0,
+                output_roles_ready,
                 reserved_ordinary_windows: 0,
-                ready: outputs > 0
-                    && desktops == outputs
-                    && locks == outputs
-                    && panels > 0
-                    && launchers == 1,
+                ready: outputs > 0 && output_roles_ready && launchers == 1,
             };
         }
         let expected_shell_pid = match self
@@ -2225,6 +2854,7 @@ impl NickelSession {
             Some(match role {
                 ShellRole::Desktop => SurfaceRole::Desktop,
                 ShellRole::Panel => SurfaceRole::Panel,
+                ShellRole::PluginSurface => SurfaceRole::Panel,
                 ShellRole::Launcher => SurfaceRole::Launcher,
                 ShellRole::ControlCenter => SurfaceRole::ControlCenter,
                 ShellRole::ContextMenu => SurfaceRole::WindowContextMenu,
@@ -2240,12 +2870,23 @@ impl NickelSession {
         };
         let internal_role_count = |role| {
             self.internal_shell.as_ref().and_then(|shell| {
-                let role = internal_surface_role(role)?;
+                let surface_role = internal_surface_role(role)?;
                 Some(
                     shell
                         .surfaces()
                         .iter()
-                        .filter(|surface| surface.role == role)
+                        .filter(|surface| {
+                            surface.role == surface_role
+                                && match role {
+                                    ShellRole::Panel => {
+                                        shell.is_reserved_panel_surface_id(surface.id)
+                                    }
+                                    ShellRole::PluginSurface => {
+                                        !shell.is_reserved_panel_surface_id(surface.id)
+                                    }
+                                    _ => true,
+                                }
+                        })
                         .count(),
                 )
             })
@@ -2325,13 +2966,22 @@ impl NickelSession {
         let expected_panels = u16::try_from(expected_panel_outputs.len()).unwrap_or(u16::MAX);
         let registered_role_outputs = |role| {
             if let Some(shell) = &self.internal_shell {
-                let Some(role) = internal_surface_role(role) else {
+                let Some(surface_role) = internal_surface_role(role) else {
                     return HashSet::new();
                 };
                 shell
                     .surfaces()
                     .iter()
-                    .filter(|surface| surface.role == role)
+                    .filter(|surface| {
+                        surface.role == surface_role
+                            && match role {
+                                ShellRole::Panel => shell.is_reserved_panel_surface_id(surface.id),
+                                ShellRole::PluginSurface => {
+                                    !shell.is_reserved_panel_surface_id(surface.id)
+                                }
+                                _ => true,
+                            }
+                    })
                     .filter_map(|surface| surface.output.clone())
                     .collect::<HashSet<_>>()
             } else {

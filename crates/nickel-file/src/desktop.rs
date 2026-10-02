@@ -81,6 +81,38 @@ pub enum DesktopFileAction {
     Open(PathBuf),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DesktopContextAction {
+    Cut,
+    Copy,
+    Rename,
+    Properties,
+    OpenTerminal,
+}
+
+impl DesktopContextAction {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Cut => "cut",
+            Self::Copy => "copy",
+            Self::Rename => "rename",
+            Self::Properties => "properties",
+            Self::OpenTerminal => "open-terminal",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "cut" => Self::Cut,
+            "copy" => Self::Copy,
+            "rename" => Self::Rename,
+            "properties" => Self::Properties,
+            "open-terminal" => Self::OpenTerminal,
+            _ => return None,
+        })
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct SelectionModifiers {
     pub toggle: bool,

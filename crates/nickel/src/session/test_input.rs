@@ -758,15 +758,25 @@ impl NickelSession {
     }
 
     fn inject_shell_pointer(&mut self, target: ResolvedShellTarget) -> Result<(), String> {
-        let surface = self
-            .protocol_shell_surfaces()
-            .into_iter()
-            .find(|surface| {
-                surface.role == target.role
-                    && target
-                        .output
+        let surfaces = self.protocol_shell_surfaces();
+        let surface = (target.role == nickel_session_protocol::ShellRole::OnScreenKeyboard)
+            .then(|| {
+                surfaces.iter().find(|surface| {
+                    surface
+                        .plugin
                         .as_ref()
-                        .is_none_or(|output| surface.output.as_ref() == Some(output))
+                        .is_some_and(|plugin| plugin.surface_id == "keyboard")
+                })
+            })
+            .flatten()
+            .or_else(|| {
+                surfaces.iter().find(|surface| {
+                    surface.role == target.role
+                        && target
+                            .output
+                            .as_ref()
+                            .is_none_or(|output| surface.output.as_ref() == Some(output))
+                })
             })
             .ok_or_else(|| format!("shell surface {:?} is not mapped", target.role))?;
         let geometry = surface
@@ -975,7 +985,9 @@ fn linux_key_code(key: TestKey) -> u32 {
         TestKey::A => 30,
         TestKey::C => 46,
         TestKey::E => 18,
+        TestKey::N => 49,
         TestKey::P => 25,
+        TestKey::R => 19,
         TestKey::S => 31,
         TestKey::T => 20,
         TestKey::U => 22,
@@ -996,6 +1008,7 @@ fn linux_key_code(key: TestKey) -> u32 {
         TestKey::Space => 57,
         TestKey::Backspace => 14,
         TestKey::Delete => 111,
+        TestKey::F4 => 62,
         TestKey::F11 => 87,
         TestKey::PrintScreen => 99,
         TestKey::VolumeMute => 113,
@@ -1036,7 +1049,9 @@ mod tests {
         assert_eq!(linux_key_code(TestKey::A), 30);
         assert_eq!(linux_key_code(TestKey::C), 46);
         assert_eq!(linux_key_code(TestKey::E), 18);
+        assert_eq!(linux_key_code(TestKey::N), 49);
         assert_eq!(linux_key_code(TestKey::P), 25);
+        assert_eq!(linux_key_code(TestKey::R), 19);
         assert_eq!(linux_key_code(TestKey::S), 31);
         assert_eq!(linux_key_code(TestKey::T), 20);
         assert_eq!(linux_key_code(TestKey::U), 22);
@@ -1054,6 +1069,7 @@ mod tests {
         assert_eq!(linux_key_code(TestKey::Space), 57);
         assert_eq!(linux_key_code(TestKey::Backspace), 14);
         assert_eq!(linux_key_code(TestKey::Delete), 111);
+        assert_eq!(linux_key_code(TestKey::F4), 62);
         assert_eq!(linux_key_code(TestKey::F11), 87);
         assert_eq!(linux_key_code(TestKey::PrintScreen), 99);
     }

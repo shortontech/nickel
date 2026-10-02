@@ -23,6 +23,7 @@ enum TestMessage {
     Volume(u8),
     Query(String),
     Drag(DragPhase, i32, i32),
+    Drop(String, String, i32, i32),
 }
 
 fn map_volume(value: f32) -> TestMessage {
@@ -39,6 +40,149 @@ fn map_drag(_seed: TestMessage, gesture: DragGesture) -> TestMessage {
         gesture.position.x.round() as i32,
         gesture.position.y.round() as i32,
     )
+}
+
+fn map_drop(_seed: TestMessage, gesture: DropGesture) -> TestMessage {
+    TestMessage::Drop(
+        gesture.source_id.as_str().to_owned(),
+        gesture.target_id.as_str().to_owned(),
+        gesture.source_bounds.size.width.round() as i32,
+        gesture.target_bounds.size.width.round() as i32,
+    )
+}
+
+#[test]
+fn captured_drag_releases_on_another_drop_target() {
+    let tree = UiFrame::layout(
+        Row::new()
+            .child(
+                Container::new()
+                    .id("source")
+                    .width(80.0)
+                    .height(40.0)
+                    .on_drag((TestMessage::Named("seed"), map_drag)),
+            )
+            .child(
+                Container::new()
+                    .id("target")
+                    .width(80.0)
+                    .height(40.0)
+                    .on_drop((TestMessage::Named("seed"), map_drop)),
+            ),
+        Rect::new(0.0, 0.0, 160.0, 40.0),
+    );
+    let mut state = UiStateStore::default();
+    tree.handle_event(
+        &mut state,
+        UiEvent::PointerPressed(Point { x: 20.0, y: 20.0 }),
+    );
+    assert_eq!(
+        tree.handle_event(
+            &mut state,
+            UiEvent::PointerReleased(Point { x: 120.0, y: 20.0 }),
+        )
+        .messages,
+        vec![
+            TestMessage::Drag(DragPhase::Ended, 120, 20),
+            TestMessage::Drop("root/source".into(), "root/target".into(), 80, 80),
+        ]
+    );
+    tree.handle_event(
+        &mut state,
+        UiEvent::PointerPressed(Point { x: 120.0, y: 20.0 }),
+    );
+    assert!(
+        tree.handle_event(
+            &mut state,
+            UiEvent::PointerReleased(Point { x: 120.0, y: 20.0 }),
+        )
+        .messages
+        .is_empty()
+    );
+}
+
+#[test]
+fn proximity_magnification_eases_hover_and_neighbor_geometry() {
+    let view = || {
+        Row::new()
+            .children([
+                Button::new(TestMessage::Named("left"), "L")
+                    .id("left")
+                    .width(40.0)
+                    .height(40.0),
+                Button::new(TestMessage::Named("center"), "C")
+                    .id("center")
+                    .width(40.0)
+                    .height(40.0),
+                Button::new(TestMessage::Named("right"), "R")
+                    .id("right")
+                    .width(40.0)
+                    .height(40.0),
+            ])
+            .into_element()
+            .proximity_magnification(ProximityMagnification {
+                maximum_scale: 1.5,
+                radius: 1,
+            })
+            .transition_duration_ms(1_000.0)
+    };
+    let mut state = UiStateStore::default();
+    state.set_hovered(Some(UiId::from("root/center")));
+    let resting = UiFrame::layout_with_state(view(), Rect::new(0.0, 0.0, 240.0, 80.0), &mut state);
+    let width = |frame: &UiFrame<TestMessage>, id: &str| {
+        frame
+            .resolved_layout()
+            .find(&UiId::from(id))
+            .unwrap()
+            .allocated
+            .size
+            .width
+    };
+    assert_eq!(width(&resting, "root/center"), 40.0);
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let first = UiFrame::layout_with_state(view(), Rect::new(0.0, 0.0, 240.0, 80.0), &mut state);
+    let center_first = width(&first, "root/center");
+    let left_first = width(&first, "root/left");
+    assert!(center_first > left_first && left_first > 40.0);
+
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let second = UiFrame::layout_with_state(view(), Rect::new(0.0, 0.0, 240.0, 80.0), &mut state);
+    assert!(
+        width(&second, "root/center") > center_first,
+        "second={}, first={center_first}, active={}",
+        width(&second, "root/center"),
+        state.geometry_animation_active()
+    );
+    assert!(state.geometry_animation_active());
+}
+
+#[test]
+fn pointer_departure_clears_proximity_hover() {
+    let view = || {
+        Row::new()
+            .child(
+                Button::new(TestMessage::Named("item"), "Item")
+                    .id("item")
+                    .width(40.0)
+                    .height(40.0),
+            )
+            .into_element()
+            .proximity_magnification(ProximityMagnification {
+                maximum_scale: 1.5,
+                radius: 1,
+            })
+    };
+    let mut state = UiStateStore::default();
+    let frame = UiFrame::layout_with_state(view(), Rect::new(0.0, 0.0, 100.0, 60.0), &mut state);
+    frame.handle_event(
+        &mut state,
+        UiEvent::PointerMoved(Point { x: 20.0, y: 20.0 }),
+    );
+    assert!(state.hovered().is_some());
+
+    frame.handle_event(&mut state, UiEvent::PointerCancelled);
+
+    assert_eq!(state.hovered(), None);
 }
 
 #[test]
@@ -502,6 +646,17 @@ fn single_line_text_field_centers_placeholder_and_masked_text() {
             }
         }
     }
+}
+
+#[test]
+fn empty_editable_field_paints_its_placeholder() {
+    let frame = UiFrame::layout(
+        TextField::on_change_with_placeholder("", "Search associations", map_query),
+        Rect::new(0.0, 0.0, 260.0, 44.0),
+    );
+    assert!(frame.commands().iter().any(|command| {
+        matches!(command, PaintCommand::Text { text, .. } if text == "Search associations")
+    }));
 }
 
 #[test]
@@ -1577,6 +1732,61 @@ fn expanded_dropdown_exposes_option_actions() {
 }
 
 #[test]
+fn semantic_dropdown_activation_opens_and_selects_an_option() {
+    let mut state = UiStateStore::default();
+    let choice = UiId::from("root/choice");
+    let view = |expanded| {
+        Dropdown::new(
+            TestMessage::Named("toggle"),
+            "First",
+            [
+                ("First", TestMessage::Option(0)),
+                ("Second", TestMessage::Option(1)),
+            ],
+        )
+        .id("choice")
+        .overlay(true)
+        .expanded(expanded)
+    };
+    let bounds = Rect::new(0.0, 0.0, 240.0, 180.0);
+    let tree = UiFrame::layout_with_state(view(false), bounds, &mut state);
+    let opened = tree
+        .transition(
+            &mut state,
+            InputSource::Accessibility,
+            InteractionIntent::Invoke {
+                target: choice.clone(),
+                action: SemanticAction::Invoke(ActionKind::Activate),
+            },
+        )
+        .unwrap();
+    assert_eq!(opened.messages, vec![TestMessage::Named("toggle")]);
+    assert!(
+        state
+            .state(&choice)
+            .is_some_and(|entry| entry.dropdown_open)
+    );
+
+    let tree = UiFrame::layout_with_state(view(true), bounds, &mut state);
+    let selected = tree
+        .transition(
+            &mut state,
+            InputSource::Accessibility,
+            InteractionIntent::Invoke {
+                target: choice.scoped("option-1"),
+                action: SemanticAction::Invoke(ActionKind::Activate),
+            },
+        )
+        .unwrap();
+    assert_eq!(selected.messages, vec![TestMessage::Option(1)]);
+    assert!(
+        !state
+            .state(&choice)
+            .is_some_and(|entry| entry.dropdown_open)
+    );
+}
+
+#[test]
 fn overlay_dropdown_flips_its_complete_option_list_inside_the_viewport() {
     let mut state = UiStateStore::default();
     state.set_dropdown_open(UiId::from("root/policy"), true);
@@ -1879,6 +2089,27 @@ fn intrinsic_measurement_covers_empty_and_nested_flex_content() {
     assert_eq!(
         empty_grid.measure(Constraints::unbounded()),
         Size::new(6.0, 6.0)
+    );
+}
+
+#[test]
+fn max_content_measurement_reserves_the_proximity_animation_envelope() {
+    let row = Row::<()>::new()
+        .children([
+            Container::new().width(40.0).height(40.0),
+            Container::new().width(40.0).height(40.0),
+            Container::new().width(40.0).height(40.0),
+        ])
+        .into_element()
+        .proximity_magnification(ProximityMagnification {
+            maximum_scale: 1.5,
+            radius: 1,
+        })
+        .width_length(Length::MaxContent);
+
+    assert_eq!(
+        UiFrame::preferred_size(row, Size::new(500.0, 500.0)),
+        Size::new(160.0, 60.0)
     );
 }
 
@@ -2207,6 +2438,32 @@ fn grid_resolves_fixed_auto_fractional_repeated_and_auto_fit_tracks() {
         Rect::new(0.0, 0.0, 250.0, 120.0),
     );
     assert_eq!(auto_fit.resolved_grid_columns(), Some(3));
+}
+
+#[test]
+fn grid_uses_justification_and_item_alignment() {
+    let grid = UiFrame::layout(
+        Grid::tracks([Track::px(40.0), Track::px(60.0)])
+            .justify_content(Justify::Center)
+            .align_items(Align::Center)
+            .children([
+                Button::new(TestMessage::Option(0), "Short").height(20.0),
+                Button::new(TestMessage::Option(1), "Tall").height(40.0),
+            ]),
+        Rect::new(0.0, 0.0, 200.0, 80.0),
+    );
+    let short = grid
+        .unique_semantic_target_for_message(&TestMessage::Option(0))
+        .unwrap()
+        .bounds;
+    let tall = grid
+        .unique_semantic_target_for_message(&TestMessage::Option(1))
+        .unwrap()
+        .bounds;
+    assert_eq!(short.origin.x, 50.0);
+    assert_eq!(tall.origin.x, 90.0);
+    assert_eq!(short.origin.y, 10.0);
+    assert_eq!(tall.origin.y, 0.0);
 }
 
 #[test]
@@ -3094,6 +3351,75 @@ fn focused_text_field_transforms_its_explicit_surface() {
         !focused.commands().iter().any(
             |command| matches!(command, PaintCommand::Fill { color, .. } if *color == fallback)
         )
+    );
+}
+
+#[test]
+fn focused_text_field_uses_exact_declared_background() {
+    const NORMAL: Color = 0xff253044;
+    const FOCUSED: Color = 0xff356a92;
+    fn query(value: String) -> TestMessage {
+        TestMessage::Query(value)
+    }
+    let field = || {
+        TextField::on_change("query", query)
+            .id("query")
+            .background(NORMAL)
+            .focus_background(FOCUSED)
+    };
+    let mut state = UiStateStore::default();
+    let initial = UiFrame::layout_with_state(field(), Rect::new(0.0, 0.0, 200.0, 32.0), &mut state);
+    assert!(
+        initial
+            .commands()
+            .iter()
+            .any(|command| matches!(command, PaintCommand::Fill { color, .. } if *color == NORMAL))
+    );
+    initial.handle_event(&mut state, UiEvent::FocusNext);
+    let focused = UiFrame::layout_with_state(field(), Rect::new(0.0, 0.0, 200.0, 32.0), &mut state);
+    assert!(
+        focused.commands().iter().any(
+            |command| matches!(command, PaintCommand::Fill { color, .. } if *color == FOCUSED)
+        )
+    );
+}
+
+#[test]
+fn focus_callbacks_follow_component_focus_and_window_blur() {
+    let fields = || {
+        Column::new()
+            .child(
+                TextField::on_change("first", |value| value)
+                    .id("first")
+                    .focus_message("focus-first".to_owned())
+                    .blur_message("blur-first".to_owned()),
+            )
+            .child(
+                TextField::on_change("second", |value| value)
+                    .id("second")
+                    .focus_message("focus-second".to_owned())
+                    .blur_message("blur-second".to_owned()),
+            )
+    };
+    let mut state = UiStateStore::default();
+    let frame = UiFrame::layout_with_state(fields(), Rect::new(0.0, 0.0, 240.0, 80.0), &mut state);
+    assert_eq!(
+        frame.handle_event(&mut state, UiEvent::FocusNext).messages,
+        ["focus-first"]
+    );
+    assert_eq!(
+        frame.handle_event(&mut state, UiEvent::FocusNext).messages,
+        ["blur-first", "focus-second"]
+    );
+    assert_eq!(
+        frame.handle_event(&mut state, UiEvent::FocusLost).messages,
+        ["blur-second"]
+    );
+    assert_eq!(
+        frame
+            .handle_event(&mut state, UiEvent::FocusGained)
+            .messages,
+        ["focus-second"]
     );
 }
 

@@ -281,6 +281,7 @@ fn application_from_entry_result(
         icon_path,
         (!launch_command.is_empty()).then_some(launch_command),
     )
+    .with_description(entry.comment(locales).as_deref())
     .with_launch_policy(
         launch_class,
         entry

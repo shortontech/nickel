@@ -1,8 +1,12 @@
+#[cfg(any(target_os = "windows", test))]
+pub(crate) mod native_application_windows;
 use crate::model::{TrayItem, WindowId};
 #[cfg(target_os = "windows")]
 pub(crate) use windows::WindowsShortcutDiagnosticSource;
 #[cfg(target_os = "windows")]
 pub(crate) use windows::remote_observation;
+#[cfg(target_os = "windows")]
+pub(crate) use windows::run_packaged_activation_child;
 pub(crate) mod status_mailbox;
 use nickel_input::global::{ShortcutCapability, ShortcutOwnership};
 
@@ -51,6 +55,31 @@ pub struct DesktopCapture {
     pub image: image::RgbaImage,
 }
 
+const TEMP_SCREENSHOT_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
+pub(crate) fn remove_stale_temp_screenshots(directory: &std::path::Path, prefix: &str) {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !name.starts_with(prefix) || !name.ends_with(".png") {
+            continue;
+        }
+        let stale = entry
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_some_and(|age| age >= TEMP_SCREENSHOT_MAX_AGE);
+        if stale {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct WifiNetworkStatus {
     pub id: String,
@@ -61,6 +90,14 @@ pub struct WifiNetworkStatus {
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct NetworkAdapterStatus {
+    pub name: String,
+    pub description: String,
+    pub connected: bool,
+    pub speed_bits_per_second: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct NetworkStatus {
     pub available: bool,
     pub enabled: bool,
@@ -68,10 +105,15 @@ pub struct NetworkStatus {
     pub name: String,
     pub signal_percent: u32,
     pub networks: Vec<WifiNetworkStatus>,
+    pub adapters: Vec<NetworkAdapterStatus>,
+    pub adapters_available: bool,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct BluetoothDeviceStatus {
+    pub battery_percent: Option<u8>,
+    pub kind: Option<String>,
+    pub signal_dbm: Option<i16>,
     pub id: String,
     pub name: String,
     pub paired: bool,
@@ -80,6 +122,7 @@ pub struct BluetoothDeviceStatus {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct BluetoothStatus {
+    pub adapter_name: String,
     pub available: bool,
     pub powered: bool,
     pub discovering: bool,
@@ -103,6 +146,8 @@ pub(crate) fn bound_connectivity_refresh(
     let mut partial = network.networks.len() > CONNECTIVITY_DEVICE_LIMIT
         || bluetooth.devices.len() > CONNECTIVITY_DEVICE_LIMIT;
     network.networks.truncate(CONNECTIVITY_DEVICE_LIMIT);
+    partial |= network.adapters.len() > CONNECTIVITY_DEVICE_LIMIT;
+    network.adapters.truncate(CONNECTIVITY_DEVICE_LIMIT);
     bluetooth.devices.truncate(CONNECTIVITY_DEVICE_LIMIT);
     let bounded = |value: &mut String, partial: &mut bool| {
         if value.chars().count() > CONNECTIVITY_TEXT_LIMIT {
@@ -111,6 +156,11 @@ pub(crate) fn bound_connectivity_refresh(
         }
     };
     bounded(&mut network.name, &mut partial);
+    bounded(&mut bluetooth.adapter_name, &mut partial);
+    for adapter in &mut network.adapters {
+        bounded(&mut adapter.name, &mut partial);
+        bounded(&mut adapter.description, &mut partial);
+    }
     for entry in &mut network.networks {
         bounded(&mut entry.id, &mut partial);
         bounded(&mut entry.name, &mut partial);
@@ -118,6 +168,10 @@ pub(crate) fn bound_connectivity_refresh(
     for entry in &mut bluetooth.devices {
         bounded(&mut entry.id, &mut partial);
         bounded(&mut entry.name, &mut partial);
+        if let Some(kind) = &mut entry.kind {
+            bounded(kind, &mut partial);
+        }
+        entry.battery_percent = entry.battery_percent.filter(|value| *value <= 100);
     }
     ConnectivityRefresh {
         network,
@@ -606,11 +660,8 @@ pub enum SecureStorageState {
     ControlUnavailable,
 }
 
-pub fn application_requires_secure_storage(application: &crate::model::Application) -> bool {
-    let identity = format!("{} {}", application.id(), application.name()).to_ascii_lowercase();
-    ["chrome", "chromium", "signal"]
-        .iter()
-        .any(|marker| identity.contains(marker))
+pub fn secure_storage_allows_application_launch(state: SecureStorageState) -> bool {
+    state == SecureStorageState::Ready
 }
 
 pub trait TraySource {
@@ -695,6 +746,17 @@ pub enum ScreenshotAction {
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub enum GlobalShortcut {
     ReloadShellSettings,
+    SetPluginEnabled {
+        id: String,
+        enabled: bool,
+        observed_generation: u64,
+    },
+    SetPluginSetting {
+        id: String,
+        key: String,
+        value: serde_json::Value,
+        observed_generation: u64,
+    },
     ToggleLauncher,
     ShowLauncher,
     HideLauncher,
@@ -746,6 +808,14 @@ impl GlobalShortcutFeed {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PreviewThumbnailBounds {
+    pub left: i32,
+    pub top: i32,
+    pub right: i32,
+    pub bottom: i32,
+}
+
 #[derive(Clone)]
 pub enum ShellCommand {
     Show,
@@ -766,11 +836,15 @@ pub enum ShellCommand {
         width: i32,
         height: i32,
         windows: Vec<WindowId>,
+        #[cfg(any(target_os = "windows", test))]
+        thumbnail_bounds: Vec<PreviewThumbnailBounds>,
     },
     ShowTaskSwitcher {
         width: i32,
         height: i32,
         windows: Vec<WindowId>,
+        #[cfg(any(target_os = "windows", test))]
+        thumbnail_bounds: Vec<PreviewThumbnailBounds>,
     },
     #[cfg(target_os = "windows")]
     ShowTaskSwitcherPeek {
@@ -778,6 +852,10 @@ pub enum ShellCommand {
     },
     #[cfg(target_os = "linux")]
     FocusControlCenter,
+    #[cfg(target_os = "linux")]
+    FocusPluginSurface {
+        key: nickel_core::plugins::PluginSurfaceKey,
+    },
     #[cfg(target_os = "linux")]
     FocusPreview,
     #[cfg(target_os = "linux")]
@@ -787,6 +865,10 @@ pub enum ShellCommand {
     #[cfg(target_os = "linux")]
     RestoreApplicationFocus,
     #[cfg(target_os = "linux")]
+    PublishPluginStatus {
+        snapshot: nickel_session_protocol::PluginStatusSnapshot,
+    },
+    #[cfg(target_os = "linux")]
     SetShellRoleVisible {
         role: nickel_session_protocol::ShellRole,
         visible: bool,
@@ -794,6 +876,11 @@ pub enum ShellCommand {
     #[cfg(target_os = "linux")]
     ShowAnchoredShellRole {
         role: nickel_session_protocol::ShellRole,
+        anchor: nickel_session_protocol::ShellPopoverAnchor,
+    },
+    #[cfg(target_os = "linux")]
+    ShowAnchoredPluginSurface {
+        key: nickel_core::plugins::PluginSurfaceKey,
         anchor: nickel_session_protocol::ShellPopoverAnchor,
     },
     HideContextMenu,
@@ -815,6 +902,8 @@ pub enum ShellCommand {
         window: WindowId,
         output: String,
     },
+    #[cfg(target_os = "linux")]
+    IdentifyOutputs,
     ApplyOutputs(nickel_session_protocol::OutputLayout),
 }
 
@@ -848,25 +937,20 @@ mod tests {
         panic!("association worker did not release its admission");
     }
 
-    use crate::model::Application;
-
     #[test]
-    fn credential_dependent_applications_are_identified_for_launch_gating() {
-        let application = |id: &str, name: &str| {
-            Application::new(id.into(), name.into(), None, None, Some(vec![id.into()]))
-        };
-        assert!(super::application_requires_secure_storage(&application(
-            "google-chrome.desktop",
-            "Google Chrome"
-        )));
-        assert!(super::application_requires_secure_storage(&application(
-            "org.signal.Signal.desktop",
-            "Signal"
-        )));
-        assert!(!super::application_requires_secure_storage(&application(
-            "org.nickel.Terminal.desktop",
-            "Nickel Terminal"
-        )));
+    fn application_launches_fail_closed_until_storage_is_ready() {
+        for state in [
+            super::SecureStorageState::Starting,
+            super::SecureStorageState::Locked,
+            super::SecureStorageState::PromptRequired,
+            super::SecureStorageState::Unavailable,
+            super::SecureStorageState::ControlUnavailable,
+        ] {
+            assert!(!super::secure_storage_allows_application_launch(state));
+        }
+        assert!(super::secure_storage_allows_application_launch(
+            super::SecureStorageState::Ready
+        ));
     }
 
     #[test]
@@ -1123,12 +1207,12 @@ pub use linux::{
     application_discovery, application_icon, applications, audio_status, bluetooth_status,
     capture_active_window, capture_active_window_to_file, capture_desktop, capture_pointer,
     configure_on_screen_keyboard, configured_primary_output, copy_image_to_clipboard,
-    copy_temp_image_path, deliver_on_screen_keyboard_input, execute_run_command,
-    handle_consumer_control, handle_focused_shortcut, launch_application,
+    copy_temp_image_path, deliver_on_screen_keyboard_input, disconnect_wifi_network,
+    execute_run_command, handle_consumer_control, handle_focused_shortcut, launch_application,
     launch_session_application, launcher_has_foreground_focus, launcher_hotkey_receiver,
     launcher_visibility_applied, network_status, on_screen_keyboard_snapshot,
-    prepare_audio_environment, projection_outputs, read_guarded_device, register_session_shell,
-    register_shell_surface, release_pointer, request_secure_storage_retry,
+    pair_bluetooth_device, prepare_audio_environment, projection_outputs, read_guarded_device,
+    register_session_shell, register_shell_surface, release_pointer, request_secure_storage_retry,
     respond_runtime_diagnostics, respond_semantic_action, respond_semantic_target,
     secure_storage_state, select_audio_device, semantic_target_receiver, send_shell_command,
     set_audio_volume, set_bluetooth_discovery, set_bluetooth_powered, set_wifi_enabled,
@@ -1146,20 +1230,23 @@ pub(crate) use linux::{
 mod windows;
 #[cfg(target_os = "windows")]
 pub use windows::{
-    NotificationFeed, TrayFeed, WindowFeed, activate_wifi_network, active_display_point,
-    application_discovery, application_icon, applications, audio_status, bluetooth_status,
-    capture_active_window, capture_active_window_to_file, capture_desktop, capture_pointer,
-    configure_context_menu_window, configure_desktop_window, configure_launcher_window,
-    configure_notification_window, configure_panel_window, configure_preview_window,
-    configure_screenshot_window, configure_volume_osd_window, configured_primary_output,
-    copy_image_to_clipboard, copy_temp_image_path, execute_run_command, handle_consumer_control,
-    handle_focused_shortcut, hide_preview_window, launch_application,
-    launcher_has_foreground_focus, launcher_hotkey_receiver, launcher_visibility_applied,
-    launcher_window_visible, lock_workstation, network_status, observe_nickel_window_key,
-    register_internal_window_thread, register_session_shell, release_panel_window, release_pointer,
-    select_audio_device, send_shell_command, set_audio_volume, set_bluetooth_discovery,
-    set_bluetooth_powered, set_wifi_enabled, show_overlay_window_without_activation,
-    show_window_system_menu, toggle_bluetooth_device, update_panel_fullscreen_state, wallpaper,
+    InternalWindowThreadGuard, NotificationFeed, TrayFeed, WindowFeed, activate_wifi_network,
+    active_display_point, application_discovery, application_icon, applications, audio_status,
+    bluetooth_status, capture_active_window, capture_active_window_to_file, capture_desktop,
+    capture_pointer, configure_context_menu_window, configure_desktop_window,
+    configure_launcher_window, configure_notification_window, configure_panel_window,
+    configure_plugin_dialog_window, configure_preview_window, configure_screenshot_window,
+    configured_primary_output, copy_image_to_clipboard, copy_temp_image_path,
+    deliver_on_screen_keyboard_input, disconnect_wifi_network, ensure_panel_tray_host,
+    execute_run_command, handle_consumer_control, handle_focused_shortcut, hide_preview_window,
+    launch_application, launcher_has_foreground_focus, launcher_hotkey_receiver,
+    launcher_visibility_applied, launcher_window_visible, lock_workstation, network_status,
+    on_screen_keyboard_snapshot, pair_bluetooth_device, register_internal_window_thread,
+    register_session_shell, register_shell_window_thread, release_panel_window, release_pointer,
+    reposition_panel_window, select_audio_device, send_shell_command, set_audio_volume,
+    set_bluetooth_discovery, set_bluetooth_powered, set_wifi_enabled,
+    show_overlay_window_without_activation, show_window_system_menu, toggle_bluetooth_device,
+    update_panel_fullscreen_state, wallpaper,
 };
 
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]
@@ -1168,12 +1255,12 @@ mod unsupported;
 pub use unsupported::{
     NotificationFeed, TrayFeed, WindowFeed, activate_wifi_network, active_display_point,
     application_discovery, application_icon, applications, audio_status, bluetooth_status,
-    capture_pointer, configure_volume_osd_window, configured_primary_output, execute_run_command,
+    capture_pointer, configured_primary_output, disconnect_wifi_network, execute_run_command,
     handle_consumer_control, handle_focused_shortcut, launch_application,
     launcher_has_foreground_focus, launcher_hotkey_receiver, launcher_visibility_applied,
-    network_status, register_session_shell, release_pointer, select_audio_device,
-    send_shell_command, set_audio_volume, set_bluetooth_discovery, set_bluetooth_powered,
-    set_wifi_enabled, show_window_system_menu, toggle_bluetooth_device,
+    network_status, pair_bluetooth_device, register_session_shell, release_pointer,
+    select_audio_device, send_shell_command, set_audio_volume, set_bluetooth_discovery,
+    set_bluetooth_powered, set_wifi_enabled, show_window_system_menu, toggle_bluetooth_device,
     update_panel_fullscreen_state, wallpaper,
 };
 
@@ -1181,7 +1268,8 @@ pub use unsupported::{
 pub(crate) use windows::{
     expose_trusted_control_window, native_preview_diagnostics, prepare_application_discovery,
     prepare_trusted_control_window, publish_application_discovery, refresh_audio_status,
-    refresh_connectivity_status, verify_trusted_control_window,
+    refresh_connectivity_status, register_native_application_window,
+    unregister_native_application_window, verify_trusted_control_window,
 };
 
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]
@@ -1190,3 +1278,27 @@ pub(crate) use unsupported::refresh_audio_status;
 pub(crate) use unsupported::refresh_connectivity_status;
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]
 pub(crate) use unsupported::{prepare_application_discovery, publish_application_discovery};
+
+/// Explicit connection intent avoids a toggle changing direction while queued.
+pub(crate) fn set_bluetooth_connected(id: &str, connected: bool) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        linux::set_bluetooth_connected(id, connected)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (id, connected);
+        false
+    }
+}
+
+pub(crate) fn refresh_optional_features() -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        linux::refresh_optional_features().map_err(|error| error.to_string())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Ok(())
+    }
+}

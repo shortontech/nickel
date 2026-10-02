@@ -1,0 +1,13 @@
+{
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": true,
+    "noEmit": true,
+    "target": "ES2020",
+    "module": "none",
+    "lib": ["ES2020"],
+    "jsx": "react",
+    "jsxFactory": "h"
+  },
+  "include": ["main.jsx", "../nickel-plugin.d.ts"]
+}

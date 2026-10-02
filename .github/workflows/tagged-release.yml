@@ -56,7 +56,6 @@ jobs:
         shell: pwsh
         run: |
           cargo build --locked --release -p nickel --bin nickel
-          cargo build --locked --release -p nickel-settings --bin nickel-settings
           cargo build --locked --release -p nickel-terminal-ui --bin nickel-terminal
           cargo build --locked --release -p nickel-windows-shell-setup --bin nickel-shell-setup
 
@@ -66,7 +65,6 @@ jobs:
           $payload = Join-Path $PWD 'target\package\windows'
           New-Item -ItemType Directory -Force $payload | Out-Null
           Copy-Item target\release\nickel.exe $payload
-          Copy-Item target\release\nickel-settings.exe $payload
           Copy-Item target\release\nickel-terminal.exe $payload
           Copy-Item target\release\nickel-shell-setup.exe $payload
           Copy-Item LICENSE-MIT $payload
@@ -104,7 +102,7 @@ jobs:
             Get-Content $log
             throw "Administrative MSI extraction failed with exit code $($process.ExitCode)."
           }
-          foreach ($file in @('nickel.exe', 'nickel-settings.exe', 'nickel-terminal.exe', 'nickel-shell-setup.exe')) {
+          foreach ($file in @('nickel.exe', 'nickel-terminal.exe', 'nickel-shell-setup.exe')) {
             if (-not (Get-ChildItem $extract -Filter $file -Recurse)) {
               throw "The MSI layout is missing $file."
             }

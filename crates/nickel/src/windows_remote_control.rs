@@ -105,6 +105,7 @@ impl Drop for LaunchPreparationAdmission {
 pub(crate) fn observe_physical_key(event: nickel_input::windows::NativeKeyboardEvent) {
     use std::sync::atomic::Ordering;
     if !event.injected {
+        crate::windows_remote_input::observe_physical_key(event);
         crate::windows_remote_input::release_all();
         advance_local_input_epoch();
     }
@@ -118,6 +119,7 @@ pub(crate) fn observe_physical_key(event: nickel_input::windows::NativeKeyboardE
 
 pub(crate) fn observe_physical_pointer(event: nickel_input::windows::NativePointerEvent) {
     if !event.injected {
+        crate::windows_remote_input::observe_physical_pointer(event);
         crate::windows_remote_input::release_all();
         advance_local_input_epoch();
     }
@@ -257,12 +259,6 @@ fn resource_label(scope: &nickel_remote_control::leases::ResourceScope) -> Strin
         ResourceScope::Output { .. } => "Output",
     }
     .into()
-}
-struct LocalRequest {
-    envelope: nickel_session_protocol::ClientEnvelope,
-    queued_at: Instant,
-    deadline: Instant,
-    reply: SyncSender<ServerMessage>,
 }
 enum ObservationKind {
     Windows,
@@ -676,7 +672,6 @@ fn move_to_windows_pointer_target(
     Ok(())
 }
 enum OwnerRequest {
-    Local(LocalRequest),
     Observation {
         permit: DesktopPermit,
         prepared: Box<crate::platform::remote_observation::Prepared>,
@@ -3761,7 +3756,6 @@ impl WindowsDesktopAuthority {
 }
 
 pub(crate) struct WindowsRemoteControl {
-    _transport: Option<nickel_platform::local_control::LocalControlServer>,
     receiver: Receiver<OwnerRequest>,
     remote_control: RemoteControlRuntime,
     local_cues: crate::local_cues::LocalCues,
@@ -3924,41 +3918,9 @@ impl WindowsRemoteControl {
             settings_worker: settings_worker.clone(),
             platform_refresh_worker: platform_refresh_worker.clone(),
         });
-        let transport = nickel_platform::local_control::LocalControlServer::start(move |frame| {
-            let envelope: nickel_session_protocol::ClientEnvelope =
-                nickel_session_protocol::decode(&frame).map_err(io::Error::other)?;
-            let request_id = envelope.request_id;
-            // Authentication belongs to the OS pipe, never an inherited token.
-            if !envelope.token.is_empty() {
-                return Err(io::Error::new(
-                    io::ErrorKind::PermissionDenied,
-                    "unexpected local token",
-                ));
-            }
-            let (reply, response) = mpsc::sync_channel(1);
-            sender
-                .try_send(OwnerRequest::Local(LocalRequest {
-                    envelope,
-                    queued_at: Instant::now(),
-                    deadline: Instant::now() + Duration::from_secs(1),
-                    reply,
-                }))
-                .map_err(|_| {
-                    io::Error::new(io::ErrorKind::WouldBlock, "Windows owner queue full")
-                })?;
-            let message = response.recv_timeout(Duration::from_secs(1)).map_err(|_| {
-                io::Error::new(io::ErrorKind::TimedOut, "Windows owner unavailable")
-            })?;
-            nickel_session_protocol::encode(&nickel_session_protocol::ServerEnvelope {
-                request_id,
-                message,
-            })
-            .map_err(io::Error::other)
-        })?;
         let desktop_unlocked =
             desktop_session.is_some_and(crate::platform::remote_observation::desktop_is_unlocked);
         let mut owner = Self {
-            _transport: Some(transport),
             receiver,
             remote_control: RemoteControlRuntime::default(),
             local_cues: Default::default(),
@@ -5173,17 +5135,6 @@ impl WindowsRemoteControl {
                 OwnerRequest::CancelApplicationPlacement { ticket } => {
                     self.pending_output_launches.remove(&ticket.id);
                 }
-                OwnerRequest::Local(request) => {
-                    if Instant::now() >= request.deadline
-                        || self
-                            .last_stop
-                            .is_some_and(|stopped| request.queued_at <= stopped)
-                    {
-                        continue;
-                    }
-                    let result = self.handle(request.envelope.request);
-                    let _ = request.reply.try_send(result);
-                }
                 OwnerRequest::Connection {
                     permit,
                     action,
@@ -5893,7 +5844,7 @@ impl WindowsRemoteControl {
         *feature_settings = settings.clone();
         codex.apply_settings(shell, &settings);
         let runtime_error = if settings.codex_enabled {
-            match codex.ensure_project_menu(shell) {
+            match codex.ensure_project_menu() {
                 Ok(()) => {
                     state.apply_codex_projection(CodexAvailabilityProjection::new(
                         FeatureSupport::Supported,
@@ -9983,7 +9934,7 @@ mod tests {
         assert_eq!(point(&surface, &identity), Ok((1199, 899)));
         let panel = SurfaceObservation {
             native: 42,
-            role: crate::winit_shell::SurfaceRole::Panel,
+            role: crate::winit_shell::SurfaceRole::Taskbar,
             generation: 6,
             geometry: Some([0, 0, 800, 56]),
             ..surface.clone()
@@ -10679,7 +10630,7 @@ mod tests {
         let observations = shell.remote_shell_surface_observations(&state);
         let panel = observations
             .iter()
-            .find(|surface| surface.role == crate::winit_shell::SurfaceRole::Panel)
+            .find(|surface| surface.role == crate::winit_shell::SurfaceRole::Taskbar)
             .expect("one temporary Nickel Panel");
         assert!(panel.native_visible && panel.canonical_visible);
         let identity = nickel_remote_control::leases::ResourceId {
@@ -10833,7 +10784,6 @@ mod tests {
         let peripheral_observation_worker = Arc::new(WindowsPlatformRefreshWorker::default());
         let display_state = Arc::new(std::sync::Mutex::new(WindowsDisplayState::default()));
         WindowsRemoteControl {
-            _transport: None,
             receiver,
             remote_control: RemoteControlRuntime::default(),
             local_cues: Default::default(),
@@ -11085,31 +11035,5 @@ mod tests {
         let mut control = control.lock().unwrap();
         assert!(control.leases().iter().any(|active| active.id == lease));
         assert!(control.leases_mut().reserve_input(lease, 8).is_ok());
-    }
-    #[test]
-    fn expired_settings_request_cannot_change_owner_generation() {
-        let mut owner = owner();
-        let (reply, receiver) = mpsc::sync_channel(1);
-        owner
-            .authority
-            .sender
-            .try_send(OwnerRequest::Local(LocalRequest {
-                envelope: nickel_session_protocol::ClientEnvelope {
-                    token: String::new(),
-                    request_id: 1,
-                    request: Request::Command(Command::ApplyRemoteControl {
-                        requested_enabled: false,
-                        generation: 99,
-                    }),
-                },
-                queued_at: Instant::now() - Duration::from_millis(2),
-                deadline: Instant::now() - Duration::from_millis(1),
-                reply,
-            }))
-            .ok()
-            .unwrap();
-        owner.poll_with_shell(None, None);
-        assert_eq!(owner.remote_control.status().generation, 0);
-        assert!(receiver.try_recv().is_err());
     }
 }

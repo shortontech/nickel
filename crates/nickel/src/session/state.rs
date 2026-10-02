@@ -2329,10 +2329,13 @@ fn command_requires_shell_identity(command: &SessionCommand) -> bool {
             | SessionCommand::Unlock
             | SessionCommand::SessionAction { .. }
             | SessionCommand::FocusShellRole { .. }
+            | SessionCommand::FocusPluginSurface { .. }
+            | SessionCommand::ShowAnchoredPluginSurface { .. }
             | SessionCommand::RestoreApplicationFocus
             | SessionCommand::ConfigureOnScreenKeyboard { .. }
             | SessionCommand::OnScreenKeyboardInput { .. }
             | SessionCommand::RegisterShellSurface { .. }
+            | SessionCommand::PublishPluginStatus { .. }
     )
 }
 
@@ -2693,6 +2696,9 @@ pub struct NickelSession {
         Option<(nickel_ui::InternalSurfaceId, nickel_ui::InternalSurfaceId)>,
     /// Latest motion is reduced immediately; scene work is bounded by frames.
     pending_desktop_scenes: HashSet<nickel_ui::InternalSurfaceId>,
+    /// A reconciliation flush may itself observe a topology change. The outer
+    /// reconciliation owns applying that change after its current pass.
+    reconciling_internal_shell_outputs: bool,
     internal_shell_timer: InternalShellTimer,
     internal_system_status_source: Option<smithay::reexports::calloop::RegistrationToken>,
     pub loop_signal: LoopSignal,
@@ -2774,6 +2780,8 @@ pub struct NickelSession {
     seat_focus_security_epoch: u64,
     launcher_restore_window: Option<WindowId>,
     launcher_subscribers: Vec<PathBuf>,
+    plugin_status: Option<nickel_session_protocol::PluginStatusSnapshot>,
+    plugin_shell_subscriber: Option<PathBuf>,
     controller_broker: ControllerBroker<ControllerEnvelopePayload>,
     controller_internal_connection: ControllerConnectionGeneration,
     pending_launch_observations: Vec<PendingLaunchObservation>,
@@ -2800,6 +2808,11 @@ pub struct NickelSession {
     lock_restore_window: Option<WindowId>,
     shell_focus_restore_window: Option<WindowId>,
     pub(crate) pending_shell_focus_role: Option<ShellRole>,
+    pub(crate) pending_plugin_focus: Option<nickel_core::plugins::PluginSurfaceKey>,
+    plugin_popover_anchors: HashMap<
+        nickel_core::plugins::PluginSurfaceKey,
+        nickel_session_protocol::ShellPopoverAnchor,
+    >,
     pub utility_windows: Vec<Window>,
     hidden_shell_roles: HashSet<ShellRole>,
     hidden_shell_role_locations: HashMap<ShellRole, Point<i32, Logical>>,
@@ -2952,6 +2965,10 @@ pub struct NickelSession {
     deferred_focus_restore: channel::Sender<WindowId>,
     #[cfg(feature = "backend-winit")]
     winit_redraw_window: Option<*const dyn smithay::reexports::winit::window::Window>,
+    #[cfg(feature = "backend-winit")]
+    winit_redraw_proxy: Option<smithay::reexports::winit::event_loop::EventLoopProxy>,
+    #[cfg(feature = "backend-winit")]
+    winit_capture_redraw: Option<smithay::backend::winit::CaptureRedrawRequester>,
 }
 
 mod control_protocol;
@@ -5122,9 +5139,18 @@ impl NickelSession {
         &mut self,
         host: std::sync::Arc<dyn crate::session_host::SessionHost>,
     ) -> Result<(), String> {
-        self.enable_internal_shell_with_system_updates(
+        self.enable_internal_shell_with_safe_mode(host, false)
+    }
+
+    pub(crate) fn enable_internal_shell_with_safe_mode(
+        &mut self,
+        host: std::sync::Arc<dyn crate::session_host::SessionHost>,
+        safe_mode: bool,
+    ) -> Result<(), String> {
+        self.enable_internal_shell_with_system_updates_in_mode(
             host,
             crate::platform::system_status_receiver(),
+            safe_mode,
         )
     }
 
@@ -5133,9 +5159,19 @@ impl NickelSession {
         host: std::sync::Arc<dyn crate::session_host::SessionHost>,
         platform_updates: crate::platform::status_mailbox::StatusReceiver,
     ) -> Result<(), String> {
+        self.enable_internal_shell_with_system_updates_in_mode(host, platform_updates, false)
+    }
+
+    fn enable_internal_shell_with_system_updates_in_mode(
+        &mut self,
+        host: std::sync::Arc<dyn crate::session_host::SessionHost>,
+        platform_updates: crate::platform::status_mailbox::StatusReceiver,
+        safe_mode: bool,
+    ) -> Result<(), String> {
         use crate::{internal_shell::InternalShellCoordinator, winit_shell::PanelEdge};
 
-        let mut shell = InternalShellCoordinator::new(host, PanelEdge::Bottom)?;
+        let mut shell =
+            InternalShellCoordinator::new_with_safe_mode(host, PanelEdge::Bottom, safe_mode)?;
         self.publish_internal_keyboard_snapshot();
         // Apply updates that were already available without delaying shell
         // construction. Later transitions remain calloop-driven.
@@ -5197,16 +5233,11 @@ impl NickelSession {
         self.internal_shell = Some(shell);
         self.reconcile_internal_shell_outputs();
         if codex_enabled {
-            let outputs = self.internal_outputs();
-            let fallback = self.resolve_interaction_output(InvocationSource::RecentInteraction);
-            let placement =
-                internal_codex_project_menu_placement(None, &outputs, fallback.as_deref());
             if let Some(mut host) = self.internal_codex.take() {
-                match host.ensure_project_menu(&mut self.internal_ui, placement) {
+                match host.ensure_project_menu(&mut self.internal_ui) {
                     Ok(_) => {
-                        host.set_project_menu_visible(&mut self.internal_ui, false);
                         if let Some(shell) = self.internal_shell.as_mut() {
-                            host.sync_shell_projection(&self.internal_ui, shell);
+                            host.sync_shell_projection(shell, &self.internal_ui);
                         }
                     }
                     Err(error) => tracing::warn!(%error, "could not start Codex project discovery"),
@@ -5235,6 +5266,14 @@ impl NickelSession {
             .chain(codex_deadline)
             .chain(self.internal_ui.next_deadline())
             .min();
+        if deadline.is_some_and(|deadline| deadline <= Instant::now()) {
+            tracing::warn!(
+                ?shell_deadline,
+                ?codex_deadline,
+                internal_ui_deadline = ?self.internal_ui.next_deadline(),
+                "internal shell deadline remained due"
+            );
+        }
         self.arm_internal_shell_timer(deadline);
     }
 
@@ -5339,6 +5378,30 @@ impl NickelSession {
     }
 
     pub(crate) fn reconcile_internal_shell_outputs(&mut self) {
+        if self.internal_shell.is_none() || self.reconciling_internal_shell_outputs {
+            return;
+        }
+        self.reconciling_internal_shell_outputs = true;
+        let before = self
+            .internal_shell
+            .as_ref()
+            .map(crate::internal_shell::InternalShellCoordinator::plugin_surfaces)
+            .unwrap_or_default();
+        self.reconcile_internal_shell_outputs_once();
+        let after = self
+            .internal_shell
+            .as_ref()
+            .map(crate::internal_shell::InternalShellCoordinator::plugin_surfaces)
+            .unwrap_or_default();
+        if after != before {
+            // A host-data render may change a JSX root after the first output
+            // plan was built. Apply that accepted descriptor to native slots.
+            self.reconcile_internal_shell_outputs_once();
+        }
+        self.reconciling_internal_shell_outputs = false;
+    }
+
+    fn reconcile_internal_shell_outputs_once(&mut self) {
         self.invalidate_remote_shell_actions();
         // Runtime slots are replaced below, but a surviving coordinator surface
         // must retain keyboard ownership across output reconciliation.
@@ -5351,17 +5414,14 @@ impl NickelSession {
         // Deliver cancellation while old runtime-to-coordinator identities still
         // exist. Tombstones retain ownership of eventual releases after rebuild.
         self.internal_ui.retire_normalized_touch_surfaces();
-        self.flush_internal_shell_input();
+        self.flush_internal_shell_input_inner(false);
         let outputs = self.internal_outputs();
-        for id in self
-            .internal_shell_surfaces
-            .drain()
-            .map(|(_, runtime)| runtime)
-            .collect::<Vec<_>>()
-        {
-            self.internal_ui.remove(id);
-        }
+        let mut previous = std::mem::take(&mut self.internal_shell_surfaces);
         let Some(shell) = self.internal_shell.as_mut() else {
+            for runtime in previous.into_values() {
+                self.unregister_internal_application(runtime);
+                self.internal_ui.remove(runtime);
+            }
             return;
         };
         shell.set_outputs(
@@ -5371,39 +5431,89 @@ impl NickelSession {
                 .collect::<Vec<_>>(),
         );
 
+        let mut plugin_windows = Vec::new();
         for mut surface in shell.surfaces().to_vec() {
             if !shell.visible(surface.id) {
                 continue;
             }
-            if surface.role == crate::winit_shell::SurfaceRole::Launcher
-                && let Some(size) = launcher_surface_size_for_output(
-                    shell,
-                    &outputs,
-                    self.launcher_output_name.as_deref(),
-                )
+            if surface.role == crate::winit_shell::SurfaceRole::Screenshot
+                && let Some(target) = shell.screenshot_output()
+                && let Some((output, _, _)) =
+                    outputs.iter().find(|(output, _, _)| output.name == target)
             {
-                surface.size = size;
-                shell.set_surface_size(surface.id, size);
+                surface.output = Some(output.name.clone());
+                surface.size = (output.width, output.height);
+                shell.set_surface_size(surface.id, surface.size);
             }
+
             let Some(scene) = shell.scene(surface.id) else {
                 continue;
             };
-            let placement = internal_shell_surface_placement(
+            let mut placement = internal_shell_surface_placement(
                 surface.role,
                 surface.output.as_deref(),
                 surface.size,
                 &outputs,
                 self.launcher_output_name.as_deref(),
+                shell.panel_edge(),
             );
+            if let Some(key) = surface.plugin.as_ref() {
+                adjust_internal_plugin_surface_placement(&mut placement, key, &shell, &outputs);
+                if *key == shell.active_shell_surface_key("quick-settings") {
+                    let preferred = match shell.panel_edge() {
+                        crate::winit_shell::PanelEdge::Top => {
+                            nickel_session_protocol::AnchorSide::Below
+                        }
+                        crate::winit_shell::PanelEdge::Bottom => {
+                            nickel_session_protocol::AnchorSide::Above
+                        }
+                    };
+                    if let Some((role, anchor)) = shell.popover_anchor(preferred)
+                        && (role == nickel_session_protocol::ShellRole::ControlCenter
+                            && *key == shell.active_shell_surface_key("quick-settings"))
+                    {
+                        apply_internal_anchored_plugin_surface_placement(
+                            &mut placement,
+                            &anchor,
+                            &outputs,
+                        );
+                    }
+                }
+            }
             let scale = surface
                 .output
                 .as_deref()
                 .and_then(|name| outputs.iter().find(|(output, _, _)| output.name == name))
                 .map_or(1.0, |(output, _, _)| output.scale);
-            let runtime_id = self.internal_ui.insert_scene(scene, placement, scale);
+            let (runtime_id, created) = if let Some(runtime_id) = previous.remove(&surface.id) {
+                self.internal_ui
+                    .configure_surface(runtime_id, placement, scale);
+                self.internal_ui.update_scene(runtime_id, scene);
+                (runtime_id, false)
+            } else {
+                (self.internal_ui.insert_scene(scene, placement, scale), true)
+            };
             self.internal_ui
-                .bind_routed_recipient(runtime_id, surface.id);
+                .renew_routed_recipient(runtime_id, surface.id);
             self.internal_shell_surfaces.insert(surface.id, runtime_id);
+            if created
+                && self
+                    .internal_ui
+                    .placement(runtime_id)
+                    .is_some_and(|placement| {
+                        placement.role == crate::session::InternalSurfaceRole::Application
+                    })
+                && let Some(key) = surface.plugin
+            {
+                plugin_windows.push((runtime_id, key));
+            }
+        }
+        for runtime in previous.into_values() {
+            self.unregister_internal_application(runtime);
+            self.internal_ui.remove(runtime);
+        }
+        for (runtime, key) in plugin_windows {
+            self.register_internal_application_with_plugin(runtime, Some(&key));
         }
         if let Some(runtime) =
             focused_owner.and_then(|owner| self.internal_shell_surfaces.get(&owner).copied())
@@ -5446,13 +5556,6 @@ impl NickelSession {
             let menu_output = codex_menu_anchor
                 .as_ref()
                 .map(|anchor| anchor.output.as_str())
-                .or_else(|| {
-                    self.internal_codex
-                        .as_ref()
-                        .and_then(crate::internal_codex::InternalCodexHost::project_menu)
-                        .and_then(|id| self.internal_ui.placement(id))
-                        .and_then(|placement| placement.output.as_deref())
-                })
                 .map(str::to_owned);
             let fallback = self.resolve_interaction_output(InvocationSource::RecentInteraction);
             if shell_changed {
@@ -5461,18 +5564,33 @@ impl NickelSession {
             for action in actions {
                 self.apply_internal_file_action(action);
             }
-            if codex_menu_visible {
-                let placement = internal_codex_project_menu_placement(
-                    codex_menu_anchor.as_ref(),
+            if let Some(mut host) = self.internal_codex.take() {
+                let placement = internal_codex_chat_placement(
                     &outputs,
-                    fallback.as_deref(),
+                    menu_output.as_deref().or(fallback.as_deref()),
                 );
-                if let Err(error) = self.show_internal_codex_project_menu(placement) {
-                    tracing::warn!(%error, "could not host Codex project menu internally");
+                let project_menu_changed = host.sync_project_menu(
+                    &mut self.internal_ui,
+                    codex_menu_visible,
+                    placement.clone(),
+                );
+                if project_menu_changed {
+                    self.schedule_internal_ui_frame();
                 }
-            } else if let Some(host) = self.internal_codex.take() {
-                if let Some(menu) = host.project_menu() {
-                    self.internal_ui.set_visible(menu, false);
+                match host.service_project_menu_requests(&mut self.internal_ui, placement) {
+                    Ok(Some(crate::internal_codex::NativeProjectMenuAction::Opened(surface))) => {
+                        if let Some(shell) = self.internal_shell.as_mut() {
+                            shell.close_codex_project_menu();
+                        }
+                        self.register_internal_application(surface);
+                    }
+                    Ok(Some(crate::internal_codex::NativeProjectMenuAction::Closed)) => {
+                        if let Some(shell) = self.internal_shell.as_mut() {
+                            shell.close_codex_project_menu();
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(error) => tracing::warn!(%error,"native project selection rejected"),
                 }
                 self.internal_codex = Some(host);
             }
@@ -5495,16 +5613,7 @@ impl NickelSession {
                 }
             }
         }
-        let chat_output = self
-            .internal_codex
-            .as_ref()
-            .and_then(crate::internal_codex::InternalCodexHost::project_menu)
-            .and_then(|id| self.internal_ui.placement(id))
-            .and_then(|placement| placement.output.as_deref())
-            .map(str::to_owned)
-            .or_else(|| self.resolve_interaction_output(InvocationSource::RecentInteraction));
-        let chat_placement =
-            internal_codex_chat_placement(&self.internal_outputs(), chat_output.as_deref());
+
         if let Some(mut codex) = self.internal_codex.take() {
             let approval_decisions = self
                 .internal_shell
@@ -5567,35 +5676,22 @@ impl NickelSession {
                 }
             }
             let changed = codex.poll_due(&mut self.internal_ui, now);
-            let opened = codex
-                .service_requests(&mut self.internal_ui, chat_placement)
-                .unwrap_or_else(|error| {
-                    tracing::warn!(%error, "could not service internal Codex request");
-                    Vec::new()
-                });
             let chat_requests_changed = codex.service_chat_requests(&mut self.internal_ui);
             let projection_changed = self
                 .internal_shell
                 .as_mut()
-                .is_some_and(|shell| codex.sync_shell_projection(&self.internal_ui, shell));
+                .is_some_and(|shell| codex.sync_shell_projection(shell, &self.internal_ui));
             if let Some(shell) = self.internal_shell.as_mut() {
                 shell.sync_codex_approval_notifications(
                     codex.approval_notifications(&self.internal_ui),
                 );
             }
             self.internal_codex = Some(codex);
-            for surface in &opened {
-                self.register_internal_application(*surface);
-            }
             self.refresh_internal_application_metadata();
             if projection_changed {
                 self.sync_internal_shell();
             }
-            if !changed.is_empty()
-                || !opened.is_empty()
-                || chat_requests_changed
-                || projection_changed
-            {
+            if !changed.is_empty() || chat_requests_changed || projection_changed {
                 self.schedule_internal_ui_frame();
             }
         }
@@ -5649,34 +5745,20 @@ impl NickelSession {
         self.schedule_internal_shell_deadline();
     }
 
-    pub(crate) fn show_internal_codex_project_menu(
-        &mut self,
-        placement: crate::internal_codex::CodexSurfacePlacement,
-    ) -> Result<nickel_ui::InternalSurfaceId, String> {
-        let mut host = self
-            .internal_codex
-            .take()
-            .ok_or_else(|| "Codex integration is disabled".to_owned())?;
-        let was_visible = host
-            .project_menu()
-            .is_some_and(|id| self.internal_ui.is_visible(id));
-        let result = host.ensure_project_menu(&mut self.internal_ui, placement);
-        self.internal_codex = Some(host);
-        if let Ok(id) = result {
-            self.internal_ui.set_visible(id, true);
-            if !was_visible {
-                self.focus_internal_surface(id);
-            }
-        }
-        result
-    }
-
     /// Admit a compositor-hosted application into the same canonical window
     /// model used by Wayland and X11 clients. Internal surface ids remain opaque
     /// and are never reinterpreted as protocol window ids.
     fn register_internal_application(
         &mut self,
         surface: nickel_ui::InternalSurfaceId,
+    ) -> Option<WindowId> {
+        self.register_internal_application_with_plugin(surface, None)
+    }
+
+    fn register_internal_application_with_plugin(
+        &mut self,
+        surface: nickel_ui::InternalSurfaceId,
+        plugin: Option<&nickel_core::plugins::PluginSurfaceKey>,
     ) -> Option<WindowId> {
         if let Some(id) = self.internal_surface_windows.get(&surface).copied() {
             self.activate_window(id);
@@ -5687,7 +5769,9 @@ impl NickelSession {
             .internal_ui
             .application::<nickel_file::FileApp>(surface)
             .is_some();
-        let application_id = if is_file {
+        let application_id = if let Some(plugin) = plugin {
+            plugin.plugin_id.clone()
+        } else if is_file {
             "nickel-file".to_owned()
         } else {
             self.internal_codex
@@ -5695,15 +5779,26 @@ impl NickelSession {
                 .and_then(|codex| codex.project_application_id(surface))
                 .unwrap_or_else(|| "nickel-codex".to_owned())
         };
-        let title = self
-            .internal_ui
-            .title(surface)
-            .unwrap_or(if is_file {
-                "Nickel File"
-            } else {
-                "Nickel Codex"
-            })
-            .to_owned();
+        let title = if let Some(plugin) = plugin {
+            self.internal_shell
+                .as_ref()
+                .and_then(|shell| {
+                    shell
+                        .plugin_window_title(plugin)
+                        .or_else(|| shell.plugin_name(&plugin.plugin_id))
+                })
+                .unwrap_or(&plugin.plugin_id)
+                .to_owned()
+        } else {
+            self.internal_ui
+                .title(surface)
+                .unwrap_or(if is_file {
+                    "Nickel File"
+                } else {
+                    "Nickel Codex"
+                })
+                .to_owned()
+        };
         self.windows.update_metadata(
             id,
             WindowMetadataSource::Internal,
@@ -5780,8 +5875,15 @@ impl NickelSession {
             .internal_surface_windows
             .iter()
             .filter_map(|(surface, window)| {
-                self.internal_ui
-                    .title(*surface)
+                self.internal_shell
+                    .as_ref()
+                    .and_then(|shell| {
+                        let entry = shell.surfaces().iter().find(|entry| {
+                            self.internal_shell_surfaces.get(&entry.id) == Some(surface)
+                        })?;
+                        shell.plugin_window_title(entry.plugin.as_ref()?)
+                    })
+                    .or_else(|| self.internal_ui.title(*surface))
                     .map(|title| (*window, title.to_owned()))
             })
             .collect::<Vec<_>>();
@@ -6861,14 +6963,11 @@ impl NickelSession {
     fn dismiss_unfocused_internal_popovers(&mut self) {
         use crate::winit_shell::SurfaceRole;
         let focused = self.internal_ui.focused();
-        let menu = self
-            .internal_codex
-            .as_ref()
-            .and_then(|host| host.project_menu())
-            .filter(|id| self.internal_ui.is_visible(*id) && focused != Some(*id));
         let control_blurred = self.internal_shell.as_ref().is_some_and(|shell| {
             shell.surfaces().iter().any(|surface| {
-                surface.role == SurfaceRole::ControlCenter
+                (surface.role == SurfaceRole::ControlCenter
+                    || surface.plugin.as_ref()
+                        == Some(&shell.active_shell_surface_key("quick-settings")))
                     && shell.visible(surface.id)
                     && self
                         .internal_shell_surfaces
@@ -6896,16 +6995,10 @@ impl NickelSession {
                         .is_some_and(|id| self.internal_ui.is_visible(*id) && focused != Some(*id))
             })
         });
-        if menu.is_none() && !launcher_blurred && !control_blurred && !window_menu_blurred {
+        if !launcher_blurred && !control_blurred && !window_menu_blurred {
             return;
         }
-        if let Some(menu) = menu {
-            self.internal_ui.set_visible(menu, false);
-        }
         if let Some(shell) = self.internal_shell.as_mut() {
-            if menu.is_some() {
-                shell.dismiss_ephemeral_on_focus_loss(SurfaceRole::CodexProjectMenu);
-            }
             if launcher_blurred {
                 shell.dismiss_ephemeral_on_focus_loss(SurfaceRole::Launcher);
             }
@@ -6921,6 +7014,10 @@ impl NickelSession {
     }
 
     pub(crate) fn flush_internal_shell_input(&mut self) {
+        self.flush_internal_shell_input_inner(true);
+    }
+
+    fn flush_internal_shell_input_inner(&mut self, dismiss_popovers: bool) {
         let stop = self
             .remote_indicator_surfaces
             .values()
@@ -6938,7 +7035,9 @@ impl NickelSession {
         self.flush_native_clipboard_results();
         let events = self.internal_ui.drain_routed_events();
         if events.is_empty() || self.internal_shell.is_none() {
-            self.dismiss_unfocused_internal_popovers();
+            if dismiss_popovers {
+                self.dismiss_unfocused_internal_popovers();
+            }
             return;
         }
         let reverse = self
@@ -6982,15 +7081,22 @@ impl NickelSession {
             .internal_shell
             .as_ref()
             .is_some_and(crate::internal_shell::InternalShellCoordinator::launcher_visible);
+        let plugin_surfaces_before = self
+            .internal_shell
+            .as_ref()
+            .map(crate::internal_shell::InternalShellCoordinator::plugin_surfaces)
+            .unwrap_or_default();
         let file_clipboard_available = self.native_file_clipboard_available();
         let shell = self.internal_shell.as_mut().unwrap();
         shell.set_file_clipboard_available(file_clipboard_available);
         let mut changed = Vec::new();
+        let mut pointer_scenes = Vec::new();
+        let mut pointer_paint_only = true;
         for (runtime_id, batch, modifiers) in events {
-            let Some((shell_id, role, output)) = reverse.get(&runtime_id).cloned() else {
+            let Some((shell_id, _role, output)) = reverse.get(&runtime_id).cloned() else {
                 continue;
             };
-            if role == crate::winit_shell::SurfaceRole::Panel
+            if shell.is_taskbar_surface_id(shell_id)
                 && let Some(output) = output
             {
                 let origin = output_origins.get(&output).copied().unwrap_or_default();
@@ -6999,10 +7105,45 @@ impl NickelSession {
             if let Some(modifiers) = modifiers {
                 shell.set_desktop_input_modifiers(shell_id, &modifiers);
             }
-            changed.extend(shell.step_slot_changes(shell_id, batch));
+            pointer_paint_only &= crate::live_shell::passive_pointer_batch(&batch);
+            let changes = shell.step_slot_changes(shell_id, batch);
+            if let Some(scene) = shell.take_pointer_paint_scene(shell_id) {
+                if changes.iter().all(|id| *id == shell_id) {
+                    if !changes.is_empty() {
+                        pointer_scenes.push((runtime_id, scene));
+                    }
+                } else {
+                    pointer_paint_only = false;
+                }
+            } else {
+                pointer_paint_only = false;
+            }
+            changed.extend(changes);
         }
         let launcher_is_visible = shell.launcher_visible();
+        let plugin_surfaces_changed = plugin_surfaces_before != shell.plugin_surfaces();
         let _ = shell;
+        if pointer_paint_only
+            && !plugin_surfaces_changed
+            && launcher_was_visible == launcher_is_visible
+        {
+            for (runtime, scene) in pointer_scenes {
+                self.internal_ui.update_scene(runtime, scene);
+            }
+            if !changed.is_empty() {
+                self.request_output_redraw();
+                #[cfg(feature = "backend-udev")]
+                self.schedule_native_ui_frame();
+            }
+            // Passive hover may start a presentation-only animation. Arm its
+            // application deadline without forcing a session snapshot or data
+            // refresh on every pointer sample.
+            self.schedule_internal_shell_deadline();
+            return;
+        }
+        if plugin_surfaces_changed {
+            self.reconcile_internal_shell_outputs();
+        }
         if desktop_motion_only {
             // Do not turn mouse polling frequency into layout frequency or
             // rearm an immediate shell timer for every motion sample. Rendering
@@ -7013,13 +7154,14 @@ impl NickelSession {
                 #[cfg(feature = "backend-udev")]
                 self.schedule_native_ui_frame();
             }
+            self.schedule_internal_shell_deadline();
             return;
         }
         changed.extend(self.pending_desktop_scenes.drain());
         self.flush_native_clipboard_results();
         if !launcher_was_visible && launcher_is_visible {
-            self.launcher_output_name =
-                self.resolve_interaction_output(InvocationSource::RecentInteraction);
+            let fallback = self.resolve_interaction_output(InvocationSource::RecentInteraction);
+            retain_launcher_invocation_output(&mut self.launcher_output_name, fallback);
             if self.launcher_restore_window.is_none() {
                 self.launcher_restore_window = self
                     .windows
@@ -7034,19 +7176,26 @@ impl NickelSession {
         }
         if launcher_was_visible && !launcher_is_visible {
             self.restore_launcher_focus();
+            self.launcher_output_name = None;
         } else if !launcher_was_visible
             && launcher_is_visible
             && let Some(runtime) = self.internal_shell.as_ref().and_then(|shell| {
                 shell
                     .surfaces()
                     .iter()
-                    .find(|surface| surface.role == crate::winit_shell::SurfaceRole::Launcher)
+                    .find(|surface| {
+                        surface.role == crate::winit_shell::SurfaceRole::Launcher
+                            || surface.plugin.as_ref()
+                                == Some(&shell.active_shell_surface_key("launcher"))
+                    })
                     .and_then(|surface| self.internal_shell_surfaces.get(&surface.id).copied())
             })
         {
             self.focus_internal_surface(runtime);
         }
-        self.dismiss_unfocused_internal_popovers();
+        if dismiss_popovers {
+            self.dismiss_unfocused_internal_popovers();
+        }
         self.wake_internal_shell();
     }
 
@@ -7070,6 +7219,50 @@ impl NickelSession {
     /// topology, scale or application replacement). Local service/input updates
     /// carry identities; visibility and placement are reconciled independently.
     fn sync_internal_shell_changes(&mut self, changed: Option<&[nickel_ui::InternalSurfaceId]>) {
+        if self
+            .internal_shell
+            .as_ref()
+            .is_some_and(|shell| shell.plugin_surface_topology_changed())
+        {
+            self.reconcile_internal_shell_outputs();
+        }
+        let committed = self
+            .internal_shell
+            .as_mut()
+            .and_then(|shell| shell.take_preferences_commit());
+        if let Some(settings) = committed {
+            if let Ok(transitions) = self
+                .workspaces
+                .set_count(usize::from(settings.desktop_count))
+            {
+                for transition in transitions {
+                    self.apply_workspace_transition(transition);
+                }
+                self.notify_workspace_state();
+            }
+            let policy = nickel_core::idle::IdlePolicy::from_seconds(
+                settings.idle_dim_seconds,
+                settings.idle_lock_seconds,
+                settings.idle_suspend_seconds,
+            );
+            if self.idle_controller.policy() != policy
+                && self
+                    .idle_controller
+                    .replace_policy(policy, self.start_time.elapsed())
+                    == Some(nickel_core::idle::IdleEffect::Undim)
+            {
+                self.dimmed = false;
+                self.request_output_redraw();
+            }
+            let bar_changed = self
+                .internal_shell
+                .as_mut()
+                .is_some_and(|shell| shell.set_bar_on_all_displays(settings.bar_on_all_displays));
+            self.notify_shell_settings_changed();
+            if bar_changed {
+                self.reconcile_internal_shell_outputs();
+            }
+        }
         self.update_internal_shell_scenes(changed, true);
     }
 
@@ -7109,15 +7302,18 @@ impl NickelSession {
             .filter(|id| !current_shell_ids.contains(id))
             .copied()
             .collect::<Vec<_>>();
+        let mut presentation_removed = !retired.is_empty();
         for id in retired {
             if let Some(runtime_id) = self.internal_shell_surfaces.remove(&id) {
                 self.invalidate_remote_shell_surface(runtime_id);
+                self.unregister_internal_application(runtime_id);
                 self.internal_ui.remove(runtime_id);
             }
             self.pending_desktop_scenes.remove(&id);
         }
         let outputs = self.internal_outputs();
         let mut focus_on_show = None;
+        let mut plugin_windows = Vec::new();
         for mut surface in entries {
             // The real ChatApplication host owns this role. LiveShell retains
             // only its visibility policy and must not paint a second shell
@@ -7126,6 +7322,7 @@ impl NickelSession {
                 if let Some(runtime_id) = self.internal_shell_surfaces.remove(&surface.id) {
                     self.invalidate_remote_shell_surface(runtime_id);
                     self.internal_ui.remove(runtime_id);
+                    presentation_removed = true;
                 }
                 continue;
             }
@@ -7133,8 +7330,12 @@ impl NickelSession {
             if !visible {
                 if let Some(runtime_id) = self.internal_shell_surfaces.remove(&surface.id) {
                     self.invalidate_remote_shell_surface(runtime_id);
+                    self.unregister_internal_application(runtime_id);
                     self.internal_ui.remove(runtime_id);
-                    if let Some(role) = remote_shell_event_role(surface.role) {
+                    presentation_removed = true;
+                    if let Some(role) =
+                        remote_shell_surface_event_role(surface.role, surface.id, &shell)
+                    {
                         self.remote_desktop_events.record(
                             nickel_remote_control::desktop_events::DesktopEventKind::ShellSurfaceVisibilityChanged {
                                 surface_generation: runtime_id.snapshot_token(),
@@ -7147,15 +7348,7 @@ impl NickelSession {
                 }
                 continue;
             }
-            if surface.role == crate::winit_shell::SurfaceRole::Launcher
-                && let Some(size) = launcher_surface_size_for_output(
-                    &mut shell,
-                    &outputs,
-                    self.launcher_output_name.as_deref(),
-                )
-            {
-                surface.size = size;
-            }
+
             let interaction_output = match surface.role {
                 crate::winit_shell::SurfaceRole::ControlCenter => shell
                     .popover_anchor(nickel_session_protocol::AnchorSide::Above)
@@ -7169,24 +7362,38 @@ impl NickelSession {
                 }
                 _ => None,
             };
+            if surface.role == crate::winit_shell::SurfaceRole::Screenshot
+                && let Some((output, _, _)) = outputs.iter().find(|(output, _, _)| {
+                    interaction_output.as_deref() == Some(output.name.as_str())
+                })
+            {
+                surface.size = (output.width, output.height);
+            }
             let mut placement = internal_shell_surface_placement(
                 surface.role,
                 interaction_output.as_deref().or(surface.output.as_deref()),
                 surface.size,
                 &outputs,
                 self.launcher_output_name.as_deref(),
+                shell.panel_edge(),
             );
+            if let Some(key) = surface.plugin.as_ref() {
+                adjust_internal_plugin_surface_placement(&mut placement, key, &shell, &outputs);
+            }
             let mut resized = false;
             if matches!(
                 surface.role,
                 crate::winit_shell::SurfaceRole::Launcher
                     | crate::winit_shell::SurfaceRole::ControlCenter
-            ) {
+                    | crate::winit_shell::SurfaceRole::Screenshot
+            ) || surface.plugin.as_ref()
+                == Some(&shell.active_shell_surface_key("quick-settings"))
+                || surface.plugin.as_ref() == Some(&shell.active_shell_surface_key("keyboard"))
+            {
                 surface.size = (placement.geometry.2, placement.geometry.3);
                 resized = shell.set_surface_size(surface.id, surface.size);
             }
             let transient_geometry = match surface.role {
-                crate::winit_shell::SurfaceRole::WindowContextMenu => shell.window_menu_geometry(),
                 crate::winit_shell::SurfaceRole::WindowPreview => shell.preview_geometry(),
                 _ => None,
             };
@@ -7265,6 +7472,7 @@ impl NickelSession {
                     if let Some(runtime_id) = self.internal_shell_surfaces.remove(&surface.id) {
                         self.invalidate_remote_shell_surface(runtime_id);
                         self.internal_ui.remove(runtime_id);
+                        presentation_removed = true;
                     }
                     continue;
                 };
@@ -7315,7 +7523,17 @@ impl NickelSession {
             self.internal_ui
                 .bind_routed_recipient(runtime_id, surface.id);
             self.internal_shell_surfaces.insert(surface.id, runtime_id);
-            if let Some(role) = remote_shell_event_role(surface.role) {
+            if self
+                .internal_ui
+                .placement(runtime_id)
+                .is_some_and(|placement| {
+                    placement.role == crate::session::InternalSurfaceRole::Application
+                })
+                && let Some(key) = surface.plugin.clone()
+            {
+                plugin_windows.push((runtime_id, key));
+            }
+            if let Some(role) = remote_shell_surface_event_role(surface.role, surface.id, &shell) {
                 self.remote_desktop_events.record(
                     nickel_remote_control::desktop_events::DesktopEventKind::ShellSurfaceVisibilityChanged {
                         surface_generation: runtime_id.snapshot_token(),
@@ -7330,16 +7548,24 @@ impl NickelSession {
                 crate::winit_shell::SurfaceRole::ControlCenter
                     | crate::winit_shell::SurfaceRole::Screenshot
                     | crate::winit_shell::SurfaceRole::WindowContextMenu
-            ) {
+            ) || surface.plugin.as_ref() == Some(&shell.active_shell_surface_key("launcher"))
+            {
                 focus_on_show = Some(runtime_id);
             }
         }
         self.internal_shell = Some(shell);
+        for (runtime, key) in plugin_windows {
+            self.register_internal_application_with_plugin(runtime, Some(&key));
+        }
         if let Some(surface) = focus_on_show {
             self.focus_internal_surface(surface);
         }
         if request_frame {
-            self.schedule_internal_ui_frame();
+            if presentation_removed || self.internal_ui.has_damage() {
+                self.schedule_internal_ui_frame();
+            } else {
+                self.schedule_internal_shell_deadline();
+            }
         } else {
             // The caller is already rendering this frame; do not queue another
             // frame merely because it consumed deferred scene work.
@@ -7747,6 +7973,12 @@ impl NickelSession {
     }
 }
 
+fn retain_launcher_invocation_output(output: &mut Option<String>, fallback: Option<String>) {
+    if output.is_none() {
+        *output = fallback;
+    }
+}
+
 fn remote_shell_event_role(
     role: crate::winit_shell::SurfaceRole,
 ) -> Option<nickel_remote_control::desktop_events::ShellEventRole> {
@@ -7754,7 +7986,8 @@ fn remote_shell_event_role(
     use nickel_remote_control::desktop_events::ShellEventRole;
     match role {
         SurfaceRole::Desktop => Some(ShellEventRole::Desktop),
-        SurfaceRole::Panel => Some(ShellEventRole::Panel),
+        SurfaceRole::Taskbar => Some(ShellEventRole::Panel),
+        SurfaceRole::Panel => None,
         SurfaceRole::Launcher => Some(ShellEventRole::Launcher),
         SurfaceRole::ControlCenter => Some(ShellEventRole::ControlCenter),
         SurfaceRole::Notification => Some(ShellEventRole::Notification),
@@ -7766,6 +7999,18 @@ fn remote_shell_event_role(
         SurfaceRole::CodexProjectMenu | SurfaceRole::CodexChat | SurfaceRole::Lock => None,
         #[cfg(target_os = "windows")]
         SurfaceRole::TrustedControl => None,
+    }
+}
+
+fn remote_shell_surface_event_role(
+    role: crate::winit_shell::SurfaceRole,
+    id: nickel_ui::InternalSurfaceId,
+    shell: &crate::internal_shell::InternalShellCoordinator,
+) -> Option<nickel_remote_control::desktop_events::ShellEventRole> {
+    if shell.is_taskbar_surface_id(id) {
+        Some(nickel_remote_control::desktop_events::ShellEventRole::Panel)
+    } else {
+        remote_shell_event_role(role)
     }
 }
 struct DisplacedWindow {
@@ -7852,6 +8097,8 @@ struct RegisteredShellRole {
     role: ShellRole,
     output: Option<String>,
     surface: ObjectId,
+    application_id: Option<String>,
+    plugin_surface: Option<nickel_session_protocol::PluginSurfacePlacement>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -7922,7 +8169,7 @@ fn shell_registration_is_active(
     expected_panel_outputs: &HashSet<String>,
 ) -> bool {
     match registration.role {
-        ShellRole::Desktop | ShellRole::Lock => registration
+        ShellRole::Desktop | ShellRole::PluginSurface | ShellRole::Lock => registration
             .output
             .as_ref()
             .is_some_and(|output| output_names.contains(output)),
@@ -8369,7 +8616,7 @@ impl NickelSession {
 
         // The shell itself uses `InProcessSessionHost`; this authenticated
         // endpoint exists only for trusted out-of-process Nickel utilities
-        // such as `nickel-settings`. Ordinary applications have both values
+        // such as trusted diagnostics tools. Ordinary applications have both values
         // stripped from their launch environment.
         let compatibility_control = {
             let protocol_token = production_control_token();
@@ -8555,6 +8802,7 @@ impl NickelSession {
             remote_indicator_accessibility: HashMap::new(),
             remote_indicator_accessibility_wake,
             pending_desktop_scenes: HashSet::new(),
+            reconciling_internal_shell_outputs: false,
             internal_file_surfaces: HashMap::new(),
             internal_file_drag_serial: None,
             internal_file_context_popup: None,
@@ -8631,6 +8879,8 @@ impl NickelSession {
             seat_focus_security_epoch: 0,
             launcher_restore_window: None,
             launcher_subscribers: Vec::new(),
+            plugin_status: None,
+            plugin_shell_subscriber: None,
             controller_broker,
             controller_internal_connection,
             pending_launch_observations: Vec::new(),
@@ -8651,6 +8901,8 @@ impl NickelSession {
             lock_restore_window: None,
             shell_focus_restore_window: None,
             pending_shell_focus_role: None,
+            pending_plugin_focus: None,
+            plugin_popover_anchors: HashMap::new(),
             utility_windows: Vec::new(),
             hidden_shell_roles: HashSet::new(),
             hidden_shell_role_locations: HashMap::new(),
@@ -8791,6 +9043,10 @@ impl NickelSession {
             deferred_focus_restore,
             #[cfg(feature = "backend-winit")]
             winit_redraw_window: None,
+            #[cfg(feature = "backend-winit")]
+            winit_redraw_proxy: None,
+            #[cfg(feature = "backend-winit")]
+            winit_capture_redraw: None,
         };
         // Hosted applications must receive the compositor's clipboard bound
         // before their first pointer action. Waiting for a keyboard paste to
@@ -8813,8 +9069,21 @@ impl NickelSession {
     pub fn set_winit_redraw_window(
         &mut self,
         window: &dyn smithay::reexports::winit::window::Window,
+        proxy: smithay::reexports::winit::event_loop::EventLoopProxy,
+        capture: smithay::backend::winit::CaptureRedrawRequester,
     ) {
         self.winit_redraw_window = Some(std::ptr::from_ref(window));
+        self.winit_redraw_proxy = Some(proxy);
+        self.winit_capture_redraw = Some(capture);
+    }
+
+    pub(crate) fn request_capture_redraw(&self) {
+        #[cfg(feature = "backend-winit")]
+        if let Some(requester) = &self.winit_capture_redraw {
+            requester.request();
+            return;
+        }
+        self.request_output_redraw();
     }
 
     #[cfg(feature = "backend-winit")]
@@ -8826,6 +9095,12 @@ impl NickelSession {
         // of the winit backend and this session state. Moving the backend does
         // not move the Arc allocation, and all calls occur on the event thread.
         unsafe { &*window }.request_redraw();
+        // A coalesced Window::request_redraw does not ping winit again. The nested loop is
+        // dispatched from calloop rather than continuously pumped, so always wake its poll FD
+        // for a compositor-originated frame (including asynchronous native capture requests).
+        if let Some(proxy) = &self.winit_redraw_proxy {
+            proxy.wake_up();
+        }
     }
 
     #[cfg(not(feature = "backend-winit"))]
@@ -8878,6 +9153,25 @@ impl NickelSession {
             |shell| shell.launcher_visible(),
         );
         self.set_launcher_visible_from(!visible, source);
+    }
+
+    fn requested_output_transform(
+        placement: &nickel_session_protocol::OutputPlacement,
+        current: smithay::utils::Transform,
+    ) -> smithay::utils::Transform {
+        use nickel_session_protocol::OutputTransform as T;
+        use smithay::utils::Transform;
+        match placement.transform {
+            None => current,
+            Some(T::Normal) => Transform::Normal,
+            Some(T::Rotate90) => Transform::_90,
+            Some(T::Rotate180) => Transform::_180,
+            Some(T::Rotate270) => Transform::_270,
+            Some(T::Flipped) => Transform::Flipped,
+            Some(T::Flipped90) => Transform::Flipped90,
+            Some(T::Flipped180) => Transform::Flipped180,
+            Some(T::Flipped270) => Transform::Flipped270,
+        }
     }
 
     fn apply_output_layout(
@@ -8988,8 +9282,7 @@ impl NickelSession {
                 placement.mode.map_or_else(
                     || {
                         output.current_mode().map_or(*fallback, |mode| {
-                            output
-                                .current_transform()
+                            Self::requested_output_transform(placement, output.current_transform())
                                 .transform_size(mode.size)
                                 .to_f64()
                                 .to_logical(f64::from(placement.scale_120) / 120.0)
@@ -8997,7 +9290,11 @@ impl NickelSession {
                         })
                     },
                     |mode| {
-                        Size::<i32, smithay::utils::Physical>::from((mode.width, mode.height))
+                        Self::requested_output_transform(placement, output.current_transform())
+                            .transform_size(Size::<i32, smithay::utils::Physical>::from((
+                                mode.width,
+                                mode.height,
+                            )))
                             .to_f64()
                             .to_logical(f64::from(placement.scale_120) / 120.0)
                             .to_i32_round()
@@ -9061,7 +9358,10 @@ impl NickelSession {
             let location = (placement.x, placement.y).into();
             output.change_current_state(
                 None,
-                None,
+                Some(Self::requested_output_transform(
+                    placement,
+                    output.current_transform(),
+                )),
                 Some(OutputScale::Fractional(
                     f64::from(placement.scale_120) / 120.0,
                 )),
@@ -9981,6 +10281,14 @@ impl NickelSession {
     }
 
     pub(super) fn set_launcher_visible_on_output(&mut self, visible: bool, output: Option<String>) {
+        if visible
+            && self
+                .internal_shell
+                .as_ref()
+                .is_some_and(|shell| !shell.can_show_launcher())
+        {
+            return;
+        }
         let was_visible = self.internal_shell.as_ref().map_or_else(
             || self.launcher_visibility.is_visible(),
             |shell| shell.launcher_visible(),
@@ -10019,6 +10327,8 @@ impl NickelSession {
                             .iter()
                             .find(|surface| {
                                 surface.role == crate::winit_shell::SurfaceRole::Launcher
+                                    || surface.plugin.as_ref()
+                                        == Some(&shell.active_shell_surface_key("launcher"))
                             })
                             .and_then(|surface| {
                                 self.internal_shell_surfaces.get(&surface.id).copied()
@@ -10304,6 +10614,44 @@ impl NickelSession {
             .retain(|path| socket.send_to(&event, path).is_ok());
     }
 
+    fn notify_plugin_event(&mut self, event: SessionEvent) -> usize {
+        let Ok(frame) = encode(&ServerEnvelope {
+            request_id: 0,
+            message: ServerMessage::Event(event),
+        }) else {
+            return 0;
+        };
+        let Ok(socket) = notification_socket() else {
+            return 0;
+        };
+        let mut delivered = 0;
+        self.launcher_subscribers.retain(|path| {
+            let sent = socket.send_to(&frame, path).is_ok();
+            delivered += usize::from(sent);
+            sent
+        });
+        delivered
+    }
+
+    fn request_plugin_activation(&mut self, event: SessionEvent) -> bool {
+        let Some(path) = self.plugin_shell_subscriber.as_ref() else {
+            return false;
+        };
+        let Ok(frame) = encode(&ServerEnvelope {
+            request_id: 0,
+            message: ServerMessage::Event(event),
+        }) else {
+            return false;
+        };
+        let sent = notification_socket()
+            .and_then(|socket| socket.send_to(&frame, path))
+            .is_ok();
+        if !sent {
+            self.plugin_shell_subscriber = None;
+        }
+        sent
+    }
+
     fn refresh_output_topology_generation(&mut self) -> bool {
         let outputs = self.protocol_outputs();
         if outputs != self.last_protocol_outputs {
@@ -10460,6 +10808,15 @@ impl NickelSession {
             let changed = shell.global_shortcut(action);
             if changed {
                 self.sync_internal_shell();
+                if let Some(key) = match action {
+                    nickel_session_protocol::ShortcutAction::ShowControlCenter => self
+                        .internal_shell
+                        .as_ref()
+                        .map(|shell| shell.active_shell_surface_key("quick-settings")),
+                    _ => None,
+                } {
+                    self.focus_plugin_surface(&key.plugin_id, &key.surface_id);
+                }
                 self.schedule_internal_ui_frame();
             }
             self.wake_internal_shell();
@@ -10739,6 +11096,7 @@ impl NickelSession {
         if !shell_role_accepts_ordinary_focus(role) {
             return false;
         }
+        self.pending_plugin_focus = None;
         if role == ShellRole::Screenshot {
             self.screenshot_output_name = self.preferred_interaction_output_name();
         }
@@ -10778,7 +11136,98 @@ impl NickelSession {
         let Some(target) = target else {
             return false;
         };
+        drop(registry);
+        self.remember_shell_focus_restore_window();
+        if role == ShellRole::Screenshot {
+            self.place_screenshot_surface(&target);
+        }
+        self.space.raise_element(&target, true);
+        self.surrender_internal_focus();
+        self.realize_seat_focus(
+            crate::session::focus::KeyboardFocusTarget::for_window(&target),
+            FocusScope::Other(role as u64),
+        );
+        self.send_tracked_xdg_configures_for_all_windows();
+        true
+    }
+
+    pub(crate) fn focus_plugin_surface(&mut self, plugin_id: &str, surface_id: &str) -> bool {
+        let key = nickel_core::plugins::PluginSurfaceKey {
+            plugin_id: plugin_id.to_owned(),
+            surface_id: surface_id.to_owned(),
+        };
+        let target = self
+            .registered_shell_role_slots
+            .iter()
+            .find_map(|registration| {
+                let placement = registration.plugin_surface.as_ref()?;
+                if registration.role != ShellRole::PluginSurface
+                    || placement.plugin_id != plugin_id
+                    || placement.surface_id != surface_id
+                {
+                    return None;
+                }
+                self.utility_windows
+                    .iter()
+                    .find(|window| {
+                        window
+                            .wl_surface()
+                            .is_some_and(|surface| surface.id() == registration.surface)
+                    })
+                    .cloned()
+            });
+        let Some(target) =
+            target.filter(|target| self.space.elements().any(|window| window == target))
+        else {
+            if let Some(runtime) = self.internal_shell.as_ref().and_then(|shell| {
+                shell
+                    .surfaces()
+                    .iter()
+                    .find(|surface| {
+                        surface.plugin.as_ref() == Some(&key) && shell.visible(surface.id)
+                    })
+                    .and_then(|surface| self.internal_shell_surfaces.get(&surface.id).copied())
+            }) {
+                self.pending_shell_focus_role = None;
+                self.pending_plugin_focus = None;
+                if let Some(id) = self.internal_surface_windows.get(&runtime).copied() {
+                    self.internal_ui.raise(runtime);
+                    if !self.focus_internal_surface(runtime) {
+                        return false;
+                    }
+                    self.windows.raise(id);
+                    self.workspaces.focused(&id);
+                    self.notify_protocol_snapshot();
+                    return true;
+                }
+                return self.focus_internal_surface(runtime);
+            }
+            return false;
+        };
+        self.pending_shell_focus_role = None;
+        self.pending_plugin_focus = None;
+        self.remember_shell_focus_restore_window();
+        self.space.raise_element(&target, true);
+        self.surrender_internal_focus();
+        if !self.realize_seat_focus(
+            crate::session::focus::KeyboardFocusTarget::for_window(&target),
+            FocusScope::Other(ShellRole::PluginSurface as u64),
+        ) {
+            return false;
+        }
+        if let Some(id) = target
+            .wl_surface()
+            .and_then(|surface| self.surface_windows.get(&surface.id()).copied())
+        {
+            self.windows.raise(id);
+        }
+        self.send_tracked_xdg_configures_for_all_windows();
+        true
+    }
+
+    fn remember_shell_focus_restore_window(&mut self) {
         if self.shell_focus_restore_window.is_none() {
+            let registry = self.windows.snapshot();
             let shell_ids = self
                 .shell_windows()
                 .filter_map(|window| {
@@ -10808,17 +11257,6 @@ impl NickelSession {
                     .map(|window| window.id)
             });
         }
-        if role == ShellRole::Screenshot {
-            self.place_screenshot_surface(&target);
-        }
-        self.space.raise_element(&target, true);
-        self.surrender_internal_focus();
-        self.realize_seat_focus(
-            crate::session::focus::KeyboardFocusTarget::for_window(&target),
-            FocusScope::Other(role as u64),
-        );
-        self.send_tracked_xdg_configures_for_all_windows();
-        true
     }
 
     fn restore_application_focus(&mut self) {
@@ -10826,6 +11264,7 @@ impl NickelSession {
             self.screenshot_output_name = None;
         }
         self.pending_shell_focus_role = None;
+        self.pending_plugin_focus = None;
         if let Some(window) = self.shell_focus_restore_window.take() {
             self.activate_window(window);
         } else {
@@ -10892,6 +11331,14 @@ impl NickelSession {
         self.preview_window = None;
         self.registered_shell_role_slots.clear();
         self.clear_all_previews();
+        self.plugin_status = None;
+        self.plugin_shell_subscriber = None;
+        self.notify_plugin_event(SessionEvent::PluginsChanged(
+            nickel_session_protocol::PluginStatusSnapshot {
+                activation_generation: 0,
+                plugins: Vec::new(),
+            },
+        ));
     }
 
     /// Remove every derived reference owned for a surface/window identity.
@@ -11134,10 +11581,12 @@ impl NickelSession {
         window: &Window,
         role: ShellRole,
         output: Option<String>,
+        application_id: Option<String>,
+        plugin_surface: Option<nickel_session_protocol::PluginSurfacePlacement>,
     ) {
         if matches!(
             role,
-            ShellRole::Desktop | ShellRole::Panel | ShellRole::Lock
+            ShellRole::Desktop | ShellRole::Panel | ShellRole::PluginSurface | ShellRole::Lock
         ) && output.is_none()
         {
             return;
@@ -11149,6 +11598,8 @@ impl NickelSession {
             role,
             output,
             surface: surface.id(),
+            application_id,
+            plugin_surface,
         };
         // A title/app-id update on the same live surface may change its output
         // slot. Replace that registration rather than treating the original
@@ -11158,7 +11609,8 @@ impl NickelSession {
             .registered_shell_role_slots
             .iter()
             .filter(|existing| {
-                existing.role == registration.role
+                existing.role != ShellRole::PluginSurface
+                    && existing.role == registration.role
                     && existing.output == registration.output
                     && existing.surface != registration.surface
             })
@@ -12299,6 +12751,10 @@ impl NickelSession {
             window.override_z_index(90);
             self.place_screenshot_surface(&window);
         }
+        if role == ShellRole::PluginSurface {
+            window.override_z_index(40);
+            self.relayout_shell_surfaces();
+        }
         if role == ShellRole::OnScreenKeyboard {
             window.override_z_index(60);
             if self.on_screen_keyboard_snapshot().visible {
@@ -12883,8 +13339,6 @@ impl NickelSession {
     }
 
     fn show_anchored_shell_role(&mut self, role: ShellRole, anchor: ShellPopoverAnchor) {
-        use nickel_session_protocol::AnchorSide;
-
         if !matches!(role, ShellRole::ControlCenter | ShellRole::ProjectMenu) {
             return;
         }
@@ -12907,56 +13361,87 @@ impl NickelSession {
         }) else {
             return;
         };
-        let bounds = anchor.bounds;
-        let anchor_geometry = match anchor.preferred {
-            AnchorSide::Above => Geometry {
-                x: output.x + bounds.x,
-                y: output.y + output.height - shell_layout::PANEL_HEIGHT + bounds.y,
-                width: bounds.width,
-                height: bounds.height,
-            },
-            AnchorSide::Below => Geometry {
-                x: output.x + bounds.x,
-                y: output.y + bounds.y,
-                width: bounds.width,
-                height: bounds.height,
-            },
-            AnchorSide::Left => Geometry {
-                x: output.x + bounds.x,
-                y: output.y + bounds.y,
-                width: bounds.width,
-                height: bounds.height,
-            },
-            AnchorSide::Right => Geometry {
-                x: output.x + output.width - shell_layout::PANEL_HEIGHT + bounds.x,
-                y: output.y + bounds.y,
-                width: bounds.width,
-                height: bounds.height,
-            },
+        self.place_anchored_shell_window(window, anchor, output, Some(role), true);
+    }
+
+    fn show_anchored_plugin_surface(
+        &mut self,
+        plugin_id: &str,
+        surface_id: &str,
+        anchor: ShellPopoverAnchor,
+    ) -> bool {
+        let Some(output) = self.output_geometry_named(&anchor.output) else {
+            return false;
         };
-        let area = match anchor.preferred {
-            AnchorSide::Above => shell_layout::work_area(output),
-            AnchorSide::Below => Geometry {
-                y: output.y + shell_layout::PANEL_HEIGHT,
-                height: (output.height - shell_layout::PANEL_HEIGHT).max(0),
-                ..output
-            },
-            AnchorSide::Left | AnchorSide::Right => output,
+        let window = self
+            .registered_shell_role_slots
+            .iter()
+            .find_map(|registration| {
+                let placement = registration.plugin_surface.as_ref()?;
+                if registration.role != ShellRole::PluginSurface
+                    || placement.plugin_id != plugin_id
+                    || placement.surface_id != surface_id
+                {
+                    return None;
+                }
+                self.utility_windows
+                    .iter()
+                    .find(|window| {
+                        window
+                            .wl_surface()
+                            .is_some_and(|surface| surface.id() == registration.surface)
+                    })
+                    .cloned()
+            });
+        let Some(window) = window else {
+            return false;
         };
-        let size = window.geometry().size;
-        let target = shell_layout::anchored_popover(
-            area,
-            anchor_geometry,
-            (size.w.max(1), size.h.max(1)),
-            anchor.preferred,
+        self.plugin_popover_anchors.insert(
+            nickel_core::plugins::PluginSurfaceKey {
+                plugin_id: plugin_id.to_owned(),
+                surface_id: surface_id.to_owned(),
+            },
+            anchor.clone(),
         );
+        self.place_anchored_shell_window(window, anchor, output, None, true);
+        true
+    }
+
+    pub(crate) fn clear_plugin_popover_anchor_for_surface(&mut self, surface: &ObjectId) {
+        let key = self
+            .registered_shell_role_slots
+            .iter()
+            .find(|registration| &registration.surface == surface)
+            .and_then(|registration| registration.plugin_surface.as_ref())
+            .map(|placement| nickel_core::plugins::PluginSurfaceKey {
+                plugin_id: placement.plugin_id.clone(),
+                surface_id: placement.surface_id.clone(),
+            });
+        if let Some(key) = key {
+            self.plugin_popover_anchors.remove(&key);
+        }
+    }
+
+    fn place_anchored_shell_window(
+        &mut self,
+        window: Window,
+        anchor: ShellPopoverAnchor,
+        output: Geometry,
+        role: Option<ShellRole>,
+        activate: bool,
+    ) {
+        let size = window.geometry().size;
+        let (anchor_geometry, target) =
+            anchored_shell_popover_geometry(output, &anchor, (size.w.max(1), size.h.max(1)));
         self.configure_window(&window, target);
         let location = Self::shell_surface_location(&window, target);
-        self.hidden_shell_roles.remove(&role);
-        self.hidden_shell_role_locations
-            .insert(role, location.into());
-        self.map_buffered_window(window.clone(), location, true);
-        self.space.raise_element(&window, true);
+        if let Some(role) = role {
+            self.hidden_shell_roles.remove(&role);
+            self.hidden_shell_role_locations
+                .insert(role, location.into());
+        }
+        self.map_buffered_window(window.clone(), location, activate);
+        self.space.raise_element(&window, activate);
         let control = anchor.control.chars().take(80).collect::<String>();
         tracing::debug!(
             ?role,
@@ -12977,6 +13462,36 @@ impl NickelSession {
 
     pub fn close_window(&mut self, id: WindowId) {
         if let Some(surface) = self.internal_surface_for_window(id) {
+            let plugin_owner = self.internal_shell.as_ref().and_then(|shell| {
+                let owner = self
+                    .internal_shell_surfaces
+                    .iter()
+                    .find_map(|(owner, runtime)| (*runtime == surface).then_some(*owner))?;
+                shell
+                    .surfaces()
+                    .iter()
+                    .find(|entry| entry.id == owner)?
+                    .plugin
+                    .clone()
+            });
+            if let Some(key) = plugin_owner
+                && let Some(shell) = self.internal_shell.as_mut()
+            {
+                match shell.close_plugin_window(&key) {
+                    Ok(true) => {
+                        let snapshot = shell.plugin_status_snapshot();
+                        self.plugin_status = Some(snapshot.clone());
+                        self.notify_plugin_event(SessionEvent::PluginsChanged(snapshot));
+                        self.reconcile_internal_shell_outputs();
+                        return;
+                    }
+                    Ok(false) => return,
+                    Err(error) => {
+                        tracing::warn!(plugin = %key.plugin_id, %error, "could not close plugin window");
+                        return;
+                    }
+                }
+            }
             if let Some(file) = self
                 .internal_file_surfaces
                 .iter()
@@ -13714,6 +14229,81 @@ impl NickelSession {
             let location = Self::shell_surface_location(&panel, geometry);
             self.map_buffered_window(panel.clone(), location, false);
             self.space.raise_element(&panel, false);
+        }
+        for plugin in self.utility_windows.clone() {
+            let Some(surface) = plugin.wl_surface() else {
+                continue;
+            };
+            let Some(registration) = self
+                .registered_shell_role_slots
+                .iter()
+                .find(|registration| {
+                    registration.surface == surface.id()
+                        && registration.role == ShellRole::PluginSurface
+                })
+            else {
+                continue;
+            };
+            let (Some(output_name), Some(placement)) = (
+                registration.output.as_deref(),
+                registration.plugin_surface.as_ref(),
+            ) else {
+                continue;
+            };
+            let Some(output_index) = output_index_for_shell_surface(output_name, &output_names)
+            else {
+                self.space.unmap_elem(&plugin);
+                continue;
+            };
+            let Some(output) = self.space.output_geometry(&outputs[output_index]) else {
+                continue;
+            };
+            let width = placement.width.min(output.size.w as u32) as i32;
+            let height = placement.height.min(output.size.h as u32) as i32;
+            let (x, y) = match placement.kind {
+                nickel_session_protocol::PluginSurfacePlacementKind::Desktop => {
+                    (output.loc.x, output.loc.y)
+                }
+                nickel_session_protocol::PluginSurfacePlacementKind::Panel
+                | nickel_session_protocol::PluginSurfacePlacementKind::Dock => (
+                    output.loc.x + (output.size.w - width) / 2,
+                    output.loc.y + (output.size.h - height - placement.bottom_offset as i32).max(0),
+                ),
+                nickel_session_protocol::PluginSurfacePlacementKind::Window
+                | nickel_session_protocol::PluginSurfacePlacementKind::Dialog
+                | nickel_session_protocol::PluginSurfacePlacementKind::Overlay => {
+                    placement.anchor.position(
+                        (
+                            output.loc.x,
+                            output.loc.y,
+                            output.size.w as u32,
+                            output.size.h as u32,
+                        ),
+                        (width as u32, height as u32),
+                        (placement.offset_x, placement.offset_y),
+                    )
+                }
+            };
+            let mut geometry = Geometry {
+                x,
+                y,
+                width,
+                height,
+            };
+            let key = nickel_core::plugins::PluginSurfaceKey {
+                plugin_id: placement.plugin_id.clone(),
+                surface_id: placement.surface_id.clone(),
+            };
+            if let Some(anchor) = self.plugin_popover_anchors.get(&key)
+                && let Some(anchor_output) = self.output_geometry_named(&anchor.output)
+            {
+                geometry =
+                    anchored_shell_popover_geometry(anchor_output, anchor, (width, height)).1;
+            }
+            self.configure_window(&plugin, geometry);
+            let location = Self::shell_surface_location(&plugin, geometry);
+            self.map_buffered_window(plugin.clone(), location, false);
+            self.space.raise_element(&plugin, false);
         }
         if self.launcher_visibility.is_visible()
             && let Some(launcher) = self.launcher_window.clone()
@@ -15341,21 +15931,10 @@ fn internal_keyboard_surface_placement(
         size,
         outputs,
         None,
+        crate::winit_shell::PanelEdge::Bottom,
     );
     placement.geometry = (geometry.x, geometry.y, size.0, size.1);
     Some(placement)
-}
-
-fn launcher_surface_size_for_output(
-    shell: &mut crate::internal_shell::InternalShellCoordinator,
-    outputs: &[(crate::internal_shell::InternalOutput, i32, i32)],
-    launcher_output: Option<&str>,
-) -> Option<(u32, u32)> {
-    let output = launcher_output
-        .and_then(|name| outputs.iter().find(|(output, _, _)| output.name == name))
-        .or_else(|| outputs.first())?;
-    let maximum = crate::internal_shell::launcher_size(output.0.width, output.0.height);
-    Some(shell.launcher_preferred_surface_size(maximum))
 }
 
 fn internal_shell_surface_placement(
@@ -15364,6 +15943,7 @@ fn internal_shell_surface_placement(
     surface_size: (u32, u32),
     outputs: &[(crate::internal_shell::InternalOutput, i32, i32)],
     launcher_output: Option<&str>,
+    panel_edge: crate::winit_shell::PanelEdge,
 ) -> crate::session::InternalSurfacePlacement {
     use crate::{session::InternalSurfaceRole, winit_shell::SurfaceRole};
 
@@ -15394,9 +15974,23 @@ fn internal_shell_surface_placement(
         _ => surface_size,
     };
     let (x, y) = match surface_role {
-        SurfaceRole::Panel => (
+        SurfaceRole::Taskbar => (
             origin_x,
-            origin_y + output_height.saturating_sub(crate::winit_shell::PANEL_HEIGHT) as i32,
+            origin_y
+                + if panel_edge == crate::winit_shell::PanelEdge::Top {
+                    0
+                } else {
+                    output_height.saturating_sub(surface_size.1) as i32
+                },
+        ),
+        SurfaceRole::Panel => (
+            origin_x + output_width.saturating_sub(surface_size.0) as i32 / 2,
+            origin_y
+                + output_height.saturating_sub(
+                    surface_size
+                        .1
+                        .saturating_add(crate::plugin_panel::bottom_offset()),
+                ) as i32,
         ),
         SurfaceRole::Launcher => {
             let work_height = output_height.saturating_sub(crate::winit_shell::PANEL_HEIGHT);
@@ -15411,7 +16005,7 @@ fn internal_shell_surface_placement(
     };
     let role = match surface_role {
         SurfaceRole::Desktop => InternalSurfaceRole::Desktop,
-        SurfaceRole::Panel => InternalSurfaceRole::Panel,
+        SurfaceRole::Taskbar => InternalSurfaceRole::Taskbar,
         SurfaceRole::OnScreenKeyboard => InternalSurfaceRole::OnScreenKeyboard,
         _ => InternalSurfaceRole::Overlay,
     };
@@ -15420,6 +16014,191 @@ fn internal_shell_surface_placement(
         geometry: (x, y, surface_size.0, surface_size.1),
         output: output_name,
     }
+}
+
+fn adjust_internal_plugin_surface_placement(
+    placement: &mut crate::session::InternalSurfacePlacement,
+    key: &nickel_core::plugins::PluginSurfaceKey,
+    shell: &crate::internal_shell::InternalShellCoordinator,
+    outputs: &[(crate::internal_shell::InternalOutput, i32, i32)],
+) {
+    if *key == shell.active_shell_surface_key("keyboard") {
+        let (dock_top, height) = shell.keyboard_placement_preferences();
+        if let Some(keyboard) = internal_keyboard_surface_placement(
+            placement.output.as_deref(),
+            dock_top,
+            height,
+            outputs,
+        ) {
+            *placement = keyboard;
+        }
+        return;
+    }
+    if shell.plugin_panel_reserves_work_area(key) {
+        let offset = placement
+            .output
+            .as_deref()
+            .and_then(|output| shell.reserved_panel_offset(key, output))
+            .unwrap_or(0);
+        place_reserved_plugin_panel(placement, shell.panel_edge(), offset, outputs);
+        return;
+    }
+    let Some((kind, bottom_offset, anchor, offset_x, offset_y)) = shell.plugin_panel_placement(key)
+    else {
+        return;
+    };
+    apply_internal_plugin_surface_placement(
+        placement,
+        kind,
+        bottom_offset,
+        anchor,
+        (offset_x, offset_y),
+        outputs,
+    );
+}
+
+fn place_reserved_plugin_panel(
+    placement: &mut crate::session::InternalSurfacePlacement,
+    edge: crate::winit_shell::PanelEdge,
+    offset: u32,
+    outputs: &[(crate::internal_shell::InternalOutput, i32, i32)],
+) {
+    let Some((output, x, y)) = outputs
+        .iter()
+        .find(|(output, _, _)| placement.output.as_deref() == Some(output.name.as_str()))
+    else {
+        return;
+    };
+    placement.role = crate::session::InternalSurfaceRole::Taskbar;
+    placement.geometry.0 = *x;
+    placement.geometry.1 = *y
+        + if edge == crate::winit_shell::PanelEdge::Top {
+            offset as i32
+        } else {
+            output
+                .height
+                .saturating_sub(placement.geometry.3.saturating_add(offset)) as i32
+        };
+}
+
+fn apply_internal_plugin_surface_placement(
+    placement: &mut crate::session::InternalSurfacePlacement,
+    kind: nickel_core::plugins::PluginSurfaceKind,
+    bottom_offset: u32,
+    anchor: nickel_core::plugins::PluginSurfaceAnchor,
+    offset: (i32, i32),
+    outputs: &[(crate::internal_shell::InternalOutput, i32, i32)],
+) {
+    if matches!(
+        kind,
+        nickel_core::plugins::PluginSurfaceKind::Window
+            | nickel_core::plugins::PluginSurfaceKind::Dialog
+            | nickel_core::plugins::PluginSurfaceKind::Overlay
+    ) {
+        placement.role = if matches!(
+            kind,
+            nickel_core::plugins::PluginSurfaceKind::Dialog
+                | nickel_core::plugins::PluginSurfaceKind::Overlay
+        ) {
+            crate::session::InternalSurfaceRole::Overlay
+        } else {
+            crate::session::InternalSurfaceRole::Application
+        };
+        if let Some((output, x, y)) = outputs
+            .iter()
+            .find(|(output, _, _)| placement.output.as_deref() == Some(output.name.as_str()))
+        {
+            let (placed_x, placed_y) = anchor.position(
+                (*x, *y, output.width, output.height),
+                (placement.geometry.2, placement.geometry.3),
+                offset,
+            );
+            placement.geometry.0 = placed_x;
+            placement.geometry.1 = placed_y;
+        }
+    } else {
+        placement.geometry.1 += crate::plugin_panel::bottom_offset() as i32 - bottom_offset as i32;
+    }
+}
+
+fn anchored_shell_popover_geometry(
+    output: Geometry,
+    anchor: &nickel_session_protocol::ShellPopoverAnchor,
+    size: (i32, i32),
+) -> (Geometry, Geometry) {
+    use nickel_session_protocol::AnchorSide;
+
+    let bounds = anchor.bounds;
+    let anchor_geometry = match anchor.preferred {
+        AnchorSide::Above => Geometry {
+            x: output.x + bounds.x,
+            y: output.y + output.height - shell_layout::PANEL_HEIGHT + bounds.y,
+            width: bounds.width,
+            height: bounds.height,
+        },
+        AnchorSide::Below | AnchorSide::Left => Geometry {
+            x: output.x + bounds.x,
+            y: output.y + bounds.y,
+            width: bounds.width,
+            height: bounds.height,
+        },
+        AnchorSide::Right => Geometry {
+            x: output.x + output.width - shell_layout::PANEL_HEIGHT + bounds.x,
+            y: output.y + bounds.y,
+            width: bounds.width,
+            height: bounds.height,
+        },
+    };
+    let area = match anchor.preferred {
+        AnchorSide::Above => shell_layout::work_area(output),
+        AnchorSide::Below => Geometry {
+            y: output.y + shell_layout::PANEL_HEIGHT,
+            height: (output.height - shell_layout::PANEL_HEIGHT).max(0),
+            ..output
+        },
+        AnchorSide::Left | AnchorSide::Right => output,
+    };
+    let target = shell_layout::anchored_popover(
+        area,
+        anchor_geometry,
+        (
+            size.0.max(1).min(area.width.max(1)),
+            size.1.max(1).min(area.height.max(1)),
+        ),
+        anchor.preferred,
+    );
+    (anchor_geometry, target)
+}
+
+fn apply_internal_anchored_plugin_surface_placement(
+    placement: &mut crate::session::InternalSurfacePlacement,
+    anchor: &nickel_session_protocol::ShellPopoverAnchor,
+    outputs: &[(crate::internal_shell::InternalOutput, i32, i32)],
+) {
+    let Some((output, x, y)) = outputs
+        .iter()
+        .find(|(output, _, _)| output.name == anchor.output)
+    else {
+        return;
+    };
+    let output_geometry = Geometry {
+        x: *x,
+        y: *y,
+        width: output.width as i32,
+        height: output.height as i32,
+    };
+    let (_, target) = anchored_shell_popover_geometry(
+        output_geometry,
+        anchor,
+        (placement.geometry.2 as i32, placement.geometry.3 as i32),
+    );
+    placement.output = Some(output.name.clone());
+    placement.geometry = (
+        target.x,
+        target.y,
+        target.width.max(1) as u32,
+        target.height.max(1) as u32,
+    );
 }
 
 fn avoid_trusted_control_collision(
@@ -15461,46 +16240,6 @@ fn avoid_trusted_control_collision(
     menu
 }
 
-fn internal_codex_project_menu_placement(
-    anchor: Option<&nickel_session_protocol::ShellPopoverAnchor>,
-    outputs: &[(crate::internal_shell::InternalOutput, i32, i32)],
-    fallback_output: Option<&str>,
-) -> crate::internal_codex::CodexSurfacePlacement {
-    let requested = anchor
-        .map(|anchor| anchor.output.as_str())
-        .or(fallback_output);
-    let selected = requested
-        .and_then(|name| outputs.iter().find(|(output, _, _)| output.name == name))
-        .or_else(|| outputs.first());
-    let Some((output, origin_x, origin_y)) = selected else {
-        return crate::internal_codex::CodexSurfacePlacement::default();
-    };
-    let work_height = output
-        .height
-        .saturating_sub(crate::winit_shell::PANEL_HEIGHT);
-    // Menus are compositor-owned overlays, so their client size must fit the
-    // usable logical output before anchor placement is clamped.
-    let menu_width = crate::internal_codex::MENU_SIZE
-        .0
-        .min(output.width.saturating_sub(16).max(1));
-    let menu_height = crate::internal_codex::MENU_SIZE
-        .1
-        .min(work_height.saturating_sub(16).max(1));
-    let max_x = output.width.saturating_sub(menu_width) as i32;
-    let anchor_center = anchor
-        .filter(|anchor| anchor.output == output.name)
-        .map_or(24, |anchor| anchor.bounds.x + anchor.bounds.width / 2);
-    let x = (anchor_center - menu_width as i32 / 2).clamp(0, max_x);
-    let y = work_height.saturating_sub(menu_height).saturating_sub(8) as i32;
-    crate::internal_codex::CodexSurfacePlacement {
-        output: Some(output.name.clone()),
-        origin: (origin_x + x, origin_y + y),
-        scale: output.scale,
-        menu_size: Some((menu_width, menu_height)),
-        chat_size: None,
-    }
-}
-
 fn internal_codex_chat_placement(
     outputs: &[(crate::internal_shell::InternalOutput, i32, i32)],
     requested_output: Option<&str>,
@@ -15540,7 +16279,6 @@ fn internal_codex_chat_placement(
             origin_y + outer_y as i32 + titlebar as i32 + border as i32,
         ),
         scale: output.scale,
-        menu_size: None,
         chat_size: Some((content_width, content_height)),
     }
 }

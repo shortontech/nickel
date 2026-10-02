@@ -29,9 +29,12 @@ type ManagedObjects = HashMap<OwnedObjectPath, Interfaces>;
 enum Command {
     SetWifiEnabled(bool),
     ActivateWifi(String),
+    DisconnectWifi(String),
+    PairBluetoothDevice(String),
     SetBluetoothPowered(bool),
     SetBluetoothDiscovery(bool),
     ToggleBluetoothDevice(String),
+    SetBluetoothConnected(String, bool),
     RefreshConnectivity(mpsc::SyncSender<Result<ConnectivityRefresh, String>>),
 }
 
@@ -344,6 +347,20 @@ pub fn activate_wifi_network(id: &str) -> bool {
         .is_ok()
 }
 
+pub fn disconnect_wifi_network(id: &str) -> bool {
+    backend()
+        .commands
+        .send(Command::DisconnectWifi(id.to_owned()))
+        .is_ok()
+}
+
+pub fn pair_bluetooth_device(id: &str) -> bool {
+    backend()
+        .commands
+        .send(Command::PairBluetoothDevice(id.to_owned()))
+        .is_ok()
+}
+
 pub fn set_bluetooth_powered(powered: bool) -> bool {
     backend()
         .commands
@@ -362,6 +379,13 @@ pub fn toggle_bluetooth_device(id: &str) -> bool {
     backend()
         .commands
         .send(Command::ToggleBluetoothDevice(id.to_owned()))
+        .is_ok()
+}
+
+pub fn set_bluetooth_connected(id: &str, connected: bool) -> bool {
+    backend()
+        .commands
+        .send(Command::SetBluetoothConnected(id.to_owned(), connected))
         .is_ok()
 }
 
@@ -528,6 +552,7 @@ fn read_network_status(connection: &Connection) -> zbus::Result<(NetworkStatus, 
     );
     partial |= saved.len() == CONNECTIVITY_DEVICE_LIMIT;
     let mut networks = Vec::new();
+    let mut adapters = Vec::new();
 
     for device_path in devices.into_iter().take(CONNECTIVITY_DEVICE_LIMIT) {
         let device = Proxy::new(
@@ -536,7 +561,40 @@ fn read_network_status(connection: &Connection) -> zbus::Result<(NetworkStatus, 
             device_path.as_str(),
             "org.freedesktop.NetworkManager.Device",
         )?;
-        if device.get_property::<u32>("DeviceType").unwrap_or(0) != 2 {
+        let device_type = device.get_property::<u32>("DeviceType").unwrap_or(0);
+        if matches!(device_type, 1 | 2) {
+            let speed = Proxy::new(
+                connection,
+                NETWORK_MANAGER,
+                device_path.as_str(),
+                if device_type == 1 {
+                    "org.freedesktop.NetworkManager.Device.Wired"
+                } else {
+                    "org.freedesktop.NetworkManager.Device.Wireless"
+                },
+            )
+            .ok()
+            .and_then(|proxy| {
+                proxy
+                    .get_property::<u32>(if device_type == 1 { "Speed" } else { "Bitrate" })
+                    .ok()
+            })
+            .map(|speed| u64::from(speed) * if device_type == 1 { 1_000_000 } else { 1_000 });
+            adapters.push(super::super::NetworkAdapterStatus {
+                name: device
+                    .get_property::<String>("Interface")
+                    .unwrap_or_default(),
+                description: if device_type == 1 {
+                    "Ethernet"
+                } else {
+                    "Wi-Fi"
+                }
+                .into(),
+                connected: device.get_property::<u32>("State").unwrap_or(0) == 100,
+                speed_bits_per_second: speed,
+            });
+        }
+        if device_type != 2 {
             continue;
         }
         let wireless = Proxy::new(
@@ -606,6 +664,8 @@ fn read_network_status(connection: &Connection) -> zbus::Result<(NetworkStatus, 
                 .unwrap_or_default(),
             signal_percent: active.map(|network| network.signal_percent).unwrap_or(0),
             networks,
+            adapters,
+            adapters_available: true,
         },
         partial,
     ))
@@ -635,6 +695,12 @@ fn read_bluetooth_status(connection: &Connection) -> zbus::Result<(BluetoothStat
             let name = raw_name.chars().take(CONNECTIVITY_TEXT_LIMIT).collect();
             Some(BluetoothDeviceStatus {
                 id: path.as_str().to_owned(),
+                battery_percent: interfaces
+                    .get("org.bluez.Battery1")
+                    .and_then(|battery| property::<u8>(battery, "Percentage"))
+                    .filter(|value| *value <= 100),
+                kind: property::<String>(properties, "Icon"),
+                signal_dbm: property::<i16>(properties, "RSSI"),
                 name,
                 paired: property::<bool>(properties, "Paired").unwrap_or(false),
                 connected: property::<bool>(properties, "Connected").unwrap_or(false),
@@ -650,6 +716,9 @@ fn read_bluetooth_status(connection: &Connection) -> zbus::Result<(BluetoothStat
     });
     Ok((
         BluetoothStatus {
+            adapter_name: property::<String>(properties, "Alias")
+                .or_else(|| property::<String>(properties, "Name"))
+                .unwrap_or_default(),
             available: true,
             powered,
             discovering,
@@ -757,6 +826,7 @@ impl PreparedControl {
                     "StartDiscovery" => ("Discovering", true),
                     "StopDiscovery" => ("Discovering", false),
                     "Connect" => ("Connected", true),
+                    "Pair" => ("Paired", true),
                     "Disconnect" => ("Connected", false),
                     _ => return false,
                 };
@@ -894,6 +964,54 @@ fn prepare_command_with_guard(
                     .map_err(|error| error.to_string())?,
             }
         }
+        Command::DisconnectWifi(id) => {
+            let (device, _) = id
+                .split_once('\t')
+                .ok_or("invalid Wi-Fi network identity")?;
+            if !guarded_wifi_target_present(connection, &id) {
+                return Err("Wi-Fi network is stale".into());
+            }
+            let (_, expected) = id.split_once('\t').unwrap();
+            let wireless = Proxy::new(
+                connection,
+                NETWORK_MANAGER,
+                device,
+                "org.freedesktop.NetworkManager.Device.Wireless",
+            )
+            .map_err(|error| error.to_string())?;
+            if wireless
+                .get_property::<OwnedObjectPath>("ActiveAccessPoint")
+                .ok()
+                .as_ref()
+                .map(|path| path.as_str())
+                != Some(expected)
+            {
+                return Err("Wi-Fi connection changed before disconnect".into());
+            }
+            PreparedControl::Method {
+                destination: NETWORK_MANAGER,
+                path: device.into(),
+                interface: "org.freedesktop.NetworkManager.Device",
+                method: "Disconnect",
+            }
+        }
+        Command::PairBluetoothDevice(path) => {
+            let objects = managed_bluez_objects(connection).map_err(|error| error.to_string())?;
+            let properties = objects
+                .iter()
+                .find(|(id, _)| id.as_str() == path)
+                .and_then(|(_, interfaces)| interfaces.get("org.bluez.Device1"))
+                .ok_or("Bluetooth device is stale")?;
+            if property::<bool>(properties, "Paired").unwrap_or(false) {
+                return Err("Bluetooth device is already paired".into());
+            }
+            PreparedControl::Method {
+                destination: BLUEZ,
+                path,
+                interface: "org.bluez.Device1",
+                method: "Pair",
+            }
+        }
         Command::SetBluetoothPowered(value) => PreparedControl::Property {
             destination: BLUEZ,
             path: bluetooth_adapter_path(connection)?.to_string(),
@@ -911,6 +1029,20 @@ fn prepare_command_with_guard(
                 "StopDiscovery"
             },
         },
+        Command::SetBluetoothConnected(path, connected) => {
+            let objects = managed_bluez_objects(connection).map_err(|error| error.to_string())?;
+            if !objects.iter().any(|(object_path, interfaces)| {
+                object_path.as_str() == path && interfaces.contains_key("org.bluez.Device1")
+            }) {
+                return Err("Bluetooth device is stale".into());
+            }
+            PreparedControl::Method {
+                destination: BLUEZ,
+                path,
+                interface: "org.bluez.Device1",
+                method: if connected { "Connect" } else { "Disconnect" },
+            }
+        }
         Command::ToggleBluetoothDevice(path) => {
             let objects = managed_bluez_objects(connection).map_err(|error| error.to_string())?;
             let connected = objects

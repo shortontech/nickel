@@ -6,7 +6,6 @@ which is the authoritative list. `crates/nickel` is the default member.
 ## Applications and shell
 
 - `nickel` — desktop shell, plus the Linux compositor and session host.
-- `nickel-settings` — Nickel Plating settings application.
 - `nickel-file` — file browser and file manager.
 - `nickel-markdown-ui` — standalone Markdown viewer.
 - `nickel-terminal-ui` — terminal application UI.

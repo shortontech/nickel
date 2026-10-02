@@ -122,6 +122,7 @@ pub enum ChatMessage {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ShellRequest {
+    CloseProjectMenu,
     OpenProject {
         cwd: PathBuf,
         project_id: String,
@@ -2381,6 +2382,10 @@ impl Application for ChatApplication {
                 true
             }
             Shortcut::Newline => false,
+            Shortcut::Escape if self.project_menu_mode => {
+                self.shell_requests.push(ShellRequest::CloseProjectMenu);
+                true
+            }
             Shortcut::Escape if self.host_editor.is_some() => {
                 self.update(ChatMessage::ManageRemoteHosts);
                 true

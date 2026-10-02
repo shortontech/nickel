@@ -22,7 +22,7 @@ enum PreparationAge {
 
 struct DiagnosticOwnerScenario {
     _event_loop: EventLoop<'static, NickelSession>,
-    session: NickelSession,
+    session: Box<NickelSession>,
     control: Arc<Mutex<ControlPlane>>,
     identity: IssuedCapability,
     lease: u64,
@@ -59,7 +59,7 @@ impl DiagnosticOwnerScenario {
         };
         Self {
             _event_loop: event_loop,
-            session,
+            session: Box::new(session),
             control,
             identity,
             lease,

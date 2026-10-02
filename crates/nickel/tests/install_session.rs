@@ -40,12 +40,7 @@ fn installer_stages_self_contained_sddm_session_from_any_working_directory() {
     let release = fixture.path().join("release");
     let root = fixture.path().join("root");
     fs::create_dir(&release).expect("release directory");
-    for binary in [
-        "nickel-login",
-        "nickel",
-        "nickel-settings",
-        "nickel-terminal",
-    ] {
+    for binary in ["nickel-login", "nickel", "nickel-terminal"] {
         executable(&release.join(binary));
     }
     fs::write(
@@ -67,12 +62,7 @@ fn installer_stages_self_contained_sddm_session_from_any_working_directory() {
         .expect("run installer");
     assert!(status.success());
 
-    for binary in [
-        "nickel-login",
-        "nickel",
-        "nickel-settings",
-        "nickel-terminal",
-    ] {
+    for binary in ["nickel-login", "nickel", "nickel-terminal"] {
         let installed = root.join("usr/local/bin").join(binary);
         let expected: &[u8] = if binary == "nickel" {
             b"#!/bin/sh\n[ \"$1\" = --available-backends ] && echo udev\n"
@@ -137,12 +127,7 @@ fn installer_rejects_session_without_native_backend() {
     let release = fixture.path().join("release");
     let root = fixture.path().join("root");
     fs::create_dir(&release).expect("release directory");
-    for binary in [
-        "nickel-login",
-        "nickel",
-        "nickel-settings",
-        "nickel-terminal",
-    ] {
+    for binary in ["nickel-login", "nickel", "nickel-terminal"] {
         executable(&release.join(binary));
     }
     fs::write(release.join("nickel"), b"#!/bin/sh\nexit 0\n")

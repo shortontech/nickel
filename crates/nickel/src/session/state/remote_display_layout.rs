@@ -145,6 +145,7 @@ impl NickelSession {
                     enabled: placement.enabled,
                     scale_120: placement.scale_120,
                     mode: None,
+                    transform: None,
                 })
                 .collect(),
         }

@@ -1,0 +1,465 @@
+//! Narrow Windows display service for the JSX plugin data/effect boundary.
+//! Only whole-layout position and primary changes are supported. Native
+//! DisplayConfig validation, temporary application, and recovery live in
+//! `windows_remote_display_topology`.
+
+use crate::windows_remote_display_topology::{self as topology, Observation, RecoveryPlan};
+use nickel_remote_control::diagnostics::{OutputDiagnostic, OutputInventory};
+use nickel_session_protocol::{
+    Geometry, OutputLayout, OutputMode, OutputSnapshot, OutputTransform,
+};
+use std::collections::BTreeSet;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
+use windows::Win32::Graphics::Gdi::{DEVMODEW, ENUM_CURRENT_SETTINGS, EnumDisplaySettingsW};
+use windows::core::PCWSTR;
+
+const RECOVERY_WINDOW: Duration = Duration::from_secs(15);
+
+pub(crate) struct DisplayRead {
+    pub available: bool,
+    pub reason: Option<String>,
+    pub outputs: Vec<OutputSnapshot>,
+    pub revision: Option<String>,
+    pub pending_confirmation: bool,
+    pub can_confirm: bool,
+    pub can_revert: bool,
+}
+
+struct Pending {
+    owner: String,
+    plan: RecoveryPlan,
+    deadline: Instant,
+    confirmable: bool,
+}
+
+#[derive(Default)]
+struct State {
+    pending: Option<Pending>,
+    recovery_error: Option<String>,
+}
+
+fn state() -> &'static Arc<Mutex<State>> {
+    static STATE: OnceLock<Arc<Mutex<State>>> = OnceLock::new();
+    STATE.get_or_init(|| Arc::new(Mutex::new(State::default())))
+}
+
+fn arm_recovery_watchdog() {
+    let shared = Arc::clone(state());
+    std::thread::spawn(move || {
+        std::thread::sleep(RECOVERY_WINDOW);
+        if let Ok(mut guard) = shared.lock()
+            && guard
+                .pending
+                .as_ref()
+                .is_some_and(|pending| Instant::now() >= pending.deadline)
+            && let Some(pending) = guard.pending.take()
+        {
+            match pending.plan.restore() {
+                Ok(()) => guard.recovery_error = None,
+                Err(error) => {
+                    guard.recovery_error = Some(error);
+                    // Keep native recovery state for a later explicit retry.
+                    guard.pending = Some(Pending {
+                        confirmable: false,
+                        ..pending
+                    });
+                }
+            }
+        }
+    });
+}
+
+fn retain_failed_recovery(guard: &mut State, owner: &str, plan: RecoveryPlan, error: String) {
+    guard.recovery_error = Some(error);
+    guard.pending = Some(Pending {
+        owner: owner.into(),
+        plan,
+        deadline: Instant::now() + RECOVERY_WINDOW,
+        confirmable: false,
+    });
+    arm_recovery_watchdog();
+}
+
+fn current_mode(name: &str) -> Result<(OutputMode, OutputTransform), String> {
+    let wide: Vec<u16> = name.encode_utf16().chain([0]).collect();
+    let mut mode = DEVMODEW {
+        dmSize: std::mem::size_of::<DEVMODEW>() as u16,
+        ..Default::default()
+    };
+    // SAFETY: The NUL-terminated name and writable mode outlive this call.
+    if !unsafe { EnumDisplaySettingsW(PCWSTR(wide.as_ptr()), ENUM_CURRENT_SETTINGS, &raw mut mode) }
+        .as_bool()
+    {
+        return Err(format!("Windows display mode is unavailable for {name}"));
+    }
+    // SAFETY: EnumDisplaySettingsW initialized the display union.
+    let orientation = unsafe { mode.Anonymous1.Anonymous2.dmDisplayOrientation };
+    let transform = match orientation.0 {
+        0 => OutputTransform::Normal,
+        1 => OutputTransform::Rotate90,
+        2 => OutputTransform::Rotate180,
+        3 => OutputTransform::Rotate270,
+        _ => return Err("Windows display orientation is unknown".into()),
+    };
+    Ok((
+        OutputMode {
+            width: i32::try_from(mode.dmPelsWidth)
+                .map_err(|_| "Windows display width is invalid")?,
+            height: i32::try_from(mode.dmPelsHeight)
+                .map_err(|_| "Windows display height is invalid")?,
+            refresh_millihz: i32::try_from(mode.dmDisplayFrequency.saturating_mul(1000))
+                .map_err(|_| "Windows display refresh rate is invalid")?,
+        },
+        transform,
+    ))
+}
+
+fn inventory() -> Result<(OutputInventory, Vec<OutputSnapshot>), String> {
+    let observed = crate::platform::remote_observation::outputs()?;
+    if observed.len() > nickel_remote_control::diagnostics::MAX_DIAGNOSTIC_OUTPUTS {
+        return Err("Windows display inventory exceeds the supported output limit".into());
+    }
+    let mut diagnostics = Vec::with_capacity(observed.len());
+    let mut snapshots = Vec::with_capacity(observed.len());
+    for (index, output) in observed.into_iter().enumerate() {
+        let width =
+            i32::try_from(output.bounds.width).map_err(|_| "Windows display width is invalid")?;
+        let height =
+            i32::try_from(output.bounds.height).map_err(|_| "Windows display height is invalid")?;
+        let work_width = i32::try_from(output.work_area.width)
+            .map_err(|_| "Windows work area width is invalid")?;
+        let work_height = i32::try_from(output.work_area.height)
+            .map_err(|_| "Windows work area height is invalid")?;
+        let (mode, transform) = current_mode(&output.name)?;
+        diagnostics.push(OutputDiagnostic {
+            name: output.name.clone(),
+            generation: index as u64 + 1,
+            geometry: [output.bounds.x, output.bounds.y, width, height],
+            work_area: [
+                output.work_area.x,
+                output.work_area.y,
+                work_width,
+                work_height,
+            ],
+            scale_120: output.scale_120,
+            primary: output.primary,
+            enabled: true,
+        });
+        snapshots.push(OutputSnapshot {
+            name: output.name.clone(),
+            model: output.name,
+            geometry: Geometry {
+                x: output.bounds.x,
+                y: output.bounds.y,
+                width,
+                height,
+            },
+            work_area: Geometry {
+                x: output.work_area.x,
+                y: output.work_area.y,
+                width: work_width,
+                height: work_height,
+            },
+            scale_120: output.scale_120,
+            transform,
+            physical_width_mm: 0,
+            physical_height_mm: 0,
+            primary: output.primary,
+            enabled: true,
+            modes: vec![mode],
+            current_mode: Some(mode),
+        });
+    }
+    Ok((
+        OutputInventory {
+            observation_generation: 1,
+            observed_at_us: 0,
+            topology_generation: 1,
+            outputs: diagnostics,
+            truncated: false,
+        },
+        snapshots,
+    ))
+}
+
+pub(crate) fn read(owner: &str) -> DisplayRead {
+    let (pending_confirmation, recovery_error, can_confirm, can_revert) = state()
+        .lock()
+        .map(|state| {
+            (
+                state.pending.is_some(),
+                state.recovery_error.clone(),
+                state.pending.as_ref().is_some_and(|pending| {
+                    pending.owner == owner
+                        && pending.confirmable
+                        && Instant::now() < pending.deadline
+                }),
+                state
+                    .pending
+                    .as_ref()
+                    .is_some_and(|pending| pending.owner == owner),
+            )
+        })
+        .unwrap_or((
+            true,
+            Some("Windows display recovery owner is unavailable".into()),
+            false,
+            false,
+        ));
+    match inventory() {
+        Ok((inventory, outputs)) => match topology::observe(&inventory) {
+            Ok(observed) => DisplayRead {
+                available: observed.transaction_supported && recovery_error.is_none(),
+                revision: Some(display_revision(&outputs, &observed)),
+                reason: recovery_error.or(observed.transaction_unavailable_reason),
+                outputs,
+                pending_confirmation,
+                can_confirm,
+                can_revert,
+            },
+            Err(reason) => DisplayRead {
+                available: false,
+                reason: Some(reason),
+                outputs,
+                revision: None,
+                pending_confirmation,
+                can_confirm,
+                can_revert,
+            },
+        },
+        Err(reason) => DisplayRead {
+            available: false,
+            reason: Some(reason),
+            outputs: Vec::new(),
+            revision: None,
+            pending_confirmation,
+            can_confirm,
+            can_revert,
+        },
+    }
+}
+
+fn display_revision(outputs: &[OutputSnapshot], observation: &Observation) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    crate::display_capabilities::revision(outputs).hash(&mut hash);
+    // The opaque observation also retires when the native adapter/target mapping
+    // changes, even if its public connector geometry happens to stay identical.
+    observation.native_names.hash(&mut hash);
+    format!("{:016x}", hash.finish())
+}
+
+fn requested_layout(
+    requested: &OutputLayout,
+    observed: &Observation,
+    snapshots: &[OutputSnapshot],
+) -> Result<nickel_remote_control::display_layout::Layout, String> {
+    let mut layout = observed.layout.clone();
+    if requested.placements.len() != layout.outputs.len() {
+        return Err("Windows display request must include every active output".into());
+    }
+    let primary = observed
+        .native_names
+        .iter()
+        .find(|(_, name)| *name == &requested.primary)
+        .map(|(id, _)| id.clone())
+        .ok_or("Windows primary display is unknown")?;
+    let primary_placement = requested
+        .placements
+        .iter()
+        .find(|placement| placement.name == requested.primary)
+        .ok_or("Windows primary display is missing from the layout")?;
+    let mut seen = BTreeSet::new();
+    for placement in &requested.placements {
+        if !seen.insert(&placement.name) {
+            return Err("Windows display request contains duplicate outputs".into());
+        }
+        let snapshot = snapshots
+            .iter()
+            .find(|output| output.name == placement.name)
+            .ok_or("Windows display request contains an unknown output")?;
+        if !placement.enabled || placement.scale_120 != snapshot.scale_120 {
+            return Err("Windows display enable and scale changes are unavailable".into());
+        }
+        if placement
+            .mode
+            .is_some_and(|mode| Some(mode) != snapshot.current_mode)
+        {
+            return Err("Windows display mode changes are unavailable".into());
+        }
+        let id = observed
+            .native_names
+            .iter()
+            .find(|(_, name)| *name == &placement.name)
+            .map(|(id, _)| id)
+            .ok_or("Windows display identity is unavailable")?;
+        let output = layout
+            .outputs
+            .iter_mut()
+            .find(|output| &output.output.id == id)
+            .ok_or("Windows display output retired")?;
+        output.x = placement
+            .x
+            .checked_sub(primary_placement.x)
+            .ok_or("Windows display X position exceeds native bounds")?;
+        output.y = placement
+            .y
+            .checked_sub(primary_placement.y)
+            .ok_or("Windows display Y position exceeds native bounds")?;
+    }
+    layout.primary = layout
+        .outputs
+        .iter()
+        .find(|output| output.output.id == primary)
+        .ok_or("Windows primary display retired")?
+        .output
+        .clone();
+    Ok(layout)
+}
+
+fn rotation(transform: OutputTransform) -> Result<u32, String> {
+    match transform {
+        OutputTransform::Normal => Ok(0),
+        OutputTransform::Rotate90 => Ok(1),
+        OutputTransform::Rotate180 => Ok(2),
+        OutputTransform::Rotate270 => Ok(3),
+        _ => Err("Windows mirrored display transforms are unavailable".into()),
+    }
+}
+
+pub(crate) fn set_layout(
+    owner: &str,
+    requested: &OutputLayout,
+    expected_revision: &str,
+) -> Result<(), String> {
+    let mut state_guard = state()
+        .lock()
+        .map_err(|_| "Windows display recovery owner is unavailable")?;
+    if state_guard.pending.is_some() {
+        return Err("Windows display recovery is already pending".into());
+    }
+    if let Some(error) = &state_guard.recovery_error {
+        return Err(format!("Windows display recovery needs attention: {error}"));
+    }
+    let (before_inventory, snapshots) = inventory()?;
+    let observed = topology::observe(&before_inventory)?;
+    if display_revision(&snapshots, &observed) != expected_revision {
+        return Err("Windows display observation is stale".into());
+    }
+    if !observed.transaction_supported {
+        return Err(observed
+            .transaction_unavailable_reason
+            .unwrap_or_else(|| "Windows display topology is unavailable".into()));
+    }
+    let layout = requested_layout(requested, &observed, &snapshots)?;
+    let mut rotations = std::collections::BTreeMap::new();
+    for placement in &requested.placements {
+        if let Some(transform) = placement.transform {
+            let snapshot = snapshots
+                .iter()
+                .find(|output| output.name == placement.name)
+                .ok_or("Windows orientation target retired")?;
+            let native_id = observed
+                .native_names
+                .iter()
+                .find(|(_, name)| **name == placement.name)
+                .map(|(id, _)| id.clone())
+                .ok_or("Windows orientation target retired")?;
+            rotations.insert(
+                native_id,
+                (rotation(snapshot.transform)?, rotation(transform)?),
+            );
+        }
+    }
+    let plan = match topology::apply_position_and_rotation_change(
+        &observed,
+        &observed.layout,
+        &layout,
+        observed.topology_generation,
+        &rotations,
+        || Ok(()),
+    ) {
+        Ok(plan) => plan,
+        Err(failure) => {
+            if let Some(plan) = failure.recovery {
+                if let Err(error) = plan.restore() {
+                    retain_failed_recovery(&mut state_guard, owner, *plan, error);
+                }
+            }
+            return Err(failure.reason);
+        }
+    };
+    let verified = inventory().is_ok_and(|(inventory, outputs)| {
+        topology::observe(&inventory)
+            .is_ok_and(|actual| topology::matches_physical_layout(&actual.layout, &layout))
+            && requested.placements.iter().all(|placement| {
+                placement.transform.is_none_or(|transform| {
+                    outputs.iter().any(|output| {
+                        output.name == placement.name && output.transform == transform
+                    })
+                })
+            })
+    });
+    if !verified {
+        if let Err(error) = plan.restore() {
+            retain_failed_recovery(&mut state_guard, owner, plan, error.clone());
+            return Err(format!(
+                "Windows display readback did not match; recovery failed: {error}"
+            ));
+        }
+        return Err("Windows display readback did not match the requested layout".into());
+    }
+    let deadline = Instant::now() + RECOVERY_WINDOW;
+    state_guard.pending = Some(Pending {
+        owner: owner.into(),
+        plan,
+        deadline,
+        confirmable: true,
+    });
+    drop(state_guard);
+    arm_recovery_watchdog();
+    Ok(())
+}
+
+pub(crate) fn confirm(owner: &str) -> Result<(), String> {
+    let mut guard = state()
+        .lock()
+        .map_err(|_| "Windows display recovery owner is unavailable")?;
+    let pending = guard
+        .pending
+        .as_ref()
+        .ok_or("No Windows display change awaits confirmation")?;
+    if pending.owner != owner {
+        return Err("Another plugin owns the pending display change".into());
+    }
+    if !pending.confirmable {
+        return Err("Windows display recovery must be retried before another change".into());
+    }
+    if Instant::now() >= pending.deadline {
+        return Err("Windows display confirmation window expired".into());
+    }
+    pending.plan.persist()?;
+    guard.pending = None;
+    Ok(())
+}
+
+pub(crate) fn revert(owner: &str) -> Result<(), String> {
+    let mut guard = state()
+        .lock()
+        .map_err(|_| "Windows display recovery owner is unavailable")?;
+    let pending = guard
+        .pending
+        .as_ref()
+        .ok_or("No Windows display change awaits recovery")?;
+    if pending.owner != owner {
+        return Err("Another plugin owns the pending display change".into());
+    }
+    if let Err(error) = pending.plan.restore() {
+        guard.recovery_error = Some(error.clone());
+        return Err(error);
+    }
+    guard.pending = None;
+    guard.recovery_error = None;
+    Ok(())
+}

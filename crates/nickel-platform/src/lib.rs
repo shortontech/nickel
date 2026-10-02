@@ -1,5 +1,6 @@
 //! Shared native platform adapters used by Nickel applications.
 
+mod associations_capability;
 #[cfg(target_os = "linux")]
 pub mod bounded_dbus;
 mod default_apps;
@@ -7,8 +8,6 @@ mod default_apps;
 mod executable_identity;
 #[cfg(target_os = "linux")]
 pub use default_apps::spawn_with_default;
-#[cfg(target_os = "windows")]
-pub mod local_control;
 mod maintenance;
 mod media;
 mod peripherals;
@@ -23,6 +22,11 @@ pub use toolkit_transaction::{
     ScaleTransactionReport, ToolkitOutcome, ToolkitOutcomeKind, transact_application_scale,
 };
 
+pub use associations_capability::{
+    ApplicationAssociationsClient, AssociationCapabilityError, AssociationCatalog,
+    AssociationHandlerInfo, AssociationHandlers, AssociationTargetId, AssociationTargetInfo,
+    NativeApplicationAssociations, SetDefaultRequest, SetDefaultResult,
+};
 pub use default_apps::{
     ApplicationHandler, AssociationBackend, AssociationCapability, AssociationError,
     AssociationFamily, AssociationScope, AssociationService, AssociationSnapshot,

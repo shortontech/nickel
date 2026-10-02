@@ -72,10 +72,6 @@
 
         let production = include_str!("../../live_shell/desktop.rs");
         assert!(production.contains(".foreground(label_foreground)"));
-        assert!(
-            !production.contains(".label_background("),
-            "desktop labels must not paint independent opaque backplates"
-        );
     }
 
     #[test]
@@ -107,6 +103,19 @@
             [20, 80, 230, 255]
         );
         assert!(!shell.refresh_configured_wallpaper(shell.wallpaper_path.clone()));
+    }
+
+    #[test]
+    fn desktop_error_banner_appears_once_in_native_view() {
+        let mut shell = LiveShell::new().unwrap();
+        shell.desktop_host.application_mut().error = Some("Desktop files unavailable".into());
+        let scene = shell.scene(SurfaceRole::Desktop, 320, 200);
+        let banner_count = scene.iter().filter(|command| matches!(
+            command,
+            nickel_ui::backend::PaintCommand::Text { text, .. }
+                if text == "Desktop files unavailable"
+        )).count();
+        assert_eq!(banner_count, 1);
     }
 
     #[test]

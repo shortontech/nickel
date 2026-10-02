@@ -44,7 +44,6 @@ Commands:
 cargo test -p nickel-file
 cargo clippy -p nickel-file --all-targets --all-features -- -D warnings
 cargo check -p nickel-file --target x86_64-pc-windows-gnu
-cargo test -p nickel-settings unavailable_named_file_icon_theme_remains_visible_and_accessible
 cargo test -p nickel-platform unavailable_or_non_local_theme_names_return_no_artwork
 cargo test -p nickel-platform scalable_theme_artwork_rasterizes_at_the_requested_physical_size
 cargo build -p nickel-file --target x86_64-pc-windows-gnu

@@ -27,8 +27,17 @@ impl<Message> Layer<Message> {
         self
     }
 
+    pub fn width_length(mut self, width: Length) -> Self {
+        self.0 = self.0.width_length(width);
+        self
+    }
+
     pub fn height(mut self, height: f32) -> Self {
         self.0 = self.0.height(height);
+        self
+    }
+    pub fn height_length(mut self, height: Length) -> Self {
+        self.0 = self.0.height_length(height);
         self
     }
     pub fn id(mut self, id: impl Into<UiId>) -> Self {
@@ -208,9 +217,15 @@ impl<Message> VerticalScroll<Message> {
             style: Style::default(),
             message: Some(message),
             context_message: None,
+            focus_message: None,
+            blur_message: None,
             message_mapper: None,
+            seeded_value_mapper: None,
             scroll_extent_mapper: None,
+            drag_seed: None,
             drag_mapper: None,
+            drop_message: None,
+            drop_mapper: None,
             text_mapper: None,
             option_messages: Vec::new(),
             inline_messages: Vec::new(),
@@ -256,6 +271,12 @@ impl<Message> VerticalScroll<Message> {
         self
     }
 
+    /// Supply CSS track and thumb without replacing native scrolling behavior.
+    pub fn scrollbar_parts(mut self, track: DropdownPartStyle, thumb: DropdownPartStyle) -> Self {
+        self.0.style.scrollbar_parts = Some(Box::new([track.bounded(), thumb.bounded()]));
+        self
+    }
+
     /// Paint this shared scrollbar from the application's live semantic theme.
     pub fn theme(mut self, theme: crate::SemanticTheme) -> Self {
         self.0.style.scrollbar_palette = theme.scrollbar_palette();
@@ -297,9 +318,15 @@ impl<Message> Grid<Message> {
             style: Style::default(),
             message: None,
             context_message: None,
+            focus_message: None,
+            blur_message: None,
             message_mapper: None,
+            seeded_value_mapper: None,
             scroll_extent_mapper: None,
+            drag_seed: None,
             drag_mapper: None,
+            drop_message: None,
+            drop_mapper: None,
             text_mapper: None,
             option_messages: Vec::new(),
             inline_messages: Vec::new(),
@@ -334,9 +361,15 @@ impl<Message> Grid<Message> {
             style: Style::default(),
             message: None,
             context_message: None,
+            focus_message: None,
+            blur_message: None,
             message_mapper: None,
+            seeded_value_mapper: None,
             scroll_extent_mapper: None,
+            drag_seed: None,
             drag_mapper: None,
+            drop_message: None,
+            drop_mapper: None,
             text_mapper: None,
             option_messages: Vec::new(),
             inline_messages: Vec::new(),
@@ -356,9 +389,15 @@ impl<Message> Grid<Message> {
             style: Style::default(),
             message: None,
             context_message: None,
+            focus_message: None,
+            blur_message: None,
             message_mapper: None,
+            seeded_value_mapper: None,
             scroll_extent_mapper: None,
+            drag_seed: None,
             drag_mapper: None,
+            drop_message: None,
+            drop_mapper: None,
             text_mapper: None,
             option_messages: Vec::new(),
             inline_messages: Vec::new(),
@@ -397,6 +436,16 @@ impl<Message> Grid<Message> {
 
     pub fn gap(mut self, gap: f32) -> Self {
         self.0 = self.0.gap(gap);
+        self
+    }
+
+    pub fn align_items(mut self, align: Align) -> Self {
+        self.0 = self.0.align_items(align);
+        self
+    }
+
+    pub fn justify_content(mut self, justify: Justify) -> Self {
+        self.0 = self.0.justify_content(justify);
         self
     }
 
@@ -766,6 +815,11 @@ impl<Message> FilePlaneItem<Message> {
         self
     }
 
+    pub fn on_drop(mut self, event: (Message, fn(Message, DropGesture) -> Message)) -> Self {
+        self.container = self.container.on_drop(event);
+        self
+    }
+
     pub fn focus_background_tint(mut self, color: Color) -> Self {
         self.container = self.container.focus_background_tint(color);
         self
@@ -863,9 +917,15 @@ impl<Message> StyledText<Message> {
             },
             message: None,
             context_message: None,
+            focus_message: None,
+            blur_message: None,
             message_mapper: None,
+            seeded_value_mapper: None,
             scroll_extent_mapper: None,
+            drag_seed: None,
             drag_mapper: None,
+            drop_message: None,
+            drop_mapper: None,
             text_mapper: None,
             option_messages: Vec::new(),
             inline_messages: Vec::new(),
@@ -924,6 +984,27 @@ impl<Message> Component<Message> for StyledText<Message> {
 pub struct Text<Message = String>(Element<Message>);
 
 impl<Message> Text<Message> {
+    pub fn part_interaction_text(mut self, paints: [InteractionPaint; 3]) -> Self {
+        self.0.style.parent_interaction = true;
+        self.0.style.interaction_paints = Some(Box::new(paints.map(|paint| InteractionPaint {
+            foreground: paint.foreground,
+            font_size: paint.font_size,
+            line_height: paint.line_height,
+            ..InteractionPaint::default()
+        })));
+        self
+    }
+
+    pub fn inherited_state_text(mut self, inherited: [bool; 3]) -> Self {
+        self.0.style.inherited_state_text = inherited;
+        self
+    }
+
+    pub fn css_paint(mut self, enabled: bool) -> Self {
+        self.0.style.css_paint = enabled;
+        self
+    }
+
     pub fn new(value: impl Into<String>) -> Self {
         let value = value.into();
         Self(Element::text(value.clone(), 2.0).accessibility_label(value))
@@ -940,6 +1021,14 @@ impl<Message> Text<Message> {
         } = &mut self.0.kind
         {
             *text_scale = scale;
+        }
+        self
+    }
+
+    /// Set an exact pixel font size, independent of the legacy discrete text scale.
+    pub fn font_size(mut self, pixels: f32) -> Self {
+        if let Kind::Text { scale, .. } = &mut self.0.kind {
+            *scale = -pixels.max(1.0);
         }
         self
     }
@@ -1117,9 +1206,15 @@ impl<Message> CustomPaint<Message> {
             style: Style::default(),
             message: None,
             context_message: None,
+            focus_message: None,
+            blur_message: None,
             message_mapper: None,
+            seeded_value_mapper: None,
             scroll_extent_mapper: None,
+            drag_seed: None,
             drag_mapper: None,
+            drop_message: None,
+            drop_mapper: None,
             text_mapper: None,
             option_messages: Vec::new(),
             inline_messages: Vec::new(),
@@ -1138,9 +1233,15 @@ impl<Message> CustomPaint<Message> {
             style: Style::default(),
             message: None,
             context_message: None,
+            focus_message: None,
+            blur_message: None,
             message_mapper: None,
+            seeded_value_mapper: None,
             scroll_extent_mapper: None,
+            drag_seed: None,
             drag_mapper: None,
+            drop_message: None,
+            drop_mapper: None,
             text_mapper: None,
             option_messages: Vec::new(),
             inline_messages: Vec::new(),
@@ -1172,6 +1273,11 @@ impl<Message> CustomPaint<Message> {
 
     pub fn on_drag(mut self, (seed, map): (Message, fn(Message, DragGesture) -> Message)) -> Self {
         self.0 = self.0.on_drag(seed, map);
+        self
+    }
+
+    pub fn on_drop(mut self, (seed, map): (Message, fn(Message, DropGesture) -> Message)) -> Self {
+        self.0 = self.0.on_drop(seed, map);
         self
     }
 
@@ -1244,9 +1350,15 @@ impl<Message> Image<Message> {
             },
             message: None,
             context_message: None,
+            focus_message: None,
+            blur_message: None,
             message_mapper: None,
+            seeded_value_mapper: None,
             scroll_extent_mapper: None,
+            drag_seed: None,
             drag_mapper: None,
+            drop_message: None,
+            drop_mapper: None,
             text_mapper: None,
             option_messages: Vec::new(),
             inline_messages: Vec::new(),
@@ -1424,7 +1536,7 @@ impl<Message> TextField<Message> {
         if let Kind::Text { input_value, .. } = &mut field.text.0.kind {
             *input_value = Some(value.to_owned());
         }
-        field.text.0.text_mapper = Some(map);
+        field.text.0.text_mapper = Some(TextMessageMapper::Function(map));
         field
     }
 
@@ -1433,8 +1545,32 @@ impl<Message> TextField<Message> {
         placeholder: impl Into<String>,
         map: fn(String) -> Message,
     ) -> Self {
+        let mut field = Self::on_change_with_placeholder_mapped_internal(value, placeholder);
+        field.text.0.text_mapper = Some(TextMessageMapper::Function(map));
+        field
+    }
+
+    /// Map edits with a field-specific callback, useful for dynamic component trees.
+    pub fn on_change_with_placeholder_mapped(
+        value: &str,
+        placeholder: impl Into<String>,
+        map: impl Fn(String) -> Message + 'static,
+    ) -> Self
+    where
+        Message: 'static,
+    {
+        let mut field = Self::on_change_with_placeholder_mapped_internal(value, placeholder);
+        field.text.0.text_mapper = Some(TextMessageMapper::new(map));
+        field
+    }
+
+    fn on_change_with_placeholder_mapped_internal(
+        value: &str,
+        placeholder: impl Into<String>,
+    ) -> Self {
+        let placeholder = placeholder.into();
         let displayed = if value.is_empty() {
-            placeholder.into()
+            placeholder.clone()
         } else {
             value.to_owned()
         };
@@ -1443,10 +1579,15 @@ impl<Message> TextField<Message> {
             displayed,
             single_line_height: None,
         };
-        if let Kind::Text { input_value, .. } = &mut field.text.0.kind {
+        if let Kind::Text {
+            input_value,
+            input_placeholder,
+            ..
+        } = &mut field.text.0.kind
+        {
             *input_value = Some(value.to_owned());
+            *input_placeholder = Some(placeholder);
         }
-        field.text.0.text_mapper = Some(map);
         field
     }
 
@@ -1468,7 +1609,7 @@ impl<Message> TextField<Message> {
             *input_value = Some(value.to_owned());
             *input_mask = Some(mask);
         }
-        field.text.0.text_mapper = Some(map);
+        field.text.0.text_mapper = Some(TextMessageMapper::Function(map));
         field
     }
 
@@ -1478,8 +1619,19 @@ impl<Message> TextField<Message> {
         mask: char,
         map: fn(String) -> Message,
     ) -> Self {
+        let mut field = Self::on_change_masked_with_placeholder_internal(value, placeholder, mask);
+        field.text.0.text_mapper = Some(TextMessageMapper::Function(map));
+        field
+    }
+
+    fn on_change_masked_with_placeholder_internal(
+        value: &str,
+        placeholder: impl Into<String>,
+        mask: char,
+    ) -> Self {
+        let placeholder = placeholder.into();
         let displayed = if value.is_empty() {
-            placeholder.into()
+            placeholder.clone()
         } else {
             std::iter::repeat_n(mask, value.chars().count()).collect()
         };
@@ -1490,15 +1642,108 @@ impl<Message> TextField<Message> {
         };
         if let Kind::Text {
             input_value,
+            input_placeholder,
             input_mask,
             ..
         } = &mut field.text.0.kind
         {
             *input_value = Some(value.to_owned());
+            *input_placeholder = Some(placeholder);
             *input_mask = Some(mask);
         }
-        field.text.0.text_mapper = Some(map);
         field
+    }
+
+    /// Map edits from a masked field with a field-specific callback.
+    pub fn on_change_masked_with_placeholder_mapped(
+        value: &str,
+        placeholder: impl Into<String>,
+        mask: char,
+        map: impl Fn(String) -> Message + 'static,
+    ) -> Self
+    where
+        Message: 'static,
+    {
+        let mut field = Self::on_change_masked_with_placeholder_internal(value, placeholder, mask);
+        field.text.0.text_mapper = Some(TextMessageMapper::new(map));
+        field
+    }
+
+    /// Apply typed compiler-owned editor frame, caret and selection styles.
+    pub fn presentation(
+        mut self,
+        frame: DropdownPartStyle,
+        caret: DropdownPartStyle,
+        selection: DropdownPartStyle,
+    ) -> Self {
+        let frame = frame.bounded();
+        self.text.0.style.background = frame
+            .background
+            .filter(|color| *color != 0)
+            .map(Background::Solid);
+        self.text.0.style.foreground = Some(frame.foreground.unwrap_or(0));
+        self.text.0.style.border = frame.border_color.filter(|color| *color != 0);
+        self.text.0.style.border_width = frame.border_width;
+        self.text.0.style.corner_radius = frame.radius;
+        self.text.0.style.padding = frame.padding;
+        self.text.0.style.hover_background =
+            frame.interaction_backgrounds[0].map(Background::Solid);
+        self.text.0.style.pressed_background =
+            frame.interaction_backgrounds[1].map(Background::Solid);
+        self.text.0.style.focus_background =
+            frame.interaction_backgrounds[2].map(Background::Solid);
+        self.text.0.style.interaction_paints = Some(Box::new(frame.interaction_paints));
+        self.text.0.style.css_paint = true;
+        self.text.0.style.automatic_focus_tint = false;
+        self.text.0.style.editing_parts = Some(Box::new([caret.bounded(), selection.bounded()]));
+        self.text.0.style.overflow_x = Overflow::Clip;
+        self.text.0.style.overflow_y = Overflow::Clip;
+        if frame.font_size > 0.0 {
+            self.text = self.text.font_size(frame.font_size);
+        }
+        if frame.line_height > 0.0 {
+            self.text = self.text.line_height(frame.line_height);
+        }
+        self
+    }
+
+    pub fn context_menu_presentation(mut self, menu: crate::OverlayMenuPresentation) -> Self {
+        self.text.0.style.editing_menu = Some(Box::new(menu));
+        self
+    }
+
+    pub fn auto_focus(mut self, auto_focus: bool) -> Self {
+        self.text.0.style.auto_focus = auto_focus;
+        self
+    }
+
+    pub fn width_length(mut self, width: Length) -> Self {
+        self.text.0.style.width = width;
+        self
+    }
+    pub fn height_length(mut self, height: Length) -> Self {
+        self.text.0.style.height = height;
+        self
+    }
+    pub fn min_width(mut self, width: f32) -> Self {
+        self.text.0.style.min_width = width;
+        self
+    }
+    pub fn max_width(mut self, width: f32) -> Self {
+        self.text.0.style.max_width = width;
+        self
+    }
+    pub fn min_height(mut self, height: f32) -> Self {
+        self.text.0.style.min_height = height;
+        self
+    }
+    pub fn max_height(mut self, height: f32) -> Self {
+        self.text.0.style.max_height = height;
+        self
+    }
+    pub fn shrink(mut self, shrink: f32) -> Self {
+        self.text.0.style.shrink = shrink;
+        self
     }
 
     pub fn display_text(&self) -> &str {
@@ -1515,8 +1760,28 @@ impl<Message> TextField<Message> {
         self
     }
 
+    pub fn focus_message(mut self, message: Message) -> Self {
+        self.text.0 = self.text.0.focus_message(message);
+        self
+    }
+
+    pub fn blur_message(mut self, message: Message) -> Self {
+        self.text.0 = self.text.0.blur_message(message);
+        self
+    }
+
     pub fn scale(mut self, scale: f32) -> Self {
         self.text = self.text.scale(scale);
+        self
+    }
+
+    pub fn font_size(mut self, pixels: f32) -> Self {
+        self.text = self.text.font_size(pixels);
+        self
+    }
+
+    pub fn line_height(mut self, pixels: f32) -> Self {
+        self.text = self.text.line_height(pixels);
         self
     }
 
@@ -1532,6 +1797,11 @@ impl<Message> TextField<Message> {
 
     pub fn focus_background_tint(mut self, color: Color) -> Self {
         self.text.0 = self.text.0.focus_background_tint(color);
+        self
+    }
+
+    pub fn focus_background(mut self, background: impl Into<Background>) -> Self {
+        self.text.0 = self.text.0.focus_background(background);
         self
     }
 
@@ -1588,6 +1858,27 @@ impl<Message> Component<Message> for Header<Message> {
 pub struct Container<Message = String>(Element<Message>);
 
 impl<Message> Container<Message> {
+    pub fn part_interaction_paints(mut self, paints: [InteractionPaint; 3]) -> Self {
+        self.0.style.parent_interaction = true;
+        self.0.style.interaction_paints = Some(Box::new(paints));
+        self
+    }
+
+    pub fn css_paint(mut self, enabled: bool) -> Self {
+        self.0.style.css_paint = enabled;
+        self
+    }
+
+    pub fn interaction_paints(mut self, paints: [InteractionPaint; 3]) -> Self {
+        self.0.style.interaction_paints = Some(Box::new(paints));
+        self
+    }
+
+    pub fn automatic_focus_tint(mut self, enabled: bool) -> Self {
+        self.0.style.automatic_focus_tint = enabled;
+        self
+    }
+
     pub fn new() -> Self {
         Self(Element::flex(Axis::Vertical))
     }
@@ -1612,6 +1903,16 @@ impl<Message> Container<Message> {
         self
     }
 
+    pub fn clear_background(mut self) -> Self {
+        self.0.style.background = None;
+        self
+    }
+
+    pub fn clear_border(mut self) -> Self {
+        self.0.style.border = None;
+        self
+    }
+
     pub fn interaction_backgrounds(
         mut self,
         hover: impl Into<Background>,
@@ -1633,6 +1934,11 @@ impl<Message> Container<Message> {
 
     pub fn focus_background_tint(mut self, color: Color) -> Self {
         self.0 = self.0.focus_background_tint(color);
+        self
+    }
+
+    pub fn focus_background(mut self, background: impl Into<Background>) -> Self {
+        self.0 = self.0.focus_background(background);
         self
     }
 
@@ -1668,6 +1974,26 @@ impl<Message> Container<Message> {
 
     pub fn radius(mut self, radius: f32) -> Self {
         self.0 = self.0.radius(radius);
+        self
+    }
+
+    pub fn box_shadow(mut self, shadow: BoxShadow) -> Self {
+        self.0 = self.0.box_shadow(shadow);
+        self
+    }
+
+    pub fn backdrop_blur(mut self, radius: f32) -> Self {
+        self.0 = self.0.backdrop_blur(radius);
+        self
+    }
+
+    pub fn proximity_magnification(mut self, magnification: crate::ProximityMagnification) -> Self {
+        self.0 = self.0.proximity_magnification(magnification);
+        self
+    }
+
+    pub fn transition_duration_ms(mut self, duration: f32) -> Self {
+        self.0 = self.0.transition_duration_ms(duration);
         self
     }
 
@@ -1796,8 +2122,23 @@ impl<Message> Container<Message> {
         self
     }
 
+    pub fn on_drop(mut self, (seed, map): (Message, fn(Message, DropGesture) -> Message)) -> Self {
+        self.0 = self.0.on_drop(seed, map);
+        self
+    }
+
     pub fn context_message(mut self, message: Message) -> Self {
         self.0 = self.0.context_message(message);
+        self
+    }
+
+    pub fn focus_message(mut self, message: Message) -> Self {
+        self.0 = self.0.focus_message(message);
+        self
+    }
+
+    pub fn blur_message(mut self, message: Message) -> Self {
+        self.0 = self.0.blur_message(message);
         self
     }
 
@@ -2304,6 +2645,16 @@ impl<Message> Button<Message> {
 
     pub fn id(mut self, id: impl Into<UiId>) -> Self {
         self.0 = self.0.id(id);
+        self
+    }
+
+    pub fn accessibility_label(mut self, label: impl Into<String>) -> Self {
+        self.0 = self.0.accessibility_label(label);
+        self
+    }
+
+    pub fn accessibility_state(mut self, state: impl Into<String>) -> Self {
+        self.0 = self.0.accessibility_state(state);
         self
     }
 
@@ -2836,13 +3187,21 @@ impl<Message> Slider<Message> {
                 fill: 0x68b8ff,
                 thumb: 0xf4f7ff,
                 thumb_border: 0x8868b8ff,
+                geometry: [6.0, 3.0, 20.0, 20.0, 10.0, 1.0],
+                presentation: None,
             },
             style: Style::default(),
             message: Some(message),
             context_message: None,
+            focus_message: None,
+            blur_message: None,
             message_mapper: None,
+            seeded_value_mapper: None,
             scroll_extent_mapper: None,
+            drag_seed: None,
             drag_mapper: None,
+            drop_message: None,
+            drop_mapper: None,
             text_mapper: None,
             option_messages: Vec::new(),
             inline_messages: Vec::new(),
@@ -2861,6 +3220,25 @@ impl<Message> Slider<Message> {
         slider
     }
 
+    pub fn on_change_with(seed: Message, map: fn(Message, f32) -> Message, value: f32) -> Self {
+        let mut slider = Self::new(seed, value);
+        slider.0.seeded_value_mapper = Some(map);
+        slider
+    }
+
+    pub fn parts(
+        mut self,
+        track: DropdownPartStyle,
+        fill: DropdownPartStyle,
+        thumb: DropdownPartStyle,
+    ) -> Self {
+        if let Kind::Slider { presentation, .. } = &mut self.0.kind {
+            *presentation = Some(Box::new([track.bounded(), fill.bounded(), thumb.bounded()]));
+        }
+        self.0.style.automatic_focus_tint = false;
+        self
+    }
+
     pub fn colors(mut self, track: Color, fill: Color, thumb: Color) -> Self {
         if let Kind::Slider {
             track: slider_track,
@@ -2872,6 +3250,36 @@ impl<Message> Slider<Message> {
             *slider_track = track;
             *slider_fill = fill;
             *slider_thumb = thumb;
+        }
+        self
+    }
+
+    /// Explicit native slider part geometry, supplied by a presentation compiler.
+    pub fn geometry(
+        mut self,
+        track_height: f32,
+        track_radius: f32,
+        thumb_width: f32,
+        thumb_height: f32,
+        thumb_radius: f32,
+        border_width: f32,
+    ) -> Self {
+        if let Kind::Slider { geometry, .. } = &mut self.0.kind {
+            *geometry = [
+                track_height,
+                track_radius,
+                thumb_width,
+                thumb_height,
+                thumb_radius,
+                border_width,
+            ]
+            .map(|value| {
+                if value.is_finite() {
+                    value.clamp(0.0, 4096.0)
+                } else {
+                    0.0
+                }
+            });
         }
         self
     }
@@ -2892,8 +3300,22 @@ impl<Message> Slider<Message> {
         self
     }
 
+    pub fn automatic_focus_tint(mut self, enabled: bool) -> Self {
+        self.0.style.automatic_focus_tint = enabled;
+        self
+    }
+    pub fn width_length(mut self, width: Length) -> Self {
+        self.0.style.width = width;
+        self
+    }
+
     pub fn width(mut self, width: f32) -> Self {
         self.0 = self.0.width(width);
+        self
+    }
+
+    pub fn height_length(mut self, height: Length) -> Self {
+        self.0.style.height = height;
         self
     }
 
@@ -2924,6 +3346,87 @@ impl<Message> Component<Message> for Slider<Message> {
     }
 }
 
+/// Typed presentation for a native compound-control part. Geometry is shared by paint,
+/// hit testing and accessibility; a CSS compiler can leave every paint absent.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct DropdownPartStyle {
+    pub width: f32,
+    pub height: f32,
+    pub padding: Insets,
+    pub margin: Insets,
+    pub background: Option<Color>,
+    /// Hover, pressed and focused backgrounds supplied by CSS.
+    pub interaction_backgrounds: [Option<Color>; 3],
+    pub interaction_paints: [InteractionPaint; 3],
+    /// Foreground, font size and line height inheritance from the owning control.
+    pub inherited_text: [bool; 3],
+    pub foreground: Option<Color>,
+    pub border_color: Option<Color>,
+    pub border_width: f32,
+    pub radius: f32,
+    pub font_size: f32,
+    pub line_height: f32,
+}
+
+impl DropdownPartStyle {
+    pub(crate) fn inherited_paint(mut self, paint: InteractionPaint) -> Self {
+        if self.inherited_text[0] {
+            self.foreground = paint.foreground.or(self.foreground);
+        }
+        if self.inherited_text[1] {
+            self.font_size = paint.font_size.unwrap_or(self.font_size);
+        }
+        if self.inherited_text[2] {
+            self.line_height = paint.line_height.unwrap_or(self.line_height);
+        }
+        self
+    }
+
+    pub(crate) fn with_interaction(mut self, index: usize) -> Self {
+        let paint = self.interaction_paints[index];
+        self.background = paint
+            .background
+            .or(self.interaction_backgrounds[index])
+            .or(self.background);
+        self.foreground = paint.foreground.or(self.foreground);
+        self.border_color = paint.border_color.or(self.border_color);
+        self.border_width = paint.border_width.unwrap_or(self.border_width);
+        self.radius = paint.radius.unwrap_or(self.radius);
+        self.font_size = paint.font_size.unwrap_or(self.font_size);
+        self.line_height = paint.line_height.unwrap_or(self.line_height);
+        self
+    }
+
+    pub(crate) fn bounded(mut self) -> Self {
+        let bound = |value: f32| {
+            if value.is_finite() {
+                value.clamp(0.0, 4096.0)
+            } else {
+                0.0
+            }
+        };
+        self.width = bound(self.width);
+        self.height = bound(self.height);
+        self.padding = Insets {
+            top: bound(self.padding.top),
+            right: bound(self.padding.right),
+            bottom: bound(self.padding.bottom),
+            left: bound(self.padding.left),
+        };
+        self.margin = Insets {
+            top: bound(self.margin.top),
+            right: bound(self.margin.right),
+            bottom: bound(self.margin.bottom),
+            left: bound(self.margin.left),
+        };
+        self.border_width = bound(self.border_width);
+        self.radius = bound(self.radius);
+        self.font_size = bound(self.font_size);
+        self.line_height = bound(self.line_height);
+        self
+    }
+}
+
 pub struct Dropdown<Message = String>(Element<Message>);
 
 impl<Message> Dropdown<Message> {
@@ -2948,13 +3451,22 @@ impl<Message> Dropdown<Message> {
                 background: 0x27344c,
                 option_background: 0x34445f,
                 foreground: 0xf4f7ff,
+                presentation: None,
+                option_presentations: Vec::new(),
+                resolved_options: Vec::new(),
             },
             style: Style::default(),
             message: Some(toggle_message),
             context_message: None,
+            focus_message: None,
+            blur_message: None,
             message_mapper: None,
+            seeded_value_mapper: None,
             scroll_extent_mapper: None,
+            drag_seed: None,
             drag_mapper: None,
+            drop_message: None,
+            drop_mapper: None,
             text_mapper: None,
             option_messages,
             inline_messages: Vec::new(),
@@ -2966,6 +3478,33 @@ impl<Message> Dropdown<Message> {
         };
         element.style.height = Length::Px(42.0);
         Self(element)
+    }
+
+    pub fn option_parts(mut self, styles: impl IntoIterator<Item = DropdownPartStyle>) -> Self {
+        if let Kind::Dropdown {
+            option_presentations,
+            ..
+        } = &mut self.0.kind
+        {
+            *option_presentations = styles.into_iter().map(DropdownPartStyle::bounded).collect();
+        }
+        self
+    }
+
+    /// Replace the native stock appearance with compiler-owned part styles.
+    /// Header and option heights also drive input and overlay placement.
+    pub fn parts(
+        mut self,
+        header: DropdownPartStyle,
+        option: DropdownPartStyle,
+        indicator: DropdownPartStyle,
+    ) -> Self {
+        let parts = [header.bounded(), option.bounded(), indicator.bounded()];
+        self.0.style.height = Length::Px(parts[0].height + parts[0].margin.height());
+        if let Kind::Dropdown { presentation, .. } = &mut self.0.kind {
+            *presentation = Some(Box::new(parts));
+        }
+        self
     }
 
     pub fn id(mut self, id: impl Into<UiId>) -> Self {
@@ -3110,6 +3649,9 @@ impl<Message: Clone> Menu<Message> {
                 background: 0x171b22,
                 option_background: 0x202630,
                 foreground: 0xe8edf4,
+                presentation: None,
+                option_presentations: Vec::new(),
+                resolved_options: Vec::new(),
             },
             style: Style::default(),
             message: Some(toggle_message.clone()),
@@ -3117,9 +3659,15 @@ impl<Message: Clone> Menu<Message> {
             // secondary-click, Shift+F10, controller menu, and accessibility
             // invocation on the same typed transition as ordinary activation.
             context_message: Some(toggle_message),
+            focus_message: None,
+            blur_message: None,
             message_mapper: None,
+            seeded_value_mapper: None,
             scroll_extent_mapper: None,
+            drag_seed: None,
             drag_mapper: None,
+            drop_message: None,
+            drop_mapper: None,
             text_mapper: None,
             option_messages: items.into_iter().map(|item| item.message).collect(),
             inline_messages: Vec::new(),

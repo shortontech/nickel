@@ -1,4 +1,4 @@
-use std::ffi::OsString;
+use std::{ffi::OsString, io::Write};
 
 use nickel_session_protocol::{
     InputState, PointerInteraction, PreviewTargetAction, RecoveryTargetAction,
@@ -20,6 +20,11 @@ Usage:
   nickel-test-input outputs
   nickel-test-input output-set NAME enabled|disabled
   nickel-test-input surfaces
+  nickel-test-input layouts
+  nickel-test-input layout INTERNAL_SURFACE_ID [NODE_OFFSET]
+  nickel-test-input plugins
+  nickel-test-input plugin-set ID enabled|disabled
+  nickel-test-input plugin-setting ID KEY JSON_VALUE
   nickel-test-input readiness
   nickel-test-input keyboard-status
   nickel-test-input semantic keyboard KEY_ID
@@ -42,6 +47,7 @@ Usage:
   nickel-test-input semantic panel-app APPLICATION_ID hover|click [OUTPUT]
   nickel-test-input semantic control-center open [OUTPUT]
   nickel-test-input semantic control-center lock
+  nickel-test-input semantic codex open [OUTPUT]
   nickel-test-input semantic preview WINDOW_ID hover|activate|close|menu
   nickel-test-input semantic menu WINDOW_ID close|maximize|minimize
   nickel-test-input semantic screenshot selection-start|selection-end|confirm|copy|save|temp|cancel
@@ -57,7 +63,7 @@ Usage:
   nickel-test-input wheel HORIZONTAL_V120 VERTICAL_V120
   nickel-test-input button left|right pressed|released
   nickel-test-input emergency-control synthetic|physical-fixture left|right pressed|released
-  nickel-test-input key a|c|e|p|s|t|u|v|x|slash|enter|escape|tab|alt|shift|control|meta|left|right|up|down|space|backspace|delete|f11|print-screen|volume-up|volume-down|volume-mute|media-play-pause|media-play|media-pause|media-stop|media-next|media-previous|media-fast-forward|media-rewind pressed|released
+  nickel-test-input key a|c|e|n|p|r|s|t|u|v|x|slash|enter|escape|tab|alt|shift|control|meta|left|right|up|down|space|backspace|delete|f4|f11|print-screen|volume-up|volume-down|volume-mute|media-play-pause|media-play|media-pause|media-stop|media-next|media-previous|media-fast-forward|media-rewind pressed|released
 ";
 
 #[cfg_attr(not(unix), allow(dead_code))]
@@ -74,6 +80,18 @@ enum Parsed {
         enabled: bool,
     },
     Surfaces,
+    Layouts,
+    Layout(String, usize),
+    Plugins,
+    PluginSet {
+        id: String,
+        enabled: bool,
+    },
+    PluginSetting {
+        id: String,
+        key: String,
+        value: serde_json::Value,
+    },
     Readiness,
     OutputConnect {
         name: String,
@@ -134,6 +152,29 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Parsed, String> {
             },
         }),
         [command] if command == "surfaces" => Ok(Parsed::Surfaces),
+        [command] if command == "layouts" => Ok(Parsed::Layouts),
+        [command, surface] if command == "layout" => Ok(Parsed::Layout(surface.clone(), 0)),
+        [command, surface, offset] if command == "layout" => Ok(Parsed::Layout(
+            surface.clone(),
+            offset
+                .parse()
+                .map_err(|_| format!("invalid layout offset {offset:?}"))?,
+        )),
+        [command] if command == "plugins" => Ok(Parsed::Plugins),
+        [command, id, state] if command == "plugin-set" => Ok(Parsed::PluginSet {
+            id: id.clone(),
+            enabled: match state.as_str() {
+                "enabled" => true,
+                "disabled" => false,
+                _ => return Err(format!("unknown plugin state {state:?}")),
+            },
+        }),
+        [command, id, key, value] if command == "plugin-setting" => Ok(Parsed::PluginSetting {
+            id: id.clone(),
+            key: key.clone(),
+            value: serde_json::from_str(value)
+                .map_err(|error| format!("invalid JSON value: {error}"))?,
+        }),
         [command] if command == "readiness" => Ok(Parsed::Readiness),
         [command] if command == "keyboard-status" => Ok(Parsed::KeyboardStatus),
         [command, kind, key] if command == "semantic" && kind == "keyboard" => {
@@ -303,6 +344,16 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Parsed, String> {
                 _ => Err(format!("unknown control-center action {action:?}")),
             }
         }
+        [command, kind, action] | [command, kind, action, _]
+            if command == "semantic" && kind == "codex" =>
+        {
+            match action.as_str() {
+                "open" => Ok(Parsed::Semantic(ShellSemanticTarget::PanelCodex {
+                    output: args.get(3).cloned(),
+                })),
+                _ => Err(format!("unknown Codex action {action:?}")),
+            }
+        }
         [command, kind, window, action] if command == "semantic" && kind == "preview" => {
             Ok(Parsed::Semantic(ShellSemanticTarget::PreviewWindow {
                 window: nickel_session_protocol::WindowId(
@@ -430,7 +481,9 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Parsed, String> {
                 "a" => TestKey::A,
                 "c" => TestKey::C,
                 "e" => TestKey::E,
+                "n" => TestKey::N,
                 "p" => TestKey::P,
+                "r" => TestKey::R,
                 "s" => TestKey::S,
                 "t" => TestKey::T,
                 "u" => TestKey::U,
@@ -451,6 +504,7 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Parsed, String> {
                 "space" => TestKey::Space,
                 "backspace" => TestKey::Backspace,
                 "delete" => TestKey::Delete,
+                "f4" => TestKey::F4,
                 "f11" => TestKey::F11,
                 "print-screen" => TestKey::PrintScreen,
                 "volume-up" => TestKey::VolumeUp,
@@ -746,6 +800,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Parsed::OutputSet { name, enabled } => Some((name.clone(), *enabled)),
         _ => None,
     };
+    let plugin_set = match &parsed {
+        Parsed::PluginSet { id, enabled } => Some((id.clone(), *enabled)),
+        _ => None,
+    };
+    let plugin_setting = match &parsed {
+        Parsed::PluginSetting { id, key, value } => Some((id.clone(), key.clone(), value.clone())),
+        _ => None,
+    };
     if let Parsed::GroupedWindowsScenario(application_id) = &parsed {
         return run_grouped_windows_scenario(application_id);
     }
@@ -783,6 +845,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Some(Request::Query(
                 nickel_session_protocol::Query::ShellSurfaces,
             )),
+            None,
+        ),
+        Parsed::Layouts => (
+            Some(Request::Query(nickel_session_protocol::Query::UiLayouts)),
+            None,
+        ),
+        Parsed::Layout(surface, offset) => (
+            Some(Request::Query(nickel_session_protocol::Query::UiLayout {
+                surface,
+                offset,
+            })),
+            None,
+        ),
+        Parsed::Plugins => (
+            Some(Request::Query(nickel_session_protocol::Query::Plugins)),
+            None,
+        ),
+        Parsed::PluginSet { .. } => (
+            Some(Request::Query(nickel_session_protocol::Query::Plugins)),
+            None,
+        ),
+        Parsed::PluginSetting { .. } => (
+            Some(Request::Query(nickel_session_protocol::Query::Plugins)),
             None,
         ),
         Parsed::Readiness => (
@@ -975,6 +1060,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     y: output.geometry.y,
                     scale_120: output.scale_120,
                     mode: None,
+                    transform: None,
                 })
                 .collect(),
         };
@@ -991,6 +1077,61 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         response_envelope = decode::<ServerEnvelope>(&response[..length])?;
         if response_envelope.request_id != request_id {
             return Err("output update response has the wrong request ID".into());
+        }
+    }
+    if let Some((id, enabled)) = plugin_set {
+        let ServerMessage::Plugins(snapshot) = response_envelope.message.clone() else {
+            return Err("plugin query returned the wrong response".into());
+        };
+        if !snapshot.plugins.iter().any(|plugin| plugin.id == id) {
+            return Err(format!("unknown plugin {id:?}").into());
+        }
+        request_id += 1;
+        socket.send_to(
+            &encode(&ClientEnvelope {
+                token: token.clone(),
+                request_id,
+                request: Request::Command(Command::SetPluginEnabled {
+                    id,
+                    enabled,
+                    observed_generation: snapshot.activation_generation,
+                }),
+            })?,
+            &control,
+        )?;
+        length = socket.recv(&mut response)?;
+        response_envelope = decode::<ServerEnvelope>(&response[..length])?;
+        if response_envelope.request_id != request_id {
+            return Err("plugin update response has the wrong request ID".into());
+        }
+    }
+    if let Some((id, key, value)) = plugin_setting {
+        let ServerMessage::Plugins(snapshot) = response_envelope.message.clone() else {
+            return Err("plugin query returned the wrong response".into());
+        };
+        if !snapshot.plugins.iter().any(|plugin| {
+            plugin.id == id && plugin.settings.iter().any(|setting| setting.id == key)
+        }) {
+            return Err(format!("unknown plugin setting {id:?}/{key:?}").into());
+        }
+        request_id += 1;
+        socket.send_to(
+            &encode(&ClientEnvelope {
+                token: token.clone(),
+                request_id,
+                request: Request::Command(Command::SetPluginSetting {
+                    id,
+                    key,
+                    value,
+                    observed_generation: snapshot.activation_generation,
+                }),
+            })?,
+            &control,
+        )?;
+        length = socket.recv(&mut response)?;
+        response_envelope = decode::<ServerEnvelope>(&response[..length])?;
+        if response_envelope.request_id != request_id {
+            return Err("plugin setting response has the wrong request ID".into());
         }
     }
     if let ServerMessage::ShellSemanticTarget(target) = response_envelope.message.clone() {
@@ -1039,6 +1180,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         ServerMessage::Ack => Ok(()),
         ServerMessage::OnScreenKeyboard(snapshot) => {
+            println!("{}", serde_json::to_string(&snapshot)?);
+            Ok(())
+        }
+        ServerMessage::Plugins(snapshot) => {
             println!("{}", serde_json::to_string(&snapshot)?);
             Ok(())
         }
@@ -1138,7 +1283,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ServerMessage::ShellSurfaces(surfaces) => {
             for surface in surfaces {
                 println!(
-                    "{:?}\t{}\t{}",
+                    "{:?}\t{}\t{}{}",
                     surface.role,
                     surface.output.as_deref().unwrap_or("unmapped"),
                     surface.geometry.map_or_else(
@@ -1147,10 +1292,51 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             "{},{} {}x{}",
                             geometry.x, geometry.y, geometry.width, geometry.height
                         )
-                    )
+                    ),
+                    surface.plugin.as_ref().map_or_else(String::new, |plugin| {
+                        format!("\t{}/{}", plugin.plugin_id, plugin.surface_id)
+                    })
                 );
             }
             Ok(())
+        }
+        ServerMessage::UiLayouts(surfaces) => {
+            for surface in surfaces {
+                println!(
+                    "{}\t{}\t{}\t{}x{}+{},{}\tnodes={}{}",
+                    surface.id,
+                    surface.role,
+                    if surface.visible { "visible" } else { "hidden" },
+                    surface.geometry.width,
+                    surface.geometry.height,
+                    surface.geometry.x,
+                    surface.geometry.y,
+                    surface.node_count,
+                    surface.plugin.map_or_else(String::new, |plugin| format!(
+                        "\t{}/{}",
+                        plugin.plugin_id, plugin.surface_id
+                    ))
+                );
+            }
+            Ok(())
+        }
+        ServerMessage::UiLayout(snapshot) => {
+            println!(
+                "# layout offset={} total={} next={}",
+                snapshot.offset,
+                snapshot.total_nodes,
+                snapshot
+                    .next_offset
+                    .map_or_else(|| "end".into(), |offset| offset.to_string())
+            );
+            match std::io::stdout()
+                .lock()
+                .write_all(snapshot.layout.as_bytes())
+            {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+                Err(error) => Err(error.into()),
+            }
         }
         ServerMessage::ShellReadiness(readiness) => {
             println!(
@@ -1190,6 +1376,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         | Parsed::Outputs
         | Parsed::OutputSet { .. }
         | Parsed::Surfaces
+        | Parsed::Layouts
+        | Parsed::Layout(_, _)
+        | Parsed::Plugins
+        | Parsed::PluginSet { .. }
+        | Parsed::PluginSetting { .. }
         | Parsed::Readiness
         | Parsed::OutputConnect { .. }
         | Parsed::OutputDisconnect(_)
@@ -1225,6 +1416,20 @@ mod tests {
             }))
         ));
         assert!(matches!(
+            parse(["key".into(), "r".into(), "pressed".into()]),
+            Ok(Parsed::Input(TestInput::Key {
+                key: TestKey::R,
+                state: InputState::Pressed,
+            }))
+        ));
+        assert!(matches!(
+            parse(["key".into(), "n".into(), "pressed".into()]),
+            Ok(Parsed::Input(TestInput::Key {
+                key: TestKey::N,
+                state: InputState::Pressed,
+            }))
+        ));
+        assert!(matches!(
             parse(["idle-inhibition".into()]),
             Ok(Parsed::IdleInhibition)
         ));
@@ -1246,6 +1451,32 @@ mod tests {
             Ok(Parsed::RuntimeDiagnostics)
         ));
         assert!(matches!(parse(["readiness".into()]), Ok(Parsed::Readiness)));
+        assert!(matches!(parse(["plugins".into()]), Ok(Parsed::Plugins)));
+        assert!(matches!(parse(["layouts".into()]), Ok(Parsed::Layouts)));
+        assert!(matches!(
+            parse(["layout".into(), "internal:12".into()]),
+            Ok(Parsed::Layout(surface, 0)) if surface == "internal:12"
+        ));
+        assert!(matches!(
+            parse(["layout".into(), "internal:12".into(), "128".into()]),
+            Ok(Parsed::Layout(surface, 128)) if surface == "internal:12"
+        ));
+        assert!(matches!(
+            parse([
+                "plugin-setting".into(),
+                "org.example.panel".into(),
+                "show-label".into(),
+                "false".into(),
+            ]),
+            Ok(Parsed::PluginSetting {
+                value: serde_json::Value::Bool(false),
+                ..
+            })
+        ));
+        assert!(matches!(
+            parse(["plugin-set".into(), "org.nickel.launcher".into(), "disabled".into()]),
+            Ok(Parsed::PluginSet { id, enabled: false }) if id == "org.nickel.launcher"
+        ));
         assert!(matches!(
             parse([
                 "capture-output".into(),

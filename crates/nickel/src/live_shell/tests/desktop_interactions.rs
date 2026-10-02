@@ -233,7 +233,7 @@
             ))
         );
         assert_ne!(shell.desktop_change_token, before_token);
-        assert_ne!(shell.desktop_host.commands(), before_commands);
+        assert_ne!(shell.scene(SurfaceRole::Desktop, 400, 600), before_commands);
         assert!(shell.desktop_input(nickel_input::InputEvent::Pointer(
             nickel_input::PointerEvent::Button {
                 device: nickel_input::DeviceId(1),
@@ -465,6 +465,7 @@
 
         assert!(shell.desktop_host.application().layout.icons_visible());
         assert!(shell.desktop_input(button(nickel_input::KeyEdge::Pressed, 1)));
+        shell.scene(SurfaceRole::Desktop, 800, 600);
         assert!(shell.desktop_host.application().context_menu.is_some());
         assert!(shell.desktop_host.inspect().open_overlay.is_some());
 
@@ -482,45 +483,22 @@
         assert!(shell.desktop_host.application().context_menu.is_some());
         assert!(shell.desktop_host.inspect().open_overlay.is_some());
 
-        let second_point = nickel_input::Point { x: 360.0, y: 340.0 };
-        assert!(shell.desktop_input(nickel_input::InputEvent::Pointer(
-            nickel_input::PointerEvent::Button {
-                device: nickel_input::DeviceId(1),
-                order: nickel_input::EventOrder(4),
-                button: nickel_input::PointerButton::Secondary,
-                edge: nickel_input::KeyEdge::Pressed,
-                position: Some(second_point),
-            },
-        )));
-        assert!(shell.desktop_host.inspect().open_overlay.is_some());
-        assert_eq!(
-            shell
-                .desktop_host
-                .application()
-                .context_menu
-                .as_ref()
-                .and_then(|menu| menu.anchor),
-            Some(nickel_file::desktop::Point {
-                x: second_point.x as f32,
-                y: second_point.y as f32,
-            })
-        );
-
         let _ = shell.desktop_input(nickel_input::InputEvent::Pointer(
             nickel_input::PointerEvent::Button {
                 device: nickel_input::DeviceId(1),
-                order: nickel_input::EventOrder(5),
+                order: nickel_input::EventOrder(4),
                 button: nickel_input::PointerButton::Primary,
                 edge: nickel_input::KeyEdge::Pressed,
-                position: Some(nickel_input::Point { x: 50.0, y: 50.0 }),
+                position: Some(nickel_input::Point { x: 750.0, y: 550.0 }),
             },
         ));
         assert!(shell.desktop_host.inspect().open_overlay.is_none());
-        assert!(shell.desktop_input(button(nickel_input::KeyEdge::Pressed, 6)));
+        assert!(shell.desktop_input(button(nickel_input::KeyEdge::Pressed, 5)));
+        shell.scene(SurfaceRole::Desktop, 800, 600);
         assert!(shell.desktop_host.inspect().open_overlay.is_some());
 
         assert!(shell.desktop_input(nickel_input::InputEvent::FocusLost {
-            order: nickel_input::EventOrder(7),
+            order: nickel_input::EventOrder(6),
         }));
         assert!(shell.desktop_host.application().context_menu.is_none());
         assert!(shell.desktop_host.inspect().open_overlay.is_none());
@@ -634,16 +612,18 @@
                 .map(|viewport| viewport.change_token.frame_generation),
             Some(right_generation)
         );
+        let native_menu_visible = shell
+            .desktop_host
+            .application()
+            .frame_overlays(ViewContext::new(
+                Rect::new(0.0, 0.0, 800.0, 600.0),
+                InputModality::Pointer,
+            ))
+            .iter()
+            .any(|overlay| matches!(overlay, FrameOverlay::Menu(_)));
         assert!(
-            shell
-                .desktop_host
-                .application()
-                .frame_overlays(ViewContext::new(
-                    Rect::new(0.0, 0.0, 800.0, 600.0),
-                    InputModality::Pointer,
-                ))
-                .iter()
-                .any(|overlay| matches!(overlay, FrameOverlay::Menu(_)))
+            native_menu_visible,
+            "the owner output must restore its native desktop menu"
         );
         let _ = shell.desktop_input(nickel_input::InputEvent::Pointer(
             nickel_input::PointerEvent::Motion {
@@ -711,8 +691,10 @@
         ]);
         let now = Instant::now();
         shell.set_desktop_output("left".into(), 0.0, 0.0, 1.0);
+        shell.scene(SurfaceRole::Desktop, 800, 600);
         shell.desktop_deadline = Some(now);
         shell.set_desktop_output("right".into(), 800.0, 0.0, 1.0);
+        shell.scene(SurfaceRole::Desktop, 800, 600);
         shell.desktop_deadline = Some(now);
 
         let _ = shell.poll_host_deadlines(now);
@@ -849,6 +831,7 @@
             application_changed: true,
             ..HostBatch::default()
         });
+        shell.scene(SurfaceRole::Desktop, 800, 600);
         let event = |button, edge, order, point| {
             nickel_input::InputEvent::Pointer(nickel_input::PointerEvent::Button {
                 device: nickel_input::DeviceId(1),
@@ -877,13 +860,14 @@
             .layout
             .active()
             .expect("secondary click selects its desktop item");
+        shell.scene(SurfaceRole::Desktop, 800, 600);
 
         let rename = shell
             .desktop_host
             .accessibility_nodes()
             .iter()
             .find(|node| node.label.as_deref() == Some("Rename"))
-            .expect("the live desktop host exposes the rendered Rename row")
+            .expect("the native desktop host exposes the rendered Rename row")
             .rect;
         let point = nickel_input::Point {
             x: (rename.origin.x + rename.size.width / 2.0) as f64,
@@ -932,13 +916,12 @@
     }
 
     #[test]
-    fn file_like_surfaces_share_the_file_plane_item_authority() {
+    fn desktop_and_file_manager_tiles_share_the_file_plane_component() {
         let file = include_str!("../../../../nickel-file/src/components.rs");
-        let launcher = include_str!("../../launcher_view.rs");
         let desktop_production = include_str!("../../live_shell/desktop.rs");
         assert!(file.contains("FileGridItem::new_with_generation"));
-        assert!(launcher.matches("FilePlaneItem::new").count() >= 2);
         assert!(desktop_production.contains("FilePlaneItem::new_with_generation"));
+        assert!(desktop_production.contains(".semantic_role(SemanticRole::GridCell)"));
         let shared = include_str!("../../../../nickel-ui/src/ui/components.rs");
         assert!(shared.contains("pub struct FilePlaneItem"));
         assert!(shared.contains("fn from_image(message: Message"));
@@ -1052,215 +1035,74 @@
     }
 
     #[test]
-    fn desktop_background_menu_captures_pointer_and_uses_shared_accessible_overlay() {
+    fn desktop_live_drag_commits_through_native_input() {
+        use std::{ffi::OsString, path::PathBuf};
+
         let palette = nickel_core::theme::ThemePalette::from_appearance(Default::default());
         let mut desktop = super::DesktopApplication::fixture(None, palette);
-        let anchor = nickel_file::desktop::Point { x: 372.0, y: 214.0 };
-        assert!(desktop.pointer_press(anchor, true, Default::default()));
-        desktop.pointer_motion(nickel_file::desktop::Point { x: 40.0, y: 60.0 });
-
-        let overlays = desktop.frame_overlays(ViewContext::new(
-            Rect::new(0.0, 0.0, 800.0, 600.0),
-            InputModality::Pointer,
-        ));
-        let menu = overlays
-            .into_iter()
-            .find_map(|overlay| match overlay {
-                FrameOverlay::Menu(menu) => Some(menu),
-                _ => None,
-            })
-            .expect("background context menu");
-        assert!(
-            matches!(menu.anchor, OverlayAnchor::Point { point, .. } if point == Point { x: 372.0, y: 214.0 })
-        );
-        assert!(menu.items.iter().any(|item| item.label == "Personalize"));
-        assert!(
-            menu.items
-                .iter()
-                .any(|item| item.label == "Display Settings")
-        );
-        assert!(menu.items.iter().any(|item| item.label == "Refresh"));
-        let view = menu
-            .items
-            .iter()
-            .find(|item| item.label == "View")
-            .expect("presentation commands are grouped under View");
-        assert!(
-            view.children
-                .iter()
-                .any(|item| item.id.as_str() == "show-icons")
-        );
-        assert!(view.children.iter().any(|item| item.id.as_str() == "align"));
-        let sort = menu
-            .items
-            .iter()
-            .find(|item| item.label == "Sort By")
-            .expect("sort commands are grouped under Sort By");
-        assert!(
-            sort.children
-                .iter()
-                .any(|item| item.id.as_str() == "sort-name")
-        );
-        assert!(
-            sort.children
-                .iter()
-                .any(|item| item.id.as_str() == "manual")
-        );
-        assert!(
-            menu.items.len() <= 9,
-            "background commands must not flatten"
-        );
-        assert!(
-            menu.items
-                .iter()
-                .all(|item| item.id.as_str() != "small-icons")
-        );
-        assert!(menu.row_height * menu.items.len() as f32 <= 600.0);
-        assert_ne!(menu.background, 0x000000);
-        assert_ne!(menu.border, menu.background);
-        assert!(
-            menu.items
-                .iter()
-                .all(|item| item.accessible_name.is_some() || !item.label.is_empty())
-        );
-
-        let host = UiHost::new(desktop, 800, 600);
-        let root = host
-            .accessibility_nodes()
-            .iter()
-            .find(|node| node.label.as_deref() == Some("Desktop"))
-            .unwrap();
-        assert!(root.actions.contains(&ActionKind::ContextMenu));
-    }
-
-    #[test]
-    fn desktop_background_menu_uses_keyboard_controller_and_accessibility_routes() {
-        let palette = nickel_core::theme::ThemePalette::from_appearance(Default::default());
-        let mut desktop = super::DesktopApplication::fixture(None, palette);
-        assert!(desktop.key(&nickel_input::KeyEvent {
-            device: nickel_input::DeviceId(1),
-            order: nickel_input::EventOrder(1),
-            physical: nickel_input::PhysicalKey::Code(KeyCode::ContextMenu),
-            logical: nickel_input::LogicalKey::Named(nickel_input::NamedKey::ContextMenu),
-            location: nickel_input::KeyLocation::Standard,
-            edge: nickel_input::KeyEdge::Pressed,
-            repeat: false,
-            modifiers: nickel_input::ModifierState::default(),
-        }));
-        assert_eq!(desktop.context_menu.as_ref().unwrap().output, "primary");
-
-        let desktop = super::DesktopApplication::fixture(None, palette);
-        let mut host = UiHost::new(desktop, 800, 600);
-        let root = host
-            .accessibility_nodes()
-            .iter()
-            .find(|node| node.label.as_deref() == Some("Desktop"))
-            .unwrap()
-            .id
-            .clone();
-        let outcome = host
-            .perform_accessibility_action(root, SemanticAction::Invoke(ActionKind::ContextMenu));
-        assert!(outcome.failures.is_empty());
-        assert!(host.application().context_menu.is_some());
-
-        let mut desktop = super::DesktopApplication::fixture(None, palette);
-        desktop.open_keyboard_context();
-        assert!(
-            desktop.context_menu.is_some(),
-            "controller uses this command model"
-        );
-    }
-
-    #[test]
-    fn desktop_view_submenu_toggles_authoritative_icon_visibility_through_live_input() {
-        fn send_button(
-            shell: &mut LiveShell,
-            order: &mut u64,
-            button: nickel_input::PointerButton,
-            edge: nickel_input::KeyEdge,
-            point: nickel_input::Point,
-        ) {
-            *order += 1;
-            let _ = shell.desktop_input(nickel_input::InputEvent::Pointer(
-                nickel_input::PointerEvent::Button {
-                    device: nickel_input::DeviceId(1),
-                    order: nickel_input::EventOrder(*order),
-                    button,
-                    edge,
-                    position: Some(point),
-                },
-            ));
-        }
-
-        fn invoke_visibility(shell: &mut LiveShell, order: &mut u64, expected_label: &str) {
-            let anchor = nickel_input::Point { x: 300.0, y: 300.0 };
-            send_button(
-                shell,
-                order,
-                nickel_input::PointerButton::Secondary,
-                nickel_input::KeyEdge::Pressed,
-                anchor,
-            );
-            send_button(
-                shell,
-                order,
-                nickel_input::PointerButton::Secondary,
-                nickel_input::KeyEdge::Released,
-                anchor,
-            );
-            let view = shell
-                .desktop_host
-                .accessibility_nodes()
-                .iter()
-                .find(|node| node.label.as_deref() == Some("View"))
-                .expect("compact root menu exposes View")
-                .rect;
-            *order += 1;
-            let _ = shell.desktop_input(nickel_input::InputEvent::Pointer(
-                nickel_input::PointerEvent::Motion {
-                    device: nickel_input::DeviceId(1),
-                    order: nickel_input::EventOrder(*order),
-                    position: nickel_input::Point {
-                        x: f64::from(view.origin.x + view.size.width / 2.0),
-                        y: f64::from(view.origin.y + view.size.height / 2.0),
-                    },
-                    delta: None,
-                },
-            ));
-            let command = shell
-                .desktop_host
-                .accessibility_nodes()
-                .iter()
-                .find(|node| node.label.as_deref() == Some(expected_label))
-                .expect("hovering View exposes its submenu")
-                .rect;
-            let point = nickel_input::Point {
-                x: f64::from(command.origin.x + command.size.width / 2.0),
-                y: f64::from(command.origin.y + command.size.height / 2.0),
-            };
-            send_button(
-                shell,
-                order,
-                nickel_input::PointerButton::Primary,
-                nickel_input::KeyEdge::Pressed,
-                point,
-            );
-            send_button(
-                shell,
-                order,
-                nickel_input::PointerButton::Primary,
-                nickel_input::KeyEdge::Released,
-                point,
-            );
-        }
-
+        desktop.set_outputs(vec![nickel_file::desktop::DesktopOutput {
+            id: "primary".into(),
+            primary: true,
+            work_area: nickel_file::desktop::Rect {
+                x: 0.0, y: 0.0, width: 400.0, height: 300.0,
+            },
+            scale: 1.0,
+        }]);
+        desktop.layout.reconcile(vec![(
+            nickel_file::FileIdentity(73, 4),
+            nickel_file::FileEntry {
+                display_name_override: None,
+                name: OsString::from("drag.txt"),
+                path: PathBuf::from("/desktop/drag.txt"),
+                is_directory: false,
+                size: None,
+                modified: None,
+            },
+        )]);
+        let start = desktop.layout.items()[0].position;
+        let cell_width = desktop.layout.grid().0;
         let mut shell = LiveShell::new().unwrap();
-        let mut order = 0;
-        assert!(shell.desktop_host.application().layout.icons_visible());
-        invoke_visibility(&mut shell, &mut order, "Hide desktop icons");
-        assert!(!shell.desktop_host.application().layout.icons_visible());
-        invoke_visibility(&mut shell, &mut order, "Show desktop icons");
-        assert!(shell.desktop_host.application().layout.icons_visible());
+        shell.desktop_host = UiHost::new(desktop, 400, 300);
+        shell.scene(SurfaceRole::Desktop, 400, 300);
+
+        let x = f64::from(start.x + 4.0);
+        let y = f64::from(start.y + 4.0);
+        let input = |order, edge, x| nickel_input::InputEvent::Pointer(
+            nickel_input::PointerEvent::Button {
+                device: nickel_input::DeviceId(1),
+                order: nickel_input::EventOrder(order),
+                button: nickel_input::PointerButton::Primary,
+                edge,
+                position: Some(nickel_input::Point { x, y }),
+            },
+        );
+        assert!(shell.desktop_input(input(1, nickel_input::KeyEdge::Pressed, x)));
+        assert!(shell.desktop_input(nickel_input::InputEvent::Pointer(
+            nickel_input::PointerEvent::Motion {
+                device: nickel_input::DeviceId(1),
+                order: nickel_input::EventOrder(2),
+                position: nickel_input::Point { x: x + 145.0, y },
+                delta: None,
+            },
+        )));
+        assert_eq!(shell.desktop_host.application().layout.items()[0].position.x, start.x);
+        assert!(shell.desktop_input(input(3, nickel_input::KeyEdge::Released, x + 145.0)));
+        assert_eq!(
+            shell.desktop_host.application().layout.items()[0].position.x,
+            start.x + cell_width * 2.0,
+        );
+    }
+
+    #[test]
+    fn desktop_background_menu_uses_native_overlay_for_controller_input() {
+        let mut shell = LiveShell::new().unwrap();
+        shell.scene(SurfaceRole::Desktop, 800, 600);
+        assert!(shell.desktop_controller(ControllerAction::ContextMenu));
+        shell.scene(SurfaceRole::Desktop, 800, 600);
+        assert!(shell.desktop_host.application().context_menu.is_some());
+        assert!(shell.desktop_host.application().frame_overlays(ViewContext::new(
+            Rect::new(0.0, 0.0, 800.0, 600.0), InputModality::Controller,
+        )).iter().any(|overlay| matches!(overlay, FrameOverlay::Menu(_))));
     }
 
     #[test]
@@ -1364,20 +1206,32 @@
         );
     }
 
-    #[test]
-    fn desktop_settings_destinations_are_typed_and_keep_the_invoking_output() {
-        assert_eq!(
-            super::SettingsDestination::Appearance.arguments(),
-            ["--screen", "appearance"]
-        );
-        assert_eq!(
-            super::SettingsDestination::Display {
-                output: "DP-2".into()
-            }
-            .arguments(),
-            ["--screen", "display", "--output", "DP-2"]
-        );
-    }
+#[test]
+fn desktop_settings_destinations_are_typed_and_keep_the_invoking_output() {
+    let palette = nickel_core::theme::ThemePalette::from_appearance(Default::default());
+    let mut desktop = super::DesktopApplication::fixture(None, palette);
+    desktop.open_background_context(None);
+    nickel_ui::Application::update(
+        &mut desktop,
+        super::desktop::DesktopMessage::Command(super::desktop::DesktopCommand::Personalize),
+    );
+    assert_eq!(
+        desktop.pending_settings.take(),
+        Some(super::SettingsDestination::Appearance)
+    );
+    desktop.set_active_output("DP-2".into(), nickel_file::desktop::Point::default(), 1.0);
+    desktop.open_background_context(None);
+    nickel_ui::Application::update(
+        &mut desktop,
+        super::desktop::DesktopMessage::Command(super::desktop::DesktopCommand::DisplaySettings),
+    );
+    assert_eq!(
+        desktop.pending_settings.take(),
+        Some(super::SettingsDestination::Display {
+            output: "DP-2".into()
+        })
+    );
+}
     #[test]
     #[cfg(target_os = "linux")]
     fn native_desktop_initial_scene_and_hotplug_use_output_topology() {

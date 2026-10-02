@@ -10,7 +10,7 @@ pub mod server_windows;
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-pub const PROTOCOL_VERSION: u16 = 29;
+pub const PROTOCOL_VERSION: u16 = 30;
 pub const MAX_FRAME_BYTES: usize = 196_608;
 pub const MAX_PREVIEW_WIDTH: u16 = 256;
 pub const MAX_PREVIEW_HEIGHT: u16 = 144;
@@ -59,6 +59,14 @@ pub enum Query {
     Windows,
     Outputs,
     ShellSurfaces,
+    /// Test-only inventory of compositor-hosted Nickel UI trees.
+    UiLayouts,
+    /// Test-only computed layout page for one `internal:<id>` from UiLayouts.
+    UiLayout {
+        surface: String,
+        #[serde(default)]
+        offset: usize,
+    },
     ShellReadiness,
     LauncherVisibility,
     SecureStorage,
@@ -69,6 +77,7 @@ pub enum Query {
     ShellRuntimeDiagnostics,
     Workspaces,
     ShellBehavior,
+    Plugins,
     RemoteControl,
     Preview {
         window: WindowId,
@@ -118,6 +127,20 @@ pub enum Command {
     ReloadShellSettings,
     ApplyShellBehavior {
         transaction: ShellBehaviorTransaction,
+    },
+    PublishPluginStatus {
+        snapshot: PluginStatusSnapshot,
+    },
+    SetPluginEnabled {
+        id: String,
+        enabled: bool,
+        observed_generation: u64,
+    },
+    SetPluginSetting {
+        id: String,
+        key: String,
+        value: serde_json::Value,
+        observed_generation: u64,
     },
     ApplyRemoteControl {
         requested_enabled: bool,
@@ -176,6 +199,11 @@ pub enum Command {
         role: ShellRole,
         anchor: ShellPopoverAnchor,
     },
+    ShowAnchoredPluginSurface {
+        plugin_id: String,
+        surface_id: String,
+        anchor: ShellPopoverAnchor,
+    },
     LogOut,
     SessionAction {
         action: SessionAction,
@@ -190,6 +218,10 @@ pub enum Command {
     },
     FocusShellRole {
         role: ShellRole,
+    },
+    FocusPluginSurface {
+        plugin_id: String,
+        surface_id: String,
     },
     RestoreApplicationFocus,
     IdentifyOutputs,
@@ -248,6 +280,94 @@ pub struct ShellSurfaceIdentity {
     pub application_id: String,
     pub role: ShellRole,
     pub output: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin_surface: Option<PluginSurfacePlacement>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginSurfacePlacement {
+    pub plugin_id: String,
+    pub surface_id: String,
+    #[serde(default)]
+    pub kind: PluginSurfacePlacementKind,
+    pub width: u32,
+    pub height: u32,
+    pub bottom_offset: u32,
+    #[serde(default, skip_serializing_if = "PluginSurfaceAnchor::is_center")]
+    pub anchor: PluginSurfaceAnchor,
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    pub offset_x: i32,
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    pub offset_y: i32,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub passive: bool,
+}
+
+fn is_zero_i32(value: &i32) -> bool {
+    *value == 0
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PluginSurfaceAnchor {
+    #[default]
+    Center,
+    TopLeft,
+    TopCenter,
+    TopRight,
+    BottomLeft,
+    BottomCenter,
+    BottomRight,
+}
+
+impl PluginSurfaceAnchor {
+    pub fn is_center(&self) -> bool {
+        *self == Self::Center
+    }
+
+    pub fn position(
+        self,
+        output: (i32, i32, u32, u32),
+        size: (u32, u32),
+        offset: (i32, i32),
+    ) -> (i32, i32) {
+        let (x, y, output_width, output_height) = output;
+        let (width, height) = size;
+        let remaining_x = output_width.saturating_sub(width).min(i32::MAX as u32) as i32;
+        let remaining_y = output_height.saturating_sub(height).min(i32::MAX as u32) as i32;
+        let anchor_x = match self {
+            Self::TopLeft | Self::BottomLeft => 0,
+            Self::TopRight | Self::BottomRight => remaining_x,
+            Self::Center | Self::TopCenter | Self::BottomCenter => remaining_x / 2,
+        };
+        let anchor_y = match self {
+            Self::TopLeft | Self::TopCenter | Self::TopRight => 0,
+            Self::BottomLeft | Self::BottomCenter | Self::BottomRight => remaining_y,
+            Self::Center => remaining_y / 2,
+        };
+        (
+            x.saturating_add(anchor_x.saturating_add(offset.0))
+                .clamp(x, x.saturating_add(remaining_x)),
+            y.saturating_add(anchor_y.saturating_add(offset.1))
+                .clamp(y, y.saturating_add(remaining_y)),
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PluginSurfacePlacementKind {
+    #[default]
+    Panel,
+    Desktop,
+    Dock,
+    Window,
+    Dialog,
+    Overlay,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -421,6 +541,9 @@ pub enum ShellSemanticTarget {
     PanelControlCenter {
         output: Option<String>,
     },
+    PanelCodex {
+        output: Option<String>,
+    },
     ControlCenterLock,
     PreviewWindow {
         window: WindowId,
@@ -497,7 +620,9 @@ pub enum TestKey {
     A,
     C,
     E,
+    N,
     P,
+    R,
     S,
     T,
     U,
@@ -531,6 +656,7 @@ pub enum TestKey {
     MediaPrevious,
     MediaFastForward,
     MediaRewind,
+    F4,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -554,6 +680,8 @@ pub enum ServerMessage {
     Windows(Vec<WindowSnapshot>),
     Outputs(Vec<OutputSnapshot>),
     ShellSurfaces(Vec<ShellSurfaceSnapshot>),
+    UiLayouts(Vec<UiLayoutSurfaceSnapshot>),
+    UiLayout(UiLayoutSnapshot),
     ShellReadiness(ShellReadinessSnapshot),
     LauncherVisibility {
         visible: bool,
@@ -569,6 +697,7 @@ pub enum ServerMessage {
     ShellRuntimeDiagnostics(ShellRuntimeDiagnostics),
     Workspaces(WorkspaceState),
     ShellBehavior(ShellBehaviorSnapshot),
+    Plugins(PluginStatusSnapshot),
     RemoteControl(RemoteControlSnapshot),
     RemotePairing(RemotePairingSnapshot),
     Preview(PreviewFrame),
@@ -773,6 +902,16 @@ pub struct CacheDiagnostics {
     pub internal_shell_wallpaper_entries: u16,
     #[serde(default)]
     pub internal_shell_wallpaper_bytes: u64,
+    #[serde(default)]
+    pub internal_shell_timer_armed: u64,
+    #[serde(default)]
+    pub internal_shell_timer_cancelled: u64,
+    #[serde(default)]
+    pub internal_shell_timer_fired: u64,
+    #[serde(default)]
+    pub internal_shell_timer_polls: u64,
+    #[serde(default)]
+    pub internal_shell_timer_redraw_requests: u64,
     pub preview_entries: u16,
     pub preview_capacity: u16,
     pub preview_bytes: u64,
@@ -1027,6 +1166,18 @@ pub enum Event {
     },
     ShellSettingsChanged,
     ShellBehaviorChanged(ShellBehaviorSnapshot),
+    PluginsChanged(PluginStatusSnapshot),
+    PluginActivationRequested {
+        id: String,
+        enabled: bool,
+        observed_generation: u64,
+    },
+    PluginSettingRequested {
+        id: String,
+        key: String,
+        value: serde_json::Value,
+        observed_generation: u64,
+    },
     Snapshot(Snapshot),
     LauncherVisibility {
         visible: bool,
@@ -1089,6 +1240,89 @@ pub struct ShellBehaviorSnapshot {
     pub all_windows_on_every_bar: bool,
     pub desktop_count: u8,
     pub topology_generation: u64,
+}
+
+/// Bounded status for the trusted local Settings plugin page. Shared process
+/// memory is deliberately absent because it cannot be attributed to a plugin.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginStatusSnapshot {
+    pub activation_generation: u64,
+    pub plugins: Vec<PluginStatus>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginStatus {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub author: Option<String>,
+    #[serde(default)]
+    pub version: Option<String>,
+    pub desired_enabled: bool,
+    pub health: PluginRuntimeHealth,
+    pub capabilities: Vec<String>,
+    pub surfaces: Vec<String>,
+    #[serde(default)]
+    pub composition: Vec<String>,
+    #[serde(default)]
+    pub settings: Vec<PluginSettingStatus>,
+    pub memory: PluginMemorySnapshot,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginSettingStatus {
+    pub id: String,
+    pub label: String,
+    pub description: String,
+    pub kind: PluginSettingKind,
+    pub value: serde_json::Value,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum PluginSettingKind {
+    Boolean,
+    Integer { min: i64, max: i64 },
+    Text { max_length: u16 },
+    Choice { options: Vec<String> },
+}
+
+impl PluginSettingKind {
+    pub fn accepts(&self, value: &serde_json::Value) -> bool {
+        match self {
+            Self::Boolean => value.is_boolean(),
+            Self::Integer { min, max } => value
+                .as_i64()
+                .is_some_and(|number| (*min..=*max).contains(&number)),
+            Self::Text { max_length } => value
+                .as_str()
+                .is_some_and(|text| text.chars().count() <= usize::from(*max_length)),
+            Self::Choice { options } => value
+                .as_str()
+                .is_some_and(|choice| options.iter().any(|option| option == choice)),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", content = "reason", rename_all = "snake_case")]
+pub enum PluginRuntimeHealth {
+    Disabled,
+    Idle,
+    Starting,
+    Running,
+    Failed(String),
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginMemorySnapshot {
+    pub js_heap_bytes: Option<u64>,
+    pub native_ui_bytes: Option<u64>,
+    pub texture_bytes: Option<u64>,
+    #[serde(default)]
+    pub tracked_peak_bytes: Option<u64>,
+    pub timers: u32,
+    pub subscriptions: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1561,6 +1795,35 @@ pub struct ShellSurfaceSnapshot {
     pub role: ShellRole,
     pub geometry: Option<Geometry>,
     pub output: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin: Option<PluginSurfaceIdentity>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginSurfaceIdentity {
+    pub plugin_id: String,
+    pub surface_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UiLayoutSurfaceSnapshot {
+    pub id: String,
+    pub title: String,
+    pub role: String,
+    pub visible: bool,
+    pub geometry: Geometry,
+    pub node_count: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin: Option<PluginSurfaceIdentity>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UiLayoutSnapshot {
+    pub surface: UiLayoutSurfaceSnapshot,
+    pub layout: String,
+    pub offset: usize,
+    pub total_nodes: usize,
+    pub next_offset: Option<usize>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1621,12 +1884,14 @@ pub struct ShellPopoverAnchor {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OutputLayout {
     pub primary: String,
     pub placements: Vec<OutputPlacement>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OutputPlacement {
     pub name: String,
     pub x: i32,
@@ -1638,6 +1903,9 @@ pub struct OutputPlacement {
     /// Requested physical scanout mode. Omitted by older clients.
     #[serde(default)]
     pub mode: Option<OutputMode>,
+    /// Requested orientation. Omission preserves the current native transform.
+    #[serde(default)]
+    pub transform: Option<OutputTransform>,
 }
 
 const fn default_output_scale_120() -> u32 {
@@ -1649,6 +1917,7 @@ const fn default_output_scale_120() -> u32 {
 pub enum ShellRole {
     Desktop,
     Panel,
+    PluginSurface,
     Launcher,
     ControlCenter,
     ContextMenu,
@@ -1667,6 +1936,7 @@ impl ShellRole {
         match self {
             Self::Desktop => "io.nickel.shell.desktop",
             Self::Panel => "io.nickel.shell.panel",
+            Self::PluginSurface => "io.nickel.shell.plugin-surface",
             Self::Launcher => "io.nickel.shell.launcher",
             Self::ControlCenter => "io.nickel.shell.control-center",
             Self::ContextMenu => "io.nickel.shell.context-menu",
@@ -1685,6 +1955,7 @@ impl ShellRole {
         [
             Self::Desktop,
             Self::Panel,
+            Self::PluginSurface,
             Self::Launcher,
             Self::ControlCenter,
             Self::ContextMenu,
@@ -1839,6 +2110,103 @@ impl PreviewFrame {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn output_placement_preserves_omitted_orientation_and_validates_transform() {
+        let value = serde_json::json!({"name":"left","x":0,"y":0,"enabled":true});
+        let placement: OutputPlacement = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(placement.transform, None);
+        let mut rotated = value.clone();
+        rotated["transform"] = serde_json::json!("rotate90");
+        assert_eq!(
+            serde_json::from_value::<OutputPlacement>(rotated)
+                .unwrap()
+                .transform,
+            Some(OutputTransform::Rotate90)
+        );
+        let mut invalid = value;
+        invalid["transform"] = serde_json::json!("arbitrary");
+        assert!(serde_json::from_value::<OutputPlacement>(invalid).is_err());
+    }
+
+    #[test]
+    fn plugin_status_and_activation_round_trip_over_local_protocol() {
+        use super::*;
+        let snapshot = PluginStatusSnapshot {
+            activation_generation: 7,
+            plugins: vec![PluginStatus {
+                id: "org.nickel.launcher".into(),
+                name: "Nickel Launcher".into(),
+                author: Some("Nickel".into()),
+                version: Some("0.1.0".into()),
+                desired_enabled: true,
+                health: PluginRuntimeHealth::Running,
+                capabilities: vec!["applications-read".into()],
+                surfaces: vec!["main: window".into()],
+                composition: Vec::new(),
+                settings: vec![PluginSettingStatus {
+                    id: "show-count".into(),
+                    label: "Show count".into(),
+                    description: String::new(),
+                    kind: PluginSettingKind::Boolean,
+                    value: serde_json::json!(true),
+                }],
+                memory: PluginMemorySnapshot {
+                    js_heap_bytes: None,
+                    native_ui_bytes: Some(4096),
+                    texture_bytes: None,
+                    tracked_peak_bytes: Some(4096),
+                    timers: 0,
+                    subscriptions: 0,
+                },
+            }],
+        };
+        let response = ServerEnvelope {
+            request_id: 10,
+            message: ServerMessage::Plugins(snapshot.clone()),
+        };
+        assert_eq!(
+            decode::<ServerEnvelope>(&encode(&response).unwrap()).unwrap(),
+            response
+        );
+        let request = ClientEnvelope {
+            token: "local".into(),
+            request_id: 11,
+            request: Request::Command(Command::SetPluginEnabled {
+                id: "org.nickel.launcher".into(),
+                enabled: false,
+                observed_generation: snapshot.activation_generation,
+            }),
+        };
+        assert_eq!(
+            decode::<ClientEnvelope>(&encode(&request).unwrap()).unwrap(),
+            request
+        );
+        let setting_request = ClientEnvelope {
+            token: "local".into(),
+            request_id: 12,
+            request: Request::Command(Command::SetPluginSetting {
+                id: "org.nickel.launcher".into(),
+                key: "show-count".into(),
+                value: serde_json::json!(false),
+                observed_generation: snapshot.activation_generation,
+            }),
+        };
+        assert_eq!(
+            decode::<ClientEnvelope>(&encode(&setting_request).unwrap()).unwrap(),
+            setting_request
+        );
+        assert!(
+            snapshot.plugins[0].settings[0]
+                .kind
+                .accepts(&serde_json::json!(false))
+        );
+        assert!(
+            !snapshot.plugins[0].settings[0]
+                .kind
+                .accepts(&serde_json::json!("false"))
+        );
+    }
+
     #[test]
     fn lease_management_uses_the_protocols_snake_case_wire_actions() {
         use super::*;
@@ -2108,12 +2476,114 @@ mod tests {
                     application_id: format!("{SHELL_SURFACE_APPLICATION_ID_PREFIX}42.7"),
                     role: ShellRole::Panel,
                     output: Some("Unknown - Display - DP-2".into()),
+                    plugin_surface: None,
                 },
             }),
         };
         assert_eq!(
             decode::<ClientEnvelope>(&encode(&request).unwrap()).unwrap(),
             request
+        );
+    }
+
+    #[test]
+    fn plugin_surface_identity_round_trips_independently_of_taskbar() {
+        let identity = ShellSurfaceIdentity {
+            application_id: format!("{SHELL_SURFACE_APPLICATION_ID_PREFIX}42.8"),
+            role: ShellRole::PluginSurface,
+            output: Some("DP-1".into()),
+            plugin_surface: Some(PluginSurfacePlacement {
+                plugin_id: "org.example.dock".into(),
+                surface_id: "main".into(),
+                kind: PluginSurfacePlacementKind::Dock,
+                width: 360,
+                height: 64,
+                bottom_offset: 24,
+                anchor: PluginSurfaceAnchor::Center,
+                offset_x: 0,
+                offset_y: 0,
+                passive: false,
+            }),
+        };
+        let request = ClientEnvelope {
+            token: "capability".into(),
+            request_id: 42,
+            request: Request::Command(Command::RegisterShellSurface {
+                identity: identity.clone(),
+            }),
+        };
+        assert_eq!(
+            decode::<ClientEnvelope>(&encode(&request).unwrap()).unwrap(),
+            request
+        );
+        assert_ne!(identity.role, ShellRole::Panel);
+        let mut window = identity;
+        let placement = window.plugin_surface.as_mut().unwrap();
+        placement.kind = PluginSurfacePlacementKind::Overlay;
+        placement.bottom_offset = 0;
+        placement.anchor = PluginSurfaceAnchor::TopRight;
+        placement.offset_x = -18;
+        placement.offset_y = 24;
+        placement.passive = true;
+        assert_eq!(
+            placement.anchor.position(
+                (100, 200, 800, 600),
+                (360, 64),
+                (placement.offset_x, placement.offset_y)
+            ),
+            (522, 224),
+        );
+        placement.anchor = PluginSurfaceAnchor::BottomCenter;
+        placement.offset_x = 0;
+        placement.offset_y = -82;
+        assert_eq!(
+            placement.anchor.position(
+                (100, 200, 800, 600),
+                (360, 64),
+                (placement.offset_x, placement.offset_y)
+            ),
+            (320, 654),
+        );
+        let encoded = encode(&window).unwrap();
+        assert_eq!(decode::<ShellSurfaceIdentity>(&encoded).unwrap(), window);
+    }
+
+    #[test]
+    fn reserved_panel_identity_carries_its_plugin_surface_key() {
+        let identity = ShellSurfaceIdentity {
+            application_id: format!("{SHELL_SURFACE_APPLICATION_ID_PREFIX}42.9"),
+            role: ShellRole::Panel,
+            output: Some("DP-1".into()),
+            plugin_surface: Some(PluginSurfacePlacement {
+                plugin_id: "org.nickel.taskbar".into(),
+                surface_id: "main".into(),
+                kind: PluginSurfacePlacementKind::Panel,
+                width: 1920,
+                height: 56,
+                bottom_offset: 0,
+                anchor: PluginSurfaceAnchor::Center,
+                offset_x: 0,
+                offset_y: 0,
+                passive: false,
+            }),
+        };
+        assert_eq!(
+            decode::<ShellSurfaceIdentity>(&encode(&identity).unwrap()).unwrap(),
+            identity
+        );
+    }
+
+    #[test]
+    fn desktop_identity_has_no_plugin_surface_key() {
+        let identity = ShellSurfaceIdentity {
+            application_id: format!("{SHELL_SURFACE_APPLICATION_ID_PREFIX}42.10"),
+            role: ShellRole::Desktop,
+            output: Some("DP-1".into()),
+            plugin_surface: None,
+        };
+        assert_eq!(
+            decode::<ShellSurfaceIdentity>(&encode(&identity).unwrap()).unwrap(),
+            identity
         );
     }
 
@@ -2351,6 +2821,7 @@ mod tests {
                         height: 1080,
                         refresh_millihz: 60_000,
                     }),
+                    transform: None,
                 }],
             },
         });
@@ -2427,6 +2898,10 @@ mod tests {
             Command::FocusShellRole {
                 role: ShellRole::ControlCenter,
             },
+            Command::FocusPluginSurface {
+                plugin_id: "org.nickel.control-center".into(),
+                surface_id: "main".into(),
+            },
             Command::RestoreApplicationFocus,
         ] {
             let envelope = ClientEnvelope {
@@ -2482,6 +2957,29 @@ mod tests {
         assert_eq!(
             decode::<ClientEnvelope>(&encode(&envelope).unwrap()).unwrap(),
             envelope
+        );
+        let plugin = ClientEnvelope {
+            token: "session-token".into(),
+            request_id: 21,
+            request: Request::Command(Command::ShowAnchoredPluginSurface {
+                plugin_id: "org.nickel.control-center".into(),
+                surface_id: "main".into(),
+                anchor: ShellPopoverAnchor {
+                    control: "panel-control".into(),
+                    output: "HDMI-A-1".into(),
+                    bounds: Geometry {
+                        x: 1720,
+                        y: 0,
+                        width: 96,
+                        height: 56,
+                    },
+                    preferred: AnchorSide::Above,
+                },
+            }),
+        };
+        assert_eq!(
+            decode::<ClientEnvelope>(&encode(&plugin).unwrap()).unwrap(),
+            plugin
         );
     }
 
@@ -2632,16 +3130,33 @@ mod tests {
 
     #[test]
     fn shell_surface_diagnostics_round_trip_authoritative_placement() {
-        let message = ServerMessage::ShellSurfaces(vec![ShellSurfaceSnapshot {
-            role: ShellRole::Launcher,
-            geometry: Some(Geometry {
-                x: 1298,
-                y: 24,
-                width: 920,
-                height: 680,
-            }),
-            output: Some("DP-test".into()),
-        }]);
+        let message = ServerMessage::ShellSurfaces(vec![
+            ShellSurfaceSnapshot {
+                role: ShellRole::Launcher,
+                geometry: Some(Geometry {
+                    x: 1298,
+                    y: 24,
+                    width: 920,
+                    height: 680,
+                }),
+                output: Some("DP-test".into()),
+                plugin: None,
+            },
+            ShellSurfaceSnapshot {
+                role: ShellRole::PluginSurface,
+                geometry: Some(Geometry {
+                    x: 1520,
+                    y: 688,
+                    width: 360,
+                    height: 96,
+                }),
+                output: Some("DP-test".into()),
+                plugin: Some(PluginSurfaceIdentity {
+                    plugin_id: "org.example.panel".into(),
+                    surface_id: "main".into(),
+                }),
+            },
+        ]);
         let envelope = ServerEnvelope {
             request_id: 18,
             message: message.clone(),
@@ -2651,6 +3166,46 @@ mod tests {
                 .unwrap()
                 .message,
             message
+        );
+    }
+
+    #[test]
+    fn test_ui_layout_response_round_trips() {
+        let surface = UiLayoutSurfaceSnapshot {
+            id: "internal:12".into(),
+            title: "Launcher".into(),
+            role: "Overlay".into(),
+            visible: true,
+            geometry: Geometry {
+                x: 18,
+                y: 24,
+                width: 920,
+                height: 680,
+            },
+            node_count: 2,
+            plugin: Some(PluginSurfaceIdentity {
+                plugin_id: "org.nickel.launcher".into(),
+                surface_id: "main".into(),
+            }),
+        };
+        let request = Query::UiLayout {
+            surface: surface.id.clone(),
+            offset: 128,
+        };
+        assert_eq!(
+            decode::<Query>(&encode(&request).unwrap()).unwrap(),
+            request
+        );
+        let response = ServerMessage::UiLayout(UiLayoutSnapshot {
+            surface,
+            layout: "Column root allocated=0,0,920,680\n".into(),
+            offset: 128,
+            total_nodes: 129,
+            next_offset: None,
+        });
+        assert_eq!(
+            decode::<ServerMessage>(&encode(&response).unwrap()).unwrap(),
+            response
         );
     }
 

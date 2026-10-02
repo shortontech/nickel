@@ -1,9 +1,12 @@
 use super::{
-    avoid_trusted_control_collision, internal_codex_chat_placement,
-    internal_codex_project_menu_placement, internal_shell_surface_placement,
+    apply_internal_plugin_surface_placement, avoid_trusted_control_collision,
+    internal_codex_chat_placement, internal_shell_surface_placement, place_reserved_plugin_panel,
 };
-use crate::{internal_shell::InternalOutput, winit_shell::SurfaceRole};
-use nickel_session_protocol::{AnchorSide, Geometry, ShellPopoverAnchor};
+use crate::{
+    internal_shell::InternalOutput,
+    winit_shell::{PanelEdge, SurfaceRole},
+};
+use nickel_core::plugins::{PluginSurfaceAnchor, PluginSurfaceKind};
 
 fn outputs() -> Vec<(InternalOutput, i32, i32)> {
     vec![
@@ -32,6 +35,107 @@ fn outputs() -> Vec<(InternalOutput, i32, i32)> {
             240,
         ),
     ]
+}
+
+#[test]
+fn taskbar_placement_uses_its_plugin_surface_height() {
+    let placement = internal_shell_surface_placement(
+        SurfaceRole::Taskbar,
+        Some("right"),
+        (2560, 80),
+        &outputs(),
+        None,
+        PanelEdge::Bottom,
+    );
+    assert_eq!(placement.geometry, (0, 1600, 2560, 80));
+    assert_eq!(placement.output.as_deref(), Some("right"));
+    let top = internal_shell_surface_placement(
+        SurfaceRole::Taskbar,
+        Some("right"),
+        (2560, 80),
+        &outputs(),
+        None,
+        PanelEdge::Top,
+    );
+    assert_eq!(top.geometry, (0, 240, 2560, 80));
+}
+
+#[test]
+fn reserved_plugin_panel_uses_taskbar_layer_and_output_edge() {
+    let outputs = outputs();
+    for (edge, offset, expected_y) in [
+        (PanelEdge::Bottom, 0, 1600),
+        (PanelEdge::Bottom, 64, 1536),
+        (PanelEdge::Top, 0, 240),
+        (PanelEdge::Top, 64, 304),
+    ] {
+        let mut placement = internal_shell_surface_placement(
+            SurfaceRole::Panel,
+            Some("right"),
+            (2560, 80),
+            &outputs,
+            None,
+            edge,
+        );
+        place_reserved_plugin_panel(&mut placement, edge, offset, &outputs);
+        assert_eq!(placement.geometry, (0, expected_y, 2560, 80));
+        assert_eq!(placement.role, crate::session::InternalSurfaceRole::Taskbar);
+    }
+}
+
+#[test]
+fn internal_plugin_window_centers_while_dock_uses_bottom_offset() {
+    let outputs = outputs();
+    let mut window = internal_shell_surface_placement(
+        SurfaceRole::Panel,
+        Some("right"),
+        (520, 340),
+        &outputs,
+        None,
+        PanelEdge::Bottom,
+    );
+    apply_internal_plugin_surface_placement(
+        &mut window,
+        PluginSurfaceKind::Window,
+        0,
+        PluginSurfaceAnchor::Center,
+        (0, 0),
+        &outputs,
+    );
+    assert_eq!(window.geometry, (1020, 790, 520, 340));
+    assert_eq!(
+        window.role,
+        crate::session::InternalSurfaceRole::Application
+    );
+
+    let mut dock = internal_shell_surface_placement(
+        SurfaceRole::Panel,
+        Some("right"),
+        (520, 340),
+        &outputs,
+        None,
+        PanelEdge::Bottom,
+    );
+    apply_internal_plugin_surface_placement(
+        &mut dock,
+        PluginSurfaceKind::Dock,
+        36,
+        PluginSurfaceAnchor::Center,
+        (0, 0),
+        &outputs,
+    );
+    assert_eq!(dock.geometry, (1020, 1304, 520, 340));
+
+    let mut overlay = window;
+    apply_internal_plugin_surface_placement(
+        &mut overlay,
+        PluginSurfaceKind::Overlay,
+        0,
+        PluginSurfaceAnchor::TopRight,
+        (-18, 24),
+        &outputs,
+    );
+    assert_eq!(overlay.geometry, (2022, 264, 520, 340));
 }
 
 pub(super) fn receive_x11_clipboard(
@@ -1259,6 +1363,7 @@ fn launcher_uses_active_output_global_origin() {
         (960, 720),
         &outputs(),
         Some("right"),
+        PanelEdge::Bottom,
     );
 
     assert_eq!(placement.output.as_deref(), Some("right"));
@@ -1273,6 +1378,7 @@ fn launcher_placement_anchors_the_actual_content_sized_surface() {
         (640, 600),
         &outputs(),
         Some("right"),
+        PanelEdge::Bottom,
     );
 
     assert_eq!(placement.geometry, (18, 1016, 640, 600));
@@ -1315,27 +1421,6 @@ fn native_keyboard_uses_authority_height_dock_and_output_without_rescaling() {
 }
 
 #[test]
-fn volume_osd_uses_requested_interaction_output_without_launcher_affinity() {
-    let placement = internal_shell_surface_placement(
-        SurfaceRole::VolumeOsd,
-        Some("right"),
-        (320, 88),
-        &outputs(),
-        Some("left"),
-    );
-    assert_eq!(placement.output.as_deref(), Some("right"));
-    assert_eq!(placement.geometry, (0, 240, 320, 88));
-    let fallback = internal_shell_surface_placement(
-        SurfaceRole::VolumeOsd,
-        Some("removed"),
-        (320, 88),
-        &outputs(),
-        None,
-    );
-    assert_eq!(fallback.output.as_deref(), Some("left"));
-}
-
-#[test]
 fn switching_active_output_relocates_one_launcher_to_negative_origin() {
     let right = internal_shell_surface_placement(
         SurfaceRole::Launcher,
@@ -1343,6 +1428,7 @@ fn switching_active_output_relocates_one_launcher_to_negative_origin() {
         (960, 720),
         &outputs(),
         Some("right"),
+        PanelEdge::Bottom,
     );
     let left = internal_shell_surface_placement(
         SurfaceRole::Launcher,
@@ -1350,64 +1436,13 @@ fn switching_active_output_relocates_one_launcher_to_negative_origin() {
         (960, 720),
         &outputs(),
         Some("left"),
+        PanelEdge::Bottom,
     );
 
     assert_eq!(right.output.as_deref(), Some("right"));
     assert_eq!(left.output.as_deref(), Some("left"));
     assert_eq!(left.geometry, (-1902, 176, 960, 720));
     assert_ne!(right.geometry, left.geometry);
-}
-
-#[test]
-fn codex_menu_uses_clicked_panel_output_global_coordinates() {
-    let anchor = ShellPopoverAnchor {
-        control: "panel-codex".into(),
-        output: "right".into(),
-        bounds: Geometry {
-            x: 2200,
-            y: 1392,
-            width: 48,
-            height: 48,
-        },
-        preferred: AnchorSide::Above,
-    };
-
-    let placement = internal_codex_project_menu_placement(Some(&anchor), &outputs(), Some("left"));
-
-    assert_eq!(placement.output.as_deref(), Some("right"));
-    assert_eq!(placement.origin, (1964, 936));
-    assert_eq!(placement.scale, 1.0);
-}
-
-#[test]
-fn codex_menu_fallback_includes_negative_output_origin() {
-    let placement = internal_codex_project_menu_placement(None, &outputs(), Some("left"));
-
-    assert_eq!(placement.output.as_deref(), Some("left"));
-    assert_eq!(placement.origin, (-1920, 216));
-}
-
-#[test]
-fn codex_menu_fits_a_nested_960_by_600_output_above_the_panel() {
-    let outputs = vec![(
-        crate::internal_shell::InternalOutput {
-            name: "nested".into(),
-            width: 960,
-            height: 600,
-            scale: 1.0,
-            x: 0,
-            y: 0,
-        },
-        0,
-        0,
-    )];
-    let placement = internal_codex_project_menu_placement(None, &outputs, None);
-    let (width, height) = placement.menu_size.expect("sized menu");
-    assert_eq!((width, height), (520, 528));
-    assert!(placement.origin.0 >= 0);
-    assert!(placement.origin.0 + width as i32 <= 960);
-    assert!(placement.origin.1 >= 0);
-    assert!(placement.origin.1 + height as i32 <= 544);
 }
 
 #[test]

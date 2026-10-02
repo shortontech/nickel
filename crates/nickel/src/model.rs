@@ -60,6 +60,7 @@ pub struct Application {
     id: ApplicationId,
     identity_aliases: Vec<String>,
     name: String,
+    description: Option<String>,
     icon: Option<String>,
     icon_path: Option<PathBuf>,
     launch_command: Option<Vec<String>>,
@@ -260,6 +261,7 @@ impl Application {
             id: ApplicationId::new(id),
             identity_aliases: Vec::new(),
             name,
+            description: None,
             icon,
             icon_path,
             launch_command,
@@ -303,6 +305,18 @@ impl Application {
         &self.name
     }
 
+    pub fn description(&self) -> Option<&str> {
+        self.description.as_deref()
+    }
+
+    pub fn with_description(mut self, description: Option<&str>) -> Self {
+        self.description = description
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| value.chars().take(512).collect());
+        self
+    }
+
     pub fn icon(&self) -> Option<&str> {
         self.icon.as_deref()
     }
@@ -329,6 +343,7 @@ impl Application {
             .len()
             .saturating_add(self.identity_aliases.iter().map(String::len).sum())
             .saturating_add(self.name.len())
+            .saturating_add(self.description.as_ref().map_or(0, String::len))
             .saturating_add(self.icon.as_ref().map_or(0, String::len))
             .saturating_add(self.icon_path.as_deref().map_or(0, path_bytes))
             .saturating_add(
@@ -640,11 +655,11 @@ mod tests {
     #[test]
     fn trusted_session_client_retains_only_production_session_capabilities() {
         install_trusted_session_capability(
-            "/run/user/1000/nickel-settings.sock".into(),
+            "/run/user/1000/nickel-test-client.sock".into(),
             "secret".into(),
         );
         let application = Application::new(
-            "nickel-settings".into(),
+            "nickel-test-client".into(),
             "Nickel Settings".into(),
             None,
             None,
@@ -657,13 +672,13 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(environment.contains(&(
             "NICKEL_SESSION_CONTROL".into(),
-            Some("/run/user/1000/nickel-settings.sock".into())
+            Some("/run/user/1000/nickel-test-client.sock".into())
         )));
         assert!(environment.contains(&("NICKEL_SESSION_TOKEN".into(), Some("secret".into()))));
         assert!(environment.contains(&("NICKEL_SHELL_TEST_CONTROL".into(), None)));
         assert!(environment.contains(&("__EGL_VENDOR_LIBRARY_FILENAMES".into(), None)));
         clear_trusted_session_capability(std::ffi::OsStr::new(
-            "/run/user/1000/nickel-settings.sock",
+            "/run/user/1000/nickel-test-client.sock",
         ));
     }
 }

@@ -1,7 +1,7 @@
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use nickel_core::theme::{Appearance, ThemeMode, ThemePalette};
-use nickel_ui::{ActionKind, ControllerFamily, ReadingDirection, SemanticRole};
+use nickel_ui::{ActionKind, ControllerFamily, SemanticRole};
 use nickel_ui_testkit::{
     DEFAULT_ACCESSIBILITY, DEFAULT_LOCALE, DEFAULT_SCALE, Fixture, FixtureMetadata,
     FixtureProvider, FixtureRegistry, FixtureSource, FixtureTheme, FixtureVariant, RegistryError,
@@ -11,16 +11,11 @@ use nickel_ui_testkit::{
 use nickel_codex_ui::ChatApplication;
 
 use crate::{
-    control_view::ControlCenterApp,
-    launcher::{Launcher, LauncherInput},
-    launcher_view::{LauncherApplication, LauncherIconCache, LauncherViewState},
-    live_shell::{DesktopApplication, LockApplication, PanelApplication},
-    model::{WindowGroup, WindowId},
-    notification::{DesktopNotification, NotificationAction},
-    notification_view::NotificationApp,
+    live_shell::{DesktopApplication, LockApplication},
     platform::{AudioStatus, BluetoothStatus, NetworkStatus, WorkspaceSummary},
+    plugin_panel::{PluginImages, PluginPanelApplication},
+    projection_recovery::ProjectionRecoveryApp,
     screenshot::ScreenshotApp,
-    window_preview::WindowPreviewApp,
 };
 
 pub struct ShellFixtureProvider;
@@ -45,22 +40,6 @@ const RUNTIME_VARIANTS: &[FixtureVariant] = &[
 const DESKTOP_VARIANTS: &[FixtureVariant] = &[
     variant("solid", "Solid background", 960, 540),
     variant("wallpaper", "Wallpaper", 960, 540),
-];
-const PANEL_VARIANTS: &[FixtureVariant] = &[
-    variant("wide", "Wide", 1200, 56),
-    variant("narrow", "Narrow", 640, 56),
-    variant("fullscreen", "Fullscreen", 960, 56),
-    variant(
-        "status-items",
-        "Tasks, Codex, and notification area",
-        1200,
-        56,
-    ),
-];
-const NOTIFICATION_VARIANTS: &[FixtureVariant] = &[
-    variant("no-actions", "No actions", 420, 180),
-    variant("actions", "Actions", 420, 180),
-    variant("long-body", "Long body", 420, 240),
 ];
 const LOCK_VARIANTS: &[FixtureVariant] = &[
     variant("empty", "Empty", 960, 540),
@@ -90,12 +69,6 @@ const PROJECT_VARIANTS: &[FixtureVariant] = &[
     variant("search", "Search", 920, 680),
     variant("empty", "Empty", 920, 680),
 ];
-const SEARCH_VARIANTS: &[FixtureVariant] = &[
-    variant("empty-query", "Empty query", 920, 680),
-    variant("results", "Results", 920, 680),
-    variant("no-results", "No results", 920, 680),
-    variant("scroll", "Scroll", 920, 680),
-];
 
 const RTL_LOCALE: nickel_ui_testkit::LocalePreset = nickel_ui_testkit::LocalePreset {
     id: "ar-SA",
@@ -112,120 +85,6 @@ const HIGH_CONTRAST: nickel_ui_testkit::AccessibilityPreset =
         reduced_motion: false,
         reduced_transparency: true,
     };
-const LAUNCHER_DASHBOARD_VARIANTS: &[FixtureVariant] = &[
-    FixtureVariant {
-        id: "populated-wide-ltr-dark-1x-pointer",
-        title: "Populated pointer",
-        viewport: ViewportPreset {
-            id: "wide",
-            width: 920,
-            height: 680,
-        },
-        theme: FixtureTheme::Dark,
-        locale: DEFAULT_LOCALE,
-        scale: DEFAULT_SCALE,
-        controller_family: ControllerFamily::Generic,
-        accessibility: DEFAULT_ACCESSIBILITY,
-    },
-    FixtureVariant {
-        id: "empty-narrow-rtl-light-2x-keyboard",
-        title: "Empty keyboard",
-        viewport: ViewportPreset {
-            id: "narrow",
-            width: 540,
-            height: 680,
-        },
-        theme: FixtureTheme::Light,
-        locale: RTL_LOCALE,
-        scale: SCALE_2X,
-        controller_family: ControllerFamily::Generic,
-        accessibility: DEFAULT_ACCESSIBILITY,
-    },
-    FixtureVariant {
-        id: "loading-wide-ltr-high-contrast-1x-controller-playstation",
-        title: "Loading PlayStation",
-        viewport: ViewportPreset {
-            id: "wide",
-            width: 920,
-            height: 680,
-        },
-        theme: FixtureTheme::HighContrast,
-        locale: DEFAULT_LOCALE,
-        scale: DEFAULT_SCALE,
-        controller_family: ControllerFamily::PlayStation,
-        accessibility: HIGH_CONTRAST,
-    },
-    FixtureVariant {
-        id: "partial-failure-narrow-rtl-dark-2x-a11y",
-        title: "Partial failure accessibility",
-        viewport: ViewportPreset {
-            id: "narrow",
-            width: 540,
-            height: 680,
-        },
-        theme: FixtureTheme::Dark,
-        locale: RTL_LOCALE,
-        scale: SCALE_2X,
-        controller_family: ControllerFamily::Generic,
-        accessibility: DEFAULT_ACCESSIBILITY,
-    },
-    FixtureVariant {
-        id: "populated-narrow-ltr-light-1x-controller-xbox",
-        title: "Populated Xbox",
-        viewport: ViewportPreset {
-            id: "narrow",
-            width: 540,
-            height: 680,
-        },
-        theme: FixtureTheme::Light,
-        locale: DEFAULT_LOCALE,
-        scale: DEFAULT_SCALE,
-        controller_family: ControllerFamily::Xbox,
-        accessibility: DEFAULT_ACCESSIBILITY,
-    },
-    FixtureVariant {
-        id: "empty-wide-rtl-high-contrast-2x-controller-switch",
-        title: "Empty Switch",
-        viewport: ViewportPreset {
-            id: "wide",
-            width: 920,
-            height: 680,
-        },
-        theme: FixtureTheme::HighContrast,
-        locale: RTL_LOCALE,
-        scale: SCALE_2X,
-        controller_family: ControllerFamily::Switch,
-        accessibility: HIGH_CONTRAST,
-    },
-    FixtureVariant {
-        id: "loading-narrow-ltr-dark-2x-pointer",
-        title: "Loading pointer",
-        viewport: ViewportPreset {
-            id: "narrow",
-            width: 540,
-            height: 680,
-        },
-        theme: FixtureTheme::Dark,
-        locale: DEFAULT_LOCALE,
-        scale: SCALE_2X,
-        controller_family: ControllerFamily::Generic,
-        accessibility: DEFAULT_ACCESSIBILITY,
-    },
-    FixtureVariant {
-        id: "partial-failure-wide-rtl-light-1x-keyboard",
-        title: "Partial failure keyboard",
-        viewport: ViewportPreset {
-            id: "wide",
-            width: 920,
-            height: 680,
-        },
-        theme: FixtureTheme::Light,
-        locale: RTL_LOCALE,
-        scale: DEFAULT_SCALE,
-        controller_family: ControllerFamily::Generic,
-        accessibility: DEFAULT_ACCESSIBILITY,
-    },
-];
 
 macro_rules! metadata {
     ($name:ident, $id:literal, $title:literal, $description:literal, $variants:ident, $tags:expr) => {
@@ -254,14 +113,7 @@ metadata!(
     RUNTIME_VARIANTS,
     &["shell", "runtime", "lifecycle", "context-interactive"]
 );
-metadata!(
-    LAUNCHER_DASHBOARD_METADATA,
-    "shell.launcher-dashboard",
-    "Launcher dashboard",
-    "Production launcher dashboard state, appearance, direction, scale, and modality matrix",
-    LAUNCHER_DASHBOARD_VARIANTS,
-    &["shell", "launcher", "dashboard", "matrix"]
-);
+
 metadata!(
     DESKTOP_METADATA,
     "shell.desktop",
@@ -269,22 +121,6 @@ metadata!(
     "Production desktop application",
     DESKTOP_VARIANTS,
     &["shell", "desktop", "context-interactive"]
-);
-metadata!(
-    PANEL_METADATA,
-    "shell.panel",
-    "Panel",
-    "Production panel application",
-    PANEL_VARIANTS,
-    &["shell", "panel", "controller"]
-);
-metadata!(
-    NOTIFICATION_METADATA,
-    "shell.notification",
-    "Notification",
-    "Production notification application",
-    NOTIFICATION_VARIANTS,
-    &["shell", "notification", "dialog", "variant-interactive"]
 );
 metadata!(
     LOCK_METADATA,
@@ -312,11 +148,11 @@ metadata!(
 );
 metadata!(
     CONTROL_METADATA,
-    "shell.control-center",
-    "Control Center",
-    "Production control center application",
+    "shell.projection-recovery",
+    "Display recovery",
+    "Trusted display recovery chooser",
     CONTROL_VARIANTS,
-    &["shell", "control-center"]
+    &["shell", "display", "recovery"]
 );
 metadata!(
     PROJECT_METADATA,
@@ -326,14 +162,6 @@ metadata!(
     PROJECT_VARIANTS,
     &["shell", "codex", "projects"]
 );
-metadata!(
-    SEARCH_METADATA,
-    "shell.launcher-search",
-    "Launcher search",
-    "Production launcher search surface",
-    SEARCH_VARIANTS,
-    &["shell", "launcher", "search"]
-);
 
 fn palette() -> ThemePalette {
     ThemePalette::from_appearance(Appearance::default())
@@ -341,15 +169,12 @@ fn palette() -> ThemePalette {
 
 pub struct RuntimeFixture;
 pub struct DesktopFixture;
-pub struct PanelFixture;
-pub struct NotificationFixture;
+
 pub struct LockFixture;
 pub struct ScreenshotFixture;
 pub struct WindowPreviewFixture;
-pub struct ControlCenterFixture;
+pub struct ProjectionRecoveryFixture;
 pub struct CodexProjectMenuFixture;
-pub struct LauncherSearchFixture;
-pub struct LauncherDashboardFixture;
 
 fn fixture_palette(theme: FixtureTheme) -> ThemePalette {
     match theme {
@@ -425,68 +250,6 @@ impl Fixture for DesktopFixture {
     }
 }
 
-impl Fixture for PanelFixture {
-    type App = PanelApplication;
-    fn metadata() -> &'static FixtureMetadata {
-        &PANEL_METADATA
-    }
-    fn create() -> Self::App {
-        PanelApplication::fixture(Launcher::default(), palette())
-    }
-    fn create_variant(variant: &FixtureVariant) -> Self::App {
-        if variant.id == "status-items" {
-            PanelApplication::populated_fixture(Launcher::default(), fixture_palette(variant.theme))
-        } else {
-            PanelApplication::fixture(Launcher::default(), fixture_palette(variant.theme))
-        }
-    }
-    fn surface_size() -> (u32, u32) {
-        (1200, 56)
-    }
-    fn default_activation() -> Option<Selector> {
-        Some(Selector::role_name(
-            SemanticRole::Button,
-            "Open Nickel Start",
-        ))
-    }
-}
-
-impl Fixture for NotificationFixture {
-    type App = NotificationApp;
-    fn metadata() -> &'static FixtureMetadata {
-        &NOTIFICATION_METADATA
-    }
-    fn create() -> Self::App {
-        Self::create_variant(&NOTIFICATION_VARIANTS[0])
-    }
-    fn create_variant(v: &FixtureVariant) -> Self::App {
-        let actions = if v.id == "no-actions" {
-            vec![]
-        } else {
-            vec![NotificationAction {
-                key: "open".into(),
-                label: "Open".into(),
-            }]
-        };
-        let body = if v.id == "long-body" {
-            "A deterministic notification body that wraps across several lines without invoking the native notification transport.".repeat(2)
-        } else {
-            "The fixture is ready.".into()
-        };
-        let notification =
-            DesktopNotification::fixture(1, "Nickel", "Workbench notification", body, actions);
-        let mut app = NotificationApp::new(palette());
-        app.sync(Some(&notification), palette());
-        app
-    }
-    fn surface_size() -> (u32, u32) {
-        (420, 180)
-    }
-    fn default_activation() -> Option<Selector> {
-        Some(Selector::role_name(SemanticRole::Button, "Dismiss"))
-    }
-}
-
 impl Fixture for LockFixture {
     type App = LockApplication;
     fn metadata() -> &'static FixtureMetadata {
@@ -524,7 +287,7 @@ impl Fixture for ScreenshotFixture {
 }
 
 impl Fixture for WindowPreviewFixture {
-    type App = WindowPreviewApp;
+    type App = PluginPanelApplication;
     fn metadata() -> &'static FixtureMetadata {
         &PREVIEW_METADATA
     }
@@ -538,38 +301,52 @@ impl Fixture for WindowPreviewFixture {
             _ => 1,
         };
         let windows = (0..count)
-            .map(|index| crate::model::OpenWindow {
-                id: WindowId(index + 1),
-                application_id: None,
-                active: index == 0,
-                title: format!("Workbench window {}", index + 1),
-                state: crate::model::WindowState::default(),
+            .map(|index| {
+                let title = format!("Workbench window {}", index + 1);
+                serde_json::json!({
+                    "id": (index + 1).to_string(),
+                    "title": title,
+                    "accessibleName": title,
+                    "canClose": true,
+                    "image":format!("window:{}",index+1),
+                    "index": index,
+                    "imageWidth": 244,
+                    "selected": index == 0,
+                })
             })
             .collect::<Vec<_>>();
-        let group = WindowGroup {
-            application_id: None,
-            application_name: "Workbench".into(),
-            windows,
-        };
-        let previews = if v.id == "missing-preview" {
-            HashMap::new()
-        } else {
-            group
-                .windows
-                .iter()
-                .map(|window| {
-                    (
-                        window.id,
-                        Arc::new(image::RgbaImage::from_pixel(
-                            260,
-                            116,
-                            image::Rgba([40, 54, 82, 255]),
-                        )),
-                    )
-                })
-                .collect()
-        };
-        WindowPreviewApp::fixture(group, previews, palette())
+        let package = crate::bundled_plugin_assets::load_package("nickel-default").unwrap();
+        let surface = package
+            .manifest
+            .surfaces
+            .iter()
+            .find(|s| s.id == "window-preview")
+            .unwrap();
+        let mut application =
+            PluginPanelApplication::from_package_surface(&package, &Default::default(), surface)
+                .expect("shared shell preview fixture");
+        application
+            .sync_host_data_field(
+                "windowPreviews",
+                &serde_json::json!({"available":true,"revision":"fixture","windows":windows}),
+            )
+            .unwrap();
+        if v.id != "missing-preview" {
+            let thumbnail = Arc::new(image::RgbaImage::from_pixel(
+                260,
+                116,
+                image::Rgba([40, 54, 82, 255]),
+            ));
+            let mut images = PluginImages::new();
+            for index in 0..count {
+                images.insert(
+                    format!("window:{}", index + 1),
+                    ((index + 1) as u16, Arc::clone(&thumbnail)),
+                );
+            }
+            application.sync_images(images);
+        }
+        application
     }
     fn surface_size() -> (u32, u32) {
         (882, 214)
@@ -582,8 +359,8 @@ impl Fixture for WindowPreviewFixture {
     }
 }
 
-impl Fixture for ControlCenterFixture {
-    type App = ControlCenterApp;
+impl Fixture for ProjectionRecoveryFixture {
+    type App = ProjectionRecoveryApp;
     fn metadata() -> &'static FixtureMetadata {
         &CONTROL_METADATA
     }
@@ -591,42 +368,21 @@ impl Fixture for ControlCenterFixture {
         Self::create_variant(&CONTROL_VARIANTS[0])
     }
     fn create_variant(v: &FixtureVariant) -> Self::App {
-        let available = v.id != "unavailable";
-        let network = NetworkStatus {
-            available,
-            enabled: available,
-            connected: available,
-            name: "Nickel Wi-Fi".into(),
-            signal_percent: 82,
-            ..Default::default()
-        };
-        let bluetooth = BluetoothStatus {
-            available,
-            powered: available,
-            ..Default::default()
-        };
-        let audio = AudioStatus {
-            available,
-            volume_percent: 64,
-            ..Default::default()
-        };
-        let mut app = ControlCenterApp::new(
-            network,
-            bluetooth,
-            audio,
-            vec![
-                WorkspaceSummary {
-                    id: 1,
-                    active: true,
-                },
-                WorkspaceSummary {
-                    id: 2,
-                    active: false,
-                },
-            ],
-        );
+        let mut app = ProjectionRecoveryApp::new();
+        if v.id != "unavailable" {
+            app.sync_projection_modes(&[
+                nickel_core::display_projection::ProjectionMode::Duplicate,
+                nickel_core::display_projection::ProjectionMode::Extend,
+            ]);
+        }
+        app.show_projection_chooser();
         if v.id == "confirmation" {
-            app.request_session_action(crate::platform::SessionAction::LogOut);
+            nickel_ui::Application::update(
+                &mut app,
+                crate::control_view::ControlAction::PreviewProjection(
+                    nickel_core::display_projection::ProjectionMode::Extend,
+                ),
+            );
         }
         app
     }
@@ -634,33 +390,8 @@ impl Fixture for ControlCenterFixture {
         (380, 650)
     }
     fn default_activation() -> Option<Selector> {
-        Some(Selector::role_name(SemanticRole::Switch, "wifi-power"))
+        None
     }
-}
-
-fn launcher_application(kind: &str) -> LauncherApplication {
-    let mut launcher = Launcher::default();
-    match kind {
-        "search-results" => {
-            launcher.reduce_input(LauncherInput::Text("fi".into()));
-        }
-        "search-none" => {
-            launcher.reduce_input(LauncherInput::Text("no-such-application".into()));
-        }
-        "search-scroll" => {
-            launcher.reduce_input(LauncherInput::Text("a".into()));
-        }
-        "search-empty" => {
-            launcher.reduce_input(LauncherInput::Text(String::new()));
-        }
-        _ => {}
-    }
-    LauncherApplication::new(
-        launcher,
-        LauncherViewState::default(),
-        LauncherIconCache::new(),
-        palette(),
-    )
 }
 
 impl Fixture for CodexProjectMenuFixture {
@@ -682,122 +413,22 @@ impl Fixture for CodexProjectMenuFixture {
     }
 }
 
-impl Fixture for LauncherSearchFixture {
-    type App = LauncherApplication;
-    fn metadata() -> &'static FixtureMetadata {
-        &SEARCH_METADATA
-    }
-    fn create() -> Self::App {
-        launcher_application("search-results")
-    }
-    fn create_variant(v: &FixtureVariant) -> Self::App {
-        launcher_application(match v.id {
-            "results" => "search-results",
-            "no-results" => "search-none",
-            "scroll" => "search-scroll",
-            _ => "search-empty",
-        })
-    }
-    fn surface_size() -> (u32, u32) {
-        (920, 680)
-    }
-    fn default_activation() -> Option<Selector> {
-        Some(Selector::keyed_item("launcher-applications", "firefox"))
-    }
-}
-
-impl Fixture for LauncherDashboardFixture {
-    type App = LauncherApplication;
-    fn metadata() -> &'static FixtureMetadata {
-        &LAUNCHER_DASHBOARD_METADATA
-    }
-    fn create() -> Self::App {
-        Self::create_variant(&LAUNCHER_DASHBOARD_VARIANTS[0])
-    }
-    fn create_variant(v: &FixtureVariant) -> Self::App {
-        let populated = v.id.starts_with("populated");
-        let mut launcher = if populated {
-            Launcher::default()
-        } else {
-            Launcher::new(Vec::new())
-        };
-        launcher.set_codex_available(true);
-        use crate::launcher::{
-            DashboardAccount, DashboardProject, DashboardSection, ProjectActivity,
-        };
-        if v.id.starts_with("partial-failure") {
-            launcher.set_dashboard_projects(DashboardSection::Failed {
-                message: "Project service unavailable".into(),
-                recoverable: true,
-            });
-            launcher.set_dashboard_account(DashboardSection::Ready(DashboardAccount {
-                display_name: "Local user".into(),
-                supporting_text: "Offline".into(),
-            }));
-        } else if v.id.starts_with("loading") {
-            launcher.set_dashboard_projects(DashboardSection::Loading);
-            launcher.set_dashboard_account(DashboardSection::Loading);
-        } else if v.id.starts_with("empty") {
-            launcher.set_dashboard_projects(DashboardSection::Empty);
-            launcher.set_dashboard_account(DashboardSection::Empty);
-        } else {
-            launcher.set_dashboard_projects(DashboardSection::Ready(vec![DashboardProject {
-                id: "nickel".into(),
-                name: "Nickel".into(),
-                roots: Vec::new(),
-                chat_count: Some(2),
-                activity: ProjectActivity::Active,
-                last_used_at: Some(1),
-            }]));
-            launcher.set_dashboard_account(DashboardSection::Ready(DashboardAccount {
-                display_name: "Nickel user".into(),
-                supporting_text: "Local session".into(),
-            }));
-        }
-        let mut app = LauncherApplication::new(
-            launcher,
-            LauncherViewState::default(),
-            LauncherIconCache::new(),
-            fixture_palette(v.theme),
-        );
-        app.set_controller_family(v.controller_family);
-        app.set_reading_direction(match v.locale.direction {
-            nickel_ui_testkit::FixtureDirection::LeftToRight => ReadingDirection::LeftToRight,
-            nickel_ui_testkit::FixtureDirection::RightToLeft => ReadingDirection::RightToLeft,
-        });
-        app
-    }
-    fn surface_size() -> (u32, u32) {
-        (920, 680)
-    }
-    fn default_activation() -> Option<Selector> {
-        Some(Selector::keyed_item("launcher-applications", "firefox"))
-    }
-}
-
 impl FixtureProvider for ShellFixtureProvider {
     fn register(&self, registry: &mut FixtureRegistry) -> Result<(), RegistryError> {
         registry.register::<RuntimeFixture>()?;
         registry.register::<DesktopFixture>()?;
-        registry.register::<PanelFixture>()?;
-        registry.register::<NotificationFixture>()?;
         registry.register::<LockFixture>()?;
         registry.register::<ScreenshotFixture>()?;
         registry.register::<WindowPreviewFixture>()?;
-        registry.register::<ControlCenterFixture>()?;
+        registry.register::<ProjectionRecoveryFixture>()?;
         registry.register::<CodexProjectMenuFixture>()?;
-        registry
-            .register::<LauncherSearchFixture>()
-            .and_then(|()| registry.register::<LauncherDashboardFixture>())
+        Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nickel_ui_testkit::{
-        ReachabilityModality, ReachabilityPolicy, Scenario, audit_reachability,
-    };
 
     #[test]
     fn provider_registers_every_shell_surface() {
@@ -812,50 +443,13 @@ mod tests {
             ids,
             vec![
                 "shell.codex-project-menu",
-                "shell.control-center",
                 "shell.desktop",
-                "shell.launcher-dashboard",
-                "shell.launcher-search",
                 "shell.lock",
-                "shell.notification",
-                "shell.panel",
+                "shell.projection-recovery",
                 "shell.runtime",
                 "shell.screenshot",
                 "shell.window-preview",
             ]
         );
-    }
-
-    #[test]
-    fn populated_dashboard_replays_discover_accessibility_menu_actions() {
-        let report = audit_reachability(
-            || {
-                Scenario::new(
-                    LauncherDashboardFixture::create_variant(&LAUNCHER_DASHBOARD_VARIANTS[0]),
-                    920,
-                    680,
-                )
-            },
-            &ReachabilityPolicy {
-                modalities: [ReachabilityModality::Accessibility].into_iter().collect(),
-                ..ReachabilityPolicy::default()
-            },
-        );
-
-        for target in [
-            "application-menu-discover/launch",
-            "application-menu-discover/toggle-pin",
-        ] {
-            assert!(
-                report.paths.iter().any(|path| {
-                    path.target == target
-                        && path.modality == ReachabilityModality::Accessibility
-                        && path.reached
-                }),
-                "{target} was not replayed: {:?}",
-                report.issues
-            );
-        }
-        assert!(report.issues.is_empty(), "issues: {:?}", report.issues);
     }
 }

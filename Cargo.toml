@@ -12,6 +12,7 @@ members = [
     "crates/nickel-ui-workbench",
     "crates/nickel-windows-app-probe",
     "crates/nickel-windows-shell-setup",
+    "crates/nickel-watchdog",
     "crates/nickel-uwu",
     "crates/nickel-windows-uwp-target",
     "crates/ui-declarative-macros",
@@ -26,9 +27,10 @@ members = [
     "crates/nickel-i18n",
     "crates/nickel-i18n-lint",
     "crates/nickel-platform",
+    "crates/nickel-plugin-runtime",
+    "crates/nickel-plugin-presentation",
     "crates/nickel-render-assets",
     "crates/nickel-session-protocol",
-    "crates/nickel-settings",
     "crates/nickel-terminal",
     "crates/nickel-terminal-ui",
 ]
@@ -88,6 +90,7 @@ raw-window-handle = "0.6.2"
 resvg = "0.47.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.149"
+semver = "1.0.27"
 smithay = { git = "https://github.com/Smithay/smithay.git", rev = "e3d461a057ba244d213a8498ec372b0799cca103", default-features = false, features = ["wayland_frontend", "desktop", "xwayland"] }
 thiserror = "2.0.17"
 toml = "0.9.8"

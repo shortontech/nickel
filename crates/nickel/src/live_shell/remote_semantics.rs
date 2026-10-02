@@ -59,82 +59,51 @@ fn observe_only(mut projection: Projection) -> Projection {
     projection
 }
 
-fn launcher_activate(action: &LauncherAction) -> RemoteActionDisposition {
-    match action {
-        LauncherAction::SetView(_)
-        | LauncherAction::ActivateResult(_)
-        | LauncherAction::TogglePin(_)
-        | LauncherAction::LaunchApplication(_)
-        | LauncherAction::ShowNarrowPrimary
-        | LauncherAction::SetQuery(_)
-        | LauncherAction::SearchScroll
-        | LauncherAction::DashboardScroll
-        | LauncherAction::Dismiss => RemoteActionDisposition::Guarded,
-        LauncherAction::RetryPreferencePersistence
-        | LauncherAction::OpenProject(_)
-        | LauncherAction::SeeAllProjects
-        | LauncherAction::OpenSettings(_)
-        | LauncherAction::OpenAccount
-        | LauncherAction::RequestLogout => RemoteActionDisposition::Unavailable,
+fn plugin_projection(
+    host: &nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>,
+    allowed: impl Fn(&str, nickel_ui::ActionKind) -> bool,
+) -> Result<Projection, String> {
+    let mut nodes = host
+        .bounded_semantic_nodes(MAX_RESOLVED_NODES, MAX_PAYLOAD_BYTES)
+        .map_err(|_| "shell semantics are protected or exceed budget")?;
+    for node in &mut nodes {
+        let leaf = node.id.as_str().rsplit('/').next().unwrap_or_default();
+        node.actions.retain(|action| {
+            allowed(leaf, *action)
+                && (*action == nickel_ui::ActionKind::SetValue
+                    || host
+                        .message_for_semantic_action(&node.id, *action)
+                        .is_some())
+        });
+        node.enabled = !node.actions.is_empty();
     }
-}
-
-fn run_activate(action: &RunAction) -> RemoteActionDisposition {
-    match action {
-        RunAction::SetCommand(_) | RunAction::Dismiss => RemoteActionDisposition::Guarded,
-        RunAction::Submit => RemoteActionDisposition::Unavailable,
-    }
+    Ok((host.resolved_frame_generation(), nodes))
 }
 
 fn control_activate(action: &ControlAction) -> RemoteActionDisposition {
     match action {
-        ControlAction::ToggleWifiSection
-        | ControlAction::SetWifiEnabled(_)
-        | ControlAction::ActivateWifi { .. }
-        | ControlAction::ToggleBluetoothSection
-        | ControlAction::SetBluetoothPowered(_)
-        | ControlAction::SetBluetoothDiscovery(_)
-        | ControlAction::ToggleBluetoothDevice { .. }
-        | ControlAction::ToggleAudioSection
-        | ControlAction::SetAudioVolume(_)
-        | ControlAction::SetAudioMuted(_)
-        | ControlAction::SelectAudioDevice { .. }
-        | ControlAction::RequestSessionAction(_)
-        | ControlAction::CancelSessionAction => RemoteActionDisposition::Guarded,
-        ControlAction::SwitchWorkspace(_)
-        | ControlAction::WifiScroll
-        | ControlAction::BluetoothScroll
-        | ControlAction::AudioScroll
-        | ControlAction::CreateWorkspace
-        | ControlAction::ToggleShowDesktop
-        | ControlAction::ShowNotifications
-        | ControlAction::RemoveWorkspace(_)
-        | ControlAction::PreviewProjection(_)
+        ControlAction::PreviewProjection(_)
         | ControlAction::ConfirmProjection
-        | ControlAction::CancelProjection
-        | ControlAction::ConfirmSessionAction
-        | ControlAction::SessionAction(_) => RemoteActionDisposition::Unavailable,
-    }
-}
-
-fn panel_activate(action: &PanelAction) -> RemoteActionDisposition {
-    match action {
-        PanelAction::Launcher
-        | PanelAction::ToggleTaskPin(_)
-        | PanelAction::MoveTaskPinLeft(_)
-        | PanelAction::MoveTaskPinRight(_)
-        | PanelAction::Control => RemoteActionDisposition::Guarded,
-        PanelAction::OnScreenKeyboard
-        | PanelAction::Task(_)
-        | PanelAction::TaskContext(_)
-        | PanelAction::TaskDrag(_, _)
-        | PanelAction::Codex
-        | PanelAction::Tray(_)
-        | PanelAction::TrayContext(_) => RemoteActionDisposition::Unavailable,
+        | ControlAction::CancelProjection => RemoteActionDisposition::Unavailable,
+        _ => RemoteActionDisposition::Guarded,
     }
 }
 
 impl LiveShell {
+    pub(crate) fn bounded_plugin_panel_semantics(
+        &self,
+        key: &nickel_core::plugins::PluginSurfaceKey,
+        _output: Option<&str>,
+    ) -> Result<Projection, String> {
+        let host = self
+            .plugin_panel_host_ref(key)
+            .ok_or("plugin surface is unavailable")?;
+        if self.locked || host.remote_access_protected() {
+            return Err("plugin surface is protected".into());
+        }
+        Ok(observe_only(plugin_projection(host, |_, _| false)?))
+    }
+
     pub(crate) fn bounded_shell_semantics(
         &self,
         role: SurfaceRole,
@@ -161,57 +130,47 @@ impl LiveShell {
                         .map_err(|_| "shell semantics are protected or exceed budget".into())
                 }
             }
-            SurfaceRole::Panel => {
-                if output == self.panel_output.as_deref() {
-                    project(&self.panel_host, panel_activate)
+            SurfaceRole::Taskbar => Err("historical native taskbar surface is unavailable".into()),
+
+            SurfaceRole::Launcher => {
+                Err("historical native launcher surface is unavailable".into())
+            }
+            SurfaceRole::ControlCenter => {
+                if self.quick_settings_surface_active() {
+                    Ok(observe_only(plugin_projection(
+                        self.plugin_panel_host_ref(
+                            &self.active_shell_surface_key("quick-settings"),
+                        )
+                        .unwrap(),
+                        |_, _| false,
+                    )?))
+                } else if self.control_host.application().view_state().projection_only {
+                    project(&self.control_host, control_activate)
                 } else {
-                    let key = output.map(str::to_owned);
-                    project(
-                        self.panel_hosts
-                            .get(&key)
-                            .ok_or("panel viewport is unavailable")?,
-                        panel_activate,
-                    )
+                    Err("Control Center plugin is unavailable".into())
                 }
             }
-            SurfaceRole::Launcher if self.run_visible => project(&self.run_host, run_activate),
-            SurfaceRole::Launcher => project(&self.launcher_host, launcher_activate),
-            SurfaceRole::ControlCenter => project(&self.control_host, control_activate),
             SurfaceRole::Notification => {
-                Ok(observe_only(project(&self.notification_host, |_| {
-                    RemoteActionDisposition::Unavailable
-                })?))
-            }
-            SurfaceRole::VolumeOsd => project(&self.volume_osd_host, |_| {
-                RemoteActionDisposition::Unavailable
-            }),
-            SurfaceRole::WindowPreview => self
-                .preview_frame
-                .as_ref()
-                .ok_or_else(|| "window preview is unavailable".to_owned())
-                .and_then(|frame| {
-                    Ok(observe_only((
-                        frame.change_token().semantic_generation,
-                        frame
-                            .bounded_semantics(MAX_RESOLVED_NODES, MAX_PAYLOAD_BYTES)
-                            .map_err(|_| {
-                                "shell semantics are protected or exceed budget".to_owned()
-                            })?,
-                    )))
-                }),
-            SurfaceRole::WindowContextMenu => {
-                if let Some(host) = self.window_menu_host.as_ref() {
-                    Ok(observe_only(project(host, |_| {
-                        RemoteActionDisposition::Unavailable
-                    })?))
-                } else if let Some(host) = self.application_menu_host.as_ref() {
-                    Ok(observe_only(project(host, |_| {
+                if self.trusted_notification_visible() {
+                    Ok(observe_only(project(&self.notification_host, |_| {
                         RemoteActionDisposition::Unavailable
                     })?))
                 } else {
-                    Err("window menu is unavailable".into())
+                    Err("Trusted notification is unavailable".into())
                 }
             }
+            SurfaceRole::VolumeOsd => Err("Retired native volume surface is unavailable".into()),
+            SurfaceRole::WindowPreview => {
+                if self.preview_plugin_active() {
+                    Ok(observe_only(plugin_projection(
+                        self.preview_plugin_host_ref().unwrap(),
+                        |_, _| false,
+                    )?))
+                } else {
+                    Err("Window preview plugin is unavailable".into())
+                }
+            }
+            SurfaceRole::WindowContextMenu => Err("Legacy menu surface is unavailable".into()),
             SurfaceRole::Screenshot => Ok(observe_only((
                 self.screenshot.change_token().semantic_generation,
                 self.screenshot
@@ -232,10 +191,7 @@ impl LiveShell {
 // the Linux compositor owns their guarded application.
 #[cfg_attr(target_os = "windows", allow(dead_code))]
 pub(crate) enum RemoteShellEffect {
-    Launcher(LauncherShellEffect),
-    Panel(PanelAction, Option<String>),
     Control(ControlAction),
-    Run(String),
 }
 
 pub(crate) struct RemoteShellOutcome {
@@ -275,6 +231,19 @@ fn mutate<A: UiApplication>(
 }
 
 impl LiveShell {
+    pub(crate) fn perform_bounded_plugin_panel_action(
+        &mut self,
+        key: &nickel_core::plugins::PluginSurfaceKey,
+        output: Option<&str>,
+        generation: u64,
+        node: usize,
+        action: nickel_ui::SemanticAction,
+        clipboard_limit: usize,
+    ) -> Result<RemoteShellOutcome, String> {
+        let _ = (key, output, generation, node, action, clipboard_limit);
+        Err("plugin semantic mutation is unavailable".into())
+    }
+
     pub(crate) fn perform_bounded_shell_action(
         &mut self,
         role: SurfaceRole,
@@ -284,6 +253,9 @@ impl LiveShell {
         action: nickel_ui::SemanticAction,
         clipboard_limit: usize,
     ) -> Result<RemoteShellOutcome, String> {
+        if role == SurfaceRole::Taskbar {
+            return Err("historical native taskbar surface is unavailable".into());
+        }
         if self.bounded_shell_semantics(role, output)?.0 != generation {
             return Err("stale semantic tree".into());
         }
@@ -303,42 +275,14 @@ impl LiveShell {
         }
         let mut effects = Vec::new();
         let host = match role {
-            SurfaceRole::Launcher if self.run_visible => {
-                let outcome = mutate(
-                    &mut self.run_host,
-                    generation,
-                    node,
-                    action,
-                    clipboard_limit,
-                )?;
-                for effect in self.run_host.application_mut().take_effects() {
-                    match effect {
-                        RunEffect::Submit(command) => effects.push(RemoteShellEffect::Run(command)),
-                        RunEffect::Dismiss => {
-                            effects.push(RemoteShellEffect::Launcher(LauncherShellEffect::Dismiss))
-                        }
-                    }
-                }
-                outcome
-            }
-            SurfaceRole::Launcher => {
-                let outcome = mutate(
-                    &mut self.launcher_host,
-                    generation,
-                    node,
-                    action,
-                    clipboard_limit,
-                )?;
-                for action in self.launcher_host.application_mut().take_effects() {
-                    if let Some(effect) =
-                        reduce_launcher_action(&mut self.launcher, &mut self.launcher_view, action)
-                    {
-                        effects.push(RemoteShellEffect::Launcher(effect));
-                    }
-                }
-                outcome
-            }
+            SurfaceRole::Launcher => return Err("Launcher plugin is unavailable".into()),
             SurfaceRole::ControlCenter => {
+                if self.quick_settings_surface_active() {
+                    return Err("control center plugin actions require shell input".into());
+                }
+                if !self.control_host.application().view_state().projection_only {
+                    return Err("Control Center plugin is unavailable".into());
+                }
                 let outcome = mutate(
                     &mut self.control_host,
                     generation,
@@ -357,37 +301,10 @@ impl LiveShell {
                 );
                 outcome
             }
-            SurfaceRole::Panel => {
-                let previous = self.panel_output.clone();
-                let token = self.panel_change_token;
-                self.switch_panel_output(output.map(str::to_owned));
-                let result = mutate(
-                    &mut self.panel_host,
-                    generation,
-                    node,
-                    action,
-                    clipboard_limit,
-                );
-                if result.is_ok() {
-                    effects.extend(
-                        std::mem::take(&mut self.panel_host.application_mut().effects)
-                            .into_iter()
-                            .map(|action| {
-                                RemoteShellEffect::Panel(action, output.map(str::to_owned))
-                            }),
-                    );
-                }
-                self.switch_panel_output(previous);
-                self.panel_change_token = token;
-                result?
+            SurfaceRole::Taskbar => unreachable!("taskbar actions use the plugin surface key"),
+            SurfaceRole::VolumeOsd => {
+                return Err("volume overlay has no remote actions".into());
             }
-            SurfaceRole::VolumeOsd => mutate(
-                &mut self.volume_osd_host,
-                generation,
-                node,
-                action,
-                clipboard_limit,
-            )?,
             // Desktop messages currently perform native file effects directly.
             // They require staging before the remote dispatcher can admit them.
             _ => return Err("semantic mutation effects are unavailable for this role".into()),
@@ -404,33 +321,6 @@ impl LiveShell {
         effect: &RemoteShellEffect,
     ) -> Result<Option<Application>, String> {
         let selected = match effect {
-            RemoteShellEffect::Launcher(LauncherShellEffect::ActivateResult(index)) => {
-                Some(self.launcher.result_at(*index).cloned())
-            }
-            RemoteShellEffect::Launcher(LauncherShellEffect::LaunchApplication(id)) => Some(
-                self.launcher
-                    .applications()
-                    .find(|app| app.id() == id)
-                    .cloned(),
-            ),
-            RemoteShellEffect::Panel(PanelAction::Task(index), output) => {
-                let previous = self.panel_output.clone();
-                let token = self.panel_change_token;
-                self.switch_panel_output(output.clone());
-                let groups = self.panel_groups();
-                self.switch_panel_output(previous);
-                self.panel_change_token = token;
-                let group = groups.get(*index).ok_or("panel application has retired")?;
-                if !group.windows.is_empty() {
-                    return Ok(None);
-                }
-                Some(group.application_id.as_ref().and_then(|id| {
-                    self.launcher
-                        .applications()
-                        .find(|app| app.id() == id.as_str())
-                        .cloned()
-                }))
-            }
             _ => None,
         };
         match selected {
@@ -451,44 +341,9 @@ impl LiveShell {
         ));
         self.session_host = staged.clone();
         let result: Result<(), String> = match effect {
-            RemoteShellEffect::Launcher(LauncherShellEffect::Dismiss) => {
-                self.apply_launcher_effect(LauncherShellEffect::Dismiss);
-                Ok(())
-            }
-            RemoteShellEffect::Panel(
-                action @ (PanelAction::Launcher | PanelAction::Control),
-                output,
-            ) => {
-                let previous = self.panel_output.clone();
-                let token = self.panel_change_token;
-                self.switch_panel_output(output);
-                self.apply_panel_action(action);
-                self.switch_panel_output(previous);
-                self.panel_change_token = token;
-                Ok(())
-            }
-            RemoteShellEffect::Control(
-                ControlAction::ToggleWifiSection
-                | ControlAction::ToggleBluetoothSection
-                | ControlAction::ToggleAudioSection
-                | ControlAction::CancelSessionAction
-                | ControlAction::RequestSessionAction(_),
-            ) => Ok(()),
-            RemoteShellEffect::Launcher(effect) => {
-                drop(effect);
-                Err("launcher native effect requires guarded delivery".into())
-            }
-            RemoteShellEffect::Panel(action, output) => {
-                drop((action, output));
-                Err("panel native effect requires guarded delivery".into())
-            }
             RemoteShellEffect::Control(action) => {
                 drop(action);
                 Err("control native effect requires guarded delivery".into())
-            }
-            RemoteShellEffect::Run(command) => {
-                drop(command);
-                Err("command launch requires guarded delivery".into())
             }
         };
         self.session_host = original;
@@ -526,24 +381,6 @@ mod tests {
     fn every_advertised_production_shell_action_has_a_dispatch_disposition() {
         let shell = LiveShell::new().expect("live shell");
 
-        assert_advertised_actions_are_guarded(&shell.launcher_host, launcher_activate);
-        assert_advertised_actions_are_guarded(&shell.run_host, run_activate);
         assert_advertised_actions_are_guarded(&shell.control_host, control_activate);
-        assert_advertised_actions_are_guarded(&shell.panel_host, panel_activate);
-        assert_advertised_actions_are_guarded(&shell.volume_osd_host, |_| {
-            RemoteActionDisposition::Unavailable
-        });
-
-        let submit = shell
-            .run_host
-            .unique_semantic_target_for_message(&RunAction::Submit)
-            .expect("run submit target");
-        let (_, projected) = project(&shell.run_host, run_activate).expect("run semantics");
-        let submit = projected
-            .iter()
-            .find(|node| node.id == submit.id)
-            .expect("projected submit node");
-        assert!(!submit.actions.contains(&nickel_ui::ActionKind::Activate));
-        assert!(!submit.enabled);
     }
 }

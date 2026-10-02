@@ -1,0 +1,9 @@
+window.example-window {
+    padding: 8px;
+    border-radius: 16px;
+}
+
+layer.example-layout {
+    width: 100%;
+    height: 100%;
+}

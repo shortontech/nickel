@@ -35,28 +35,6 @@ pub struct DesktopNotification {
     expires_at: Option<Instant>,
 }
 
-#[cfg(feature = "workbench-fixtures")]
-impl DesktopNotification {
-    // The production binary shares this source module but does not compile the fixture registry.
-    #[allow(dead_code)]
-    pub(crate) fn fixture(
-        id: u32,
-        app_name: impl Into<String>,
-        summary: impl Into<String>,
-        body: impl Into<String>,
-        actions: Vec<NotificationAction>,
-    ) -> Self {
-        Self {
-            id,
-            app_name: app_name.into(),
-            summary: summary.into(),
-            body: body.into(),
-            actions,
-            expires_at: None,
-        }
-    }
-}
-
 #[cfg(any(target_os = "linux", target_os = "windows", test))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ClosedNotification {
@@ -427,5 +405,63 @@ mod tests {
         assert_eq!(store.history().len(), 1);
         assert!(store.history()[0].body.contains("unconfirmed"));
         assert!(store.expire(now + Duration::from_secs(86_400)).is_empty());
+    }
+}
+
+/// Bounded public feed snapshot. The caller excludes host-owned approval notices.
+pub(crate) fn snapshot(
+    notification: Option<&DesktopNotification>,
+    history: &[DesktopNotification],
+) -> serde_json::Value {
+    let item = |notification: &DesktopNotification| {
+        serde_json::json!({
+            "id": notification.id,
+            "appName": notification.app_name,
+            "summary": notification.summary,
+            "body": notification.body,
+            "actions": notification.actions.iter().take(MAX_NOTIFICATION_ACTIONS).map(|action| {
+                serde_json::json!({"key": action.key, "label": action.label})
+            }).collect::<Vec<_>>(),
+        })
+    };
+    serde_json::json!({
+        "notification": notification.map(item),
+        "history": history.iter().take(12).map(item).collect::<Vec<_>>(),
+    })
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+
+    #[test]
+    fn public_snapshot_bounds_history_and_actions_without_presentation_state() {
+        let mut store = NotificationStore::default();
+        for index in 0..20 {
+            store.notify(
+                0,
+                NotificationRequest {
+                    app_name: "App".into(),
+                    summary: index.to_string(),
+                    body: "Body".into(),
+                    actions: (0..20)
+                        .map(|index| NotificationAction {
+                            key: index.to_string(),
+                            label: "Action".into(),
+                        })
+                        .collect(),
+                    expire_timeout_ms: 0,
+                },
+                Instant::now(),
+            );
+        }
+        let history = store.history();
+        let value = snapshot(history.first(), &history);
+        assert_eq!(value["history"].as_array().unwrap().len(), 12);
+        assert_eq!(
+            value["notification"]["actions"].as_array().unwrap().len(),
+            MAX_NOTIFICATION_ACTIONS
+        );
+        assert!(value.get("historyVisible").is_none());
     }
 }

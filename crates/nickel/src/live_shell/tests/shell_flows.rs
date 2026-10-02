@@ -1,22 +1,177 @@
-    #[test]
-    fn reopening_launcher_restores_default_dashboard_view() {
-        let mut shell = LiveShell::new().unwrap();
-        shell.apply_session_launcher_visibility(true);
-        shell.apply_launcher_action(crate::launcher_view::LauncherAction::SetView(
-            crate::launcher::LauncherView::Applications,
-        ));
-        assert_eq!(shell.launcher.view(), crate::launcher::LauncherView::Applications);
 
-        shell.apply_session_launcher_visibility(false);
-        assert_eq!(shell.launcher.view(), crate::launcher::LauncherView::Favorites);
+
+
+    #[test]
+    fn ordinary_plugin_window_title_comes_from_its_jsx_root() {
+        let directory = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/plugins/example-surface-dialog"
+        );
+        let mut package = nickel_core::plugins::PluginPackage::load(directory).unwrap();
+        package.source = "function App() { const surface = nickel.data.surface; return h(Window, {width: surface.width, height: surface.height, title: surface.id === 'confirm' ? 'Confirm' : 'Home'}, h(Text, {}, 'Example')); }".into();
+        let surface = package
+            .manifest
+            .surfaces
+            .iter()
+            .find(|surface| surface.id == "home")
+            .unwrap();
+        let key = nickel_core::plugins::PluginSurfaceKey {
+            plugin_id: package.manifest.id.clone(),
+            surface_id: surface.id.clone(),
+        };
+        let application = crate::plugin_panel::PluginPanelApplication::from_package_surface(
+            &package,
+            &Default::default(),
+            surface,
+        )
+        .unwrap();
+        let mut shell = LiveShell::new().unwrap();
+        shell.plugin_surface_hosts.insert(
+            key.clone(),
+            (
+                surface.clone(),
+                nickel_ui::UiHost::new(application, surface.width, surface.height),
+            ),
+        );
+        assert_eq!(shell.plugin_panel_title(&key), Some("Home"));
+        shell.plugin_surface_hosts.remove(&key);
+        assert_eq!(shell.plugin_panel_title(&key), None);
+    }
+
+
+
+
+
+
+    #[cfg(target_os = "linux")]
+
+
+
+
+    #[test]
+    fn window_preview_shared_surface_retires_and_public_requests_recheck_revision_lock() {
+        let host = Arc::new(crate::session_host::StagedSessionHost::new(crate::session_host::default_session_host()));
+        let mut shell = LiveShell::new_with_session_host(host.clone()).unwrap();
+        shell.launcher = crate::launcher::Launcher::new(Vec::new());
+        shell.windows = vec![OpenWindow {id:WindowId(71),application_id:None,active:true,title:"Document".into(),state:Default::default()}];
+        shell.open_window_preview(0);
+        assert!(shell.preview_plugin_active());
+        assert!(!shell.window_preview_scene().is_empty());
+        assert!(shell.plugin_registry.get("org.nickel.window-preview").is_none());
+        let revision = shell.plugin_window_previews("nickel-default").unwrap()["revision"].as_str().unwrap().to_owned();
+        let request = |revision:String| crate::plugin_panel::PluginEffect::WindowPreviewRequest {plugin_id:"nickel-default".into(),revision,action:crate::window_preview::PreviewAction::Close(WindowId(71))};
+        host.take_commands();
+        assert!(!shell.apply_plugin_effects(vec![request("stale".into())]));
+        shell.close_window_preview();
+        shell.open_window_preview(0);
+        assert!(!shell.apply_plugin_effects(vec![request(revision.clone())]));
+        let revision = shell.plugin_window_previews("nickel-default").unwrap()["revision"].as_str().unwrap().to_owned();
+        shell.locked=true;
+        assert_eq!(shell.plugin_window_previews("nickel-default").unwrap()["available"],false);
+        assert!(!shell.apply_plugin_effects(vec![request(revision.clone())]));
+        shell.locked=false;
+        assert!(shell.apply_plugin_effects(vec![request(revision)]));
+        assert!(host.take_commands().iter().any(|command|matches!(command,crate::platform::ShellCommand::WindowAction{window:WindowId(71),action:crate::platform::WindowAction::Close})));
+        shell.set_plugin_enabled("nickel-default",false).unwrap();
+        assert!(!shell.preview_plugin_active());
+        assert!(shell.preview_group.is_none());
+        assert!(shell.plugin_window_previews("nickel-default").is_none());
+    }
+
+    #[test]
+    fn task_switcher_cards_render_in_jsx_and_activate_through_the_host() {
+        let host = std::sync::Arc::new(crate::session_host::StagedSessionHost::new(
+            crate::session_host::default_session_host(),
+        ));
+        let mut shell = LiveShell::new_with_session_host(host.clone()).unwrap();
+        shell.windows = [WindowId(71), WindowId(72)]
+            .into_iter()
+            .map(|id| OpenWindow {
+                id,
+                application_id: None,
+                active: id == WindowId(71),
+                title: format!("Window {}", id.0),
+                state: Default::default(),
+            })
+            .collect();
+        let candidates = shell
+            .windows
+            .iter()
+            .map(|window| nickel_core::task_switcher::SwitchWindow {
+                id: window.id,
+                application_id: window.title.clone(),
+                active: window.active,
+            })
+            .collect::<Vec<_>>();
+        shell.task_switcher.apply(
+            nickel_core::hotkeys::HotkeyAction::SwitchNext,
+            &candidates,
+        );
+        shell.rebuild_task_switcher_preview();
+        assert!(!shell.scene(SurfaceRole::WindowPreview, 474, 214).is_empty());
+        assert!(shell.preview_plugin_active());
+        let projection = shell.plugin_window_previews("nickel-default").unwrap();
+        assert_eq!(projection["taskSwitcher"], true);
         assert_eq!(
-            shell.launcher_view.dashboard_narrow_page,
-            crate::launcher_view::DashboardNarrowPage::Primary
+            projection["windows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|window| window["selected"] == true)
+                .count(),
+            1
         );
 
-        shell.apply_session_launcher_visibility(true);
-        assert_eq!(shell.launcher.view(), crate::launcher::LauncherView::Favorites);
+        let action = crate::window_preview::PreviewAction::Activate(WindowId(71));
+        let bounds = shell.preview_plugin_bounds(action).unwrap();
+        host.take_commands();
+        shell.sync_transient_overlays();
+        let thumbnails = host
+            .take_commands()
+            .into_iter()
+            .find_map(|command| match command {
+                crate::platform::ShellCommand::ShowTaskSwitcher {
+                    thumbnail_bounds, ..
+                } => Some(thumbnail_bounds),
+                _ => None,
+            })
+            .expect("task switcher command includes live JSX thumbnail bounds");
+        assert_eq!(thumbnails.len(), 2);
+        assert_eq!(thumbnails[0].left, bounds.origin.x.floor() as i32);
+        assert!(shell.preview_click(
+            bounds.origin.x + bounds.size.width / 2.0,
+            bounds.origin.y + bounds.size.height / 2.0,
+            false,
+        ));
+        assert!(host.take_commands().iter().any(|command| matches!(
+            command,
+            crate::platform::ShellCommand::WindowAction {
+                window: WindowId(71),
+                action: crate::platform::WindowAction::Activate,
+            }
+        )));
+        assert!(shell.task_switcher.session().is_none());
+        assert!(shell.task_switcher_group.is_none());
+
+        shell
+            .set_plugin_enabled("nickel-default", false)
+            .unwrap();
+        assert!(shell.task_switcher.session().is_none());
+        assert!(shell.task_switcher_group.is_none());
+        shell.task_switcher.apply(
+            nickel_core::hotkeys::HotkeyAction::SwitchNext,
+            &candidates,
+        );
+        shell.rebuild_task_switcher_preview();
+        assert!(shell.scene(SurfaceRole::WindowPreview, 474, 214).is_empty());
+        assert!(!shell.surface_visible(SurfaceRole::WindowPreview));
+        assert!(!shell.preview_plugin_active());
     }
+
+
+
+
+
 
     #[test]
     fn shortcut_capability_failures_have_visible_classified_status() {
@@ -77,14 +232,10 @@
         assert_eq!(samples.scheduled_wakeups, 70);
     }
     use crate::{
-        launcher_view::{LauncherAction, LauncherApplication},
-        model::{ApplicationId, OpenWindow, TrayItem, WindowGroup, WindowId},
-        notification::{NotificationAction, NotificationRequest, NotificationStore},
-        window_preview::{MenuAction, build_preview_frame},
+        model::{ApplicationId, OpenWindow, TrayItem, WindowId},
         winit_shell::SurfaceRole,
     };
     use nickel_core::launcher_preferences::LauncherPreferences;
-    use nickel_core::theme::{Appearance, ThemeMode, ThemePalette};
 
     fn preferences_fixture(shell: &mut LiveShell, path: std::path::PathBuf) {
         let preferences = LauncherPreferences::load(&path).unwrap_or_default();
@@ -101,159 +252,11 @@
         }
     }
 
-    #[test]
-    fn launcher_open_focuses_search_and_sequential_input_survives_mode_change() {
-        let mut shell = LiveShell::new().unwrap();
-        shell.apply_session_launcher_visibility(true);
-        shell.launcher_host.step(HostBatch {
-            surface_size: Some((920, 680)),
-            ..HostBatch::default()
-        });
-        assert!(shell.launcher_host.inspect().keyboard_focus.is_some());
-        shell.launcher_host.step(HostBatch {
-            events: vec![HostEvent::Ui(UiEvent::TextInput("a".into()))],
-            ..HostBatch::default()
-        });
-        for action in shell.launcher_host.application_mut().take_effects() {
-            shell.apply_launcher_action(action);
-        }
-        assert_eq!(shell.launcher.query(), "a");
-        let status = shell.launcher_status_text();
-        shell
-            .launcher_host
-            .application_mut()
-            .sync(&shell.launcher, shell.palette, status);
-        shell.launcher_host.step(HostBatch {
-            events: vec![HostEvent::Ui(UiEvent::TextInput("b".into()))],
-            ..HostBatch::default()
-        });
-        for action in shell.launcher_host.application_mut().take_effects() {
-            shell.apply_launcher_action(action);
-        }
-        assert_eq!(shell.launcher.query(), "ab");
-    }
 
-    #[test]
-    fn first_launcher_open_accepts_typing_after_native_scene_layout() {
-        let mut shell = LiveShell::new().unwrap();
-        shell.launcher.set_codex_available(true);
-        shell.apply_session_launcher_visibility(true);
-        shell.scene(SurfaceRole::Launcher, 960, 720);
-        shell.launcher_host_ui(UiEvent::TextInput("konsole".into()), 960, 720);
-        assert_eq!(shell.launcher.query(), "konsole");
-    }
 
-    #[test]
-    fn reopening_launcher_replaces_retained_child_focus_with_search() {
-        let mut shell = LiveShell::new().unwrap();
-        shell.apply_session_launcher_visibility(true);
-        shell.scene(SurfaceRole::Launcher, 920, 680);
-        let non_search = shell
-            .launcher_host
-            .unique_semantic_target_for_message(&LauncherAction::SetView(
-                crate::launcher::LauncherView::Applications,
-            ))
-            .expect("launcher navigation target");
-        assert!(shell.launcher_host.request_focus(non_search.id).changed);
-        shell.apply_session_launcher_visibility(false);
-        shell.apply_session_launcher_visibility(true);
-        let search = shell
-            .launcher_host
-            .query_unique(&nickel_ui::SemanticSelector::Role(
-                nickel_ui::SemanticRole::TextField,
-            ))
-            .expect("launcher search field");
-        assert_eq!(
-            shell.launcher_host.inspect().keyboard_focus,
-            Some(search.id)
-        );
-        shell.launcher_host_ui(UiEvent::TextInput("files".into()), 920, 680);
-        assert_eq!(shell.launcher.query(), "files");
-    }
 
-    #[test]
-    fn launcher_submit_opens_the_keyboard_focused_dashboard_project() {
-        let mut shell = LiveShell::new().unwrap();
-        shell.launcher.set_codex_available(true);
-        shell.set_dashboard_projects(crate::launcher::DashboardSection::Ready(vec![
-            crate::launcher::DashboardProject {
-                id: "nickel".into(),
-                name: "Nickel".into(),
-                roots: Vec::new(),
-                chat_count: Some(1),
-                activity: crate::launcher::ProjectActivity::Idle,
-                // Recent-project navigation only exposes projects with activity.
-                last_used_at: Some(1),
-            },
-        ]));
-        shell.apply_session_launcher_visibility(true);
-        shell.launcher_host_event_with_clipboard_limit(HostEvent::Poll, 920, 680, None);
-        let target = shell
-            .launcher_host
-            .unique_semantic_target_for_message(&LauncherAction::OpenProject("nickel".into()))
-            .expect("Nickel project row");
-        for event in [UiEvent::KeyboardNavigateDown, UiEvent::KeyboardNavigateLeft] {
-            shell.launcher_host_ui(event, 920, 680);
-        }
-        for _ in 0..7 {
-            shell.launcher_host_ui(UiEvent::KeyboardNavigateDown, 920, 680);
-        }
-        assert_eq!(shell.launcher_host.inspect().controller_target, Some(target.id));
-        assert!(shell.take_requested_codex_project().is_none());
-        shell.shell_role_host_shortcut(SurfaceRole::Launcher, Shortcut::Submit, 920, 680);
-        assert_eq!(shell.take_requested_codex_project().as_deref(), Some("nickel"));
-    }
 
-    #[test]
-    fn launcher_submit_dispatches_the_keyboard_focused_dashboard_application() {
-        let mut shell = LiveShell::new().unwrap();
-        shell.launcher = crate::launcher::Launcher::new(vec![crate::model::Application::new(
-            "org.kde.konsole".into(),
-            "Konsole".into(),
-            None,
-            None,
-            Some(vec!["nickel-test-command-that-does-not-exist".into()]),
-        )]);
-        shell.apply_session_launcher_visibility(true);
-        shell.launcher_host_event_with_clipboard_limit(HostEvent::Poll, 920, 680, None);
-        let target = shell
-            .launcher_host
-            .unique_semantic_target_for_message(&LauncherAction::LaunchApplication(
-                "org.kde.konsole".into(),
-            ))
-            .expect("Konsole application row");
-        for event in [
-            UiEvent::KeyboardNavigateDown,
-            UiEvent::KeyboardNavigateRight,
-        ] {
-            shell.launcher_host_ui(event, 920, 680);
-        }
-        assert_eq!(shell.launcher_host.inspect().controller_target, Some(target.id));
-        assert!(!shell.launcher_status.as_deref().unwrap_or_default().starts_with("Could not launch Konsole: "));
-        shell.shell_role_host_shortcut(SurfaceRole::Launcher, Shortcut::Submit, 920, 680);
-        // An intentionally unavailable executable proves the production launch
-        // action ran without spawning a real application during this test.
-        assert!(
-            shell.launcher_status.as_deref().unwrap_or_default()
-                .starts_with("Could not launch Konsole: ")
-        );
-    }
 
-    #[test]
-    fn controller_cancel_closes_nested_overlay_before_requesting_launcher_dismissal() {
-        assert!(matches!(
-            super::launcher_controller_host_event(ControllerAction::Cancel, true),
-            HostEvent::Controller(ControllerAction::Cancel)
-        ));
-        assert!(matches!(
-            super::launcher_controller_host_event(ControllerAction::Cancel, false),
-            HostEvent::Shortcut(Shortcut::Escape)
-        ));
-        assert!(matches!(
-            super::launcher_controller_host_event(ControllerAction::Down, false),
-            HostEvent::Controller(ControllerAction::Down)
-        ));
-    }
 
     #[test]
     fn failed_application_launch_keeps_launcher_open_and_reports_error() {
@@ -275,6 +278,60 @@
         assert!(status.contains("No such file") || status.contains("not found"));
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn repeated_application_activation_cannot_bypass_secure_storage_readiness() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct StartingStorageHost(AtomicUsize);
+
+        impl crate::session_host::SessionHost for StartingStorageHost {
+            fn dispatch(
+                &self,
+                _command: crate::platform::ShellCommand,
+            ) -> Result<(), crate::platform::SessionRequestError> {
+                Ok(())
+            }
+
+            fn secure_storage_state(
+                &self,
+            ) -> Result<
+                crate::platform::SecureStorageState,
+                crate::platform::SessionRequestError,
+            > {
+                Ok(crate::platform::SecureStorageState::Starting)
+            }
+
+            fn request_secure_storage_retry(
+                &self,
+            ) -> Result<(), crate::platform::SessionRequestError> {
+                self.0.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            }
+        }
+
+        let host = std::sync::Arc::new(StartingStorageHost(AtomicUsize::new(0)));
+        let mut shell = LiveShell::new_with_session_host(host.clone()).unwrap();
+        let application = crate::model::Application::new(
+            "org.example.application".into(),
+            "External application".into(),
+            None,
+            None,
+            Some(vec!["nickel-command-that-must-never-run".into()]),
+        );
+
+        shell.launch_application(application.clone());
+        shell.launch_application(application);
+
+        assert_eq!(host.0.load(Ordering::Relaxed), 2);
+        assert_eq!(
+            shell.launcher_status.as_deref(),
+            Some(
+                "Secure storage is not ready. External application will remain blocked until your existing wallet is available."
+            )
+        );
+    }
+
     #[test]
     fn unavailable_shortcut_application_is_a_visible_typed_failure() {
         let mut shell = LiveShell::new().unwrap();
@@ -286,592 +343,84 @@
         );
     }
 
-    fn launcher_application_menu_has_label(
-        launcher: &crate::launcher::Launcher,
-        palette: nickel_core::theme::ThemePalette,
-        application_id: &str,
-        expected_label: &str,
-    ) -> bool {
-        let mut host = UiHost::new(
-            LauncherApplication::new(
-                launcher.clone(),
-                crate::launcher_view::LauncherViewState::default(),
-                crate::launcher_view::LauncherIconCache::new(),
-                palette,
-            ),
-            920,
-            680,
-        );
-        let target = host
-            .unique_semantic_target_for_message(&LauncherAction::LaunchApplication(
-                application_id.to_owned(),
-            ))
-            .expect("application semantic target");
-        let outcome = host.perform_accessibility_action(
-            target.id.clone(),
-            SemanticAction::Invoke(ActionKind::ContextMenu),
-        );
-        assert!(outcome.failures.is_empty(), "{:#?}", outcome.failures);
-        host.accessibility_nodes()
-            .iter()
-            .any(|node| node.label.as_deref() == Some(expected_label))
-    }
+
 
     #[test]
-    fn launcher_pin_persists_once_reopens_and_recovers_after_save_failure() {
-        let directory = tempfile::tempdir().expect("temporary preferences directory");
-        let preferences_path = directory.path().join("launcher-preferences");
-        let mut shell = LiveShell::new().unwrap();
-        let application_id = "org.nickel.Files".to_owned();
-        shell.launcher = crate::launcher::Launcher::new(vec![crate::model::Application::new(
-            application_id.clone(),
-            "Files".into(),
-            None,
-            None,
-            None,
-        )]);
-        preferences_fixture(&mut shell, preferences_path.clone());
-
-        shell.apply_launcher_action(crate::launcher_view::LauncherAction::TogglePin(
-            application_id.clone(),
-        ));
-        finish_preference_write(&mut shell);
-        assert_eq!(shell.launcher_persistence_attempts, 1);
-        assert!(shell.launcher.is_pinned(&application_id));
-        let persisted = LauncherPreferences::load(&preferences_path).expect("persisted favorite");
-        assert_eq!(persisted.favorites(), [application_id.as_str()]);
-
-        let mut reopened =
-            crate::launcher::Launcher::new(shell.launcher.applications().cloned().collect());
-        reopened.set_preferences(persisted);
-        assert!(reopened.is_pinned(&application_id));
-        assert!(launcher_application_menu_has_label(
-            &reopened,
-            shell.palette,
-            &application_id,
-            "Unpin from Nickel Bar",
-        ));
-
-        preferences_fixture(&mut shell, directory.path().to_path_buf());
-        shell.apply_launcher_action(crate::launcher_view::LauncherAction::TogglePin(
-            application_id.clone(),
-        ));
-        finish_preference_write(&mut shell);
-        assert_eq!(shell.launcher_persistence_attempts, 2);
-        assert!(!shell.launcher.is_pinned(&application_id));
-        assert!(
-            shell.launcher_status.as_deref().is_some_and(
-                |status| status.starts_with("Launcher preferences could not be saved:")
-            )
-        );
-        assert!(launcher_application_menu_has_label(
-            &shell.launcher,
-            shell.palette,
-            &application_id,
-            "Pin to Nickel Bar",
-        ));
-
-        preferences_fixture(&mut shell, preferences_path.clone());
-        shell.apply_launcher_action(crate::launcher_view::LauncherAction::TogglePin(
-            application_id.clone(),
-        ));
-        finish_preference_write(&mut shell);
-        assert_eq!(shell.launcher_persistence_attempts, 3);
-        assert!(shell.launcher.is_pinned(&application_id));
-        assert!(shell.launcher_status.is_none());
-        assert_eq!(
-            LauncherPreferences::load(preferences_path)
-                .expect("recovered preferences")
-                .favorites(),
-            [application_id]
-        );
-    }
-
-    fn launcher_scenario(
-        launcher: &crate::launcher::Launcher,
-        palette: nickel_core::theme::ThemePalette,
-        status: Option<String>,
-    ) -> Scenario<LauncherApplication> {
-        let mut application = LauncherApplication::new(
-            launcher.clone(),
-            crate::launcher_view::LauncherViewState::default(),
-            crate::launcher_view::LauncherIconCache::new(),
-            palette,
-        );
-        application.sync(launcher, palette, status);
-        Scenario::new(application, 920, 680)
-    }
-
-    fn application_context_target(
-        scenario: &Scenario<LauncherApplication>,
-        application_id: &str,
-    ) -> Selector {
-        let target = scenario
-            .host()
-            .unique_semantic_target_for_message(&LauncherAction::LaunchApplication(
-                application_id.to_owned(),
-            ))
-            .expect("launcher application semantic target");
-        Selector::id(target.id.as_str())
-    }
-
-    #[test]
-    fn controller_scenario_pins_reopens_unpins_and_persists_each_action_once() {
+    fn plugin_retry_saves_failed_launcher_preferences_once() {
         let directory = tempfile::tempdir().expect("temporary preferences directory");
         let preferences_path = directory.path().join("launcher-preferences");
         let mut shell = LiveShell::new().unwrap();
         shell.launcher = crate::launcher::Launcher::default();
-        preferences_fixture(&mut shell, preferences_path.clone());
-        let application_id = "firefox";
-
-        let mut pin = launcher_scenario(&shell.launcher, shell.palette, None);
-        let origin = application_context_target(&pin, application_id);
-        pin.controller_semantic_action(&origin, ActionKind::ContextMenu)
-            .expect("production controller context action opens application menu");
-        pin.controller_activate(&Selector::role_name(
-            SemanticRole::MenuItem,
-            "Pin to Nickel Bar",
-        ))
-        .expect("controller reaches and confirms Pin");
-        assert!(pin.host().inspect().open_overlay.is_none());
-        assert_eq!(
-            pin.host().inspect().controller_target.as_ref(),
-            Some(
-                &pin.host()
-                    .query_unique(&SemanticSelector::Id(match &origin {
-                        Selector::Id(id) => id.clone(),
-                        _ => unreachable!(),
-                    }))
-                    .expect("origin remains present")
-                    .id
-            )
-        );
-        let effects = pin.host_mut().application_mut().take_effects();
-        assert_eq!(effects, [LauncherAction::TogglePin(application_id.into())]);
-        for effect in effects {
-            shell.apply_launcher_action(effect);
-        }
+        preferences_fixture(&mut shell, directory.path().to_path_buf());
+        shell.toggle_application_pin("firefox");
         finish_preference_write(&mut shell);
-        assert_eq!(shell.launcher_persistence_attempts, 1);
-        assert!(shell.launcher.is_pinned(application_id));
-        assert_eq!(
-            LauncherPreferences::load(&preferences_path)
-                .expect("pin persisted")
-                .favorites(),
-            [application_id]
-        );
+        assert!(shell.launcher_status.as_deref().is_some_and(|status| {
+            status.starts_with("Launcher preferences could not be saved:")
+        }));
 
-        let mut unpin = launcher_scenario(&shell.launcher, shell.palette, None);
-        let origin = application_context_target(&unpin, application_id);
-        unpin
-            .controller_semantic_action(&origin, ActionKind::ContextMenu)
-            .expect("reopened menu uses authoritative favorite state");
-        unpin
-            .controller_activate(&Selector::role_name(
-                SemanticRole::MenuItem,
-                "Unpin from Nickel Bar",
-            ))
-            .expect("controller reaches and confirms Unpin");
-        let effects = unpin.host_mut().application_mut().take_effects();
-        assert_eq!(effects, [LauncherAction::TogglePin(application_id.into())]);
-        for effect in effects {
-            shell.apply_launcher_action(effect);
-        }
+
+        preferences_fixture(&mut shell, preferences_path.clone());
+        assert!(shell.apply_plugin_effects(vec![
+            crate::plugin_panel::PluginEffect::RetryApplicationPinSave
+        ]));
         finish_preference_write(&mut shell);
         assert_eq!(shell.launcher_persistence_attempts, 2);
-        assert!(!shell.launcher.is_pinned(application_id));
-        assert!(
-            LauncherPreferences::load(preferences_path)
-                .expect("unpin persisted")
-                .favorites()
-                .is_empty()
-        );
-    }
+        assert!(shell.launcher_status.is_none());
 
-    #[test]
-    fn controller_scenario_logout_emits_only_the_typed_request() {
-        let shell = LiveShell::new().unwrap();
-        let mut scenario = launcher_scenario(&shell.launcher, shell.palette, None);
-        let account = scenario
-            .host()
-            .unique_semantic_target_for_message(&LauncherAction::OpenAccount)
-            .expect("account presentation semantic target");
-        scenario
-            .controller_semantic_action(&Selector::id(account.id.as_str()), ActionKind::ContextMenu)
-            .expect("controller opens the shared account menu");
-        scenario
-            .controller_activate(&Selector::role_name(SemanticRole::MenuItem, "Log out"))
-            .expect("controller reaches Logout");
         assert_eq!(
-            scenario.host_mut().application_mut().take_effects(),
-            [LauncherAction::RequestLogout]
+            LauncherPreferences::load(preferences_path)
+                .expect("retried preferences")
+                .favorites(),
+            ["firefox"]
         );
-        assert!(scenario.host().inspect().open_overlay.is_none());
+        assert!(!shell.apply_plugin_effects(vec![
+            crate::plugin_panel::PluginEffect::RetryApplicationPinSave
+        ]));
+        assert_eq!(shell.launcher_persistence_attempts, 2);
     }
 
     #[test]
-    fn failed_pin_retry_is_idempotent_and_restores_origin_focus() {
+    fn granted_plugin_can_pin_catalog_app_and_unpin_unavailable_app() {
         let directory = tempfile::tempdir().expect("temporary preferences directory");
-        let valid_path = directory.path().join("launcher-preferences");
         let mut shell = LiveShell::new().unwrap();
         shell.launcher = crate::launcher::Launcher::default();
-        let application_id = "firefox";
-        preferences_fixture(&mut shell, directory.path().to_path_buf());
+        shell.launcher.set_query("no-such-application");
+        preferences_fixture(&mut shell, directory.path().join("launcher-preferences"));
+        assert_eq!(shell.launcher.result_count(), 0);
 
-        shell.apply_launcher_action(LauncherAction::TogglePin(application_id.into()));
-        finish_preference_write(&mut shell);
-        assert_eq!(shell.launcher_persistence_attempts, 1);
-        assert!(shell.launcher.is_pinned(application_id));
-        let failure = shell
-            .launcher_status
-            .clone()
-            .expect("truthful save failure");
-
-        preferences_fixture(&mut shell, valid_path.clone());
-        let mut retry = launcher_scenario(&shell.launcher, shell.palette, Some(failure));
-        let origin = application_context_target(&retry, application_id);
-        let origin_id = match &origin {
-            Selector::Id(id) => id.clone(),
-            _ => unreachable!(),
-        };
-        retry
-            .controller_semantic_action(&origin, ActionKind::ContextMenu)
-            .expect("failed menu remains controller-usable");
-        retry
-            .controller_activate(&Selector::role_name(
-                SemanticRole::MenuItem,
-                "Retry saving favorites",
-            ))
-            .expect("controller retries persistence without toggling state");
-        assert!(retry.host().inspect().open_overlay.is_none());
-        assert_eq!(
-            retry.host().inspect().controller_target.as_ref(),
-            Some(&origin_id),
-            "closing the retry menu restores the originating application"
-        );
-        let effects = retry.host_mut().application_mut().take_effects();
-        assert_eq!(effects, [LauncherAction::RetryPreferencePersistence]);
-        for effect in effects {
-            shell.apply_launcher_action(effect);
-        }
-        finish_preference_write(&mut shell);
-        assert_eq!(shell.launcher_persistence_attempts, 2);
-        assert!(shell.launcher.is_pinned(application_id));
-        assert!(shell.launcher_status.is_none());
-        assert_eq!(
-            LauncherPreferences::load(valid_path)
-                .expect("retry persisted unchanged authoritative state")
-                .favorites(),
-            [application_id]
-        );
-    }
-
-    #[test]
-    fn launcher_exposes_every_non_ready_secure_storage_state() {
-        for (state, expected) in [
-            (SecureStorageState::Starting, "Secure storage is starting…"),
-            (SecureStorageState::Locked, "Secure storage is locked."),
-            (
-                SecureStorageState::PromptRequired,
-                "Secure storage is waiting for its unlock prompt.",
-            ),
-            (
-                SecureStorageState::Unavailable,
-                "Secure storage is unavailable.",
-            ),
-            (
-                SecureStorageState::UnavailableReason(
-                    nickel_session_protocol::SecureStorageUnavailableReason::ProviderDisappeared,
-                ),
-                "The secure-storage provider disappeared.",
-            ),
-            (
-                SecureStorageState::ControlUnavailable,
-                "Nickel cannot reach the session service.",
-            ),
-        ] {
-            assert_eq!(secure_storage_status_label(state), Some(expected));
-        }
-        assert_eq!(secure_storage_status_label(SecureStorageState::Ready), None);
-    }
-
-    #[test]
-    fn session_feeds_start_loading_and_keep_failure_distinct_from_empty_ready() {
-        let shell = LiveShell::new().unwrap();
-        assert_eq!(shell.window_feed_status, FeedStatus::Loading);
-        assert_eq!(shell.workspace_feed_status, FeedStatus::Loading);
-        assert_eq!(
-            session_feed_status_label(shell.window_feed_status, shell.workspace_feed_status),
-            Some("Loading session data…")
-        );
-
-        assert_eq!(
-            FeedState::<Vec<OpenWindow>>::Ready(Vec::new()).status(),
-            FeedStatus::Ready
-        );
-        assert_eq!(
-            FeedState::<Vec<OpenWindow>>::Disconnected.status(),
-            FeedStatus::Disconnected
-        );
-        assert_eq!(
-            FeedState::<Vec<OpenWindow>>::Failed.status(),
-            FeedStatus::Failed
-        );
-        assert_eq!(
-            session_feed_status_label(FeedStatus::Ready, FeedStatus::Ready),
-            None
-        );
-        assert_eq!(
-            session_feed_status_label(FeedStatus::Disconnected, FeedStatus::Ready),
-            Some("Session window data is disconnected.")
-        );
-        assert_eq!(
-            session_feed_status_label(FeedStatus::Failed, FeedStatus::Ready),
-            Some("Session window data failed to load.")
-        );
-    }
-
-    #[test]
-    fn semantic_shell_targets_come_from_live_group_preview_and_menu_records() {
-        let mut shell = LiveShell::new().unwrap();
-        shell
-            .launcher
-            .set_preferences(LauncherPreferences::default());
-        let application_id = ApplicationId::new("org.nickel.Terminal");
-        shell.windows = vec![
-            OpenWindow {
-                id: WindowId(4),
-                application_id: Some(application_id.clone()),
-                active: true,
-                title: "one".into(),
-                state: crate::model::WindowState::default(),
-            },
-            OpenWindow {
-                id: WindowId(9),
-                application_id: Some(application_id),
-                active: false,
-                title: "two".into(),
-                state: crate::model::WindowState::default(),
-            },
-        ];
-        let _ = shell.scene(SurfaceRole::Panel, 1280, 56);
-        let panel = shell
-            .resolve_semantic_target(&ShellSemanticTarget::PanelApplication {
-                application_id: "org.nickel.Terminal".into(),
-                output: Some("DP-1".into()),
-                interaction: PointerInteraction::Hover,
-            })
-            .expect("live panel group resolves");
-        assert_eq!(panel.role, ShellRole::Panel);
-        assert_eq!(panel.output.as_deref(), Some("DP-1"));
-        assert!(shell.panel_pointer_moved(panel.x as f32, 1280));
-        assert_eq!(shell.panel_hover, Some(super::PanelHover::Task(0)));
-        assert!(shell.preview_group.is_none());
-        assert_eq!(shell.preview_pending.map(|(index, _)| index), Some(0));
-        assert!(shell.preview_pending.unwrap().1 > Instant::now());
-
-        let (preview_width, _) = super::preview_dimensions(2);
-        assert_eq!(
-            shell.preview_origin_x(0, preview_width),
-            (panel.x - i32::try_from(preview_width / 2).unwrap()).max(shell.panel_origin_x)
-        );
-
-        let group = shell.launcher.group_windows(&shell.windows).remove(0);
-        shell.preview_frame = Some(build_preview_frame(
-            &group,
-            &HashMap::new(),
-            None,
-            shell.semantic_theme(),
-        ));
-        let preview = shell
-            .resolve_semantic_target(&ShellSemanticTarget::PreviewWindow {
-                window: nickel_session_protocol::WindowId(9),
-                action: PreviewTargetAction::Close,
-            })
-            .expect("live preview close target resolves");
-        assert_eq!(preview.role, ShellRole::Preview);
-        assert_eq!(preview.interaction, PointerInteraction::LeftClick);
-        assert_eq!(
-            shell.preview_frame.as_mut().unwrap().transition_pointer(
-                Point {
-                    x: preview.x as f32,
-                    y: preview.y as f32,
-                },
-                false,
-            ),
-            Some(crate::window_preview::PreviewAction::Close(WindowId(9)))
-        );
-
-        shell.window_menu = Some(WindowId(9));
-        let _ = shell.window_menu_scene();
-        let menu = shell
-            .resolve_semantic_target(&ShellSemanticTarget::WindowMenu {
-                window: nickel_session_protocol::WindowId(9),
-                action: WindowMenuTargetAction::Minimize,
-            })
-            .expect("live context-menu row resolves");
-        assert_eq!(menu.role, ShellRole::ContextMenu);
-        assert!(
-            shell
-                .window_menu_host
-                .as_ref()
-                .unwrap()
-                .semantic_targets_for_message(&MenuAction::Minimize(WindowId(9)))
-                .into_iter()
-                .next()
-                .is_some()
-        );
-
-        shell.screenshot.show(image::RgbaImage::new(400, 200));
-        let _ = shell.scene(SurfaceRole::Screenshot, 800, 600);
-        assert!(shell.perform_screenshot_semantic_action(ScreenshotTargetAction::SelectionStart));
-        assert!(shell.perform_screenshot_semantic_action(ScreenshotTargetAction::SelectionEnd));
-        assert!(shell.perform_screenshot_semantic_action(ScreenshotTargetAction::Confirm));
-        assert!(shell.screenshot.confirmed());
-    }
-
-    #[test]
-    fn taskbar_secondary_click_opens_application_menu_for_captured_group_at_item_anchor() {
-        let mut shell = LiveShell::new().unwrap();
-        shell
-            .launcher
-            .set_preferences(LauncherPreferences::default());
-        let application_id = ApplicationId::new("org.kde.dolphin");
-        shell.windows = vec![
-            OpenWindow {
-                id: WindowId(41),
-                application_id: Some(application_id.clone()),
-                active: false,
-                title: "Files".into(),
-                state: crate::model::WindowState::default(),
-            },
-            OpenWindow {
-                id: WindowId(42),
-                application_id: Some(application_id),
-                active: true,
-                title: "Downloads".into(),
-                state: crate::model::WindowState::default(),
-            },
-        ];
-        shell.panel_origin_x = 1_920;
-        let _ = shell.scene(SurfaceRole::Panel, 1_280, 56);
-        let target = shell
-            .panel_host
-            .unique_semantic_target_for_message(&super::PanelAction::Task(0))
-            .expect("taskbar item");
-        let expected_anchor = shell.panel_origin_x + target.bounds.origin.x.round() as i32;
-        let center = target.bounds.origin.x + target.bounds.size.width / 2.0;
-
-        assert!(shell.panel_click(center, 1_280, true));
-        assert!(shell.window_menu.is_none());
-        assert_eq!(shell.window_menu_anchor_x, Some(expected_anchor));
-        assert!(shell.preview_group.is_none());
-        assert_eq!(
-            shell
-                .application_menu_target
-                .as_ref()
-                .map(|target| target.windows.clone()),
-            Some(vec![WindowId(41), WindowId(42)])
-        );
-        shell.windows[0].active = true;
-        shell.windows[1].active = false;
-        assert_eq!(
-            shell
-                .application_menu_target
-                .as_ref()
-                .map(|target| target.windows.clone()),
-            Some(vec![WindowId(41), WindowId(42)]),
-            "an open menu must not recapture membership when group activity changes"
-        );
-        shell.windows[0].active = false;
-        shell.windows[1].active = true;
-
-        shell.sync_transient_overlays();
-        assert_eq!(shell.window_menu_anchor_x, Some(expected_anchor));
-        assert_eq!(
-            shell.window_menu_geometry(),
-            Some((
-                expected_anchor,
-                shell.panel_origin_y,
-                super::MENU_WIDTH.ceil() as u32,
-                shell.window_context_menu_height() as u32,
-            ))
-        );
-
-        shell.close_window_preview();
-        let outcome = shell.panel_host.perform_accessibility_action(
-            target.id.clone(),
-            SemanticAction::Invoke(ActionKind::ContextMenu),
-        );
-        assert!(outcome.failures.is_empty(), "{:#?}", outcome.failures);
-        assert!(shell.apply_panel_effects());
-        assert!(shell.application_menu_target.is_some());
-        assert_eq!(shell.window_menu_anchor_x, Some(expected_anchor));
-
-        for event in [
-            HostEvent::Ui(UiEvent::KeyboardContextMenu),
-            HostEvent::Controller(ControllerAction::ContextMenu),
-            HostEvent::Ui(UiEvent::TouchLongPress(Point {
-                x: center,
-                y: target.bounds.origin.y + target.bounds.size.height / 2.0,
-            })),
-        ] {
-            shell.close_window_preview();
-            shell.panel_host.step(HostBatch {
-                events: vec![
-                    HostEvent::Ui(UiEvent::AccessibilityFocus(target.id.clone())),
-                    event,
-                ],
-                ..HostBatch::default()
-            });
-            assert!(shell.apply_panel_effects());
-            assert!(shell.application_menu_target.is_some());
-            assert_eq!(shell.window_menu_anchor_x, Some(expected_anchor));
-        }
-    }
-
-    #[test]
-    fn taskbar_primary_click_activates_the_topmost_group_window_without_opening_previews() {
-        let host = std::sync::Arc::new(crate::session_host::StagedSessionHost::new(
-            crate::session_host::default_session_host(),
-        ));
-        let mut shell = LiveShell::new_with_session_host(host.clone()).unwrap();
-        shell
-            .launcher
-            .set_preferences(LauncherPreferences::default());
-        let application_id = ApplicationId::new("org.kde.konsole");
-        shell.windows = [WindowId(41), WindowId(42)]
-            .into_iter()
-            .map(|id| OpenWindow {
-                id,
-                application_id: Some(application_id.clone()),
-                active: id == WindowId(42),
-                title: format!("Terminal {}", id.0),
-                state: crate::model::WindowState::default(),
-            })
-            .collect();
-        let _ = shell.scene(SurfaceRole::Panel, 1_280, 56);
-        let target = shell
-            .panel_host
-            .unique_semantic_target_for_message(&super::PanelAction::Task(0))
-            .expect("taskbar item");
-        let center = target.bounds.origin.x + target.bounds.size.width / 2.0;
-
-        assert!(shell.panel_click(center, 1_280, false));
-        assert!(shell.preview_group.is_none());
-        let commands = host.take_commands();
-        assert!(commands.iter().any(|command| matches!(
-            command,
-            crate::platform::ShellCommand::WindowAction {
-                window: WindowId(42),
-                action: crate::platform::WindowAction::Activate,
+        assert!(shell.apply_plugin_effects(vec![
+            crate::plugin_panel::PluginEffect::ToggleApplicationPin {
+                id: "firefox".into(),
             }
-        )));
-        assert!(!commands.iter().any(|command| matches!(
-            command,
-            crate::platform::ShellCommand::ShowPreview { .. }
-        )));
+        ]));
+        assert!(shell.launcher.is_pinned("firefox"));
+        assert_eq!(shell.launcher_persistence_attempts, 1);
+        assert!(!shell.apply_plugin_effects(vec![
+            crate::plugin_panel::PluginEffect::ToggleApplicationPin {
+                id: "org.example.missing".into(),
+            }
+        ]));
+        assert_eq!(shell.launcher_persistence_attempts, 1);
+
+        shell.launcher.toggle_pin("org.example.unavailable");
+        assert!(shell.launcher.is_pinned("org.example.unavailable"));
+        assert!(shell.apply_plugin_effects(vec![
+            crate::plugin_panel::PluginEffect::ToggleApplicationPin {
+                id: "org.example.unavailable".into(),
+            }
+        ]));
+        assert!(!shell.launcher.is_pinned("org.example.unavailable"));
     }
+
+
+
+
+
+
+
+
+
+
 
     #[test]
     fn preview_window_menus_anchor_to_their_distinct_cards() {
@@ -889,9 +438,23 @@
             })
             .collect();
         shell.panel_origin_x = 300;
-        let _ = shell.scene(SurfaceRole::Panel, 1_280, 56);
+        let _ = shell.scene(SurfaceRole::Taskbar, 1_280, 56);
         shell.open_window_preview(0);
         let _ = shell.scene(SurfaceRole::WindowPreview, 640, 240);
+        assert!(shell.preview_plugin_active());
+        assert!(shell
+            .preview_plugin_bounds(crate::window_preview::PreviewAction::Activate(WindowId(71)))
+            .is_some());
+        let thumbnails = shell
+            .preview_thumbnail_bounds(&[WindowId(71), WindowId(72)])
+            .expect("JSX preview provides thumbnail bounds");
+        assert_eq!(thumbnails.len(), 2);
+        let first_image = shell
+            .preview_plugin_bounds(crate::window_preview::PreviewAction::Activate(WindowId(71)))
+            .unwrap();
+        assert_eq!(thumbnails[0].left, first_image.origin.x.floor() as i32);
+        assert_eq!(thumbnails[0].top, first_image.origin.y.floor() as i32);
+        assert!(thumbnails[1].left > thumbnails[0].right);
         let (preview_width, preview_height) = super::preview_dimensions(2);
         assert_eq!(
             shell.preview_geometry(),
@@ -904,101 +467,91 @@
         );
 
         shell.apply_preview_action(crate::window_preview::PreviewAction::OpenMenu(WindowId(71)));
-        let first = shell.window_menu_anchor_x.expect("first card anchor");
+        let key=shell.active_shell_surface_key("window-menu");
+        let first=shell.plugin_surface_hosts.get(&key).unwrap().0.offset_x;
         shell.apply_preview_action(crate::window_preview::PreviewAction::OpenMenu(WindowId(72)));
-        let second = shell.window_menu_anchor_x.expect("second card anchor");
+        let second=shell.plugin_surface_hosts.get(&key).unwrap().0.offset_x;
 
         assert!(second > first + 200, "each card must retain its own anchor");
 
         shell.window_menu = None;
         let card = shell
-            .preview_frame
-            .as_ref()
-            .and_then(|frame| frame.semantic_bounds(crate::window_preview::PreviewAction::Activate(
-                WindowId(71),
-            )))
+            .preview_plugin_bounds(crate::window_preview::PreviewAction::Activate(WindowId(71)))
             .expect("first preview card");
         let touch = Point {
             x: card.origin.x + card.size.width / 2.0,
             y: card.origin.y + card.size.height / 2.0,
         };
-        let frame = shell.preview_frame.as_mut().unwrap();
-        frame.step(HostBatch {
-            events: vec![HostEvent::Ui(UiEvent::TouchLongPress(touch))],
-            ..HostBatch::default()
-        });
-        let actions = frame.take_actions();
-        assert_eq!(
-            actions,
-            vec![crate::window_preview::PreviewAction::OpenMenu(WindowId(71))]
+        shell.preview_plugin_event(
+            HostEvent::Ui(UiEvent::TouchLongPress(touch)),
+            (preview_width, preview_height),
+            None,
         );
-        for action in actions {
-            shell.apply_preview_action(action);
-        }
         assert_eq!(shell.window_menu, Some(WindowId(71)));
-        assert_eq!(shell.window_menu_anchor_x, Some(first));
+        assert_eq!(shell.plugin_surface_hosts.get(&key).unwrap().0.offset_x,first);
+        assert!(shell.default_shell_surface_visible("window-menu"));
     }
 
     #[test]
-    fn successful_window_command_consumes_and_dismisses_the_preview_menu() {
+    fn preview_geometry_and_thumbnail_bounds_follow_the_projected_card_limit() {
         let mut shell = LiveShell::new().unwrap();
-        let window = OpenWindow {
-            id: WindowId(73),
-            application_id: Some(ApplicationId::new("org.example.Editor")),
-            active: true,
-            title: "Document".into(),
-            state: crate::model::WindowState::default(),
-        };
-        shell.windows = vec![window.clone()];
-        shell.preview_group = Some(0);
-        shell.window_menu = Some(window.id);
-        shell.window_menu_snapshot = Some(window.clone());
+        shell.launcher.set_preferences(LauncherPreferences::default());
+        shell.windows = (1..=13)
+            .map(|index| OpenWindow {
+                id: WindowId(index),
+                application_id: Some(ApplicationId::new("org.example.Editor")),
+                active: index == 1,
+                title: format!("Document {index}"),
+                state: crate::model::WindowState::default(),
+            })
+            .collect();
+        let _ = shell.scene(SurfaceRole::Taskbar, 1_280, 56);
+        shell.open_window_preview(0);
+        let (_, _, width, height) = shell.preview_geometry().expect("preview is open");
+        assert_eq!((width, height), super::preview_dimensions(12));
+        let windows = (1..=12).map(WindowId).collect::<Vec<_>>();
+        assert_eq!(shell.preview_thumbnail_bounds(&windows).unwrap().len(), 12);
+        assert!(shell.preview_plugin_bounds(crate::window_preview::PreviewAction::Activate(WindowId(13))).is_none());
+    }
 
-        shell.apply_window_menu_action(crate::window_preview::MenuAction::Close(window.id));
-
+    #[test]
+    fn public_jsx_window_close_consumes_and_dismisses_the_preview_menu() {
+        let host=Arc::new(crate::session_host::StagedSessionHost::new(crate::session_host::default_session_host()));
+        let mut shell=LiveShell::new_with_session_host(host.clone()).unwrap();
+        let window=OpenWindow{id:WindowId(73),application_id:Some(ApplicationId::new("org.example.Editor")),active:true,title:"Document".into(),state:Default::default()};
+        shell.windows=vec![window.clone()];
+        assert!(shell.open_window_menu_at(window.id.0,120,200));
+        let key=shell.active_shell_surface_key("window-menu");
+        shell.plugin_panel_scene(&key,320,400);
+        let target=shell.plugin_panel_host_ref(&key).unwrap().query_unique(&nickel_ui::SemanticSelector::RoleAndName{role:nickel_ui::SemanticRole::Button,name:"Close window".into()}).unwrap();
+        host.take_commands();
+        shell.plugin_surface_host_event(&key,HostEvent::Ui(UiEvent::AccessibilityActivate(target.id)),(320,400),None,None);
         assert!(shell.window_menu.is_none());
         assert!(shell.window_menu_snapshot.is_none());
-        assert!(shell.preview_group.is_none());
+        assert!(!shell.default_shell_surface_visible("window-menu"));
+        assert!(host.take_commands().iter().any(|command|matches!(command,crate::platform::ShellCommand::WindowAction{window:WindowId(73),action:crate::platform::WindowAction::Close})));
     }
 
     #[test]
-    fn panel_popover_anchor_is_semantic_and_scoped_to_the_invoking_output() {
-        let mut shell = LiveShell::new().unwrap();
-        let _ = shell.scene(SurfaceRole::Panel, 1_280, 56);
-        shell.set_panel_output("left");
-        let target = shell
-            .panel_host
-            .unique_semantic_target_for_message(&super::PanelAction::Control)
-            .expect("control button");
-        let expected = target.bounds;
-        let outcome = shell
-            .panel_host
-            .perform_accessibility_action(target.id, SemanticAction::Invoke(ActionKind::Activate));
-        assert!(outcome.failures.is_empty(), "{:#?}", outcome.failures);
-        assert!(shell.apply_panel_effects());
-        let (role, first) = shell.popover_anchor(AnchorSide::Above).unwrap();
-        assert_eq!(role, ShellRole::ControlCenter);
-        assert_eq!(first.control, "panel-control");
-        assert_eq!(first.output, "left");
-        assert_eq!(first.bounds.x, expected.origin.x.floor() as i32);
-
-        shell.set_panel_output("right");
-        for _ in 0..2 {
-            let target = shell
-                .panel_host
-                .unique_semantic_target_for_message(&super::PanelAction::Control)
-                .unwrap();
-            let outcome = shell.panel_host.perform_accessibility_action(
-                target.id,
-                SemanticAction::Invoke(ActionKind::Activate),
-            );
-            assert!(outcome.failures.is_empty(), "{:#?}", outcome.failures);
-            assert!(shell.apply_panel_effects());
-        }
-        let (_, reopened) = shell.popover_anchor(AnchorSide::Below).unwrap();
-        assert_eq!(reopened.output, "right");
-        assert_eq!(reopened.preferred, AnchorSide::Below);
-        assert_eq!(reopened.bounds, first.bounds);
+    fn public_menu_blur_dismissal_invalidates_intent_without_restoring_application_focus() {
+        let host = Arc::new(crate::session_host::StagedSessionHost::new(crate::session_host::default_session_host()));
+        let mut shell = LiveShell::new_with_session_host(host.clone()).unwrap();
+        shell.windows = vec![OpenWindow { id: WindowId(73), application_id: Some(ApplicationId::new("org.example.Editor")), active: true, title: "Document".into(), state: Default::default() }];
+        assert!(shell.open_window_menu_at(73, 120, 200));
+        let generation = shell.window_menu_generation().unwrap();
+        shell.windows[0].active = false;
+        shell.windows.push(OpenWindow { id: WindowId(74), application_id: Some(ApplicationId::new("org.example.Terminal")), active: true, title: "Terminal".into(), state: Default::default() });
+        host.take_commands();
+        assert!(shell.apply_plugin_effects(vec![crate::plugin_panel::PluginEffect::WindowOperation {
+            plugin_id: "nickel-default".into(), operation: "windows.dismissMenu".into(), restore_focus: false, destination: None, window: None,
+        }]));
+        assert!(shell.window_menu.is_none());
+        assert!(shell.window_menu_snapshot.is_none());
+        assert!(shell.window_menu_generation().is_none());
+        assert!(!shell.retire_window_menu(generation));
+        assert_eq!(shell.windows.iter().find(|window| window.active).unwrap().id, WindowId(74));
+        assert!(!shell.default_shell_surface_visible("window-menu"));
+        assert!(!host.take_commands().iter().any(|command| matches!(command, crate::platform::ShellCommand::RestoreApplicationFocus)));
     }
 
     #[test]
@@ -1062,37 +615,31 @@
     }
 
     #[test]
-    fn control_center_keyboard_navigation_uses_host_semantic_order() {
-        let mut shell = LiveShell::new().unwrap();
-        shell.control_visible = true;
+    fn lock_password_paint_does_not_change_with_input_modality() {
+        let mut host = UiHost::new(super::LockApplication::fixture("nickel", None), 960, 540);
+        let target = host
+            .query_unique(&SemanticSelector::RoleAndName {
+                role: SemanticRole::TextField,
+                name: "Password".into(),
+            })
+            .expect("lock password semantic target");
+        let center = Point {
+            x: target.bounds.origin.x + target.bounds.size.width / 2.0,
+            y: target.bounds.origin.y + target.bounds.size.height / 2.0,
+        };
+        host.step(HostBatch {
+            events: vec![
+                HostEvent::Ui(UiEvent::PointerPressed(center)),
+                HostEvent::Ui(UiEvent::PointerReleased(center)),
+            ],
+            ..HostBatch::default()
+        });
 
-        assert!(shell.control_key(Some(KeyCode::ArrowDown), 420, 600));
-        assert!(shell.control_host.inspect().controller_target.is_some());
-        assert!(shell.control_key(Some(KeyCode::ArrowUp), 420, 600));
-        assert!(shell.control_host.inspect().controller_target.is_some());
-        assert!(shell.control_key(Some(KeyCode::Escape), 420, 600));
-        assert!(!shell.control_visible);
-    }
+        host.adopt_input_modality(InputModality::Pointer);
+        let pointer_paint = host.commands().to_vec();
+        assert!(host.adopt_input_modality(InputModality::Keyboard));
 
-    #[test]
-    fn control_center_controller_dispatch_matches_keyboard_adapter() {
-        let mut keyboard = LiveShell::new().unwrap();
-        let mut controller = LiveShell::new().unwrap();
-        keyboard.control_visible = true;
-        controller.control_visible = true;
-
-        assert!(controller.control_controller(nickel_ui::ControllerAction::Down, 420, 600));
-        assert!(
-            controller
-                .control_host
-                .inspect()
-                .controller_target
-                .is_some()
-        );
-
-        assert!(keyboard.control_key(Some(KeyCode::Escape), 420, 600));
-        assert!(controller.control_controller(nickel_ui::ControllerAction::Cancel, 420, 600));
-        assert_eq!(controller.control_visible, keyboard.control_visible);
+        assert_eq!(host.commands(), pointer_paint);
     }
 
     #[test]
@@ -1101,233 +648,8 @@
 
         assert!(shell.global_shortcut(GlobalShortcut::ProjectDisplays));
         assert!(shell.control_visible);
-        assert!(
-            shell
-                .control_host
-                .semantic_targets_for_message(&ControlAction::ToggleShowDesktop)
-                .is_empty(),
-            "Super+P must not open the generic Control Center"
-        );
-    }
-
-    #[test]
-    fn transient_keyboard_navigation_uses_production_frame_order() {
-        let mut shell = LiveShell::new().unwrap();
-        let palette = nickel_core::theme::ThemePalette::from_appearance(Appearance::default());
-        let group = WindowGroup {
-            application_id: None,
-            application_name: "Editor".into(),
-            windows: vec![
-                OpenWindow {
-                    id: WindowId(4),
-                    application_id: None,
-                    active: true,
-                    title: "one".into(),
-                    state: crate::model::WindowState::default(),
-                },
-                OpenWindow {
-                    id: WindowId(9),
-                    application_id: None,
-                    active: false,
-                    title: "two".into(),
-                    state: crate::model::WindowState::default(),
-                },
-            ],
-        };
-        shell.preview_group = Some(0);
-        shell.preview_frame = Some(build_preview_frame(
-            &group,
-            &HashMap::new(),
-            None,
-            semantic_theme_from_palette(palette),
-        ));
-
-        assert!(shell.preview_key(Some(KeyCode::ArrowRight)));
-        assert_eq!(shell.preview_hovered, Some(WindowId(9)));
-        assert!(shell.preview_key(Some(KeyCode::ArrowLeft)));
-        assert_eq!(shell.preview_hovered, Some(WindowId(4)));
-
-        shell.window_menu = Some(WindowId(4));
-        shell.window_menu_snapshot = Some(group.windows[0].clone());
-        let _ = shell.window_menu_scene();
-        assert!(shell.preview_key(Some(KeyCode::ArrowDown)));
-        assert!(
-            shell
-                .window_menu_host
-                .as_ref()
-                .unwrap()
-                .inspect()
-                .controller_target
-                .is_some()
-        );
-        let first_target = shell
-            .window_menu_host
-            .as_ref()
-            .unwrap()
-            .inspect()
-            .controller_target
-            .clone();
-        assert!(!shell.window_menu_host_key(Some(KeyCode::ArrowUp)));
-        assert_eq!(
-            shell
-                .window_menu_host
-                .as_ref()
-                .unwrap()
-                .inspect()
-                .controller_target,
-            first_target
-        );
-        assert!(shell.window_menu_host_key(Some(KeyCode::ArrowDown)));
-        assert_ne!(
-            shell
-                .window_menu_host
-                .as_ref()
-                .unwrap()
-                .inspect()
-                .controller_target,
-            first_target
-        );
-    }
-
-    #[test]
-    fn notification_host_effects_stay_at_the_transport_boundary() {
-        let mut shell = LiveShell::new().unwrap();
-        shell.notification_feed.notify_internal(NotificationRequest {
-            app_name: "Test".into(),
-            summary: "Ready".into(),
-            body: "Choose".into(),
-            actions: vec![NotificationAction {
-                key: "open".into(),
-                label: "Open".into(),
-            }],
-            expire_timeout_ms: 0,
-        });
-        shell.notification = shell.notification_feed.snapshot();
-        let _ = shell.scene(SurfaceRole::Notification, 420, 180);
-        let target = shell
-            .notification_host
-            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
-                role: nickel_ui::SemanticRole::Button,
-                name: "Open".into(),
-            })
-            .unwrap();
-        let point = Point {
-            x: target.bounds.origin.x + target.bounds.size.width / 2.0,
-            y: target.bounds.origin.y + target.bounds.size.height / 2.0,
-        };
-
-        assert!(shell.notification_click(point.x, point.y, 420, 180));
-        assert!(shell.notification.is_none());
-        assert!(
-            shell
-                .notification_host
-                .query(&nickel_ui::SemanticSelector::Role(
-                    nickel_ui::SemanticRole::Dialog
-                ))
-                .is_empty()
-        );
-    }
-
-    #[test]
-    fn notification_controller_cancel_uses_the_typed_host_effect() {
-        let mut shell = LiveShell::new().unwrap();
-        let mut store = NotificationStore::default();
-        store.notify(
-            0,
-            NotificationRequest {
-                app_name: "Test".into(),
-                summary: "Ready".into(),
-                body: "Choose".into(),
-                actions: vec![],
-                expire_timeout_ms: 0,
-            },
-            Instant::now(),
-        );
-        shell.notification = store.newest();
-        let _ = shell.scene(SurfaceRole::Notification, 420, 180);
-
-        assert!(shell.notification_controller(ControllerAction::Cancel));
-        assert!(shell.notification.is_none());
-        assert!(
-            shell
-                .notification_host
-                .query(&nickel_ui::SemanticSelector::Role(
-                    nickel_ui::SemanticRole::Dialog
-                ))
-                .is_empty()
-        );
-    }
-
-    #[test]
-    fn compositor_owned_notification_ui_uses_production_effect_reducer() {
-        let mut shell = LiveShell::new().unwrap();
-        shell.notification_feed.notify_internal(NotificationRequest {
-            app_name: "Test".into(),
-            summary: "Ready".into(),
-            body: "Choose".into(),
-            actions: vec![NotificationAction {
-                key: "open".into(),
-                label: "Open".into(),
-            }],
-            expire_timeout_ms: 0,
-        });
-        shell.notification = shell.notification_feed.snapshot();
-        let _ = shell.scene(SurfaceRole::Notification, 420, 180);
-        let target = shell
-            .notification_host
-            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
-                role: nickel_ui::SemanticRole::Button,
-                name: "Open".into(),
-            })
-            .unwrap();
-        let point = Point {
-            x: target.bounds.origin.x + target.bounds.size.width / 2.0,
-            y: target.bounds.origin.y + target.bounds.size.height / 2.0,
-        };
-
-        assert!(shell.shell_role_host_ui(
-            SurfaceRole::Notification,
-            UiEvent::PointerPressed(point),
-            420,
-            180,
-        ));
-        assert!(shell.shell_role_host_ui(
-            SurfaceRole::Notification,
-            UiEvent::PointerReleased(point),
-            420,
-            180,
-        ));
-        assert!(shell.notification.is_none());
-    }
-
-    #[test]
-    fn compositor_owned_control_center_ui_updates_the_production_host() {
-        let mut shell = LiveShell::new().unwrap();
-        shell.control_visible = true;
-        let _ = shell.scene(SurfaceRole::ControlCenter, 420, 600);
-        let target = shell
-            .control_host
-            .query(&nickel_ui::SemanticSelector::Role(
-                nickel_ui::SemanticRole::Button,
-            ))
-            .into_iter()
-            .next()
-            .expect("control center button");
-        let point = Point {
-            x: target.bounds.origin.x + target.bounds.size.width / 2.0,
-            y: target.bounds.origin.y + target.bounds.size.height / 2.0,
-        };
-
-        assert!(shell.shell_role_host_ui(
-            SurfaceRole::ControlCenter,
-            UiEvent::PointerPressed(point),
-            420,
-            600,
-        ));
-        assert!(shell.shell_role_host_ui(
-            SurfaceRole::ControlCenter,
-            UiEvent::PointerReleased(point),
-            420,
-            600,
-        ));
+        assert!(shell.control_host.query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+            role: nickel_ui::SemanticRole::Button,
+            name: "Show desktop".into(),
+        }).is_err());
     }

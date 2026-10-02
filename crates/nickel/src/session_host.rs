@@ -47,6 +47,24 @@ use crate::session::{NickelSession, SessionAuthority, SessionAuthorityRequest};
 // keeps the compositor methods for Linux and standalone shell fixtures.
 #[cfg_attr(target_os = "windows", allow(dead_code))]
 pub trait SessionHost: Send + Sync {
+    fn feature_preference_writes_allowed(&self) -> bool {
+        true
+    }
+    fn optional_features_committed(
+        &self,
+        _codex_generation: u64,
+        _keyboard_generation: u64,
+    ) -> Result<(), String> {
+        // The native Windows shell already observes preferences in its system subscription.
+        #[cfg(target_os = "linux")]
+        {
+            platform::refresh_optional_features()
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Ok(())
+        }
+    }
     fn stages_effects(&self) -> bool {
         false
     }
@@ -143,6 +161,15 @@ impl SessionHost for PlatformSessionHost {
     ) -> Result<nickel_session_protocol::OnScreenKeyboardSnapshot, SessionRequestError> {
         platform::on_screen_keyboard_snapshot()
     }
+    #[cfg(target_os = "windows")]
+    fn keyboard_snapshot(
+        &self,
+    ) -> Result<nickel_session_protocol::OnScreenKeyboardSnapshot, SessionRequestError> {
+        platform::on_screen_keyboard_snapshot().map_err(|error| {
+            tracing::warn!(%error, "Windows keyboard recipient observation failed");
+            SessionRequestError::Receive
+        })
+    }
     #[cfg(target_os = "linux")]
     fn configure_keyboard(
         &self,
@@ -169,6 +196,17 @@ impl SessionHost for PlatformSessionHost {
         input: nickel_session_protocol::OnScreenKeyboardInput,
     ) -> Result<(), SessionRequestError> {
         platform::deliver_on_screen_keyboard_input(epoch, input)
+    }
+    #[cfg(target_os = "windows")]
+    fn keyboard_input(
+        &self,
+        epoch: u64,
+        input: nickel_session_protocol::OnScreenKeyboardInput,
+    ) -> Result<(), SessionRequestError> {
+        platform::deliver_on_screen_keyboard_input(epoch, input).map_err(|error| {
+            tracing::warn!(%error, "Windows keyboard input rejected");
+            SessionRequestError::Send
+        })
     }
     fn dispatch(&self, command: ShellCommand) -> Result<(), SessionRequestError> {
         #[cfg(target_os = "linux")]
@@ -220,6 +258,24 @@ pub(crate) struct InProcessSessionHost {
 
 #[cfg(target_os = "linux")]
 impl SessionHost for InProcessSessionHost {
+    fn optional_features_committed(
+        &self,
+        codex_generation: u64,
+        keyboard_generation: u64,
+    ) -> Result<(), String> {
+        self.sender
+            .send(SessionAuthorityRequest::OptionalFeaturesCommitted {
+                codex_generation,
+                keyboard_generation,
+            })
+            .map_err(|_| "could not queue native feature reconciliation".into())
+    }
+    fn stages_effects(&self) -> bool {
+        // Dispatch queues a compositor command. The compositor must apply the
+        // visibility change before the shell observes its returned event.
+        true
+    }
+
     fn remote_pending_leases(&self) -> Vec<nickel_session_protocol::RemotePendingLease> {
         let control = self.remote_control.lock().unwrap();
         control
@@ -394,6 +450,7 @@ impl SessionHost for InProcessSessionHost {
                         "internal capture authority is unavailable".into(),
                     ));
                 }
+                tracing::trace!(?output, "native screenshot capture command queued");
                 DesktopCapturePoll::Pending
             }
             InternalCaptureState::Pending(path) => {
@@ -401,6 +458,10 @@ impl SessionHost for InProcessSessionHost {
                 DesktopCapturePoll::Pending
             }
             InternalCaptureState::Complete(path, result) => {
+                tracing::trace!(
+                    saved = matches!(result, nickel_session_protocol::CaptureResult::Saved { .. }),
+                    "native screenshot capture completion consumed"
+                );
                 let answer = match result {
                     nickel_session_protocol::CaptureResult::Saved { .. } => image::open(&path)
                         .map(|image| platform::DesktopCapture {
@@ -509,6 +570,12 @@ impl StagedSessionHost {
 }
 #[cfg(any(test, target_os = "linux"))]
 impl SessionHost for StagedSessionHost {
+    fn feature_preference_writes_allowed(&self) -> bool {
+        false
+    }
+    fn optional_features_committed(&self, _: u64, _: u64) -> Result<(), String> {
+        Err("staged feature writes are unavailable".into())
+    }
     fn stages_effects(&self) -> bool {
         true
     }
@@ -598,6 +665,24 @@ mod tests {
                 visible: true,
             })
         );
+    }
+
+    #[test]
+    fn feature_preferences_queue_native_reconciliation_and_staged_hosts_cannot_persist() {
+        let (sender, receiver) = channel();
+        let original: Arc<dyn SessionHost> = Arc::new(host(sender));
+        original.optional_features_committed(8, 4).unwrap();
+        assert_eq!(
+            receiver.try_recv().unwrap(),
+            SessionAuthorityRequest::OptionalFeaturesCommitted {
+                codex_generation: 8,
+                keyboard_generation: 4
+            }
+        );
+        let staged = super::StagedSessionHost::new(original);
+        assert!(!staged.feature_preference_writes_allowed());
+        assert!(staged.optional_features_committed(9, 5).is_err());
+        assert!(receiver.try_recv().is_err());
     }
 
     #[test]

@@ -1,0 +1,61 @@
+/* Filtered artwork, antialiased material, clipped blur, and pointer-distance magnification. */
+window.cupertino-dock {
+    display: flex;
+    width: max-content;
+    height: 100%;
+    bottom: 10px;
+    /* Max-content reserves the animation envelope; these insets style the shadow. */
+    padding: 8px 16px 6px;
+    align-items: end;
+    background: transparent;
+}
+
+div.dock-shelf {
+    display: flex;
+    width: max-content;
+    min-width: 260px;
+    max-width: 580px;
+    height: 92px;
+    padding: 6px 28px 3px 8px;
+    gap: 3px;
+    align-items: center;
+    justify-content: center;
+    background: #e8edf25c;
+    backdrop-filter: blur(12px);
+    border-width: 1px;
+    border-color: #fefefe8a;
+    border-radius: 18px;
+    box-shadow: 0px 2px 8px 0px #0101014a;
+    -nickel-proximity-magnification: 1.38 2;
+    transition-duration: 150ms;
+}
+
+div.dock-item {
+    width: 58px;
+    height: 68px;
+    flex-shrink: 0;
+    align-items: center;
+}
+
+button.dock-button, button.dock-utility, button.dock-clock {
+    flex-shrink: 0;
+    padding: 5px;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 13px;
+    color: #17202bd9;
+    font-size: 21px;
+    text-align: center;
+}
+
+button.dock-clock {
+    font-size: 18px;
+}
+
+button.dock-button:hover, button.dock-utility:hover, button.dock-clock:hover,
+button.dock-button:active, button.dock-utility:active, button.dock-clock:active {
+    background: #fefefe52;
+    border-color: #fefefe8f;
+}
+
+/* Intrinsic content plus effects determine shelf and surface sizing. */

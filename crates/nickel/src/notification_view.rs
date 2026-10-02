@@ -1,8 +1,19 @@
 use nickel_core::theme::ThemePalette;
 use nickel_ui::{
-    AnyView, Application, Button, Column, Container, EffectEvidence, Insets, Row, SemanticRole,
-    Shortcut, Text, TextAlign, UiHost, VerticalScroll, ViewContext,
+    AnyView, Application, Button, ButtonLabel, Column, ComponentBuilderExt, Container, DragGesture,
+    DragPhase, EffectEvidence, Insets, Point, Row, SemanticRole, Shortcut, Text, TextAlign, UiHost,
+    VerticalScroll, ViewContext,
 };
+
+const DISMISS_DRAG_THRESHOLD: f32 = 96.0;
+const DISMISS_ANIMATION: std::time::Duration = std::time::Duration::from_millis(180);
+pub(crate) const NOTIFICATION_MAX_WIDTH: u32 = 420;
+pub(crate) const NOTIFICATION_MAX_HEIGHT: u32 = 320;
+const NOTIFICATION_PADDING: f32 = 20.0;
+const NOTIFICATION_SECTION_GAP: f32 = 8.0;
+const NOTIFICATION_HEADER_HEIGHT: f32 = 40.0;
+const NOTIFICATION_TITLE_HEIGHT: f32 = 30.0;
+const NOTIFICATION_ACTION_HEIGHT: f32 = 42.0;
 
 use crate::notification::DesktopNotification;
 
@@ -12,6 +23,7 @@ pub enum NotificationMessage {
     Dismiss,
     Scroll(f32),
     ScrollBody(f32),
+    Drag(DragGesture),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -37,6 +49,11 @@ pub struct NotificationApp {
     effect_evidence: Vec<EffectEvidence>,
     failures: Vec<NotificationFailure>,
     dirty: bool,
+    drag_start_x: Option<f32>,
+    drag_offset: f32,
+    dismiss_animation: Option<(std::time::Instant, f32)>,
+    dismiss_target_width: f32,
+    measurement_mode: bool,
 }
 
 impl NotificationApp {
@@ -52,6 +69,11 @@ impl NotificationApp {
             effect_evidence: Vec::new(),
             failures: Vec::new(),
             dirty: false,
+            drag_start_x: None,
+            drag_offset: 0.0,
+            dismiss_animation: None,
+            dismiss_target_width: 420.0,
+            measurement_mode: false,
         }
     }
 
@@ -60,6 +82,9 @@ impl NotificationApp {
             // A revised request starts at its new scope rather than inheriting old scroll.
             self.body_offset = 0.0;
             self.notification = notification.cloned();
+            self.drag_start_x = None;
+            self.drag_offset = 0.0;
+            self.dismiss_animation = None;
             self.palette = palette;
             self.dirty = true;
         }
@@ -113,6 +138,36 @@ impl Application for NotificationApp {
                 self.body_offset = offset.max(0.0);
                 self.dirty = true;
             }
+            NotificationMessage::Drag(gesture) if !self.history_mode => match gesture.phase {
+                DragPhase::Started => {
+                    self.drag_start_x = Some(gesture.position.x);
+                    self.dismiss_target_width = gesture.bounds.size.width.max(1.0);
+                    self.dismiss_animation = None;
+                }
+                DragPhase::Moved => {
+                    if let Some(start) = self.drag_start_x {
+                        self.drag_offset = (gesture.position.x - start).max(0.0);
+                        self.dirty = true;
+                    }
+                }
+                DragPhase::Ended => {
+                    self.drag_start_x = None;
+                    if self.drag_offset >= DISMISS_DRAG_THRESHOLD {
+                        self.dismiss_animation =
+                            Some((std::time::Instant::now(), self.drag_offset));
+                    } else {
+                        self.drag_offset = 0.0;
+                        self.request_dismiss();
+                    }
+                    self.dirty = true;
+                }
+                DragPhase::Cancelled => {
+                    self.drag_start_x = None;
+                    self.drag_offset = 0.0;
+                    self.dirty = true;
+                }
+            },
+            NotificationMessage::Drag(_) => {}
             NotificationMessage::Invoke(key) => {
                 if notification.actions.iter().any(|action| action.key == key) {
                     self.effects.push(NotificationEffect::Invoke {
@@ -153,6 +208,16 @@ impl Application for NotificationApp {
     }
 
     fn poll(&mut self) -> bool {
+        if let Some((started, initial)) = self.dismiss_animation {
+            let progress =
+                (started.elapsed().as_secs_f32() / DISMISS_ANIMATION.as_secs_f32()).clamp(0.0, 1.0);
+            self.drag_offset = initial + (self.viewport_width() + 24.0 - initial) * progress;
+            self.dirty = true;
+            if progress >= 1.0 {
+                self.dismiss_animation = None;
+                self.request_dismiss();
+            }
+        }
         std::mem::take(&mut self.dirty)
     }
 
@@ -216,97 +281,181 @@ impl Application for NotificationApp {
         } else {
             &notification.summary
         };
-        let action_count = notification.actions.len() + 1;
+        let action_count = notification.actions.len();
         let gap = 8.0;
         let button_width = if action_count == 0 {
             0.0
         } else {
-            ((context.viewport.size.width - 40.0 - gap * action_count.saturating_sub(1) as f32)
+            ((context.viewport.size.width
+                - NOTIFICATION_PADDING * 2.0
+                - gap * action_count.saturating_sub(1) as f32)
                 / action_count as f32)
                 .max(1.0)
         };
-        let actions = Row::new()
-            .gap(gap)
-            .children(notification.actions.iter().map(|action| {
+        let actions = AnyView::new(Row::new().id("notification-actions").gap(gap).children(
+            notification.actions.iter().map(|action| {
                 Button::new(
                     NotificationMessage::Invoke(action.key.clone()),
                     action.label.clone(),
                 )
                 .id(format!("notification-action-{}", action.key))
                 .width(button_width)
-                .height(30.0)
-                .padding(Insets::all(5.0))
+                .height(NOTIFICATION_ACTION_HEIGHT)
+                .padding(Insets::all(8.0))
                 .background(self.palette.surface_hover)
                 .focus_background_tint(self.palette.accent)
                 .controller_focus_background_tint(self.palette.accent)
-                .radius(7.0)
+                .radius(8.0)
                 .color(self.palette.text)
                 .label_align(TextAlign::Center)
-            }))
-            .child(
-                Button::new(
-                    NotificationMessage::Dismiss,
-                    nickel_i18n::system_text("ui-notification-view-dismiss"),
+            }),
+        ));
+        let action_height = if action_count == 0 {
+            0.0
+        } else {
+            NOTIFICATION_ACTION_HEIGHT + NOTIFICATION_SECTION_GAP
+        };
+        let body_height = (context.viewport.size.height
+            - NOTIFICATION_PADDING * 2.0
+            - NOTIFICATION_HEADER_HEIGHT
+            - NOTIFICATION_TITLE_HEIGHT
+            - action_height
+            - NOTIFICATION_SECTION_GAP * 2.0)
+            .max(1.0);
+        let body = if self.measurement_mode {
+            AnyView::new(
+                Text::new(&notification.body)
+                    .scale(1.7)
+                    .color(self.palette.muted)
+                    .wrap(true)
+                    .max_height(body_height),
+            )
+        } else {
+            AnyView::new(
+                VerticalScroll::new(
+                    NotificationMessage::ScrollBody(self.body_offset),
+                    self.body_offset,
                 )
-                .id("notification-dismiss")
-                .width(button_width)
-                .height(30.0)
-                .padding(Insets::all(5.0))
-                .background(self.palette.surface_hover)
-                .focus_background_tint(self.palette.accent)
-                .controller_focus_background_tint(self.palette.accent)
-                .radius(7.0)
-                .color(self.palette.text)
-                .label_align(TextAlign::Center),
-            );
+                .theme(self.palette.into())
+                .on_scroll(NotificationMessage::ScrollBody)
+                .max_height(body_height)
+                .child(
+                    Text::new(&notification.body)
+                        .scale(1.7)
+                        .color(self.palette.muted)
+                        .wrap(true),
+                ),
+            )
+        };
+        let mut content = Column::new()
+            .gap(NOTIFICATION_SECTION_GAP)
+            .child(
+                Row::new()
+                    .id("notification-header")
+                    .gap(10.0)
+                    .height(NOTIFICATION_HEADER_HEIGHT)
+                    .child(
+                        Container::new()
+                            .width(24.0)
+                            .height(24.0)
+                            .background(self.palette.accent)
+                            .radius(6.0),
+                    )
+                    .child(
+                        Text::new(&notification.app_name)
+                            .scale(1.55)
+                            .color(self.palette.text)
+                            .grow(1.0),
+                    )
+                    .child(
+                        Button::with_label(
+                            NotificationMessage::Dismiss,
+                            ButtonLabel::new("✕").scale(2.1),
+                        )
+                        .id("notification-close")
+                        .width(46.0)
+                        .height(NOTIFICATION_HEADER_HEIGHT)
+                        .background(self.palette.panel)
+                        .focus_background_tint(self.palette.surface_hover)
+                        .controller_focus_background_tint(self.palette.surface_hover)
+                        .radius(8.0)
+                        .color(self.palette.muted)
+                        .label_align(TextAlign::Center)
+                        .center_label_vertically()
+                        .accessibility_label("Dismiss"),
+                    ),
+            )
+            .child(
+                Text::new(heading)
+                    .id("notification-title")
+                    .height(NOTIFICATION_TITLE_HEIGHT)
+                    .scale(1.7)
+                    .color(self.palette.text)
+                    .bold(true),
+            )
+            .child(body);
+        if action_count > 0 {
+            content = content.child(actions);
+        }
+        content = content.child(
+            Container::new()
+                .semantic_role(SemanticRole::Group)
+                .accessibility_label("Notification content end")
+                .height(1.0),
+        );
         AnyView::new(
             Container::new()
                 .id("notification")
                 .semantic_role(SemanticRole::Dialog)
                 .accessibility_label(heading)
                 .width(context.viewport.size.width)
-                .height(context.viewport.size.height)
+                .max_height(context.viewport.size.height)
                 .background(self.palette.panel)
                 .border(self.palette.surface_hover, 1.0)
-                .radius(16.0)
-                .padding(Insets {
-                    top: 18.0,
-                    right: 20.0,
-                    bottom: 16.0,
-                    left: 20.0,
+                .radius(14.0)
+                .padding(Insets::all(NOTIFICATION_PADDING))
+                .position(Point {
+                    x: self.drag_offset,
+                    y: 0.0,
                 })
-                .child(
-                    Column::new()
-                        .gap(5.0)
-                        .child(
-                            Text::new(heading)
-                                .height(32.0)
-                                .scale(20.0)
-                                .color(self.palette.text)
-                                .bold(true),
-                        )
-                        .child(
-                            VerticalScroll::new(
-                                NotificationMessage::ScrollBody(self.body_offset),
-                                self.body_offset,
-                            )
-                            .theme(self.palette.into())
-                            .on_scroll(NotificationMessage::ScrollBody)
-                            .height((context.viewport.size.height - 116.0).max(1.0))
-                            .child(
-                                Text::new(&notification.body)
-                                    .scale(16.0)
-                                    .color(self.palette.muted)
-                                    .wrap(true),
-                            ),
-                        )
-                        .child(actions),
-                ),
+                .on_drag((NotificationMessage::Dismiss, |_, gesture| {
+                    NotificationMessage::Drag(gesture)
+                }))
+                .child(content),
         )
     }
 }
 
+impl NotificationApp {
+    fn viewport_width(&self) -> f32 {
+        self.dismiss_target_width
+    }
+}
+
 pub type NotificationHost = UiHost<NotificationApp>;
+
+pub(crate) fn preferred_notification_surface_size(
+    notification: &DesktopNotification,
+    _palette: ThemePalette,
+    maximum: (u32, u32),
+) -> (u32, u32) {
+    let width = NOTIFICATION_MAX_WIDTH.min(maximum.0).max(1);
+    let height = NOTIFICATION_MAX_HEIGHT.min(maximum.1).max(1);
+    let mut application = NotificationApp::new(_palette);
+    application.sync(Some(notification), _palette);
+    application.measurement_mode = true;
+    let mut host = NotificationHost::new(application, width, height);
+    host.poll();
+    let measured = host
+        .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+            role: SemanticRole::Group,
+            name: "Notification content end".into(),
+        })
+        .map(|node| node.bounds.origin.y + node.bounds.size.height)
+        .map(|bottom| (bottom + NOTIFICATION_PADDING).ceil() as u32)
+        .unwrap_or(height);
+    (width, measured.clamp(1, height))
+}
 
 #[cfg(test)]
 mod tests {
@@ -314,13 +463,14 @@ mod tests {
 
     use nickel_core::theme::{Appearance, ThemePalette};
     use nickel_ui::{
-        ActionKind, Application, ControllerAction, HostBatch, HostEvent, SemanticAction,
-        SemanticRole, SemanticSelector, Shortcut,
+        ActionKind, Application, HostBatch, HostEvent, SemanticAction, SemanticRole,
+        SemanticSelector, Shortcut,
     };
 
     use super::{
-        NotificationApp, NotificationEffect, NotificationFailure, NotificationHost,
-        NotificationMessage,
+        NOTIFICATION_MAX_HEIGHT, NOTIFICATION_MAX_WIDTH, NotificationApp, NotificationEffect,
+        NotificationFailure, NotificationHost, NotificationMessage,
+        preferred_notification_surface_size,
     };
     use crate::notification::{NotificationAction, NotificationRequest, NotificationStore};
 
@@ -425,7 +575,7 @@ mod tests {
     }
 
     #[test]
-    fn semantic_and_controller_activation_emit_typed_effects() {
+    fn semantic_activation_emits_typed_effects() {
         let mut semantic = host();
         let open = semantic
             .query_unique(&SemanticSelector::RoleAndName {
@@ -441,27 +591,20 @@ mod tests {
                 key: "open".into(),
             }]
         );
-
-        let mut controller = host();
-        controller.handle_controller_action(ControllerAction::Right);
-        controller.handle_controller_action(ControllerAction::Confirm);
-        assert!(matches!(
-            controller.application_mut().take_effects().as_slice(),
-            [NotificationEffect::Invoke {
-                notification_id: 1,
-                ..
-            }]
-        ));
     }
 
     #[test]
     fn keyboard_and_accessibility_activation_emit_typed_effects() {
         let mut keyboard = host();
+        let open = keyboard
+            .query_unique(&SemanticSelector::RoleAndName {
+                role: SemanticRole::Button,
+                name: "Open".into(),
+            })
+            .unwrap();
+        keyboard.request_focus(open.id);
         keyboard.step(HostBatch {
-            events: vec![
-                HostEvent::Ui(nickel_ui::UiEvent::FocusNext),
-                HostEvent::Ui(nickel_ui::UiEvent::KeyboardActivate),
-            ],
+            events: vec![HostEvent::Ui(nickel_ui::UiEvent::KeyboardActivate)],
             ..HostBatch::default()
         });
         assert_eq!(
@@ -524,13 +667,15 @@ mod tests {
     #[test]
     fn keyboard_and_accessibility_dismissal_emit_typed_effects() {
         let mut keyboard = host();
+        let close = keyboard
+            .query_unique(&SemanticSelector::RoleAndName {
+                role: SemanticRole::Button,
+                name: "Dismiss".into(),
+            })
+            .unwrap();
+        keyboard.request_focus(close.id);
         keyboard.step(HostBatch {
-            events: vec![
-                HostEvent::Ui(nickel_ui::UiEvent::FocusNext),
-                HostEvent::Ui(nickel_ui::UiEvent::FocusNext),
-                HostEvent::Ui(nickel_ui::UiEvent::FocusNext),
-                HostEvent::Ui(nickel_ui::UiEvent::KeyboardActivate),
-            ],
+            events: vec![HostEvent::Ui(nickel_ui::UiEvent::KeyboardActivate)],
             ..HostBatch::default()
         });
         assert_eq!(
@@ -556,20 +701,70 @@ mod tests {
             accessibility.application_mut().take_effects(),
             vec![NotificationEffect::Dismiss { notification_id: 1 }]
         );
+    }
 
-        let mut controller = host();
-        controller.step(HostBatch {
+    #[test]
+    fn pointer_close_dispatches_dismiss_effect() {
+        let mut host = host();
+        let close = host
+            .query_unique(&SemanticSelector::RoleAndName {
+                role: SemanticRole::Button,
+                name: "Dismiss".into(),
+            })
+            .unwrap();
+        let point = nickel_ui::Point {
+            x: close.bounds.origin.x + close.bounds.size.width / 2.0,
+            y: close.bounds.origin.y + close.bounds.size.height / 2.0,
+        };
+        host.step(HostBatch {
             events: vec![
-                HostEvent::Controller(ControllerAction::Right),
-                HostEvent::Controller(ControllerAction::Right),
-                HostEvent::Controller(ControllerAction::Right),
-                HostEvent::Controller(ControllerAction::Confirm),
+                HostEvent::Ui(nickel_ui::UiEvent::PointerPressed(point)),
+                HostEvent::Ui(nickel_ui::UiEvent::PointerReleased(point)),
             ],
             ..HostBatch::default()
         });
         assert_eq!(
-            controller.application_mut().take_effects(),
+            host.application_mut().take_effects(),
             vec![NotificationEffect::Dismiss { notification_id: 1 }]
         );
+    }
+
+    #[test]
+    fn pointer_body_tap_dispatches_dismiss_effect() {
+        let mut host = host();
+        let dialog = host
+            .query_unique(&SemanticSelector::Role(SemanticRole::Dialog))
+            .unwrap();
+        let point = nickel_ui::Point {
+            x: dialog.bounds.origin.x + 30.0,
+            y: dialog.bounds.origin.y + 100.0,
+        };
+        host.step(HostBatch {
+            events: vec![
+                HostEvent::Ui(nickel_ui::UiEvent::PointerPressed(point)),
+                HostEvent::Ui(nickel_ui::UiEvent::PointerReleased(point)),
+            ],
+            ..HostBatch::default()
+        });
+        assert_eq!(
+            host.application_mut().take_effects(),
+            vec![NotificationEffect::Dismiss { notification_id: 1 }]
+        );
+    }
+
+    #[test]
+    fn preferred_surface_uses_resolved_content_height_with_design_limits() {
+        let palette = ThemePalette::from_appearance(Appearance::default());
+        let short = host().application().notification.clone().unwrap();
+        let short_size = preferred_notification_surface_size(&short, palette, (1920, 1080));
+
+        let mut long = short.clone();
+        long.body = "A wrapped notification body. ".repeat(100);
+        let long_size = preferred_notification_surface_size(&long, palette, (1920, 1080));
+
+        assert_eq!(short_size.0, NOTIFICATION_MAX_WIDTH);
+        assert_eq!(long_size.0, NOTIFICATION_MAX_WIDTH);
+        assert!(short_size.1 < long_size.1);
+        assert!(long_size.1 <= NOTIFICATION_MAX_HEIGHT);
     }
 }

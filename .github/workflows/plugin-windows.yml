@@ -1,0 +1,221 @@
+name: Windows plugin runtime
+
+on:
+  push:
+    branches:
+      - feature/plugins
+    paths:
+      - ".github/workflows/plugin-windows.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "crates/nickel/**"
+      - "crates/nickel-codex-ui/**"
+      - "crates/nickel-core/**"
+      - "crates/nickel-plugin-runtime/**"
+      - "crates/nickel-session-protocol/**"
+      - "crates/nickel-ui/**"
+      - "assets/plugins/**"
+      - "assets/plugin-runtime/**"
+  pull_request:
+    paths:
+      - ".github/workflows/plugin-windows.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "crates/nickel/**"
+      - "crates/nickel-codex-ui/**"
+      - "crates/nickel-core/**"
+      - "crates/nickel-plugin-runtime/**"
+      - "crates/nickel-session-protocol/**"
+      - "crates/nickel-ui/**"
+      - "assets/plugins/**"
+      - "assets/plugin-runtime/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: plugin-windows-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  RUSTC_WRAPPER: ""
+
+jobs:
+  plugin-runtime:
+    name: JSX host and package contracts
+    runs-on: windows-2025
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install the pinned Rust toolchain
+        shell: pwsh
+        run: |
+          rustup toolchain install 1.94.1 --profile minimal
+          rustup default 1.94.1
+
+      - name: Install the JSX compiler
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Install TypeScript
+        shell: pwsh
+        run: |
+          npm install --global typescript@5.9.3
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $prefix = npm prefix --global
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $prefix | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          & (Join-Path $prefix "tsc.cmd") --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Test the JSX host and plugin packages
+        shell: pwsh
+        run: |
+          cargo test --locked -p nickel-plugin-runtime
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel-session-protocol
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel-core dialog_owner_must_be_a_window_on_the_same_output
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --test plugin_panel
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --lib plugin_panel::tests
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --lib multiple_plugin_surface_keys_can_target_the_same_output
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --lib installed_panel_geometry_uses_its_manifest
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --lib reserved_plugin_panel_uses_full_output_and_configured_edge
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --lib windows_appbar_rect_uses_its_declared_edge
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --lib explorer_free_panels_stack_and_reflow_after_retirement
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --lib installed_window_geometry_centers_on_its_output
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --lib bundled_notification_placement_comes_from_its_surface_declaration
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --lib anchored_plugin_overlay_is_valid_but_panel_anchor_is_rejected
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --lib installed_component_window_activates_and_retires_with_its_plugin
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --lib closing_one_installed_window_preserves_its_sibling_and_memory_account
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --lib live_shell::tests::plugin_launcher_
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --lib disabled_launcher_retires_surface_without_native_fallback
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --lib run_plugin_can_start_render_and_retire
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --lib platform::windows::keyboard::tests
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --lib jsx_keyboard_delivers_with_windows_recipient_lease
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --lib volume_osd_plugin_retires_without_native_fallback
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --lib volume_overlay_uses_bundled_manifest_size_and_bottom_placement
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --lib window_preview_plugin_reports_memory_and_can_be_disabled_or_enabled
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --lib task_switcher_cards_render_in_jsx_and_activate_through_the_host
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --lib live_shell::tests::jsx_taskbar_
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --lib live_shell::tests::plugin_taskbar_
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --lib disabled_taskbar_retires_its_visible_role
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --lib taskbar_plugin_identity_retires_and_returns_with_its_surface
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --lib shell_surfaces_follow_updated_display_geometry
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --lib desktop_work_area_follows_enabled_taskbar_outputs_and_edge
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --lib live_shell::tests::desktop_plugin_opens_only_the_current_projected_tile
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --lib live_shell::tests::desktop_background_menu_uses_jsx_submenu_and_typed_visibility_action
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --lib live_shell::tests::desktop_plugin_background_action_rejects_unavailable_and_stale_commands
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --lib desktop_background_plugin_reports_memory_and_retires_wallpaper_when_disabled
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --lib bundled_desktop_surface_retires_and_returns_with_its_plugin
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --lib bundled_overlay_surfaces_follow_their_plugin_lifetimes
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --lib fixed_shell_surface_keys_follow_bundled_plugin_activation
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --lib shared_launcher_surface_retires_only_when_launcher_and_run_are_disabled
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --lib desktop_secondary_press_opens_overlay_without_hiding_items_on_release_or_motion
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --lib live_shell::tests::notification_plugin_
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --lib trusted_remote_approval_uses_host_even_when_notification_plugin_is_enabled
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --lib pending_remote_lease_becomes_persistent_shell_notification
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --lib live_shell::tests::control_center_plugin_renders_and_dispatches_typed_desktop_action
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --lib control_center_plugin_can_be_disabled_and_reenabled
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --lib bundled_codex_project_menu_renders_only_the_bounded_projection
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --lib codex_project_menu_uses_a_plugin_surface_and_retires_on_disable
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --lib codex_discovery_host_runs_without_a_native_menu_viewport
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel-codex-ui projection_hides_roots_and_rejects_stale_or_forged_open_requests
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --lib display_projection_recovery_survives_control_plugin_disablement
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --lib live_shell::tests::disabling_plugin_retires_host_and_clears_reported_memory
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --lib live_shell::tests::declared_dialog_starts_closed_and_dismisses_without_retiring_its_plugin
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --lib live_shell::tests::closing_dialog_owner_retires_its_dialog_but_preserves_sibling_window
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --lib plugin_panel::tests::overlay_example_opens_and_hides_its_declared_surface
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --lib live_shell::tests::declared_overlay_opens_and_hides_without_retiring_its_plugin
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --bin nickel-plugin
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Validate shipped extension examples
+        shell: pwsh
+        run: |
+          foreach ($package in @("hello-panel", "taskbar", "launcher", "desktop", "notification", "run", "control-center", "codex-projects", "on-screen-keyboard", "window-preview", "volume-osd", "screenshot")) {
+            cargo run --locked -p nickel --bin nickel-plugin -- validate "assets/plugins/$package"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          cargo run --locked -p nickel --bin nickel-plugin -- validate assets/plugins/example-dialog
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo run --locked -p nickel --bin nickel-plugin -- validate assets/plugins/example-window
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo run --locked -p nickel --bin nickel-plugin -- validate assets/plugins/example-two-windows
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo run --locked -p nickel --bin nickel-plugin -- validate assets/plugins/example-surface-dialog
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo run --locked -p nickel --bin nickel-plugin -- validate assets/plugins/example-overlay
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo run --locked -p nickel --bin nickel-plugin -- validate assets/plugins/example-reserved-panel
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo run --locked -p nickel --bin nickel-plugin -- validate assets/plugins/example-control-section
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Test public package settings and retirement contracts
+        shell: pwsh
+        run: |
+          cargo test --locked -p nickel --lib plugins_capabilities
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --lib plugin_management_rechecks
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --lib embedded_default_shell_surfaces_share_runtime_and_settings_registry
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nickel --lib embedded_package_visibility_preserves_shared_runtime_until_disable
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo build --locked -p nickel --bin nickel
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

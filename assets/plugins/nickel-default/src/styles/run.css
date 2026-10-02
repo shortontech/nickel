@@ -1,0 +1,39 @@
+window.run-window {
+    background: var(--nickel-panel);
+    border: 1px solid var(--nickel-border);
+    border-radius: 12px;
+}
+div.run-content {
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    height: 100%;
+    padding: 16px;
+    gap: 10px;
+}
+window.run-window text {
+    height: 26px;
+    flex-shrink: 0;
+    color: var(--nickel-text);
+    font-size: 17px;
+}
+window.run-window text-field {
+    height: 42px;
+    flex-shrink: 0;
+    padding: 8px 12px;
+    background: var(--nickel-surface);
+    border: 1px solid var(--nickel-border);
+    border-radius: 8px;
+    color: var(--nickel-text);
+    font-size: 15px;
+}
+window.run-window row { gap: 8px; }
+window.run-window button {
+    height: 36px;
+    padding: 5px 12px;
+    background: var(--nickel-surface);
+    border: 1px solid var(--nickel-border);
+    border-radius: 8px;
+    color: var(--nickel-text);
+    font-size: 14px;
+}

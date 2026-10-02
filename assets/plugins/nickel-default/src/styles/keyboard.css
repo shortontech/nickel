@@ -1,0 +1,43 @@
+window.keyboard-window {
+    background: var(--nickel-surface);
+    border: 1px solid var(--nickel-border);
+    border-radius: 12px;
+    padding: 10px;
+}
+
+column.keyboard-content {
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    gap: 8px;
+}
+
+row.keyboard-toolbar, row.keyboard-key-row, row.keyboard-footer {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+row.keyboard-key-row {
+    width: 100%;
+}
+
+window.keyboard-window text {
+    color: var(--nickel-text);
+    font-size: 14px;
+    line-height: 20px;
+}
+
+window.keyboard-window button {
+    min-height: 39px;
+    padding: 6px;
+    background: var(--nickel-surface-raised);
+    border: 1px solid var(--nickel-border);
+    border-radius: 6px;
+    color: var(--nickel-text);
+    font-size: 14px;
+}
+
+button.keyboard-key {
+    flex-grow: 1;
+}

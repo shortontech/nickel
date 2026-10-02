@@ -268,7 +268,7 @@ struct AssociationServiceState {
 }
 
 impl AssociationService {
-    fn new(backend: Box<dyn AssociationBackend>) -> Self {
+    pub(crate) fn new(backend: Box<dyn AssociationBackend>) -> Self {
         Self {
             backend,
             state: Mutex::new(AssociationServiceState::default()),
@@ -312,6 +312,37 @@ impl AssociationService {
             generation: state.generation,
             snapshot,
         })
+    }
+
+    /// Resolves the current platform catalog as one revisioned observation.
+    /// Consumers can use the returned generation for a later compare-and-set
+    /// without depending on a presentation-specific projection.
+    pub fn inspect_available_versioned(
+        &self,
+    ) -> Result<(u64, Vec<AssociationSnapshot>), AssociationError> {
+        let (revision, snapshots, _) = self.inspect_available_bounded_versioned(usize::MAX)?;
+        Ok((revision, snapshots))
+    }
+
+    /// Bounded catalog observation for capability clients. The returned flag
+    /// reports whether native targets were omitted from this observation.
+    pub fn inspect_available_bounded_versioned(
+        &self,
+        limit: usize,
+    ) -> Result<(u64, Vec<AssociationSnapshot>, bool), AssociationError> {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        let mut targets = self.backend.available_targets()?;
+        let truncated = targets.len() > limit;
+        targets.truncate(limit);
+        let results = self.backend.inspect_many(&targets);
+        let mut snapshots = Vec::with_capacity(results.len());
+        for (_, result) in results {
+            snapshots.push(result?);
+        }
+        for snapshot in &snapshots {
+            observe_snapshot(&mut state, &snapshot.target, snapshot)?;
+        }
+        Ok((state.generation, snapshots, truncated))
     }
 
     /// Changes only a target and handler selected from the fresh native catalog.
@@ -570,22 +601,10 @@ fn gio_content_type(output: &str) -> Option<String> {
     })
 }
 
-/// Opens the Nickel Settings surface backed by this same association service.
+/// Opens the operating system's native default-application controls.
+/// Native applications can use this fallback independently of the active shell.
 pub fn open_default_application_settings() -> Result<(), AssociationError> {
-    let current = std::env::current_exe()
-        .map_err(|error| AssociationError(format!("could not locate Nickel Settings: {error}")))?;
-    let executable = current.with_file_name(if cfg!(target_os = "windows") {
-        "nickel-settings.exe"
-    } else {
-        "nickel-settings"
-    });
-    std::process::Command::new(&executable)
-        .args(["--screen", "default-apps"])
-        .spawn()
-        .map(|_| ())
-        .map_err(|error| {
-            AssociationError(format!("could not open {}: {error}", executable.display()))
-        })
+    crate::associations_capability::open_native_default_apps_settings()
 }
 
 fn infer_portable_mime(path: &Path) -> Option<&'static str> {
@@ -1779,6 +1798,43 @@ mod tests {
             .unwrap();
         assert_eq!(snapshot.handlers.len(), 250);
         assert_eq!(snapshot.handlers.last().unwrap().id, "handler-249.desktop");
+    }
+
+    #[test]
+    fn associations_bounded_catalog_observes_only_exposed_targets_without_revision_churn() {
+        struct CatalogFixture;
+        impl AssociationBackend for CatalogFixture {
+            fn available_targets(&self) -> Result<Vec<AssociationTarget>, AssociationError> {
+                Ok((0..1000)
+                    .map(|id| AssociationTarget::mime(format!("application/x-{id}")))
+                    .collect())
+            }
+            fn inspect(
+                &self,
+                target: &AssociationTarget,
+            ) -> Result<AssociationSnapshot, AssociationError> {
+                assert!(
+                    matches!(target, AssociationTarget::Mime(id) if id == "application/x-0" || id == "application/x-1")
+                );
+                LargeFixture.inspect(target)
+            }
+            fn request_change(
+                &self,
+                _: &AssociationTarget,
+                _: &str,
+            ) -> Result<ChangeOutcome, AssociationError> {
+                unreachable!()
+            }
+        }
+        let service = AssociationService::new(Box::new(CatalogFixture));
+        let (revision, snapshots, truncated) =
+            service.inspect_available_bounded_versioned(2).unwrap();
+        assert_eq!(snapshots.len(), 2);
+        assert!(truncated);
+        assert_eq!(
+            service.inspect_available_bounded_versioned(2).unwrap().0,
+            revision
+        );
     }
 
     #[test]

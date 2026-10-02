@@ -241,6 +241,7 @@ impl XdgShellHandler for NickelSession {
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
         self.forget_toplevel_geometry(&surface);
         let surface_id = surface.wl_surface().id();
+        self.clear_plugin_popover_anchor_for_surface(&surface_id);
         let window_id = self.surface_windows.get(&surface_id).copied();
         if let Some(window_id) = window_id {
             self.withdraw_foreign_toplevel(window_id);
@@ -988,6 +989,7 @@ impl NickelSession {
         if !self.mapped_xdg_toplevels.remove(&surface_id) {
             return Some(window);
         }
+        self.clear_plugin_popover_anchor_for_surface(&surface_id);
         self.restored_xdg_toplevels.insert(surface_id.clone());
         if let Some(location) = self.space.element_location(&window) {
             self.xdg_toplevel_locations
@@ -1095,6 +1097,11 @@ impl NickelSession {
         let is_context_menu = shell_role == Some(ShellRole::ContextMenu);
         let is_preview = shell_role == Some(ShellRole::Preview);
         let is_notification = shell_role == Some(ShellRole::Notification);
+        let is_passive_plugin_overlay = shell_role == Some(ShellRole::PluginSurface)
+            && identity
+                .as_ref()
+                .and_then(|identity| identity.plugin_surface.as_ref())
+                .is_some_and(|placement| placement.passive);
         let is_lock = shell_role == Some(ShellRole::Lock);
         let is_codex_project_chat = is_codex_project_chat(projected_app_id);
         let is_utility = matches!(
@@ -1107,6 +1114,7 @@ impl NickelSession {
                     | ShellRole::Screenshot
                     | ShellRole::OnScreenKeyboard
                     | ShellRole::Recovery
+                    | ShellRole::PluginSurface
             )
         );
         if let Some(id) = registry_id {
@@ -1183,6 +1191,12 @@ impl NickelSession {
                     identity
                         .as_ref()
                         .and_then(|identity| identity.output.clone()),
+                    identity
+                        .as_ref()
+                        .map(|identity| identity.application_id.clone()),
+                    identity
+                        .as_ref()
+                        .and_then(|identity| identity.plugin_surface.clone()),
                 );
             }
         }
@@ -1237,7 +1251,16 @@ impl NickelSession {
                 if is_notification {
                     utility.override_z_index(45);
                 }
-                self.register_utility_window(utility, shell_role.expect("utility has shell role"));
+                self.register_utility_window(
+                    utility.clone(),
+                    shell_role.expect("utility has shell role"),
+                );
+                if is_passive_plugin_overlay {
+                    // Plugin surfaces normally sit at 40. A passive overlay
+                    // needs the notification layer without taking focus.
+                    utility.override_z_index(45);
+                    self.space.raise_element(&utility, false);
+                }
             }
         }
         if is_lock {
@@ -1250,6 +1273,17 @@ impl NickelSession {
             && self.pending_shell_focus_role == Some(role)
         {
             self.focus_shell_role(role);
+        }
+        if is_utility
+            && let Some(key) = self.pending_plugin_focus.clone()
+            && identity
+                .as_ref()
+                .and_then(|identity| identity.plugin_surface.as_ref())
+                .is_some_and(|placement| {
+                    placement.plugin_id == key.plugin_id && placement.surface_id == key.surface_id
+                })
+        {
+            self.focus_plugin_surface(&key.plugin_id, &key.surface_id);
         }
         // The shell and its dynamic Codex windows share one Wayland
         // client. New toplevels from that client are deliberately not focused

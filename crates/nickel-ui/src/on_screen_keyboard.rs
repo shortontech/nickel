@@ -1,7 +1,8 @@
 //! Shared shell keyboard surface. Native delivery stays in the owning shell adapter.
 
 use nickel_core::on_screen_keyboard::{
-    KeyboardKey, KeyboardMetrics, KeyboardPanel, Latch, VirtualModifiers, compact_us_keyboard_rows,
+    KeyboardDisplayKey, KeyboardKey, KeyboardMetrics, KeyboardPanel, Latch, VirtualModifiers,
+    compact_us_keyboard_rows, keyboard_display_rows, resolve_keyboard_display_key,
     us_keyboard_rows,
 };
 use nickel_core::theme::ThemePalette;
@@ -81,6 +82,27 @@ impl KeyboardApp {
             self.palette = palette;
             self.dirty = true;
         }
+    }
+
+    pub fn display_rows(&self, compact: bool) -> Vec<Vec<KeyboardDisplayKey>> {
+        keyboard_display_rows(
+            self.panel,
+            self.modifiers,
+            compact,
+            self.recipient_available,
+        )
+    }
+
+    /// Apply a plugin's displayed key ID through the same state machine as native UI input.
+    pub fn press_display_key(&mut self, compact: bool, id: &str) -> bool {
+        let Some(key) = resolve_keyboard_display_key(self.panel, compact, id) else {
+            return false;
+        };
+        if !self.recipient_available && !matches!(key, KeyboardKey::Panel(_)) {
+            return false;
+        }
+        self.update(KeyboardMessage::Key(key));
+        true
     }
 
     fn theme(&self) -> SemanticTheme {
@@ -453,6 +475,32 @@ mod tests {
             host.application_mut().take_effects(),
             vec![KeyboardEffect::Hide]
         );
+    }
+
+    #[test]
+    fn plugin_key_ids_use_current_panel_and_recipient_state() {
+        let mut app = KeyboardApp::new(ThemePalette::from_appearance(Default::default()));
+        assert!(!app.press_display_key(true, "osk-char-113"));
+        assert!(app.press_display_key(true, "osk-symbols"));
+        assert!(!app.press_display_key(true, "osk-char-113"));
+        assert!(app.press_display_key(true, "osk-letters"));
+        assert!(!app.press_display_key(true, "osk-char-113"));
+        assert!(app.take_effects().is_empty());
+        app.recipient_changed(true);
+        assert!(
+            app.display_rows(true)
+                .into_iter()
+                .flatten()
+                .any(|key| { key.id == "osk-char-113" && key.enabled })
+        );
+        assert!(app.press_display_key(true, "osk-char-113"));
+        assert!(matches!(
+            app.take_effects().as_slice(),
+            [KeyboardEffect::Input {
+                key: KeyboardKey::Character { normal: 'q', .. },
+                ..
+            }]
+        ));
     }
 
     #[test]

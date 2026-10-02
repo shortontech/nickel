@@ -6,16 +6,11 @@ license.workspace = true
 rust-version.workspace = true
 
 [features]
-default = ["diagnostics"]
+default = []
 diagnostics = []
 
 [lib]
 name = "nickel_uwu"
-
-[[bin]]
-name = "nickel-windows-frame-probe"
-path = "src/main.rs"
-required-features = ["diagnostics"]
 
 [target.'cfg(target_os = "windows")'.dependencies]
 libloading = { workspace = true }

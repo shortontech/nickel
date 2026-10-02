@@ -334,10 +334,24 @@ impl NickelSession {
             {
                 return Err("application catalog changed; enumerate it again".into());
             }
-            if crate::platform::application_requires_secure_storage(&prepared.application)
-                && self.secure_storage_state()
-                    != crate::session::login_services::SecureStorageState::Ready
-            {
+            let secure_storage_state = match self.secure_storage_state() {
+                crate::session::login_services::SecureStorageState::Starting => {
+                    crate::platform::SecureStorageState::Starting
+                }
+                crate::session::login_services::SecureStorageState::Locked => {
+                    crate::platform::SecureStorageState::Locked
+                }
+                crate::session::login_services::SecureStorageState::PromptRequired => {
+                    crate::platform::SecureStorageState::PromptRequired
+                }
+                crate::session::login_services::SecureStorageState::Ready => {
+                    crate::platform::SecureStorageState::Ready
+                }
+                crate::session::login_services::SecureStorageState::Unavailable => {
+                    crate::platform::SecureStorageState::Unavailable
+                }
+            };
+            if !crate::platform::secure_storage_allows_application_launch(secure_storage_state) {
                 return Err("application launch requires local secure-storage readiness".into());
             }
             // The compositor's host DISPLAY may name a different desktop when

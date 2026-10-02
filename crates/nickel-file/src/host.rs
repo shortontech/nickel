@@ -633,24 +633,17 @@ impl HostAdapter<FileApp> for FileHostAdapter {
         _services: HostServices<'_>,
     ) -> Result<AdapterOutcome, Box<dyn std::error::Error>> {
         if let winit::event::WindowEvent::KeyboardInput { event: key, .. } = event
-            && let winit::keyboard::PhysicalKey::Code(physical_key) = key.physical_key
-            && let Some(key_code) = match physical_key {
-                winit::keyboard::KeyCode::PrintScreen => Some(KeyCode::PrintScreen),
-                winit::keyboard::KeyCode::SuperLeft => Some(KeyCode::SuperLeft),
-                winit::keyboard::KeyCode::SuperRight => Some(KeyCode::SuperRight),
-                _ => None,
-            }
             && !key.repeat
+            && let nickel_input::PhysicalKey::Code(key_code) =
+                nickel_input::winit::physical_key(key.physical_key)
             && let Some(shortcut) = &self.focused_shortcut
         {
-            shortcut(
-                key_code,
-                if key.state == winit::event::ElementState::Pressed {
-                    KeyEdge::Pressed
-                } else {
-                    KeyEdge::Released
-                },
-            );
+            let edge = if key.state == winit::event::ElementState::Pressed {
+                KeyEdge::Pressed
+            } else {
+                KeyEdge::Released
+            };
+            shortcut(key_code, edge);
         }
         Ok(AdapterOutcome::default())
     }

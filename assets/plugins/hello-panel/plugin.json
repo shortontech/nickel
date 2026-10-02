@@ -1,0 +1,23 @@
+{
+  "api_version": 1,
+  "id": "org.nickel.hello-panel",
+  "name": "Hello Panel",
+  "author": "Nickel",
+  "version": "0.1.0",
+  "entry": "main.js",
+  "stylesheet": "ui.css",
+  "surfaces": [
+    {
+      "id": "main",
+      "kind": "panel",
+      "width": 440,
+      "height": 220,
+      "bottom_offset": 24,
+      "output": "all"
+    }
+  ],
+  "capabilities": ["launcher-show"],
+  "settings": [
+    {"id":"show-count","label":"Show count","description":"Display the click counter","kind":"boolean","default":true}
+  ]
+}

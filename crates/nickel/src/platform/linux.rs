@@ -286,6 +286,7 @@ pub(crate) fn save_temp_image(image: &image::RgbaImage) -> Result<PathBuf, Strin
     let runtime = env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(env::temp_dir);
+    super::remove_stale_temp_screenshots(&runtime, "nickel-screenshot-");
     let sequence = SESSION_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
     let path = runtime.join(format!(
         "nickel-screenshot-{}-{sequence}.png",
@@ -377,6 +378,14 @@ pub fn set_wifi_enabled(enabled: bool) -> bool {
 
 pub fn activate_wifi_network(id: &str) -> bool {
     linux_control::activate_wifi_network(id)
+}
+
+pub fn disconnect_wifi_network(id: &str) -> bool {
+    linux_control::disconnect_wifi_network(id)
+}
+
+pub fn pair_bluetooth_device(id: &str) -> bool {
+    linux_control::pair_bluetooth_device(id)
 }
 
 pub fn bluetooth_status() -> super::BluetoothStatus {
@@ -1292,6 +1301,8 @@ fn session_request_operation(request: &SessionRequest) -> &'static str {
             SessionQuery::Windows => "query-windows",
             SessionQuery::Outputs => "query-outputs",
             SessionQuery::ShellSurfaces => "query-shell-surfaces",
+            SessionQuery::UiLayouts => "query-ui-layouts",
+            SessionQuery::UiLayout { .. } => "query-ui-layout",
             SessionQuery::ShellReadiness => "query-shell-readiness",
             SessionQuery::LauncherVisibility => "query-launcher-visibility",
             SessionQuery::SecureStorage => "query-secure-storage",
@@ -1299,6 +1310,7 @@ fn session_request_operation(request: &SessionRequest) -> &'static str {
             SessionQuery::CacheDiagnostics => "query-cache-diagnostics",
             SessionQuery::Workspaces => "query-workspaces",
             SessionQuery::ShellBehavior => "query-shell-behavior",
+            SessionQuery::Plugins => "query-plugins",
             SessionQuery::RemoteControl => "query-remote-control",
             SessionQuery::Preview { .. } => "query-preview",
             SessionQuery::ShellSemanticTarget { .. } => "query-shell-semantic-target",
@@ -1313,6 +1325,9 @@ fn session_request_operation(request: &SessionRequest) -> &'static str {
             SessionCommand::OnScreenKeyboardInput { .. } => "on-screen-keyboard-input",
             SessionCommand::ReloadShellSettings => "reload-shell-settings",
             SessionCommand::ApplyShellBehavior { .. } => "apply-shell-behavior",
+            SessionCommand::PublishPluginStatus { .. } => "publish-plugin-status",
+            SessionCommand::SetPluginEnabled { .. } => "set-plugin-enabled",
+            SessionCommand::SetPluginSetting { .. } => "set-plugin-setting",
             SessionCommand::ApplyRemoteControl { .. } => "apply-remote-control",
             SessionCommand::StartRemotePairing { .. } => "start-remote-pairing",
             SessionCommand::CancelRemotePairing => "cancel-remote-pairing",
@@ -1330,6 +1345,7 @@ fn session_request_operation(request: &SessionRequest) -> &'static str {
             }
             SessionCommand::SetShellRoleVisible { .. } => "set-shell-role-visible",
             SessionCommand::ShowAnchoredShellRole { .. } => "show-anchored-shell-role",
+            SessionCommand::ShowAnchoredPluginSurface { .. } => "show-anchored-plugin-surface",
             SessionCommand::LogOut => "log-out",
             SessionCommand::SessionAction { .. } => "session-action",
             SessionCommand::Unlock => "unlock",
@@ -1337,6 +1353,7 @@ fn session_request_operation(request: &SessionRequest) -> &'static str {
             SessionCommand::HideOverlay => "hide-overlay",
             SessionCommand::ShowOverlay { .. } => "show-overlay",
             SessionCommand::FocusShellRole { .. } => "focus-shell-role",
+            SessionCommand::FocusPluginSurface { .. } => "focus-plugin-surface",
             SessionCommand::RestoreApplicationFocus => "restore-application-focus",
             SessionCommand::IdentifyOutputs => "identify-outputs",
             SessionCommand::CaptureOutput { .. } => "capture-output",
@@ -1494,6 +1511,9 @@ fn command_response(response: ServerMessage) -> Result<(), SessionRequestError> 
 
 pub(crate) fn shell_command_payload(command: ShellCommand) -> SessionCommand {
     match command {
+        ShellCommand::PublishPluginStatus { snapshot } => {
+            SessionCommand::PublishPluginStatus { snapshot }
+        }
         ShellCommand::Show => SessionCommand::SetLauncherVisible { visible: true },
         ShellCommand::ShowFromController => {
             SessionCommand::SetLauncherVisibleFromController { visible: true }
@@ -1540,6 +1560,7 @@ pub(crate) fn shell_command_payload(command: ShellCommand) -> SessionCommand {
             width,
             height,
             windows,
+            ..
         } => SessionCommand::ShowOverlay {
             role: SessionShellRole::Preview,
             geometry: SessionGeometry {
@@ -1557,6 +1578,7 @@ pub(crate) fn shell_command_payload(command: ShellCommand) -> SessionCommand {
             width,
             height,
             windows,
+            ..
         } => SessionCommand::ShowOverlay {
             role: SessionShellRole::Preview,
             geometry: SessionGeometry {
@@ -1573,6 +1595,10 @@ pub(crate) fn shell_command_payload(command: ShellCommand) -> SessionCommand {
         ShellCommand::FocusControlCenter => SessionCommand::FocusShellRole {
             role: SessionShellRole::ControlCenter,
         },
+        ShellCommand::FocusPluginSurface { key } => SessionCommand::FocusPluginSurface {
+            plugin_id: key.plugin_id,
+            surface_id: key.surface_id,
+        },
         ShellCommand::FocusPreview => SessionCommand::FocusShellRole {
             role: SessionShellRole::Preview,
         },
@@ -1588,6 +1614,13 @@ pub(crate) fn shell_command_payload(command: ShellCommand) -> SessionCommand {
         }
         ShellCommand::ShowAnchoredShellRole { role, anchor } => {
             SessionCommand::ShowAnchoredShellRole { role, anchor }
+        }
+        ShellCommand::ShowAnchoredPluginSurface { key, anchor } => {
+            SessionCommand::ShowAnchoredPluginSurface {
+                plugin_id: key.plugin_id,
+                surface_id: key.surface_id,
+                anchor,
+            }
         }
         ShellCommand::HideContextMenu => SessionCommand::HideOverlay,
         ShellCommand::HighlightWindow(window) => SessionCommand::HighlightWindow {
@@ -1627,6 +1660,7 @@ pub(crate) fn shell_command_payload(command: ShellCommand) -> SessionCommand {
                 output,
             }
         }
+        ShellCommand::IdentifyOutputs => SessionCommand::IdentifyOutputs,
         ShellCommand::ApplyOutputs(layout) => SessionCommand::ApplyOutputs { layout },
     }
 }
@@ -2136,6 +2170,26 @@ fn subscription_shortcut(
         ServerMessage::Event(
             SessionEvent::ShellSettingsChanged | SessionEvent::ShellBehaviorChanged(_),
         ) => Some(GlobalShortcut::ReloadShellSettings),
+        ServerMessage::Event(SessionEvent::PluginActivationRequested {
+            id,
+            enabled,
+            observed_generation,
+        }) => Some(GlobalShortcut::SetPluginEnabled {
+            id,
+            enabled,
+            observed_generation,
+        }),
+        ServerMessage::Event(SessionEvent::PluginSettingRequested {
+            id,
+            key,
+            value,
+            observed_generation,
+        }) => Some(GlobalShortcut::SetPluginSetting {
+            id,
+            key,
+            value,
+            observed_generation,
+        }),
         ServerMessage::Event(SessionEvent::LauncherVisibility { visible })
         | ServerMessage::LauncherVisibility { visible } => {
             if state.launcher_visible.replace(visible) == Some(visible) {
@@ -3051,4 +3105,14 @@ mod tests {
             assert!(protocol_preview_image(invalid).is_none());
         }
     }
+}
+
+pub(super) fn set_bluetooth_connected(id: &str, connected: bool) -> bool {
+    linux_control::set_bluetooth_connected(id, connected)
+}
+
+pub(super) fn refresh_optional_features() -> Result<(), SessionRequestError> {
+    command_response(one_shot_session_request(SessionRequest::Command(
+        SessionCommand::ReloadShellSettings,
+    ))?)
 }

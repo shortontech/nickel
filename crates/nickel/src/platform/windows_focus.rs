@@ -9,8 +9,8 @@ use windows::Win32::{
     System::Threading::GetCurrentThreadId,
     UI::{
         Input::KeyboardAndMouse::{
-            GetAsyncKeyState, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
-            SendInput, SetFocus, VK_MENU,
+            INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput, SetFocus,
+            VK_MENU,
         },
         WindowsAndMessaging::{
             GWL_EXSTYLE, GetForegroundWindow, GetWindowLongPtrW, GetWindowThreadProcessId,
@@ -96,10 +96,7 @@ fn request_foreground(window: HWND) -> bool {
         // A hook-owned shortcut does not grant foreground permission. Windows
         // unlocks foreground changes on Alt input. Only recover an explicit
         // user activation, and never release or chord a physically held modifier.
-        if [0x10, 0x11, 0x12, 0x5b, 0x5c]
-            .iter()
-            .any(|key| GetAsyncKeyState(*key) < 0)
-        {
+        if !crate::windows_remote_input::physical_modifiers_idle() {
             return false;
         }
         let mut input = [INPUT {

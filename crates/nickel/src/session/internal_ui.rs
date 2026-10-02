@@ -49,7 +49,7 @@ smithay::backend::renderer::element::render_elements! {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InternalSurfaceRole {
     Desktop,
-    Panel,
+    Taskbar,
     Overlay,
     /// Foremost compositor paint that never participates in hit testing or focus.
     PassiveOverlay,
@@ -98,6 +98,38 @@ struct PresentedSurface {
     visible: bool,
     z_order: u64,
     decoration: Option<InternalWindowDecoration>,
+    backdrop_materials: Vec<BackdropMaterial>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct BackdropMaterial {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub radius: f32,
+    pub blur: f32,
+}
+
+fn backdrop_materials(commands: &[PaintCommand]) -> Vec<BackdropMaterial> {
+    commands
+        .iter()
+        .filter_map(|command| match command {
+            PaintCommand::BackdropBlur { rect, radius, blur }
+                if rect.size.width > 0.0 && rect.size.height > 0.0 && *blur > 0.0 =>
+            {
+                Some(BackdropMaterial {
+                    x: rect.origin.x.floor() as i32,
+                    y: rect.origin.y.floor() as i32,
+                    width: rect.size.width.ceil() as u32,
+                    height: rect.size.height.ceil() as u32,
+                    radius: *radius,
+                    blur: *blur,
+                })
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 struct SceneSlot;
@@ -236,6 +268,7 @@ pub struct AggregateInternalUiRendererDiagnostics {
 pub struct SmithayFrameRenderer {
     software: Option<SoftwareRenderer>,
     text_software: SoftwareRenderer,
+    shape_software: SoftwareRenderer,
     primitives: Vec<GpuPrimitive>,
     raster: Option<MemoryRenderBuffer>,
     raster_configuration: Option<(u32, u32, u32)>,
@@ -245,6 +278,7 @@ pub struct SmithayFrameRenderer {
     image_cache: Rc<RefCell<TextureCache<ImageTextureKey>>>,
     image_hashes: ImageHashes,
     text_cache: Rc<RefCell<TextureCache<TextTextureKey>>>,
+    shape_cache: TextureCache<ShapeTextureKey>,
     /// Retained until all renderer-specific texture imports succeed. Without
     /// this, an import error can only omit the affected icon from the frame.
     import_fallback: Option<ImportFallbackFrame>,
@@ -431,6 +465,21 @@ struct TextTextureKey {
     kind: TextTextureKind,
 }
 
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct ShapeTextureKey {
+    width: u32,
+    height: u32,
+    frame_scale: u32,
+    kind: ShapeTextureKind,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+enum ShapeTextureKind {
+    TopFill { color: u32, radius: u32 },
+    Fill { color: u32, radius: u32 },
+    Stroke { color: u32, width: u32, radius: u32 },
+}
+
 enum GpuPrimitive {
     Solid(nickel_ui::Rect, SolidColorBuffer),
     Texture {
@@ -451,26 +500,12 @@ const IMAGE_CACHE_ENTRY_LIMIT: usize = 256;
 const IMAGE_CACHE_BYTE_LIMIT: usize = 32 * 1024 * 1024;
 const TEXT_CACHE_ENTRY_LIMIT: usize = 1_024;
 const TEXT_CACHE_BYTE_LIMIT: usize = 8 * 1024 * 1024;
+const SHAPE_CACHE_ENTRY_LIMIT: usize = 256;
+const SHAPE_CACHE_BYTE_LIMIT: usize = 16 * 1024 * 1024;
+const MAX_CACHED_SHAPE_PIXELS: f32 = 512.0 * 512.0;
 
-fn estimated_rounded_elements(rect: nickel_ui::Rect, radius: f32, top_only: bool) -> usize {
-    let rows = rect.size.height.ceil().max(1.0) as usize;
-    let radius = radius
-        .max(0.0)
-        .min(rect.size.width / 2.0)
-        .min(rect.size.height / 2.0);
-    if radius < 0.5 {
-        return 1;
-    }
-    let corner_rows = radius.ceil() as usize;
-    let corner_rows = if top_only {
-        corner_rows
-    } else {
-        corner_rows.saturating_mul(2)
-    };
-    // Corner strips plus the coalesced rectangular middle. This is a
-    // conservative upper bound because pixel-centre sampling can turn an
-    // edge row into part of the middle.
-    rows.min(corner_rows.saturating_add(1))
+fn cache_rounded_shape(rect: nickel_ui::Rect) -> bool {
+    rect.size.width * rect.size.height <= MAX_CACHED_SHAPE_PIXELS
 }
 
 struct SharedTextureCaches {
@@ -514,6 +549,7 @@ impl SmithayFrameRenderer {
             // across every label in a scene; constructing a font system per
             // command can stall the compositor event loop for many seconds.
             text_software: SoftwareRenderer::new(1, 1, scale),
+            shape_software: SoftwareRenderer::new(1, 1, scale),
             primitives: Vec::new(),
             raster: None,
             raster_configuration: None,
@@ -523,6 +559,7 @@ impl SmithayFrameRenderer {
             image_cache: Rc::clone(&caches.images),
             image_hashes: Default::default(),
             text_cache: Rc::clone(&caches.text),
+            shape_cache: TextureCache::new(SHAPE_CACHE_ENTRY_LIMIT, SHAPE_CACHE_BYTE_LIMIT),
             import_fallback: None,
         }
     }
@@ -545,6 +582,7 @@ impl SmithayFrameRenderer {
     fn suspend(&mut self) {
         self.image_hashes.entries.clear();
         self.text_software.suspend();
+        self.shape_software.suspend();
         if let Some(mut software) = self.software.take() {
             software.suspend();
         }
@@ -565,11 +603,13 @@ impl SmithayFrameRenderer {
         commands.iter().all(|command| {
             matches!(
                 command,
-                PaintCommand::Fill { .. }
+                PaintCommand::BackdropBlur { .. }
+                    | PaintCommand::Fill { .. }
                     | PaintCommand::OverlayFill { .. }
                     | PaintCommand::TopRoundedFill { .. }
                     | PaintCommand::RoundedFill { .. }
                     | PaintCommand::Gradient { .. }
+                    | PaintCommand::RoundedStroke { .. }
                     | PaintCommand::Stroke { .. }
                     | PaintCommand::OverlayStroke { .. }
                     | PaintCommand::Image { .. }
@@ -581,6 +621,8 @@ impl SmithayFrameRenderer {
         })
     }
 
+    // SolidColorRenderElement uses integer logical geometry. Sample coverage
+    // on that grid so fractional spans cannot round onto each other and blend twice.
     fn estimated_gpu_elements(commands: &[PaintCommand]) -> usize {
         commands.iter().fold(0_usize, |total, command| {
             let elements = match command {
@@ -589,18 +631,62 @@ impl SmithayFrameRenderer {
                 | PaintCommand::Image { .. }
                 | PaintCommand::Text { .. }
                 | PaintCommand::StyledText { .. } => 1,
-                PaintCommand::TopRoundedFill { rect, radius, .. } => {
-                    estimated_rounded_elements(*rect, *radius, true)
+                PaintCommand::TopRoundedFill {
+                    rect,
+                    color,
+                    radius,
+                } => {
+                    if cache_rounded_shape(*rect) {
+                        1
+                    } else {
+                        nickel_ui::backend::rounded_coverage_spans(
+                            *rect, *color, *radius, None, true, 1.0,
+                        )
+                        .len()
+                    }
                 }
-                PaintCommand::RoundedFill { rect, radius, .. } => {
-                    estimated_rounded_elements(*rect, *radius, false)
+                PaintCommand::RoundedFill {
+                    rect,
+                    color,
+                    radius,
+                } => {
+                    if cache_rounded_shape(*rect) {
+                        1
+                    } else {
+                        nickel_ui::backend::rounded_coverage_spans(
+                            *rect, *color, *radius, None, false, 1.0,
+                        )
+                        .len()
+                    }
+                }
+                PaintCommand::RoundedStroke {
+                    rect,
+                    color,
+                    width,
+                    radius,
+                } => {
+                    if cache_rounded_shape(*rect) {
+                        1
+                    } else {
+                        nickel_ui::backend::rounded_coverage_spans(
+                            *rect,
+                            *color,
+                            *radius,
+                            Some(*width),
+                            false,
+                            1.0,
+                        )
+                        .len()
+                    }
                 }
                 PaintCommand::Gradient { rect, gradient } => match gradient.axis {
                     GradientAxis::Horizontal => rect.size.width.ceil().max(1.0) as usize,
                     GradientAxis::Vertical => rect.size.height.ceil().max(1.0) as usize,
                 },
                 PaintCommand::Stroke { .. } | PaintCommand::OverlayStroke { .. } => 4,
-                PaintCommand::PushClip(_) | PaintCommand::PopClip => 0,
+                PaintCommand::BackdropBlur { .. }
+                | PaintCommand::PushClip(_)
+                | PaintCommand::PopClip => 0,
             };
             total.saturating_add(elements)
         })
@@ -618,78 +704,6 @@ impl SmithayFrameRenderer {
             rect,
             SolidColorBuffer::new(size, color32f(color)),
         ));
-    }
-
-    fn push_rounded_solid(
-        &mut self,
-        rect: nickel_ui::Rect,
-        color: u32,
-        radius: f32,
-        top_only: bool,
-        clip: nickel_ui::Rect,
-    ) {
-        let radius = radius
-            .max(0.0)
-            .min(rect.size.width / 2.0)
-            .min(rect.size.height / 2.0);
-        if radius < 0.5 {
-            self.push_solid(rect, color, clip);
-            return;
-        }
-        // Only corner rows need individual strips. Coalesce the rectangular
-        // middle into one element so a large rounded launcher background does
-        // not exceed the GPU element budget merely because it is tall. That
-        // otherwise activates two full-output software fallback buffers and
-        // leaves the process allocator's resident high-water mark behind when
-        // the transient surface closes.
-        let rows = rect.size.height.ceil().max(1.0) as u32;
-        let mut middle_start = None::<f32>;
-        let mut middle_end = 0.0_f32;
-        for row in 0..rows {
-            let y = row as f32;
-            let height = (rect.size.height - y).clamp(0.0, 1.0);
-            if height == 0.0 {
-                continue;
-            }
-            let sample_y = y + height / 2.0;
-            let corner_y = if sample_y < radius {
-                Some(radius - sample_y)
-            } else if !top_only && sample_y > rect.size.height - radius {
-                Some(sample_y - (rect.size.height - radius))
-            } else {
-                None
-            };
-            let inset = corner_y
-                .map(|dy| radius - (radius * radius - dy * dy).max(0.0).sqrt())
-                .unwrap_or(0.0);
-            if inset == 0.0 {
-                middle_start.get_or_insert(y);
-                middle_end = y + height;
-                continue;
-            }
-            self.push_solid(
-                nickel_ui::Rect::new(
-                    rect.origin.x + inset,
-                    rect.origin.y + y,
-                    (rect.size.width - inset * 2.0).max(0.0),
-                    height,
-                ),
-                color,
-                clip,
-            );
-        }
-        if let Some(y) = middle_start {
-            self.push_solid(
-                nickel_ui::Rect::new(
-                    rect.origin.x,
-                    rect.origin.y + y,
-                    rect.size.width,
-                    middle_end - y,
-                ),
-                color,
-                clip,
-            );
-        }
     }
 
     fn push_gradient(
@@ -729,6 +743,104 @@ impl SmithayFrameRenderer {
         }
     }
 
+    fn push_rounded_texture(
+        &mut self,
+        command: &PaintCommand,
+        bounds: nickel_ui::Rect,
+        clip: nickel_ui::Rect,
+        scale: f32,
+    ) {
+        let Some(rect) = intersect(bounds, clip) else {
+            return;
+        };
+        if bounds.size.width <= 0.0 || bounds.size.height <= 0.0 {
+            return;
+        }
+        let width = (bounds.size.width * scale).ceil().max(1.0) as u32;
+        let height = (bounds.size.height * scale).ceil().max(1.0) as u32;
+        let kind = match command {
+            PaintCommand::TopRoundedFill { color, radius, .. } => ShapeTextureKind::TopFill {
+                color: *color,
+                radius: radius.to_bits(),
+            },
+            PaintCommand::RoundedFill { color, radius, .. } => ShapeTextureKind::Fill {
+                color: *color,
+                radius: radius.to_bits(),
+            },
+            PaintCommand::RoundedStroke {
+                color,
+                width,
+                radius,
+                ..
+            } => ShapeTextureKind::Stroke {
+                color: *color,
+                width: width.to_bits(),
+                radius: radius.to_bits(),
+            },
+            _ => unreachable!("rounded texture receives rounded geometry"),
+        };
+        let key = ShapeTextureKey {
+            width,
+            height,
+            frame_scale: scale.to_bits(),
+            kind,
+        };
+        let texture = if let Some(texture) = self.shape_cache.get(&key) {
+            texture
+        } else {
+            let mut local = command.clone();
+            match &mut local {
+                PaintCommand::TopRoundedFill { rect, .. }
+                | PaintCommand::RoundedFill { rect, .. }
+                | PaintCommand::RoundedStroke { rect, .. } => {
+                    rect.origin = nickel_ui::Point { x: 0.0, y: 0.0 };
+                }
+                _ => unreachable!("rounded texture receives rounded geometry"),
+            }
+            self.shape_software.resize(width, height, scale);
+            self.shape_software.invalidate();
+            self.shape_software.render(&[local]);
+            let mut bytes = Vec::with_capacity(self.shape_software.pixels().len() * 4);
+            for pixel in self.shape_software.pixels() {
+                bytes.extend_from_slice(&[pixel.r, pixel.g, pixel.b, pixel.a]);
+            }
+            let texture = CachedTexture {
+                buffer: MemoryRenderBuffer::from_slice(
+                    &bytes,
+                    Fourcc::Abgr8888,
+                    (width as i32, height as i32),
+                    1,
+                    Transform::Normal,
+                    None,
+                ),
+                width,
+                height,
+            };
+            self.shape_cache
+                .insert(key, texture.clone(), texture_bytes(width, height));
+            texture
+        };
+        let scale = f64::from(scale);
+        let source = Rectangle::new(
+            (
+                f64::from(rect.origin.x - bounds.origin.x) * scale,
+                f64::from(rect.origin.y - bounds.origin.y) * scale,
+            )
+                .into(),
+            (
+                f64::from(rect.size.width) * scale,
+                f64::from(rect.size.height) * scale,
+            )
+                .into(),
+        );
+        self.primitives.push(GpuPrimitive::Texture {
+            rect,
+            source,
+            text_scale: None,
+            buffer: texture.buffer,
+        });
+    }
+
     fn prepare_gpu(&mut self, frame: RenderFrame<'_>) {
         self.import_fallback = Some(ImportFallbackFrame {
             commands: frame.commands.to_vec(),
@@ -746,6 +858,7 @@ impl SmithayFrameRenderer {
         for command in frame.commands {
             let clip = *clips.last().unwrap_or(&viewport);
             match command {
+                PaintCommand::BackdropBlur { .. } => {}
                 PaintCommand::Fill { rect, color } | PaintCommand::OverlayFill { rect, color } => {
                     self.push_solid(*rect, *color, clip)
                 }
@@ -753,12 +866,53 @@ impl SmithayFrameRenderer {
                     rect,
                     color,
                     radius,
-                } => self.push_rounded_solid(*rect, *color, *radius, true, clip),
+                } => {
+                    if cache_rounded_shape(*rect) {
+                        self.push_rounded_texture(command, *rect, clip, frame.scale_factor);
+                    } else {
+                        for (span, shaded) in nickel_ui::backend::rounded_coverage_spans(
+                            *rect, *color, *radius, None, true, 1.0,
+                        ) {
+                            self.push_solid(span, shaded, clip);
+                        }
+                    }
+                }
                 PaintCommand::RoundedFill {
                     rect,
                     color,
                     radius,
-                } => self.push_rounded_solid(*rect, *color, *radius, false, clip),
+                } => {
+                    if cache_rounded_shape(*rect) {
+                        self.push_rounded_texture(command, *rect, clip, frame.scale_factor);
+                    } else {
+                        for (span, shaded) in nickel_ui::backend::rounded_coverage_spans(
+                            *rect, *color, *radius, None, false, 1.0,
+                        ) {
+                            self.push_solid(span, shaded, clip);
+                        }
+                    }
+                }
+                PaintCommand::RoundedStroke {
+                    rect,
+                    color,
+                    width,
+                    radius,
+                } => {
+                    if cache_rounded_shape(*rect) {
+                        self.push_rounded_texture(command, *rect, clip, frame.scale_factor);
+                    } else {
+                        for (span, shaded) in nickel_ui::backend::rounded_coverage_spans(
+                            *rect,
+                            *color,
+                            *radius,
+                            Some(*width),
+                            false,
+                            1.0,
+                        ) {
+                            self.push_solid(span, shaded, clip);
+                        }
+                    }
+                }
                 PaintCommand::Gradient { rect, gradient } => {
                     self.push_gradient(*rect, *gradient, clip)
                 }
@@ -1499,11 +1653,14 @@ fn color32f(color: u32) -> Color32F {
     } else {
         (color >> 24) & 0xff
     };
+    // Smithay consumes premultiplied RGBA. Coverage spans retain straight RGB,
+    // so their partial alpha must attenuate the color channels here as well.
+    let alpha = alpha as f32 / 255.0;
     Color32F::new(
-        ((color >> 16) & 0xff) as f32 / 255.0,
-        ((color >> 8) & 0xff) as f32 / 255.0,
-        (color & 0xff) as f32 / 255.0,
-        alpha as f32 / 255.0,
+        ((color >> 16) & 0xff) as f32 / 255.0 * alpha,
+        ((color >> 8) & 0xff) as f32 / 255.0 * alpha,
+        (color & 0xff) as f32 / 255.0 * alpha,
+        alpha,
     )
 }
 
@@ -1602,8 +1759,46 @@ impl Default for InternalUiRuntime {
 }
 
 impl InternalUiRuntime {
+    /// Return explicit compositor material requests emitted by styled elements.
+    pub(crate) fn backdrop_blur_regions(
+        &self,
+        output: &str,
+        output_origin: Point<i32, Logical>,
+        _output_width: u32,
+    ) -> Vec<BackdropMaterial> {
+        self.presentation
+            .values()
+            .filter(|surface| {
+                surface.visible && surface.placement.output.as_deref() == Some(output)
+            })
+            .flat_map(|surface| {
+                let (surface_x, surface_y, _, _) = surface.placement.geometry;
+                surface
+                    .backdrop_materials
+                    .iter()
+                    .map(move |material| BackdropMaterial {
+                        x: surface_x - output_origin.x + material.x,
+                        y: surface_y - output_origin.y + material.y,
+                        ..*material
+                    })
+            })
+            .collect()
+    }
+
+    pub(crate) fn layout_surface_ids(&self) -> impl Iterator<Item = InternalSurfaceId> + '_ {
+        self.presentation.keys().copied()
+    }
+
+    pub(crate) fn layout_snapshot(&self, id: InternalSurfaceId) -> Option<String> {
+        self.surfaces.get(id)?.layout_snapshot()
+    }
+
+    pub(crate) fn layout_node_count(&self, id: InternalSurfaceId) -> Option<usize> {
+        Some(self.surfaces.get(id)?.inspect().resources.node_count)
+    }
+
     fn panel_is_suppressed(&self, surface: &PresentedSurface) -> bool {
-        surface.placement.role == InternalSurfaceRole::Panel
+        surface.placement.role == InternalSurfaceRole::Taskbar
             && surface
                 .placement
                 .output
@@ -1715,6 +1910,7 @@ impl InternalUiRuntime {
                 visible: true,
                 z_order: self.next_z_order,
                 decoration: None,
+                backdrop_materials: Vec::new(),
             },
         );
         id
@@ -1996,6 +2192,7 @@ impl InternalUiRuntime {
                 visible: true,
                 z_order: self.next_z_order,
                 decoration: None,
+                backdrop_materials: Vec::new(),
             },
         );
         id
@@ -2043,6 +2240,23 @@ impl InternalUiRuntime {
         self.routed_recipients.insert(
             runtime,
             nickel_ui::NormalizedRecipientBinding { lease, lifetime },
+        );
+    }
+
+    /// Keep a surface's window identity while invalidating input admitted
+    /// before its output placement was reconciled.
+    pub(crate) fn renew_routed_recipient(
+        &mut self,
+        runtime: InternalSurfaceId,
+        recipient: InternalSurfaceId,
+    ) {
+        let lease = self.allocate_recipient_lease();
+        self.routed_recipients.insert(
+            runtime,
+            nickel_ui::NormalizedRecipientBinding {
+                lease,
+                lifetime: recipient.snapshot_token(),
+            },
         );
     }
 
@@ -2180,9 +2394,9 @@ impl InternalUiRuntime {
             };
             let changed = surface.visible != visible;
             surface.visible = visible;
-            if visible {
+            if changed && visible {
                 surface.dirty = true;
-            } else {
+            } else if !visible {
                 surface.renderer.suspend();
             }
             changed
@@ -2430,6 +2644,9 @@ impl InternalUiRuntime {
         let Some(surface) = self.presentation.get_mut(&id) else {
             return false;
         };
+        if surface.external_scene.as_ref() == Some(&commands) {
+            return false;
+        }
         surface.external_scene = Some(commands);
         surface.dirty = true;
         true
@@ -2605,7 +2822,7 @@ impl InternalUiRuntime {
             InternalSurfaceRole::TrustedControl => 4,
             InternalSurfaceRole::Desktop => 0,
             InternalSurfaceRole::Application => 1,
-            InternalSurfaceRole::Panel => 2,
+            InternalSurfaceRole::Taskbar => 2,
             InternalSurfaceRole::Overlay
             | InternalSurfaceRole::PassiveOverlay
             | InternalSurfaceRole::OnScreenKeyboard => 3,
@@ -2617,7 +2834,7 @@ impl InternalUiRuntime {
             InternalSurfaceRole::Desktop => InternalSurfaceLayer::Background,
             InternalSurfaceRole::Application => InternalSurfaceLayer::Application,
             InternalSurfaceRole::TrustedControl
-            | InternalSurfaceRole::Panel
+            | InternalSurfaceRole::Taskbar
             | InternalSurfaceRole::Overlay
             | InternalSurfaceRole::PassiveOverlay
             | InternalSurfaceRole::OnScreenKeyboard => InternalSurfaceLayer::Overlay,
@@ -3057,6 +3274,7 @@ impl InternalUiRuntime {
         let presentation = self.presentation.get_mut(&id)?;
         if presentation.dirty {
             if let Some(commands) = &presentation.external_scene {
+                presentation.backdrop_materials = backdrop_materials(commands);
                 let (_, _, width, height) = presentation.placement.geometry;
                 let _ = presentation.renderer.render_frame(RenderFrame {
                     commands,
@@ -3066,7 +3284,9 @@ impl InternalUiRuntime {
                 });
             } else {
                 let surface = self.surfaces.get(id)?;
-                let _ = presentation.renderer.render_frame(surface.render_frame());
+                let frame = surface.render_frame();
+                presentation.backdrop_materials = backdrop_materials(frame.commands);
+                let _ = presentation.renderer.render_frame(frame);
             }
             presentation.dirty = false;
         }
@@ -3198,6 +3418,7 @@ impl InternalUiRuntime {
                 if self.presentation.get(&id)?.dirty {
                     let presentation = self.presentation.get_mut(&id)?;
                     if let Some(commands) = &presentation.external_scene {
+                        presentation.backdrop_materials = backdrop_materials(commands);
                         let (_, _, width, height) = placement.geometry;
                         let _ = presentation.renderer.render_frame(RenderFrame {
                             commands,
@@ -3207,7 +3428,9 @@ impl InternalUiRuntime {
                         });
                     } else {
                         let surface = self.surfaces.get(id)?;
-                        let _ = presentation.renderer.render_frame(surface.render_frame());
+                        let frame = surface.render_frame();
+                        presentation.backdrop_materials = backdrop_materials(frame.commands);
+                        let _ = presentation.renderer.render_frame(frame);
                     }
                     presentation.dirty = false;
                 }
@@ -3389,7 +3612,7 @@ mod tests {
 
     fn placement(output: Option<&str>) -> InternalSurfacePlacement {
         InternalSurfacePlacement {
-            role: InternalSurfaceRole::Panel,
+            role: InternalSurfaceRole::Taskbar,
             geometry: (10, 20, 120, 32),
             output: output.map(str::to_owned),
         }
@@ -3410,6 +3633,33 @@ mod tests {
         assert!(!runtime.has_damage());
         assert!(runtime.remove(id));
         assert!(runtime.is_empty());
+    }
+
+    #[test]
+    fn synchronizing_an_already_visible_surface_does_not_redirty_it() {
+        let mut runtime = InternalUiRuntime::default();
+        let id = runtime.insert(Label, placement(Some("DP-1")), 1.0);
+        assert!(runtime.has_damage());
+        assert!(runtime.render_buffer(id).is_none());
+        assert!(!runtime.has_damage());
+
+        assert!(!runtime.set_visible(id, true));
+        assert!(!runtime.has_damage());
+    }
+
+    #[test]
+    fn synchronizing_an_unchanged_external_scene_does_not_redirty_it() {
+        let mut runtime = InternalUiRuntime::default();
+        let scene = vec![PaintCommand::Fill {
+            rect: nickel_ui::Rect::new(0.0, 0.0, 20.0, 10.0),
+            color: 0xff0a141e,
+        }];
+        let id = runtime.insert_scene(scene.clone(), placement(Some("DP-1")), 1.0);
+        assert!(runtime.render_buffer(id).is_none());
+        assert!(!runtime.has_damage());
+
+        assert!(!runtime.update_scene(id, scene));
+        assert!(!runtime.has_damage());
     }
 
     #[test]
@@ -3458,6 +3708,19 @@ mod tests {
     }
 
     #[test]
+    fn renewing_routed_recipient_preserves_surface_identity_and_rotates_input_lease() {
+        let mut runtime = InternalUiRuntime::default();
+        let id = runtime.insert_scene(Vec::new(), placement(Some("DP-1")), 1.0);
+        runtime.bind_routed_recipient(id, id);
+        let before = runtime.normalized_recipient(id);
+        runtime.renew_routed_recipient(id, id);
+        let after = runtime.normalized_recipient(id);
+        assert_eq!(after.lifetime, before.lifetime);
+        assert_ne!(after.lease, before.lease);
+        assert_eq!(runtime.surfaces.ids().collect::<Vec<_>>(), vec![id]);
+    }
+
+    #[test]
     fn output_agnostic_surfaces_are_visible_on_every_output() {
         let mut runtime = InternalUiRuntime::default();
         let id = runtime.insert(Label, placement(None), 1.0);
@@ -3470,7 +3733,7 @@ mod tests {
         let mut runtime = InternalUiRuntime::default();
         let id = runtime.insert(Label, placement(Some("DP-1")), 1.0);
         let moved = InternalSurfacePlacement {
-            role: InternalSurfaceRole::Panel,
+            role: InternalSurfaceRole::Taskbar,
             geometry: (-1910, 220, 120, 32),
             output: Some("HDMI-A-1".into()),
         };
@@ -3772,7 +4035,7 @@ mod tests {
         let panel = runtime.insert(
             Counter(0),
             InternalSurfacePlacement {
-                role: InternalSurfaceRole::Panel,
+                role: InternalSurfaceRole::Taskbar,
                 geometry: (0, 0, 100, 40),
                 output: None,
             },
@@ -3892,7 +4155,7 @@ mod tests {
         let panel = runtime.insert(
             Label,
             InternalSurfacePlacement {
-                role: InternalSurfaceRole::Panel,
+                role: InternalSurfaceRole::Taskbar,
                 geometry: (0, 0, 200, 32),
                 output: None,
             },
@@ -3913,7 +4176,7 @@ mod tests {
         let left_panel = runtime.insert(
             Label,
             InternalSurfacePlacement {
-                role: InternalSurfaceRole::Panel,
+                role: InternalSurfaceRole::Taskbar,
                 geometry: (0, 0, 100, 32),
                 output: Some("left".into()),
             },
@@ -3922,7 +4185,7 @@ mod tests {
         let right_panel = runtime.insert(
             Label,
             InternalSurfacePlacement {
-                role: InternalSurfaceRole::Panel,
+                role: InternalSurfaceRole::Taskbar,
                 geometry: (100, 0, 100, 32),
                 output: Some("right".into()),
             },
@@ -3989,7 +4252,7 @@ mod tests {
         let panel = runtime.insert(
             Label,
             InternalSurfacePlacement {
-                role: InternalSurfaceRole::Panel,
+                role: InternalSurfaceRole::Taskbar,
                 geometry: (0, 0, 100, 100),
                 output: Some("nested".into()),
             },
@@ -4179,7 +4442,45 @@ mod tests {
     }
 
     #[test]
-    fn full_output_rounded_fill_coalesces_middle_and_stays_on_gpu() {
+    fn small_rounded_fill_uses_one_cached_texture_and_stays_on_gpu() {
+        let commands = [PaintCommand::RoundedFill {
+            rect: nickel_ui::Rect::new(8.0, 8.0, 320.0, 80.0),
+            color: 0x336699,
+            radius: 8.0,
+        }];
+        let mut renderer = SmithayFrameRenderer::new(360, 112, 1.0, InternalUiRendererMode::Gpu);
+
+        renderer
+            .render_frame(RenderFrame {
+                commands: &commands,
+                logical_size: (360, 112),
+                scale_factor: 1.0,
+                generation: 1,
+            })
+            .unwrap();
+
+        assert_eq!(renderer.mode(), InternalUiPresentationMode::GpuSolid);
+        assert!(renderer.raster.is_none());
+        assert_eq!(renderer.primitives.len(), 1);
+        assert!(matches!(
+            renderer.primitives[0],
+            GpuPrimitive::Texture { .. }
+        ));
+        assert_eq!(renderer.shape_cache.misses, 1);
+        renderer
+            .render_frame(RenderFrame {
+                commands: &commands,
+                logical_size: (360, 112),
+                scale_factor: 1.0,
+                generation: 2,
+            })
+            .unwrap();
+        assert_eq!(renderer.shape_cache.hits, 1);
+        assert_eq!(renderer.shape_cache.insertions, 1);
+    }
+
+    #[test]
+    fn large_rounded_fill_avoids_a_full_surface_texture() {
         let commands = [PaintCommand::RoundedFill {
             rect: nickel_ui::Rect::new(0.0, 0.0, 1920.0, 1080.0),
             color: 0x336699,
@@ -4197,16 +4498,52 @@ mod tests {
             .unwrap();
 
         assert_eq!(renderer.mode(), InternalUiPresentationMode::GpuSolid);
-        assert!(renderer.raster.is_none());
-        assert_eq!(renderer.primitives.len(), 17);
-        let GpuPrimitive::Solid(first, _) = &renderer.primitives[0] else {
-            panic!("rounded row should be a solid")
-        };
-        assert!(first.size.width < 1920.0);
-        assert!(renderer.primitives.iter().any(|primitive| matches!(
-            primitive,
-            GpuPrimitive::Solid(rect, _) if rect.size.width == 1920.0 && rect.size.height > 1.0
-        )));
+        assert_eq!(renderer.diagnostics().fallback_reason, None);
+        assert_eq!(renderer.shape_cache.insertions, 0);
+        assert!(
+            renderer
+                .primitives
+                .iter()
+                .all(|primitive| matches!(primitive, GpuPrimitive::Solid(..)))
+        );
+    }
+
+    #[test]
+    fn layered_soft_shadow_stays_on_cached_gpu_textures() {
+        let commands = (1..=12)
+            .rev()
+            .map(|layer| PaintCommand::RoundedFill {
+                rect: nickel_ui::Rect::new(
+                    12.0 - layer as f32,
+                    10.0 - layer as f32,
+                    320.0 + layer as f32 * 2.0,
+                    72.0 + layer as f32 * 2.0,
+                ),
+                color: 0x1001_0101,
+                radius: 18.0 + layer as f32,
+            })
+            .collect::<Vec<_>>();
+        let mut renderer = SmithayFrameRenderer::new(360, 112, 1.0, InternalUiRendererMode::Gpu);
+
+        renderer
+            .render_frame(RenderFrame {
+                commands: &commands,
+                logical_size: (360, 112),
+                scale_factor: 1.0,
+                generation: 1,
+            })
+            .unwrap();
+
+        assert_eq!(renderer.mode(), InternalUiPresentationMode::GpuSolid);
+        assert_eq!(renderer.diagnostics().fallback_reason, None);
+        assert_eq!(renderer.primitives.len(), 12);
+        assert!(
+            renderer
+                .primitives
+                .iter()
+                .all(|primitive| matches!(primitive, GpuPrimitive::Texture { .. }))
+        );
+        assert_eq!(renderer.shape_cache.insertions, 12);
     }
 
     #[test]

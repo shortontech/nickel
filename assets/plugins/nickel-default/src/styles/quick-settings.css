@@ -1,0 +1,51 @@
+window.control-center {
+    background: var(--nickel-surface);
+    border: 1px solid var(--nickel-border);
+    border-radius: 16px;
+    padding: 12px;
+}
+
+column.control-content, column.control-sections {
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    gap: 8px;
+}
+
+window.control-center row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+window.control-center text {
+    color: var(--nickel-text);
+    font-size: 14px;
+    line-height: 20px;
+}
+
+text.control-title {
+    font-size: 18px;
+    line-height: 26px;
+}
+
+text.control-section-title {
+    font-size: 15px;
+    line-height: 22px;
+}
+
+window.control-center button {
+    min-height: 34px;
+    padding: 6px 10px;
+    background: var(--nickel-surface-hover);
+    border: 1px solid var(--nickel-border);
+    border-radius: 8px;
+    color: var(--nickel-text);
+    font-size: 14px;
+}
+
+progress.audio-progress {
+    background: var(--nickel-surface-hover);
+    color: var(--nickel-accent);
+    border-radius: 4px;
+}

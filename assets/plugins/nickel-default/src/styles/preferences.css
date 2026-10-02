@@ -1,0 +1,14 @@
+column.preferences-page {
+    width: 100%; gap: 16px;
+}
+column.preferences-card {
+    width: 100%; gap: 12px; padding: 16px;
+    background: var(--nickel-surface);
+    border: 1px solid var(--nickel-border);
+    border-radius: var(--nickel-radius-control);
+}
+text.preferences-heading { font-size: 18px; line-height: 26px; }
+row.preferences-row { width: 100%; gap: 12px; align-items: center; }
+column.preferences-description { flex-grow: 1; gap: 6px; }
+row.preferences-choices { gap: 8px; }
+button.preferences-choice.selected { border-color: var(--nickel-accent); }

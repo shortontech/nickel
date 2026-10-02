@@ -47,8 +47,8 @@ pub use nickel_core::resource_owner::{
 };
 pub use overlay::{
     CollisionPolicy, DismissPolicy, DismissReason, FocusReturn, OverlayAnchor, OverlayFocusPolicy,
-    OverlayId, OverlayMenu, OverlayMenuItem, OverlayPlacement, OverlayStyle, TransientKind,
-    TransientSurface, TransientTone, place_transient,
+    OverlayId, OverlayMenu, OverlayMenuItem, OverlayMenuPresentation, OverlayPlacement,
+    OverlayStyle, TransientKind, TransientSurface, TransientTone, place_transient,
 };
 pub use primitives::{
     ActionRegion, ArtworkPresentation, ItemPresentation, StatusRegion, SurfaceScaffold, ToolRegion,
@@ -86,21 +86,22 @@ pub use theme::{
 pub use ui::{
     ACTION_LEGEND_COMPACT_BREAKPOINT, AccessibilityNode, AccountSummaryRow, ActionKind,
     ActionLegend, ActionLegendActions, ActionLegendDensity, ActionLegendEntry, ActionLegendLabel,
-    AnyView, Background, Border, BoundedSemanticError, Button, ButtonLabel, ButtonPresentation,
-    ChoiceCard, ChoiceCardGroup, Collection, CollectionError, CollectionPresentation,
-    CollectionState, Color, ColorSwatch, Column, CompactIconTile, Component, ComponentBuilderExt,
-    Container, ContentPane, ControllerControlPresentation, ControllerGlyphSource, CustomPaint,
-    DiagnosticKind, DiagnosticMode, DragGesture, DragPhase, Dropdown, EffectiveHitRoute,
-    EventDisposition, EventOutcome, FallbackAvatar, FieldGroup, FileGrid, FileGridItem,
-    FilePlaneItem, FrameRequest, FrameResourceDiagnostics, GradientAxis, Grid, GridColumnSpec,
-    Header, HorizontalRule, Icon, Image, ImageAlignment, ImageFit, ImagePresentation,
-    InlineButtonGroup, InputSource, InteractionIntent, InteractionState, LauncherSearchField,
-    Layer, LayoutDiagnostic, LinearGradient, Menu, MenuBar, MenuItem, NavigationDirection,
+    AnyView, Background, Border, BoundedSemanticError, BoxShadow, Button, ButtonLabel,
+    ButtonPresentation, ChoiceCard, ChoiceCardGroup, Collection, CollectionError,
+    CollectionPresentation, CollectionState, Color, ColorSwatch, Column, CompactIconTile,
+    Component, ComponentBuilderExt, Container, ContentPane, ControllerControlPresentation,
+    ControllerGlyphSource, CustomPaint, DiagnosticKind, DiagnosticMode, DragGesture, DragPhase,
+    DropGesture, Dropdown, DropdownPartStyle, EffectiveHitRoute, EventDisposition, EventOutcome,
+    FallbackAvatar, FieldGroup, FileGrid, FileGridItem, FilePlaneItem, FrameRequest,
+    FrameResourceDiagnostics, GradientAxis, Grid, GridColumnSpec, Header, HorizontalRule, Icon,
+    Image, ImageAlignment, ImageFit, ImagePresentation, InlineButtonGroup, InputSource,
+    InteractionIntent, InteractionPaint, InteractionState, LauncherSearchField, Layer,
+    LayoutDiagnostic, LinearGradient, Menu, MenuBar, MenuItem, NavigationDirection,
     NavigationEntry, NavigationExit, NavigationItem, NavigationNeighbors, NavigationScope,
     NavigationSectionLabel, NavigationTraversal, PageHeader, PointerIcon, PreviewState,
-    PreviewTile, ProjectStatusRow, RESPONSIVE_NAVIGATION_BREAKPOINT, RadioButton, RadioGroup,
-    RadioOption, ReadingDirection, ResolvedGrid, ResolvedLayout, ResolvedNode,
-    ResponsiveNavigation, ResponsiveNavigationDestination, ResponsiveNavigationError,
+    PreviewTile, ProjectStatusRow, ProximityMagnification, RESPONSIVE_NAVIGATION_BREAKPOINT,
+    RadioButton, RadioGroup, RadioOption, ReadingDirection, ResolvedGrid, ResolvedLayout,
+    ResolvedNode, ResponsiveNavigation, ResponsiveNavigationDestination, ResponsiveNavigationError,
     ResponsiveNavigationPresentation, Row, SETTINGS_SHELL_NARROW_BREAKPOINT,
     START_MENU_SINGLE_PANE_BREAKPOINT, ScrollExtent, SectionHeader, SelectField,
     SelectionIndicator, SelectionRegion, SemanticAction, SemanticActionError,
@@ -124,7 +125,7 @@ pub(crate) use ui::PaintCommand;
 /// Renderer-facing command stream. Application UI should use declarative
 /// components or [`CustomPaint`]; platform presenters consume this module.
 pub mod backend {
-    pub use crate::ui::PaintCommand;
+    pub use crate::ui::{PaintCommand, rounded_border_spans, rounded_coverage_spans};
 
     use std::{convert::Infallible, sync::Arc};
 
@@ -288,17 +289,17 @@ pub mod prelude {
         CollectionPresentation, CollectionState, CollisionPolicy, Color, ColorSwatch, Column,
         CompactIconTile, Component, ComponentBuilderExt, Container, ContrastPreference,
         CustomPaint, DesktopDensity, DiagnosticKind, DismissPolicy, DismissReason, Dropdown,
-        EasingCurve, FallbackAvatar, FieldGroup, FontWeight, Fragment, Grid, GridColumnSpec, Icon,
-        Image, ImageAlignment, ImageFit, ImagePresentation, InlineButtonGroup, Insets,
-        ItemPresentation, Justify, LauncherSearchField, Length, Menu, MenuBar, MenuItem,
-        MotionPreference, MotionScale, NavigationDirection, NavigationEntry, NavigationExit,
-        NavigationItem, NavigationNeighbors, NavigationScope, NavigationSectionLabel,
-        NavigationTraversal, Overflow, OverlayAnchor, OverlayFocusPolicy, OverlayId, OverlayMenu,
-        OverlayMenuItem, OverlayPlacement, OverlayStyle, PageHeader, PlatformThemePreferences,
-        PointerIcon, Popover, PreviewState, PreviewTile, ProjectStatusRow,
-        RESPONSIVE_NAVIGATION_BREAKPOINT, RadioButton, RadioGroup, RadioOption, RadiusScale,
-        ReadingDirection, ResolvedAppearance, ResolvedThemePreferences, ResponsiveNavigation,
-        ResponsiveNavigationDestination, ResponsiveNavigationError,
+        DropdownPartStyle, EasingCurve, FallbackAvatar, FieldGroup, FontWeight, Fragment, Grid,
+        GridColumnSpec, Icon, Image, ImageAlignment, ImageFit, ImagePresentation,
+        InlineButtonGroup, Insets, ItemPresentation, Justify, LauncherSearchField, Length, Menu,
+        MenuBar, MenuItem, MotionPreference, MotionScale, NavigationDirection, NavigationEntry,
+        NavigationExit, NavigationItem, NavigationNeighbors, NavigationScope,
+        NavigationSectionLabel, NavigationTraversal, Overflow, OverlayAnchor, OverlayFocusPolicy,
+        OverlayId, OverlayMenu, OverlayMenuItem, OverlayMenuPresentation, OverlayPlacement,
+        OverlayStyle, PageHeader, PlatformThemePreferences, PointerIcon, Popover, PreviewState,
+        PreviewTile, ProjectStatusRow, RESPONSIVE_NAVIGATION_BREAKPOINT, RadioButton, RadioGroup,
+        RadioOption, RadiusScale, ReadingDirection, ResolvedAppearance, ResolvedThemePreferences,
+        ResponsiveNavigation, ResponsiveNavigationDestination, ResponsiveNavigationError,
         ResponsiveNavigationPresentation, Row, SETTINGS_SHELL_NARROW_BREAKPOINT,
         START_MENU_SINGLE_PANE_BREAKPOINT, SectionHeader, SelectField, SelectionIndicator,
         SelectionRegion, SemanticTheme, SemanticTokenSet, SessionActionRow, SettingsCard,

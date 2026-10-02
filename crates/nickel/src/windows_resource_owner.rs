@@ -796,7 +796,6 @@ pub(crate) fn protected_executable(name: Option<&str>) -> bool {
     matches!(
         name.to_ascii_lowercase().as_str(),
         "nickel.exe"
-            | "nickel-settings.exe"
             | "nickel-login.exe"
             | "nickel-screenshot.exe"
             | "consent.exe"
@@ -962,7 +961,6 @@ mod tests {
         );
         assert!(protected_executable(None));
         assert!(protected_executable(Some("CONSENT.EXE")));
-        assert!(protected_executable(Some("nickel-settings.exe")));
         assert!(!protected_executable(Some("ordinary.exe")));
     }
     #[test]
@@ -1922,6 +1920,7 @@ mod tests {
         assert!(shell_surface_client_point(i32::MAX, 0, i64::MAX, 600, 2.0).is_err());
     }
 
+    #[cfg(target_os = "windows")]
     #[test]
     fn native_hidden_surface_dpi_maps_into_client_without_taking_focus() {
         use windows::{
@@ -2010,6 +2009,7 @@ mod tests {
         assert_ne!(unsafe { GetForegroundWindow() }, fixture.window);
     }
 
+    #[cfg(target_os = "windows")]
     #[test]
     #[ignore = "requires NICKEL_WINDOWS_SURFACE_HWND and NICKEL_WINDOWS_SURFACE_PID for a live Nickel surface"]
     fn native_live_shell_surface_pointer_uses_current_dpi_and_visible_client() {

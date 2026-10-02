@@ -19,6 +19,39 @@ use crate::{
 
 pub type Color = u32;
 
+pub(crate) enum TextMessageMapper<Message> {
+    Function(fn(String) -> Message),
+    Closure(Arc<dyn Fn(String) -> Message>),
+}
+
+impl<Message> Clone for TextMessageMapper<Message> {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Function(map) => Self::Function(*map),
+            Self::Closure(map) => Self::Closure(Arc::clone(map)),
+        }
+    }
+}
+
+impl<Message> std::fmt::Debug for TextMessageMapper<Message> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("TextMessageMapper")
+    }
+}
+
+impl<Message> TextMessageMapper<Message> {
+    fn new(map: impl Fn(String) -> Message + 'static) -> Self {
+        Self::Closure(Arc::new(map))
+    }
+
+    fn call(&self, value: String) -> Message {
+        match self {
+            Self::Function(map) => map(value),
+            Self::Closure(map) => map(value),
+        }
+    }
+}
+
 /// How image pixels are mapped into their allocated viewport.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ImageFit {
@@ -128,6 +161,38 @@ pub enum TextUnderlineStyle {
 }
 
 /// One non-overlapping byte range in a styled text stream.
+/// Typed paint overrides for hover, pressed, and keyboard/controller focus.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct InteractionPaint {
+    pub background: Option<Color>,
+    pub foreground: Option<Color>,
+    pub border_color: Option<Color>,
+    pub border_width: Option<f32>,
+    pub radius: Option<f32>,
+    pub font_size: Option<f32>,
+    pub line_height: Option<f32>,
+    /// Optional interaction geometry. Declarative CSS uses this for controls
+    /// that grow near the pointer; layout and hit testing remain unified.
+    pub width: Option<Length>,
+    pub height: Option<Length>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct BoxShadow {
+    pub offset_x: f32,
+    pub offset_y: f32,
+    pub blur: f32,
+    pub spread: f32,
+    pub color: Color,
+}
+
+/// Native distance-based sibling magnification for horizontal containers.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ProximityMagnification {
+    pub maximum_scale: f32,
+    pub radius: usize,
+}
+
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct StyledTextSpan {
     pub range: Range<usize>,
@@ -293,6 +358,16 @@ pub struct DragGesture {
     pub phase: DragPhase,
     pub position: Point,
     pub bounds: Rect,
+}
+
+/// A release over a drop target during a captured declarative drag.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DropGesture {
+    pub position: Point,
+    pub source_id: UiId,
+    pub source_bounds: Rect,
+    pub target_id: UiId,
+    pub target_bounds: Rect,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -775,6 +850,13 @@ impl Tone {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum PaintCommand {
+    /// Compositor material request. Renderers do not paint this command; a
+    /// compositor may sample and filter the scene behind the rounded region.
+    BackdropBlur {
+        rect: Rect,
+        radius: f32,
+        blur: f32,
+    },
     Fill {
         rect: Rect,
         color: Color,
@@ -787,6 +869,12 @@ pub enum PaintCommand {
     RoundedFill {
         rect: Rect,
         color: Color,
+        radius: f32,
+    },
+    RoundedStroke {
+        rect: Rect,
+        color: Color,
+        width: f32,
         radius: f32,
     },
     Gradient {
@@ -865,7 +953,9 @@ pub(crate) fn assert_background_color_policy(identity: &str, commands: &[PaintCo
                 }
                 continue;
             }
-            PaintCommand::Stroke { .. }
+            PaintCommand::BackdropBlur { .. }
+            | PaintCommand::RoundedStroke { .. }
+            | PaintCommand::Stroke { .. }
             | PaintCommand::OverlayStroke { .. }
             | PaintCommand::Text { .. }
             | PaintCommand::StyledText { .. }
@@ -895,18 +985,37 @@ pub struct Style {
     pub background: Option<Background>,
     pub border: Option<Color>,
     pub border_width: f32,
+    pub box_shadow: Option<BoxShadow>,
+    pub backdrop_blur: Option<f32>,
+    pub proximity_magnification: Option<ProximityMagnification>,
+    pub transition_duration_ms: f32,
     pub foreground: Option<Color>,
     /// Semantic background applied while an interactive element is hovered.
+    pub interaction_paints: Option<Box<[InteractionPaint; 3]>>,
     pub hover_background: Option<Background>,
     /// Semantic background applied while an interactive element is pressed.
     pub pressed_background: Option<Background>,
+    /// Explicit background for a focused control, used by declarative styles.
+    pub focus_background: Option<Background>,
     /// Semantic hue/lightness cue applied to the child background for keyboard
     /// or accessibility focus.
     pub focus_background_tint: Option<Color>,
+    /// Presentation compilers may supply complete focus cues explicitly.
+    pub automatic_focus_tint: bool,
+    pub css_paint: bool,
+    /// Whether foreground, font size and line height inherit owner state paint.
+    pub inherited_state_text: [bool; 3],
+    /// Decorative compound parts follow owner state without becoming input targets.
+    pub parent_interaction: bool,
+    pub auto_focus: bool,
+    pub editing_parts: Option<Box<[DropdownPartStyle; 2]>>,
+    pub editing_menu: Option<Box<crate::OverlayMenuPresentation>>,
     /// Semantic hue/lightness cue applied to the current controller target.
     pub controller_focus_background_tint: Option<Color>,
     /// Shared semantic scrollbar chrome for this element's viewport.
     pub scrollbar_palette: crate::ScrollbarPalette,
+    /// Optional CSS track and thumb; native callers retain semantic defaults.
+    pub scrollbar_parts: Option<Box<[DropdownPartStyle; 2]>>,
     /// Semantic background applied to a selected or entered controller scope.
     pub controller_scope_background: Option<Background>,
     pub text_align: TextAlign,
@@ -966,12 +1075,26 @@ impl Default for Style {
             background: None,
             border: None,
             border_width: 1.0,
+            box_shadow: None,
+            backdrop_blur: None,
+            proximity_magnification: None,
+            transition_duration_ms: 0.0,
             foreground: None,
+            interaction_paints: None,
             hover_background: None,
             pressed_background: None,
+            focus_background: None,
             focus_background_tint: None,
+            automatic_focus_tint: true,
+            css_paint: false,
+            inherited_state_text: [false; 3],
+            parent_interaction: false,
+            auto_focus: false,
+            editing_parts: None,
+            editing_menu: None,
             controller_focus_background_tint: None,
             scrollbar_palette: crate::theme::FALLBACK_SCROLLBAR_PALETTE,
+            scrollbar_parts: None,
             controller_scope_background: None,
             text_align: TextAlign::Start,
             padding: Insets::default(),
@@ -1042,6 +1165,7 @@ enum Kind {
         selection_x: Option<(f32, f32)>,
         caret_position: Option<Point>,
         input_value: Option<String>,
+        input_placeholder: Option<String>,
         input_mask: Option<char>,
     },
     StyledText {
@@ -1064,6 +1188,8 @@ enum Kind {
         fill: Color,
         thumb: Color,
         thumb_border: Color,
+        geometry: [f32; 6],
+        presentation: Option<Box<[DropdownPartStyle; 3]>>,
     },
     Dropdown {
         selected: String,
@@ -1074,6 +1200,9 @@ enum Kind {
         background: Color,
         option_background: Color,
         foreground: Color,
+        presentation: Option<Box<[DropdownPartStyle; 3]>>,
+        option_presentations: Vec<DropdownPartStyle>,
+        resolved_options: Vec<DropdownPartStyle>,
     },
 }
 
@@ -1131,10 +1260,16 @@ pub struct Element<Message = String> {
     style: Style,
     message: Option<Message>,
     context_message: Option<Message>,
+    focus_message: Option<Message>,
+    blur_message: Option<Message>,
     message_mapper: Option<fn(f32) -> Message>,
+    seeded_value_mapper: Option<fn(Message, f32) -> Message>,
     scroll_extent_mapper: Option<fn(ScrollExtent) -> Message>,
+    drag_seed: Option<Message>,
     drag_mapper: Option<fn(Message, DragGesture) -> Message>,
-    text_mapper: Option<fn(String) -> Message>,
+    drop_message: Option<Message>,
+    drop_mapper: Option<fn(Message, DropGesture) -> Message>,
+    text_mapper: Option<TextMessageMapper<Message>>,
     option_messages: Vec<Option<Message>>,
     inline_messages: Vec<(Range<usize>, Message)>,
     children: Vec<Element<Message>>,
@@ -1151,9 +1286,15 @@ impl<Message> Element<Message> {
             style: Style::default(),
             message: None,
             context_message: None,
+            focus_message: None,
+            blur_message: None,
             message_mapper: None,
+            seeded_value_mapper: None,
             scroll_extent_mapper: None,
+            drag_seed: None,
             drag_mapper: None,
+            drop_message: None,
+            drop_mapper: None,
             text_mapper: None,
             option_messages: Vec::new(),
             inline_messages: Vec::new(),
@@ -1183,6 +1324,7 @@ impl<Message> Element<Message> {
                 selection_x: None,
                 caret_position: None,
                 input_value: None,
+                input_placeholder: None,
                 input_mask: None,
             },
             id: None,
@@ -1190,9 +1332,15 @@ impl<Message> Element<Message> {
             style: Style::default(),
             message: None,
             context_message: None,
+            focus_message: None,
+            blur_message: None,
             message_mapper: None,
+            seeded_value_mapper: None,
             scroll_extent_mapper: None,
+            drag_seed: None,
             drag_mapper: None,
+            drop_message: None,
+            drop_mapper: None,
             text_mapper: None,
             option_messages: Vec::new(),
             inline_messages: Vec::new(),
@@ -1250,6 +1398,26 @@ impl<Message> Element<Message> {
         self
     }
 
+    pub fn box_shadow(mut self, shadow: BoxShadow) -> Self {
+        self.style.box_shadow = Some(shadow);
+        self
+    }
+
+    pub fn backdrop_blur(mut self, radius: f32) -> Self {
+        self.style.backdrop_blur = Some(radius.clamp(0.0, 128.0));
+        self
+    }
+
+    pub fn proximity_magnification(mut self, magnification: ProximityMagnification) -> Self {
+        self.style.proximity_magnification = Some(magnification);
+        self
+    }
+
+    pub fn transition_duration_ms(mut self, duration: f32) -> Self {
+        self.style.transition_duration_ms = duration.clamp(0.0, 2_000.0);
+        self
+    }
+
     pub fn foreground(mut self, color: Color) -> Self {
         self.style.foreground = Some(color);
         self
@@ -1267,6 +1435,11 @@ impl<Message> Element<Message> {
 
     pub fn focus_background_tint(mut self, color: Color) -> Self {
         self.style.focus_background_tint = Some(color);
+        self
+    }
+
+    pub fn focus_background(mut self, background: impl Into<Background>) -> Self {
+        self.style.focus_background = Some(background.into());
         self
     }
 
@@ -1402,8 +1575,15 @@ impl<Message> Element<Message> {
     /// The seed message supplies target-specific typed data. Nickel UI owns
     /// hit testing and pointer capture, then calls `map` for every drag phase.
     pub fn on_drag(mut self, seed: Message, map: fn(Message, DragGesture) -> Message) -> Self {
-        self.message = Some(seed);
+        self.drag_seed = Some(seed);
         self.drag_mapper = Some(map);
+        self
+    }
+
+    /// Accepts a release from a captured drag source over this element.
+    pub fn on_drop(mut self, seed: Message, map: fn(Message, DropGesture) -> Message) -> Self {
+        self.drop_message = Some(seed);
+        self.drop_mapper = Some(map);
         self
     }
 
@@ -1444,6 +1624,16 @@ impl<Message> Element<Message> {
 
     pub fn context_message(mut self, message: Message) -> Self {
         self.context_message = Some(message);
+        self
+    }
+
+    pub fn focus_message(mut self, message: Message) -> Self {
+        self.focus_message = Some(message);
+        self
+    }
+
+    pub fn blur_message(mut self, message: Message) -> Self {
+        self.blur_message = Some(message);
         self
     }
 
@@ -1504,7 +1694,9 @@ impl<Message> Element<Message> {
     {
         assert!(
             self.message_mapper.is_none()
+                && self.seeded_value_mapper.is_none()
                 && self.drag_mapper.is_none()
+                && self.drop_mapper.is_none()
                 && self.text_mapper.is_none(),
             "map value-producing messages at the control constructor"
         );
@@ -1515,9 +1707,15 @@ impl<Message> Element<Message> {
             style: self.style,
             message: self.message.map(&mut *map),
             context_message: self.context_message.map(&mut *map),
+            focus_message: self.focus_message.map(&mut *map),
+            blur_message: self.blur_message.map(&mut *map),
             message_mapper: None,
+            seeded_value_mapper: None,
             scroll_extent_mapper: None,
+            drag_seed: None,
             drag_mapper: None,
+            drop_message: None,
+            drop_mapper: None,
             text_mapper: None,
             option_messages: self
                 .option_messages
@@ -1828,7 +2026,10 @@ fn measure_styled_text(
     })
 }
 
-fn text_font_size(scale: f32) -> f32 {
+pub(crate) fn text_font_size(scale: f32) -> f32 {
+    if scale < 0.0 {
+        return -scale;
+    }
     match scale.round() as i32 {
         0 | 1 => 12.0,
         2 => 16.0,
@@ -1881,6 +2082,25 @@ impl<Message> Component<Message> for AnyView<Message> {
 /// extension methods fill in the same typed style and identity surface for
 /// components that do not need a specialized return type.
 pub trait ComponentBuilderExt<Message>: Component<Message> + Sized {
+    /// Apply a compiler-owned frame without changing the native component behavior.
+    fn css_frame(self, frame: DropdownPartStyle) -> Element<Message> {
+        let frame = frame.bounded();
+        let mut element = self.into_element();
+        element.style.css_paint = true;
+        element.style.automatic_focus_tint = false;
+        element.style.background = frame
+            .background
+            .filter(|color| *color != 0)
+            .map(Background::Solid);
+        element.style.foreground = Some(frame.foreground.unwrap_or(0));
+        element.style.border = frame.border_color.filter(|color| *color != 0);
+        element.style.border_width = frame.border_width;
+        element.style.corner_radius = frame.radius;
+        element.style.padding = frame.padding;
+        element.style.interaction_paints = Some(Box::new(frame.interaction_paints));
+        element
+    }
+
     fn id(self, id: impl Into<UiId>) -> Element<Message> {
         self.into_element().id(id)
     }
@@ -2273,4 +2493,204 @@ mod background_policy_tests {
             }],
         );
     }
+}
+
+/// Tessellate an inside rounded border without painting its transparent center.
+/// All presenters consume the same bounded logical strips.
+pub fn rounded_border_spans(rect: Rect, width: f32, radius: f32) -> impl Iterator<Item = Rect> {
+    let width = width
+        .max(0.0)
+        .min(rect.size.width / 2.0)
+        .min(rect.size.height / 2.0);
+    let radius = radius
+        .max(0.0)
+        .min(rect.size.width / 2.0)
+        .min(rect.size.height / 2.0);
+    let inner = rect.inset(Insets::all(width));
+    let inner_radius = (radius - width).max(0.0);
+    let inset = |y: f32, height: f32, r: f32| {
+        let edge = y.min(height - y);
+        if edge >= r {
+            0.0
+        } else {
+            r - (r * r - (r - edge).powi(2)).max(0.0).sqrt()
+        }
+    };
+    (0..rect.size.height.ceil().max(0.0).min(16384.0) as u32).flat_map(move |row| {
+        let y = row as f32;
+        let h = (rect.size.height - y).min(1.0);
+        let middle = y + h / 2.0;
+        let outer_inset = inset(middle, rect.size.height, radius);
+        let x = rect.origin.x + outer_inset;
+        let right = rect.origin.x + rect.size.width - outer_inset;
+        let inner_y = middle - width;
+        let hole = width > 0.0 && inner_y >= 0.0 && inner_y < inner.size.height;
+        let inner_inset = inset(inner_y, inner.size.height, inner_radius);
+        let left_end = if hole {
+            inner.origin.x + inner_inset
+        } else {
+            right
+        };
+        let right_start = inner.origin.x + inner.size.width - inner_inset;
+        [
+            Rect::new(x, rect.origin.y + y, (left_end - x).max(0.0), h),
+            Rect::new(
+                right_start,
+                rect.origin.y + y,
+                if hole {
+                    (right - right_start).max(0.0)
+                } else {
+                    0.0
+                },
+                h,
+            ),
+        ]
+        .into_iter()
+        .filter(move |span| width > 0.0 && span.size.width > 0.0 && span.size.height > 0.0)
+    })
+}
+
+/// Antialiased rounded geometry in logical coordinates. Coverage is sampled on
+/// the physical pixel grid, including fractional origins and output scaling.
+/// Equal spans on adjacent rows are merged, so straight edges stay inexpensive.
+pub fn rounded_coverage_spans(
+    rect: Rect,
+    color: u32,
+    radius: f32,
+    stroke: Option<f32>,
+    top_only: bool,
+    scale: f32,
+) -> Vec<(Rect, u32)> {
+    if !scale.is_finite() || scale <= 0.0 || rect.size.width <= 0.0 || rect.size.height <= 0.0 {
+        return Vec::new();
+    }
+    let rect = Rect::new(
+        rect.origin.x * scale,
+        rect.origin.y * scale,
+        rect.size.width * scale,
+        rect.size.height * scale,
+    );
+    let radius = (radius * scale)
+        .max(0.0)
+        .min(rect.size.width / 2.0)
+        .min(rect.size.height / 2.0);
+    let width = stroke.map(|w| {
+        (w * scale)
+            .max(0.0)
+            .min(rect.size.width / 2.0)
+            .min(rect.size.height / 2.0)
+    });
+    if width == Some(0.0) {
+        return Vec::new();
+    }
+    let interval = |r: Rect, radius: f32, y: f32| -> Option<(f32, f32)> {
+        let y = y - r.origin.y;
+        if y < 0.0 || y >= r.size.height || r.size.width <= 0.0 {
+            return None;
+        }
+        let edge = if top_only {
+            y
+        } else {
+            y.min(r.size.height - y)
+        };
+        let inset = if edge < radius {
+            radius - (radius * radius - (radius - edge).powi(2)).max(0.0).sqrt()
+        } else {
+            0.0
+        };
+        Some((r.origin.x + inset, r.origin.x + r.size.width - inset))
+    };
+    let alpha = if color <= 0x00ff_ffff {
+        255
+    } else {
+        color >> 24
+    };
+    let mut spans: Vec<(Rect, u32)> = Vec::new();
+    let mut previous: Vec<usize> = Vec::new();
+    let mut row = rect.origin.y.floor() as i32;
+    let end = (rect.origin.y + rect.size.height).ceil() as i32;
+    let middle_start = (rect.origin.y + radius.max(width.unwrap_or(0.0))).ceil() as i32;
+    let bottom_radius = if top_only { 0.0 } else { radius };
+    let middle_end =
+        (rect.origin.y + rect.size.height - bottom_radius.max(width.unwrap_or(0.0))).floor() as i32;
+    while row < end {
+        let rows = if row >= middle_start && row < middle_end {
+            middle_end - row
+        } else {
+            1
+        };
+        // Integrate four horizontal slices per physical pixel. Horizontal
+        // coverage is analytic; only the curved vertical profile is sampled.
+        let mut slices = Vec::with_capacity(8);
+        for sample in 0..4 {
+            let y = row as f32 + (sample as f32 + 0.5) / 4.0;
+            if let Some((left, right)) = interval(rect, radius, y) {
+                let hole = width
+                    .and_then(|w| interval(rect.inset(Insets::all(w)), (radius - w).max(0.0), y));
+                if let Some((il, ir)) = hole {
+                    slices.push((left, il));
+                    slices.push((ir, right));
+                } else {
+                    slices.push((left, right));
+                }
+            }
+        }
+        let mut boundaries: Vec<i32> = slices
+            .iter()
+            .flat_map(|&(l, r)| {
+                [
+                    l.floor() as i32,
+                    l.ceil() as i32,
+                    r.floor() as i32,
+                    r.ceil() as i32,
+                ]
+            })
+            .collect();
+        boundaries.sort_unstable();
+        boundaries.dedup();
+        let mut current = Vec::new();
+        for pair in boundaries.windows(2) {
+            let x = pair[0] as f32;
+            let length = (pair[1] - pair[0]) as f32;
+            if length <= 0.0 {
+                continue;
+            }
+            let coverage: f32 = slices
+                .iter()
+                .map(|&(l, r)| (r.min(x + length) - l.max(x)).max(0.0))
+                .sum::<f32>()
+                / (4.0 * length);
+            let a = (alpha as f32 * coverage.clamp(0.0, 1.0)).round() as u32;
+            // Zero in the packed color format means opaque RGB, not transparent.
+            if a == 0 {
+                continue;
+            }
+            let shaded = (color & 0x00ff_ffff) | (a << 24);
+            let span = Rect::new(x, row as f32, length, rows as f32);
+            let existing = previous.iter().copied().find(|&index| {
+                let (old, c) = spans[index];
+                c == shaded
+                    && old.origin.x == x
+                    && old.size.width == length
+                    && old.origin.y + old.size.height == row as f32
+            });
+            let index = if let Some(index) = existing {
+                spans[index].0.size.height += rows as f32;
+                index
+            } else {
+                spans.push((span, shaded));
+                spans.len() - 1
+            };
+            current.push(index);
+        }
+        previous = current;
+        row += rows;
+    }
+    for (span, _) in &mut spans {
+        span.origin.x /= scale;
+        span.origin.y /= scale;
+        span.size.width /= scale;
+        span.size.height /= scale;
+    }
+    spans
 }

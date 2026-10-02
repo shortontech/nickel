@@ -11,6 +11,10 @@ path = "src/lib.rs"
 [dependencies]
 nickel-input = { path = "../nickel-input", features = ["windows"] }
 nickel-storage = { path = "../nickel-storage" }
+serde.workspace = true
+serde_json.workspace = true
+semver.workspace = true
+sha2.workspace = true
 
 [dev-dependencies]
 tempfile = "3.25.0"

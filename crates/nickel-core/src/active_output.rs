@@ -38,9 +38,8 @@ pub fn resolve_active_output(
 ) -> Option<String> {
     let direct = match source {
         InvocationSource::Pointer | InvocationSource::Touch => context.pointer,
-        InvocationSource::Keyboard
-        | InvocationSource::Controller
-        | InvocationSource::Accessibility => context.focused_surface,
+        InvocationSource::Keyboard => context.pointer.or(context.focused_surface),
+        InvocationSource::Controller | InvocationSource::Accessibility => context.focused_surface,
         InvocationSource::RecentInteraction => None,
     };
     context
@@ -104,13 +103,25 @@ mod tests {
     }
 
     #[test]
-    fn keyboard_and_controller_use_the_focused_surface_output() {
+    fn keyboard_uses_the_pointer_output_while_controller_uses_focus() {
         assert_eq!(
             resolve_active_output(InvocationSource::Keyboard, context()).as_deref(),
-            Some("HDMI-A-1")
+            Some("DP-1")
         );
         assert_eq!(
             resolve_active_output(InvocationSource::Controller, context()).as_deref(),
+            Some("HDMI-A-1")
+        );
+    }
+
+    #[test]
+    fn keyboard_falls_back_to_the_focused_surface_without_a_pointer_output() {
+        let context = ActiveOutputContext {
+            pointer: None,
+            ..context()
+        };
+        assert_eq!(
+            resolve_active_output(InvocationSource::Keyboard, context).as_deref(),
             Some("HDMI-A-1")
         );
     }

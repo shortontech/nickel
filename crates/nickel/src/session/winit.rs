@@ -8,10 +8,11 @@ use smithay::{
         allocator::Fourcc,
         renderer::{
             Bind, Color32F, ExportMem, Frame, ImportAll, ImportDma, ImportMem, Offscreen, Renderer,
+            TextureMapping,
             damage::OutputDamageTracker,
             element::{
                 AsRenderElements, Kind,
-                memory::MemoryRenderBufferRenderElement,
+                memory::{MemoryRenderBuffer, MemoryRenderBufferRenderElement},
                 solid::{SolidColorBuffer, SolidColorRenderElement},
                 surface::{WaylandSurfaceRenderElement, render_elements_from_surface_tree},
                 utils::{ConstrainAlign, ConstrainScaleBehavior, constrain_render_elements},
@@ -52,6 +53,11 @@ fn parse_nested_size(value: &str) -> Option<(u32, u32)> {
 
 fn preview_retry_delay(last_capture: Instant, now: Instant) -> Duration {
     PREVIEW_CAPTURE_INTERVAL.saturating_sub(now.saturating_duration_since(last_capture))
+}
+
+struct BackdropCache {
+    material: crate::session::internal_ui::BackdropMaterial,
+    buffer: MemoryRenderBuffer,
 }
 
 smithay::backend::renderer::element::render_elements! {
@@ -121,7 +127,11 @@ pub fn init_winit(
             .request_user_attention(Some(UserAttentionType::Critical));
         backend.window().focus_window();
     }
-    state.set_winit_redraw_window(backend.window());
+    state.set_winit_redraw_window(
+        backend.window(),
+        winit.wake_proxy(),
+        winit.capture_redraw_requester(),
+    );
     state.advertise_dmabuf_formats(backend.renderer().dmabuf_formats().iter().copied(), None);
     let startup_frame_pump_until = Instant::now() + Duration::from_secs(3);
 
@@ -166,6 +176,7 @@ pub fn init_winit(
     let mut presentation_sequence = 0_u64;
     let frame_icons = crate::session::window_frame::FrameIcons::load();
     let mut task_switcher_cache: Option<crate::session::task_switcher_render::BufferCache> = None;
+    let mut backdrop_cache = Vec::<BackdropCache>::new();
 
     // SAFETY: startup is single-threaded and no child process is spawned until
     // after this function returns.
@@ -180,6 +191,7 @@ pub fn init_winit(
             let mut display = data.display_handle.clone();
             let state = data;
 
+            let capture_only_frame = matches!(&event, WinitEvent::CaptureRedraw);
             match event {
                 WinitEvent::Resized { size, scale_factor } => {
                     let mode = Mode {
@@ -194,25 +206,26 @@ pub fn init_winit(
                         None,
                     );
                     damage_tracker = OutputDamageTracker::from_output(&output);
+                    backdrop_cache.clear();
                     state.space.refresh();
                     state.refresh_surface_scales();
                     state.relayout_shell_surfaces();
                     state.reconcile_internal_shell_outputs();
                     state.reconcile_stationary_pointer_after_topology_change();
                     let _ = display.flush_clients();
-                    backend.window().request_redraw();
+                    state.request_output_redraw();
                     eprintln!("nickel: output resized to {}x{}", size.w, size.h);
                 }
                 WinitEvent::Input(event) => {
                     let _ = state.process_input_event(event);
                     let _ = display.flush_clients();
-                    backend.window().request_redraw();
+                    state.request_output_redraw();
                 }
                 WinitEvent::Focus(false) => {
                     state.release_pressed_keys_on_host_focus_loss();
                 }
                 WinitEvent::Focus(true) => {}
-                WinitEvent::Redraw => {
+                WinitEvent::Redraw | WinitEvent::CaptureRedraw => {
                     let trace_started = Instant::now();
                     state.poll_task_switcher_peek(trace_started);
                     state.flush_desktop_scenes_for_frame();
@@ -253,11 +266,14 @@ pub fn init_winit(
                             &mut pending_output_capture,
                             requested_output_capture,
                         );
+                    if request_another_frame || output_capture_path.is_some() {
+                        tracing::trace!(request_another_frame, ready = output_capture_path.is_some(), "nested native capture frame phase");
+                    }
                     if request_another_frame {
                         // Capture the following fully rendered frame. This prevents a surface
                         // commit queued beside the capture request (notably an overlay unmap)
                         // from exposing a compositor transition buffer to the screenshot.
-                        backend.window().request_redraw();
+                        state.request_capture_redraw();
                     }
                     let capture_requested = image_copy_requested || output_capture_path.is_some();
                     if capture_requested {
@@ -387,6 +403,65 @@ pub fn init_winit(
                                 .into_iter()
                                 .map(WinitFrameElement::from),
                         );
+                        let blur_regions = state.internal_ui.backdrop_blur_regions(
+                            &output.name(),
+                            (0, 0).into(),
+                            size.w.max(0) as u32,
+                        );
+                        backdrop_cache.retain(|cached| blur_regions.contains(&cached.material));
+                        let base_damage = render_result.damage.cloned().unwrap_or_default();
+                        for material in blur_regions {
+                            let (x, y, width, height) =
+                                (material.x, material.y, material.width, material.height);
+                            let physical_region = Rectangle::new(
+                                (x, y).into(),
+                                (width as i32, height as i32).into(),
+                            );
+                            let scene_changed = base_damage
+                                .iter()
+                                .any(|damage| damage.overlaps(physical_region));
+                            let cached_index = backdrop_cache
+                                .iter()
+                                .position(|cached| cached.material == material);
+                            let stale = cached_index.is_none() || scene_changed;
+                            if stale {
+                                let refreshed = blurred_backdrop_buffer(
+                                    renderer,
+                                    &framebuffer,
+                                    x,
+                                    y,
+                                    width,
+                                    height,
+                                    material.blur,
+                                    material.radius,
+                                );
+                                if let Some(buffer) = refreshed {
+                                    let cached = BackdropCache { material, buffer };
+                                    if let Some(index) = cached_index {
+                                        backdrop_cache[index] = cached;
+                                    } else {
+                                        backdrop_cache.push(cached);
+                                    }
+                                }
+                            }
+                            if let Some(buffer) = backdrop_cache
+                                .iter()
+                                .find(|cached| cached.material == material)
+                                .map(|cached| &cached.buffer)
+                                && let Ok(element) = MemoryRenderBufferRenderElement::from_buffer(
+                                renderer,
+                                (f64::from(x), f64::from(y)),
+                                buffer,
+                                None,
+                                None,
+                                None,
+                                Kind::Unspecified,
+                            ) {
+                                // Render elements are front-to-back. The surface remains
+                                // in front while this sampled material sits directly behind it.
+                                overlay_elements.push(WinitFrameElement::from(element));
+                            }
+                        }
                         if !state.locked
                             && let Some(highlight) = state.preview_highlight
                         {
@@ -692,18 +767,25 @@ pub fn init_winit(
                         (captured, render_result.states)
                     };
                     state.update_output_primary_scanout(&output, &render_states);
-                    let mut presentation_feedback =
-                        state.take_output_presentation_feedback(&output, Some(&render_states));
-                    backend.submit(Some(&[damage])).unwrap();
-                    presentation_sequence = presentation_sequence.wrapping_add(1);
-                    presentation_feedback.presented(
-                        Clock::<Monotonic>::new().now(),
-                        smithay::wayland::presentation::Refresh::fixed(Duration::from_nanos(
-                            1_000_000_000_000_u64 / 60_000,
-                        )),
-                        presentation_sequence,
-                        smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::empty(),
-                    );
+                    // Captures render the compositor's pixels even when the host has withheld
+                    // frame callbacks (for example an occluded nested window). They do not swap
+                    // host buffers or claim presentation feedback for an unpresented frame.
+                    if capture_only_frame {
+                        // The tracker saw a render but the host did not receive a buffer swap.
+                        // Force the next presented frame to repaint instead of preserving damage
+                        // history for a framebuffer that was consumed only by the capture owner.
+                        damage_tracker = OutputDamageTracker::from_output(&output);
+                    } else {
+                        let mut presentation_feedback = state.take_output_presentation_feedback(&output, Some(&render_states));
+                        backend.submit(Some(&[damage])).unwrap();
+                        presentation_sequence = presentation_sequence.wrapping_add(1);
+                        presentation_feedback.presented(
+                            Clock::<Monotonic>::new().now(),
+                            smithay::wayland::presentation::Refresh::fixed(Duration::from_nanos(1_000_000_000_000_u64 / 60_000)),
+                            presentation_sequence,
+                            smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::empty(),
+                        );
+                    }
 
                     if image_copy_requested
                         && captured_frame
@@ -747,6 +829,7 @@ pub fn init_winit(
                             size,
                             &path,
                         );
+                        tracing::trace!(saved = matches!(result, nickel_session_protocol::CaptureResult::Saved { .. }), "nested native capture framebuffer completed");
                         state.complete_output_capture(&path, result);
                     }
 
@@ -815,7 +898,7 @@ pub fn init_winit(
                     // After startup, commits and explicit state changes request
                     // frames and an unchanged desktop stays idle.
                     if Instant::now() < startup_frame_pump_until {
-                        backend.window().request_redraw();
+                        state.request_output_redraw();
                     }
                 }
                 WinitEvent::CloseRequested => {
@@ -1084,6 +1167,82 @@ fn capture_bound_framebuffer(
     }
 }
 
+fn blurred_backdrop_buffer(
+    renderer: &mut GlesRenderer,
+    framebuffer: &GlesTarget<'_>,
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+    blur: f32,
+    radius: f32,
+) -> Option<MemoryRenderBuffer> {
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let region = Rectangle::<i32, Buffer>::new(
+        (x, y).into(),
+        (i32::try_from(width).ok()?, i32::try_from(height).ok()?).into(),
+    );
+    let mapping = renderer
+        .copy_framebuffer(framebuffer, region, Fourcc::Abgr8888)
+        .ok()?;
+    let flipped = mapping.flipped();
+    let mapped = renderer.map_texture(&mapping).ok()?;
+    let stride = width as usize * 4;
+    let mut pixels = mapped.to_vec();
+    if flipped {
+        let mut normalized = vec![0; pixels.len()];
+        for row in 0..height as usize {
+            let source = row * stride;
+            let target = (height as usize - row - 1) * stride;
+            normalized[target..target + stride].copy_from_slice(&pixels[source..source + stride]);
+        }
+        pixels = normalized;
+    }
+    let image = image::RgbaImage::from_raw(width, height, pixels)?;
+    let mut blurred = image::imageops::blur(&image, blur);
+    mask_rounded_backdrop(&mut blurred, radius);
+    Some(MemoryRenderBuffer::from_slice(
+        blurred.as_raw(),
+        Fourcc::Abgr8888,
+        (i32::try_from(width).ok()?, i32::try_from(height).ok()?),
+        1,
+        Transform::Normal,
+        None,
+    ))
+}
+
+fn mask_rounded_backdrop(image: &mut image::RgbaImage, radius: f32) {
+    let (width, height) = image.dimensions();
+    let left = 0.0_f32;
+    let top = 0.0_f32;
+    let right = width as f32;
+    let bottom = height as f32;
+    let radius = radius.min((right - left) * 0.5).min((bottom - top) * 0.5);
+    let center_x = (left + right) * 0.5;
+    let center_y = (top + bottom) * 0.5;
+    let half_width = (right - left) * 0.5;
+    let half_height = (bottom - top) * 0.5;
+    for (x, y, pixel) in image.enumerate_pixels_mut() {
+        let px = x as f32 + 0.5;
+        let py = y as f32 + 0.5;
+        let qx = (px - center_x).abs() - (half_width - radius);
+        let qy = (py - center_y).abs() - (half_height - radius);
+        let outside = qx.max(0.0).hypot(qy.max(0.0));
+        let inside = qx.max(qy).min(0.0);
+        let signed_distance = outside + inside - radius;
+        let coverage = (0.5 - signed_distance).clamp(0.0, 1.0);
+        for channel in &mut pixel.0[..3] {
+            *channel = (f32::from(*channel) * coverage).round() as u8;
+        }
+        pixel.0[3] = (f32::from(pixel.0[3]) * coverage).round() as u8;
+        if pixel.0[3] == 0 {
+            pixel.0[..3].fill(0);
+        }
+    }
+}
+
 fn capture_preview(
     renderer: &mut GlesRenderer,
     window: &Window,
@@ -1194,7 +1353,10 @@ mod tests {
         time::{Duration, Instant},
     };
 
-    use super::{PREVIEW_CAPTURE_INTERVAL, advance_output_capture, preview_retry_delay};
+    use super::{
+        PREVIEW_CAPTURE_INTERVAL, advance_output_capture, mask_rounded_backdrop,
+        preview_retry_delay,
+    };
 
     #[test]
     fn explicit_nested_sizes_are_bounded_and_keep_720p_exact() {
@@ -1231,5 +1393,14 @@ mod tests {
             preview_retry_delay(last_capture, last_capture + PREVIEW_CAPTURE_INTERVAL),
             Duration::ZERO
         );
+    }
+
+    #[test]
+    fn rounded_backdrop_mask_antialiases_edges() {
+        let mut image = image::RgbaImage::from_pixel(580, 92, image::Rgba([80, 120, 160, 255]));
+        mask_rounded_backdrop(&mut image, 18.0);
+        assert_eq!(image.get_pixel(0, 0).0, [0, 0, 0, 0]);
+        assert_eq!(image.get_pixel(300, 40).0[3], 255);
+        assert!(image.pixels().any(|pixel| (1..255).contains(&pixel.0[3])));
     }
 }

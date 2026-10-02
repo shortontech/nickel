@@ -87,10 +87,6 @@ pub fn copy_temp_image_path(_image: &image::RgbaImage) -> Result<std::path::Path
 
 pub fn release_pointer() {}
 
-pub fn configure_volume_osd_window(_window: &impl raw_window_handle::HasWindowHandle) -> bool {
-    true
-}
-
 pub fn select_audio_device(_id: &str) -> bool {
     false
 }
@@ -215,4 +211,11 @@ impl WindowFeed {
     pub fn icon(&self, _: WindowId) -> Option<image::RgbaImage> {
         None
     }
+}
+
+pub fn disconnect_wifi_network(_id: &str) -> bool {
+    false
+}
+pub fn pair_bluetooth_device(_id: &str) -> bool {
+    false
 }

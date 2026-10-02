@@ -42,23 +42,24 @@ pub fn resized(source: &RgbaImage, width: u32, height: u32) -> RgbaImage {
 pub fn nickel_application(identity_or_name: &str) -> Option<(u16, Arc<RgbaImage>)> {
     static SETTINGS: OnceLock<Option<Arc<RgbaImage>>> = OnceLock::new();
     static FILE: OnceLock<Option<Arc<RgbaImage>>> = OnceLock::new();
-    let (id, bytes, cache): (u16, &[u8], &OnceLock<Option<Arc<RgbaImage>>>) =
-        if identity_or_name == "nickel-settings" || identity_or_name.starts_with("Nickel Settings")
-        {
-            (
-                0x3000,
-                include_bytes!("../../../assets/icons/nickel-settings.png"),
-                &SETTINGS,
-            )
-        } else if identity_or_name == "nickel-file" || identity_or_name.starts_with("Nickel File") {
-            (
-                0x3001,
-                include_bytes!("../../../assets/icons/nickel-file.png"),
-                &FILE,
-            )
-        } else {
-            return None;
-        };
+    let (id, bytes, cache): (u16, &[u8], &OnceLock<Option<Arc<RgbaImage>>>) = if identity_or_name
+        == "nickel-default/settings"
+        || identity_or_name.starts_with("Nickel Settings")
+    {
+        (
+            0x3000,
+            include_bytes!("../../../assets/icons/nickel-settings.png"),
+            &SETTINGS,
+        )
+    } else if identity_or_name == "nickel-file" || identity_or_name.starts_with("Nickel File") {
+        (
+            0x3001,
+            include_bytes!("../../../assets/icons/nickel-file.png"),
+            &FILE,
+        )
+    } else {
+        return None;
+    };
     cache
         .get_or_init(|| {
             image::load_from_memory(bytes)

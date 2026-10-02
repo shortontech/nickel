@@ -43,6 +43,8 @@ nickel-i18n = { path = "../nickel-i18n" }
 nickel-input = { path = "../nickel-input", features = ["winit", "windows"] }
 nickel-remote-control = { path = "../nickel-remote-control" }
 nickel-logging = { path = "../nickel-logging" }
+nickel-plugin-runtime = { path = "../nickel-plugin-runtime" }
+nickel-plugin-presentation = { path = "../nickel-plugin-presentation" }
 nickel-render-assets = { path = "../nickel-render-assets" }
 nickel-storage = { path = "../nickel-storage" }
 nickel-session-protocol = { path = "../nickel-session-protocol" }
@@ -54,6 +56,10 @@ tracing.workspace = true
 winit.workspace = true
 zeroize.workspace = true
 nickel-ui-testkit = { path = "../nickel-ui-testkit", optional = true }
+serde.workspace = true
+serde_json.workspace = true
+tempfile = "3.25.0"
+ctrlc.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 accesskit = "0.24.1"
@@ -64,7 +70,6 @@ freedesktop-desktop-entry.workspace = true
 freedesktop-icons.workspace = true
 shlex.workspace = true
 zbus.workspace = true
-serde = { workspace = true }
 async-io = "2.6.0"
 futures-lite = "2.6.1"
 wayland-scanner = "0.31.11"
@@ -76,7 +81,6 @@ pipewire = "0.10.1"
 spa_sys = { package = "libspa-sys", version = "0.10" }
 pipewire-native.workspace = true
 pipewire-native-spa.workspace = true
-serde_json.workspace = true
 smithay.workspace = true
 evdev = "0.13.2"
 bitflags.workspace = true
@@ -99,8 +103,11 @@ bytemuck.workspace = true
 windows-core = "0.62.2"
 windows = { workspace = true, features = [
     "Foundation",
+    "ApplicationModel",
     "Media_Control",
     "System",
+    "UI_Notifications",
+    "UI_Notifications_Management",
     "Win32_Foundation",
     "Win32_Globalization",
     "Win32_Graphics_Dwm",
@@ -156,6 +163,10 @@ required-features = ["backend-udev"]
 name = "nickel-nested"
 path = "src/bin/nickel-nested.rs"
 required-features = ["backend-winit"]
+
+[[bin]]
+name = "nickel-plugin"
+path = "src/bin/nickel-plugin.rs"
 
 [[bin]]
 name = "nickel-login"
