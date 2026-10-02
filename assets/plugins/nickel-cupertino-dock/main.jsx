@@ -91,8 +91,9 @@ export function Taskbar() {
         <div className="dock-shelf">
                 <Button id="cupertino-dock-launcher" className="dock-button launcher"
                     width={58} height={58}
+                    icon="nickel-logo" iconSize={44} showLabel={false}
                     accessibilityLabel="Open Nickel Launcher"
-                    onClick={() => nickel.surfaces.show("launcher")}>◆</Button>
+                    onClick={() => nickel.surfaces.show("launcher")}>Nickel</Button>
                 {items.map(item => <DockItem key={item.id} item={item} />)}
                 {contributions.map(entry => <entry.component key={entry.key} />)}
                 <Text color="#26313d70">│</Text>

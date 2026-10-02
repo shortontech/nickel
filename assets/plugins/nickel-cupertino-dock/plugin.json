@@ -6,6 +6,9 @@
   "version": "0.1.0",
   "entry": "main.js",
   "stylesheet": "ui.css",
+  "images": [
+    { "id": "nickel-logo", "path": "images/nickel-logo.png" }
+  ],
   "composition": {
     "api_version": 1,
     "id": "nickel-cupertino-dock",
