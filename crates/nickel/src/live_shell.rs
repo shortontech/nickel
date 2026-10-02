@@ -7151,6 +7151,18 @@ impl LiveShell {
                     interaction: PointerInteraction::LeftClick,
                 })
             }
+            ShellSemanticTarget::PanelCodex { output } => {
+                let output = self.semantic_panel_output(output.as_ref());
+                let plugin_host = self.semantic_panel_host(&output)?;
+                let bounds = taskbar_plugin_control_bounds(plugin_host, "taskbar-codex")?;
+                Some(ResolvedShellTarget {
+                    role: ShellRole::Panel,
+                    output,
+                    x: (bounds.origin.x + bounds.size.width / 2.0).round() as i32,
+                    y: (bounds.origin.y + bounds.size.height / 2.0).round() as i32,
+                    interaction: PointerInteraction::LeftClick,
+                })
+            }
             ShellSemanticTarget::ControlCenterLock => {
                 if !self.control_visible {
                     return None;

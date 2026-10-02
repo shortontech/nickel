@@ -5569,11 +5569,14 @@ impl NickelSession {
                     &outputs,
                     menu_output.as_deref().or(fallback.as_deref()),
                 );
-                host.sync_project_menu(
+                let project_menu_changed = host.sync_project_menu(
                     &mut self.internal_ui,
                     codex_menu_visible,
                     placement.clone(),
                 );
+                if project_menu_changed {
+                    self.schedule_internal_ui_frame();
+                }
                 match host.service_project_menu_requests(&mut self.internal_ui, placement) {
                     Ok(Some(crate::internal_codex::NativeProjectMenuAction::Opened(surface))) => {
                         if let Some(shell) = self.internal_shell.as_mut() {
@@ -7296,6 +7299,7 @@ impl NickelSession {
             .filter(|id| !current_shell_ids.contains(id))
             .copied()
             .collect::<Vec<_>>();
+        let mut presentation_removed = !retired.is_empty();
         for id in retired {
             if let Some(runtime_id) = self.internal_shell_surfaces.remove(&id) {
                 self.invalidate_remote_shell_surface(runtime_id);
@@ -7315,6 +7319,7 @@ impl NickelSession {
                 if let Some(runtime_id) = self.internal_shell_surfaces.remove(&surface.id) {
                     self.invalidate_remote_shell_surface(runtime_id);
                     self.internal_ui.remove(runtime_id);
+                    presentation_removed = true;
                 }
                 continue;
             }
@@ -7324,6 +7329,7 @@ impl NickelSession {
                     self.invalidate_remote_shell_surface(runtime_id);
                     self.unregister_internal_application(runtime_id);
                     self.internal_ui.remove(runtime_id);
+                    presentation_removed = true;
                     if let Some(role) =
                         remote_shell_surface_event_role(surface.role, surface.id, &shell)
                     {
@@ -7463,6 +7469,7 @@ impl NickelSession {
                     if let Some(runtime_id) = self.internal_shell_surfaces.remove(&surface.id) {
                         self.invalidate_remote_shell_surface(runtime_id);
                         self.internal_ui.remove(runtime_id);
+                        presentation_removed = true;
                     }
                     continue;
                 };
@@ -7551,7 +7558,11 @@ impl NickelSession {
             self.focus_internal_surface(surface);
         }
         if request_frame {
-            self.schedule_internal_ui_frame();
+            if presentation_removed || self.internal_ui.has_damage() {
+                self.schedule_internal_ui_frame();
+            } else {
+                self.schedule_internal_shell_deadline();
+            }
         } else {
             // The caller is already rendering this frame; do not queue another
             // frame merely because it consumed deferred scene work.

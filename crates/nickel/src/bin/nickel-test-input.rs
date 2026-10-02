@@ -47,6 +47,7 @@ Usage:
   nickel-test-input semantic panel-app APPLICATION_ID hover|click [OUTPUT]
   nickel-test-input semantic control-center open [OUTPUT]
   nickel-test-input semantic control-center lock
+  nickel-test-input semantic codex open [OUTPUT]
   nickel-test-input semantic preview WINDOW_ID hover|activate|close|menu
   nickel-test-input semantic menu WINDOW_ID close|maximize|minimize
   nickel-test-input semantic screenshot selection-start|selection-end|confirm|copy|save|temp|cancel
@@ -341,6 +342,16 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Parsed, String> {
                     Ok(Parsed::Semantic(ShellSemanticTarget::ControlCenterLock))
                 }
                 _ => Err(format!("unknown control-center action {action:?}")),
+            }
+        }
+        [command, kind, action] | [command, kind, action, _]
+            if command == "semantic" && kind == "codex" =>
+        {
+            match action.as_str() {
+                "open" => Ok(Parsed::Semantic(ShellSemanticTarget::PanelCodex {
+                    output: args.get(3).cloned(),
+                })),
+                _ => Err(format!("unknown Codex action {action:?}")),
             }
         }
         [command, kind, window, action] if command == "semantic" && kind == "preview" => {

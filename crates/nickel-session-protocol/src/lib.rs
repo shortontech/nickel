@@ -541,6 +541,9 @@ pub enum ShellSemanticTarget {
     PanelControlCenter {
         output: Option<String>,
     },
+    PanelCodex {
+        output: Option<String>,
+    },
     ControlCenterLock,
     PreviewWindow {
         window: WindowId,

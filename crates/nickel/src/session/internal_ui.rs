@@ -2175,9 +2175,9 @@ impl InternalUiRuntime {
             };
             let changed = surface.visible != visible;
             surface.visible = visible;
-            if visible {
+            if changed && visible {
                 surface.dirty = true;
-            } else {
+            } else if !visible {
                 surface.renderer.suspend();
             }
             changed
@@ -2425,6 +2425,9 @@ impl InternalUiRuntime {
         let Some(surface) = self.presentation.get_mut(&id) else {
             return false;
         };
+        if surface.external_scene.as_ref() == Some(&commands) {
+            return false;
+        }
         surface.external_scene = Some(commands);
         surface.dirty = true;
         true
@@ -3405,6 +3408,33 @@ mod tests {
         assert!(!runtime.has_damage());
         assert!(runtime.remove(id));
         assert!(runtime.is_empty());
+    }
+
+    #[test]
+    fn synchronizing_an_already_visible_surface_does_not_redirty_it() {
+        let mut runtime = InternalUiRuntime::default();
+        let id = runtime.insert(Label, placement(Some("DP-1")), 1.0);
+        assert!(runtime.has_damage());
+        assert!(runtime.render_buffer(id).is_none());
+        assert!(!runtime.has_damage());
+
+        assert!(!runtime.set_visible(id, true));
+        assert!(!runtime.has_damage());
+    }
+
+    #[test]
+    fn synchronizing_an_unchanged_external_scene_does_not_redirty_it() {
+        let mut runtime = InternalUiRuntime::default();
+        let scene = vec![PaintCommand::Fill {
+            rect: nickel_ui::Rect::new(0.0, 0.0, 20.0, 10.0),
+            color: 0xff0a141e,
+        }];
+        let id = runtime.insert_scene(scene.clone(), placement(Some("DP-1")), 1.0);
+        assert!(runtime.render_buffer(id).is_none());
+        assert!(!runtime.has_damage());
+
+        assert!(!runtime.update_scene(id, scene));
+        assert!(!runtime.has_damage());
     }
 
     #[test]
