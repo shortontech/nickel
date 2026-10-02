@@ -102,7 +102,7 @@ fn captured_drag_releases_on_another_drop_target() {
 }
 
 #[test]
-fn dock_magnification_eases_hover_and_neighbor_geometry() {
+fn proximity_magnification_eases_hover_and_neighbor_geometry() {
     let view = || {
         Row::new()
             .children([
@@ -120,15 +120,15 @@ fn dock_magnification_eases_hover_and_neighbor_geometry() {
                     .height(40.0),
             ])
             .into_element()
-            .dock_magnification(DockMagnification {
+            .proximity_magnification(ProximityMagnification {
                 maximum_scale: 1.5,
                 radius: 1,
             })
-            .transition_duration_ms(160.0)
+            .transition_duration_ms(1_000.0)
     };
     let mut state = UiStateStore::default();
     state.set_hovered(Some(UiId::from("root/center")));
-    let first = UiFrame::layout_with_state(view(), Rect::new(0.0, 0.0, 240.0, 80.0), &mut state);
+    let resting = UiFrame::layout_with_state(view(), Rect::new(0.0, 0.0, 240.0, 80.0), &mut state);
     let width = |frame: &UiFrame<TestMessage>, id: &str| {
         frame
             .resolved_layout()
@@ -138,12 +138,21 @@ fn dock_magnification_eases_hover_and_neighbor_geometry() {
             .size
             .width
     };
+    assert_eq!(width(&resting, "root/center"), 40.0);
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let first = UiFrame::layout_with_state(view(), Rect::new(0.0, 0.0, 240.0, 80.0), &mut state);
     let center_first = width(&first, "root/center");
     let left_first = width(&first, "root/left");
     assert!(center_first > left_first && left_first > 40.0);
 
+    std::thread::sleep(std::time::Duration::from_millis(20));
     let second = UiFrame::layout_with_state(view(), Rect::new(0.0, 0.0, 240.0, 80.0), &mut state);
-    assert!(width(&second, "root/center") > center_first);
+    assert!(
+        width(&second, "root/center") > center_first,
+        "second={}, first={center_first}, active={}",
+        width(&second, "root/center"),
+        state.geometry_animation_active()
+    );
     assert!(state.geometry_animation_active());
 }
 

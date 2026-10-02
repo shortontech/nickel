@@ -528,8 +528,8 @@ fn apply_container_style<Message>(
     if let Some(blur) = style.backdrop_blur {
         container = container.backdrop_blur(blur);
     }
-    if let Some(magnification) = style.dock_magnification {
-        container = container.dock_magnification(magnification);
+    if let Some(magnification) = style.proximity_magnification {
+        container = container.proximity_magnification(magnification);
     }
     if let Some(duration) = style.transition_duration_ms {
         container = container.transition_duration_ms(duration);

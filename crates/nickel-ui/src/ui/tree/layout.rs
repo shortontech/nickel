@@ -1134,7 +1134,7 @@ fn apply_transient_state_with_parent<Message>(
             element.style.scroll_offset_x = scroll_offset_x.max(0.0);
         }
     }
-    let magnified_child = element.style.dock_magnification.and_then(|_| {
+    let magnified_child = element.style.proximity_magnification.and_then(|_| {
         let hovered = state.hovered()?.as_str();
         element
             .children
@@ -1155,7 +1155,7 @@ fn apply_transient_state_with_parent<Message>(
             || id.scoped(format!("#{index}")),
             |child_id| id.scoped(child_id.as_str()),
         );
-        if let Some(magnification) = element.style.dock_magnification {
+        if let Some(magnification) = element.style.proximity_magnification {
             let target = magnified_child.map_or(1.0, |hovered| {
                 let pointer_index = hovered as f32 + state.hover_fraction() - 0.5;
                 let distance = (index as f32 - pointer_index).abs();

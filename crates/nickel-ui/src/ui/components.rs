@@ -1987,8 +1987,8 @@ impl<Message> Container<Message> {
         self
     }
 
-    pub fn dock_magnification(mut self, magnification: crate::DockMagnification) -> Self {
-        self.0 = self.0.dock_magnification(magnification);
+    pub fn proximity_magnification(mut self, magnification: crate::ProximityMagnification) -> Self {
+        self.0 = self.0.proximity_magnification(magnification);
         self
     }
 

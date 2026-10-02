@@ -286,13 +286,14 @@ pub struct UiStateStore {
     geometry_animations: HashMap<UiId, GeometryAnimation>,
     geometry_animation_active: bool,
     geometry_animation_frame: Instant,
-    geometry_animation_previous_frame: Instant,
 }
 
 #[derive(Clone, Copy, Debug)]
 struct GeometryAnimation {
     value: f32,
+    start: f32,
     target: f32,
+    started_at: Instant,
 }
 
 impl Default for UiStateStore {
@@ -338,7 +339,6 @@ impl UiStateStore {
             geometry_animations: HashMap::new(),
             geometry_animation_active: false,
             geometry_animation_frame: now,
-            geometry_animation_previous_frame: now,
         }
     }
 
@@ -624,29 +624,36 @@ impl UiStateStore {
         let animation = self
             .geometry_animations
             .entry(id)
-            .or_insert(GeometryAnimation { value: 1.0, target });
+            .or_insert(GeometryAnimation {
+                value: 1.0,
+                start: 1.0,
+                target,
+                started_at: self.geometry_animation_frame,
+            });
         if duration_ms <= 0.0 {
             animation.value = target;
+            animation.start = target;
             animation.target = target;
             return target;
         }
         // Drive transitions from elapsed time, not an assumed 16 ms rebuild.
         // Presentation cadence can then follow a 60, 120, or 144 Hz output
         // without changing the perceived duration of the animation.
+        let target_changed = (animation.target - target).abs() > f32::EPSILON;
+        if target_changed {
+            animation.start = animation.value;
+            animation.target = target;
+            animation.started_at = self.geometry_animation_frame;
+        }
         let elapsed_ms = self
             .geometry_animation_frame
-            .saturating_duration_since(self.geometry_animation_previous_frame)
+            .saturating_duration_since(animation.started_at)
             .as_secs_f32()
             * 1_000.0;
-        let target_changed = (animation.target - target).abs() > f32::EPSILON;
-        animation.target = target;
-        let alpha = if target_changed {
-            0.0
-        } else {
-            (elapsed_ms / duration_ms).clamp(0.0, 1.0)
-        };
-        animation.value += (target - animation.value) * alpha;
-        if (animation.value - target).abs() < 0.005 {
+        let progress = (elapsed_ms / duration_ms).clamp(0.0, 1.0);
+        let eased = 1.0 - (1.0 - progress).powi(3);
+        animation.value = animation.start + (animation.target - animation.start) * eased;
+        if progress >= 1.0 {
             animation.value = target;
         } else {
             self.geometry_animation_active = true;
@@ -656,7 +663,6 @@ impl UiStateStore {
 
     pub(crate) fn begin_geometry_animation_frame(&mut self) {
         self.geometry_animation_active = false;
-        self.geometry_animation_previous_frame = self.geometry_animation_frame;
         self.geometry_animation_frame = Instant::now();
     }
 

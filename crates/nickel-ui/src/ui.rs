@@ -172,7 +172,7 @@ pub struct InteractionPaint {
     pub font_size: Option<f32>,
     pub line_height: Option<f32>,
     /// Optional interaction geometry. Declarative CSS uses this for controls
-    /// such as magnifying dock icons; layout and hit testing remain unified.
+    /// that grow near the pointer; layout and hit testing remain unified.
     pub width: Option<Length>,
     pub height: Option<Length>,
 }
@@ -186,9 +186,9 @@ pub struct BoxShadow {
     pub color: Color,
 }
 
-/// Native sibling magnification for dock-like horizontal containers.
+/// Native distance-based sibling magnification for horizontal containers.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct DockMagnification {
+pub struct ProximityMagnification {
     pub maximum_scale: f32,
     pub radius: usize,
 }
@@ -987,7 +987,7 @@ pub struct Style {
     pub border_width: f32,
     pub box_shadow: Option<BoxShadow>,
     pub backdrop_blur: Option<f32>,
-    pub dock_magnification: Option<DockMagnification>,
+    pub proximity_magnification: Option<ProximityMagnification>,
     pub transition_duration_ms: f32,
     pub foreground: Option<Color>,
     /// Semantic background applied while an interactive element is hovered.
@@ -1077,7 +1077,7 @@ impl Default for Style {
             border_width: 1.0,
             box_shadow: None,
             backdrop_blur: None,
-            dock_magnification: None,
+            proximity_magnification: None,
             transition_duration_ms: 0.0,
             foreground: None,
             interaction_paints: None,
@@ -1408,8 +1408,8 @@ impl<Message> Element<Message> {
         self
     }
 
-    pub fn dock_magnification(mut self, magnification: DockMagnification) -> Self {
-        self.style.dock_magnification = Some(magnification);
+    pub fn proximity_magnification(mut self, magnification: ProximityMagnification) -> Self {
+        self.style.proximity_magnification = Some(magnification);
         self
     }
 

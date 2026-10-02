@@ -11,7 +11,7 @@ use cssparser::{
 };
 use nickel_core::theme::{Appearance, ThemePalette};
 use nickel_ui::{
-    Align, BoxShadow, DockMagnification, Insets, Justify, Length, ReadingDirection, TextAlign,
+    Align, BoxShadow, Insets, Justify, Length, ProximityMagnification, ReadingDirection, TextAlign,
     Track,
 };
 
@@ -51,7 +51,7 @@ pub struct ControlStyle {
     pub border_color: Option<u32>,
     pub box_shadow: Option<BoxShadow>,
     pub backdrop_blur: Option<f32>,
-    pub dock_magnification: Option<DockMagnification>,
+    pub proximity_magnification: Option<ProximityMagnification>,
     pub transition_duration_ms: Option<f32>,
     pub radius: Option<f32>,
     pub font_size: Option<f32>,
@@ -240,7 +240,7 @@ enum Declaration {
     Border(f32, u32),
     BoxShadow(BoxShadow),
     BackdropBlur(f32),
-    DockMagnification(DockMagnification),
+    ProximityMagnification(ProximityMagnification),
     TransitionDuration(f32),
 }
 
@@ -271,7 +271,7 @@ impl Declaration {
             Self::BorderColor(value) => style.border_color = Some(*value),
             Self::BoxShadow(value) => style.box_shadow = Some(*value),
             Self::BackdropBlur(value) => style.backdrop_blur = Some(*value),
-            Self::DockMagnification(value) => style.dock_magnification = Some(*value),
+            Self::ProximityMagnification(value) => style.proximity_magnification = Some(*value),
             Self::TransitionDuration(value) => style.transition_duration_ms = Some(*value),
             Self::Radius(value) => style.radius = Some(*value),
             Self::FontSize(value) => style.font_size = Some(*value),
@@ -590,27 +590,27 @@ fn declaration(name: &str, value: &str) -> Result<Declaration, String> {
                 .ok_or("backdrop-filter currently supports blur(<length>)")?;
             Declaration::BackdropBlur(px(inner.trim(), 128.0)?)
         }
-        "-nickel-dock-magnification" => {
+        "-nickel-proximity-magnification" => {
             let mut parts = value.split_ascii_whitespace();
             let maximum_scale = bounded_number(
                 parts
                     .next()
-                    .ok_or("dock magnification needs a maximum scale")?,
+                    .ok_or("proximity magnification needs a maximum scale")?,
                 3.0,
-                "dock magnification",
+                "proximity magnification",
             )?;
             if maximum_scale < 1.0 {
-                return Err("dock magnification scale must be at least 1".into());
+                return Err("proximity magnification scale must be at least 1".into());
             }
             let radius = parts
                 .next()
-                .ok_or("dock magnification needs a sibling radius")?
+                .ok_or("proximity magnification needs a sibling radius")?
                 .parse::<usize>()
-                .map_err(|_| "invalid dock magnification radius")?;
+                .map_err(|_| "invalid proximity magnification radius")?;
             if radius > 8 || parts.next().is_some() {
-                return Err("dock magnification radius must be 0 to 8".into());
+                return Err("proximity magnification radius must be 0 to 8".into());
             }
-            Declaration::DockMagnification(DockMagnification {
+            Declaration::ProximityMagnification(ProximityMagnification {
                 maximum_scale,
                 radius,
             })
@@ -1570,7 +1570,7 @@ mod tests {
     fn interaction_geometry_and_rounded_shadow_compile_to_typed_styles() {
         let css = StyleSheet::compile(
             ".dock { box-shadow: -2px 10px 24px 0px #00000059; backdrop-filter: blur(12px); \
-             -nickel-dock-magnification: 1.38 2; transition-duration: 150ms; } \
+             -nickel-proximity-magnification: 1.38 2; transition-duration: 150ms; } \
              button.icon:hover { width: 76px; height: 76px; }",
         )
         .unwrap();
@@ -1582,8 +1582,8 @@ mod tests {
         assert_eq!(shadow.color, 0x5900_0000);
         let dock = css.resolve("div", None, Some("dock"));
         assert_eq!(dock.backdrop_blur, Some(12.0));
-        assert_eq!(dock.dock_magnification.unwrap().maximum_scale, 1.38);
-        assert_eq!(dock.dock_magnification.unwrap().radius, 2);
+        assert_eq!(dock.proximity_magnification.unwrap().maximum_scale, 1.38);
+        assert_eq!(dock.proximity_magnification.unwrap().radius, 2);
         assert_eq!(dock.transition_duration_ms, Some(150.0));
         let hover = css.resolve_interaction_paint(
             "button",

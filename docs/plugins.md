@@ -197,8 +197,9 @@ Supported declarations are `padding`, `margin`, `border` (solid only),
 `height`, `min-width`, `max-width`, `min-height`, `max-height`, `display`,
 `flex-direction`, `flex`, `flex-grow`, `flex-shrink`, `flex-basis`, `align-items`,
 `justify-content`, `text-align` (`start`, `center`, or `end`), and
-`grid-template-columns`. Floating docks may additionally use
-`-nickel-dock-magnification: <maximum-scale> <sibling-radius>` with a bounded
+`grid-template-columns` and `backdrop-filter: blur(<pixel-radius>)`. Horizontal
+containers may use
+`-nickel-proximity-magnification: <maximum-scale> <sibling-radius>` with a bounded
 `transition-duration` in milliseconds. Nickel applies the falloff to neighboring
 children in native layout, keeps hit geometry synchronized, and schedules the
 interpolated frames itself. Text alignment inherits through containers.
@@ -210,10 +211,10 @@ bounded `repeat()`, and `minmax()`. Lengths support pixels, percentages, `auto`,
 Colors accept hex, `rgba()`, and `transparent`. Unsupported selectors or
 declarations fail validation.
 
-Centered, translucent taskbar surfaces are compositor materials: Nickel samples
-and blurs the scene behind the surface before composing its CSS background,
-border, shadow, and content. A full-width taskbar remains on the ordinary opaque
-panel path.
+An element with `backdrop-filter` emits an exact rounded compositor material
+region: Nickel samples and blurs the scene behind that element before composing
+its CSS background, border, shadow, and content. Elements without the declaration
+remain on the ordinary paint path.
 
 The JSX `width` and `height` props remain available. Root component layout uses
 ordinary CSS width, height, percentages, and flex sizing. When the host supplies

@@ -16,7 +16,7 @@ div.dock-shelf {
     min-width: 260px;
     max-width: 580px;
     height: 92px;
-    padding: 6px 8px 3px;
+    padding: 6px 28px 3px 8px;
     gap: 3px;
     align-items: center;
     justify-content: center;
@@ -26,7 +26,7 @@ div.dock-shelf {
     border-color: #fefefe8a;
     border-radius: 18px;
     box-shadow: 0px 2px 8px 0px #0101014a;
-    -nickel-dock-magnification: 1.38 2;
+    -nickel-proximity-magnification: 1.38 2;
     transition-duration: 150ms;
 }
 
@@ -58,4 +58,4 @@ button.dock-button:active, button.dock-utility:active, button.dock-clock:active 
     border-color: #fefefe8f;
 }
 
-/* The shelf and its surface use intrinsic sizing rather than an icon-count formula. */
+/* Its shelf and surface use intrinsic sizing rather than an icon-count formula. */
