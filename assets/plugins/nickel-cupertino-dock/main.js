@@ -68,7 +68,7 @@ export function Taskbar() {
     const clockText = (hours % 12 || 12) + ":" + String(localTime.getUTCMinutes()).padStart(2, "0");
     return h(FixedWindow, { id: "taskbar", output: "all", edge: "bottom", bottomOffset: 10, width: "max-content", reserveWorkArea: false, className: "cupertino-dock" },
         h("div", { className: "dock-shelf" },
-            h(Button, { id: "cupertino-dock-launcher", className: "dock-button launcher", width: 58, height: 58, accessibilityLabel: "Open Nickel Launcher", onClick: () => nickel.surfaces.show("launcher") }, "\u25C6"),
+            h(Button, { id: "cupertino-dock-launcher", className: "dock-button launcher", width: 58, height: 58, icon: "nickel-logo", iconSize: 44, showLabel: false, accessibilityLabel: "Open Nickel Launcher", onClick: () => nickel.surfaces.show("launcher") }, "Nickel"),
             items.map(item => h(DockItem, { key: item.id, item: item })),
             contributions.map(entry => h(entry.component, { key: entry.key })),
             h(Text, { color: "#26313d70" }, "\u2502"),
