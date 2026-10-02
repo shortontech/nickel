@@ -317,10 +317,7 @@ impl nickel_ui::Application for LockApplication {
                         .accessibility_label("Password")
                         .scale(18.0)
                         .single_line_height(28.0)
-                        .color(password_color)
-                        .background(self.palette.surface)
-                        .focus_background_tint(theme.borders.focus)
-                        .controller_focus_background_tint(theme.borders.controller_focus),
+                        .color(password_color),
                     ),
             );
         if let Some(status) = &self.status {

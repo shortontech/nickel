@@ -615,6 +615,34 @@
     }
 
     #[test]
+    fn lock_password_paint_does_not_change_with_input_modality() {
+        let mut host = UiHost::new(super::LockApplication::fixture("nickel", None), 960, 540);
+        let target = host
+            .query_unique(&SemanticSelector::RoleAndName {
+                role: SemanticRole::TextField,
+                name: "Password".into(),
+            })
+            .expect("lock password semantic target");
+        let center = Point {
+            x: target.bounds.origin.x + target.bounds.size.width / 2.0,
+            y: target.bounds.origin.y + target.bounds.size.height / 2.0,
+        };
+        host.step(HostBatch {
+            events: vec![
+                HostEvent::Ui(UiEvent::PointerPressed(center)),
+                HostEvent::Ui(UiEvent::PointerReleased(center)),
+            ],
+            ..HostBatch::default()
+        });
+
+        host.adopt_input_modality(InputModality::Pointer);
+        let pointer_paint = host.commands().to_vec();
+        assert!(host.adopt_input_modality(InputModality::Keyboard));
+
+        assert_eq!(host.commands(), pointer_paint);
+    }
+
+    #[test]
     fn project_displays_shortcut_opens_dedicated_projection_view() {
         let mut shell = LiveShell::new().unwrap();
 
