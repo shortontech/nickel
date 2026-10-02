@@ -1506,7 +1506,23 @@ impl<Message: Clone> UiFrame<Message> {
     /// surface. Hosts use this to resolve intrinsic native-surface dimensions.
     pub fn preferred_size(root: impl Component<Message>, maximum: Size) -> Size {
         let root = root.into_element();
-        measure_element(&root, Constraints::loose(maximum))
+        let measurement_maximum = Size::new(
+            if root.style.width == Length::MaxContent {
+                f32::INFINITY
+            } else {
+                maximum.width
+            },
+            if root.style.height == Length::MaxContent {
+                f32::INFINITY
+            } else {
+                maximum.height
+            },
+        );
+        let preferred = measure_element(&root, Constraints::loose(measurement_maximum));
+        Size::new(
+            preferred.width.min(maximum.width),
+            preferred.height.min(maximum.height),
+        )
     }
 
     pub fn layout_with_diagnostics(root: impl Component<Message>, bounds: Rect) -> Self {

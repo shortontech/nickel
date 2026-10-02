@@ -4,7 +4,8 @@ window.cupertino-dock {
     width: max-content;
     height: 100%;
     bottom: 10px;
-    padding: 8px 10px 6px;
+    /* Reserve transparent overflow for neighbor magnification and the shadow. */
+    padding: 8px 42px 6px;
     align-items: end;
     background: transparent;
 }
@@ -19,7 +20,7 @@ div.dock-shelf {
     gap: 3px;
     align-items: center;
     justify-content: center;
-    background: #e8edf27a;
+    background: #e8edf25c;
     backdrop-filter: blur(12px);
     border-width: 1px;
     border-color: #fefefe8a;
@@ -32,10 +33,12 @@ div.dock-shelf {
 div.dock-item {
     width: 58px;
     height: 68px;
+    flex-shrink: 0;
     align-items: center;
 }
 
 button.dock-button, button.dock-utility, button.dock-clock {
+    flex-shrink: 0;
     padding: 5px;
     background: transparent;
     border: 1px solid transparent;
@@ -45,10 +48,14 @@ button.dock-button, button.dock-utility, button.dock-clock {
     text-align: center;
 }
 
+button.dock-clock {
+    font-size: 18px;
+}
+
 button.dock-button:hover, button.dock-utility:hover, button.dock-clock:hover,
 button.dock-button:active, button.dock-utility:active, button.dock-clock:active {
     background: #fefefe52;
     border-color: #fefefe8f;
 }
 
-/* The surface and shelf use intrinsic sizing rather than an icon-count formula. */
+/* The shelf and its surface use intrinsic sizing rather than an icon-count formula. */
