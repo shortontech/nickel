@@ -826,10 +826,27 @@ fn plugin_display_preview_rejects_stale_topology_and_rolls_back_on_deadline() {
 }
 
 #[test]
-fn safe_mode_suppresses_installed_autostart_without_discarding_saved_choice() {
-    assert!(super::should_auto_start_installed_plugin(true, false));
-    assert!(!super::should_auto_start_installed_plugin(true, true));
-    assert!(!super::should_auto_start_installed_plugin(false, false));
+fn installed_autostart_excludes_safe_mode_and_the_already_started_default_shell() {
+    assert!(super::should_auto_start_installed_plugin(
+        "org.example.panel",
+        true,
+        false
+    ));
+    assert!(!super::should_auto_start_installed_plugin(
+        "org.example.panel",
+        true,
+        true
+    ));
+    assert!(!super::should_auto_start_installed_plugin(
+        "org.example.panel",
+        false,
+        false
+    ));
+    assert!(!super::should_auto_start_installed_plugin(
+        "nickel-default",
+        true,
+        false
+    ));
 }
 
 include!("tests/wallpaper.rs");
@@ -2752,6 +2769,31 @@ fn shipped_example_shell_composes_owned_taskbar_default_controls_and_registered_
         );
         let quick = key("quick-settings");
         shell.plugin_panel_scene(&quick, 420, 600).unwrap();
+        for _ in 0..3 {
+            shell.plugin_panel_scene(&taskbar, 1280, 56).unwrap();
+            shell.plugin_panel_scene(&quick, 420, 600).unwrap();
+        }
+        let stable_taskbar_token = shell.plugin_surface_change_token(&taskbar).unwrap();
+        let stable_quick_settings_token = shell.plugin_surface_change_token(&quick).unwrap();
+        let stable_application_catalog_builds = shell.application_catalog_builds;
+        for _ in 0..8 {
+            shell.plugin_panel_scene(&taskbar, 1280, 56).unwrap();
+            shell.plugin_panel_scene(&quick, 420, 600).unwrap();
+            assert_eq!(
+                shell.plugin_surface_change_token(&taskbar),
+                Some(stable_taskbar_token),
+                "alternating composed surfaces must not rebuild the taskbar"
+            );
+            assert_eq!(
+                shell.plugin_surface_change_token(&quick),
+                Some(stable_quick_settings_token),
+                "alternating composed surfaces must not rebuild quick settings"
+            );
+        }
+        assert_eq!(
+            shell.application_catalog_builds, stable_application_catalog_builds,
+            "stable composed surfaces must reuse their application projection"
+        );
         assert!(std::rc::Rc::ptr_eq(
             &shared,
             &shell
@@ -2967,6 +3009,58 @@ fn launcher_sizes_to_its_named_output_and_expands_again_on_a_larger_output() {
                 shell.plugin_surface_hosts[&key].0.height
             ),
             (608, 628)
+        );
+    });
+}
+
+#[test]
+fn replicated_taskbar_keeps_one_output_agnostic_viewport_across_monitors() {
+    with_package_runtime_stack(|| {
+        let mut shell = LiveShell::new().unwrap();
+        shell.set_desktop_outputs(vec![
+            nickel_file::desktop::DesktopOutput {
+                id: "DP-3".into(),
+                primary: true,
+                work_area: nickel_file::desktop::Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 1920.0,
+                    height: 1024.0,
+                },
+                scale: 1.0,
+            },
+            nickel_file::desktop::DesktopOutput {
+                id: "DVI-I-2".into(),
+                primary: false,
+                work_area: nickel_file::desktop::Rect {
+                    x: 1920.0,
+                    y: 0.0,
+                    width: 1920.0,
+                    height: 1024.0,
+                },
+                scale: 1.0,
+            },
+        ]);
+        let key = LiveShell::default_shell_surface_key("taskbar");
+        shell
+            .plugin_panel_scene_for_output(&key, Some("DP-3"), 1920, 56)
+            .unwrap();
+        shell
+            .plugin_panel_scene_for_output(&key, Some("DVI-I-2"), 1920, 56)
+            .unwrap();
+        let viewport = serde_json::json!({
+            "width": 1920, "height": 56, "output": null,
+            "availableWidth": null, "availableHeight": null,
+        });
+        assert!(
+            !shell
+                .plugin_surface_hosts
+                .get_mut(&key)
+                .unwrap()
+                .1
+                .application_mut()
+                .sync_host_data_field("viewport", &viewport)
+                .unwrap()
         );
     });
 }

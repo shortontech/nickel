@@ -647,6 +647,9 @@ pub struct LiveShell {
     external_plugin_packages:
         std::collections::BTreeMap<String, nickel_core::plugins::PluginPackageSource>,
     application_search: crate::application_capabilities::ApplicationSearch,
+    application_catalog_cache: [Option<ApplicationCatalogCache>; 2],
+    #[cfg(test)]
+    application_catalog_builds: u64,
     feature_client: crate::feature_capabilities::FeatureClient,
     shortcut_capability_observed: bool,
     primary_panel_key: nickel_core::plugins::PluginSurfaceKey,
@@ -730,6 +733,12 @@ pub struct LiveShell {
     keyboard_deadline: Instant,
     keyboard_gesture_leases: HashMap<(nickel_input::DeviceId, Option<nickel_input::TouchId>), u64>,
     keyboard_recipient: Option<nickel_session_protocol::OnScreenKeyboardSnapshot>,
+}
+
+struct ApplicationCatalogCache {
+    launcher_revision: Arc<()>,
+    windows: Vec<OpenWindow>,
+    value: serde_json::Value,
 }
 
 #[cfg(target_os = "linux")]
@@ -849,8 +858,11 @@ fn shortcut_capability_status(
     Some(format!("Global shortcuts unavailable: {reason}."))
 }
 
-fn should_auto_start_installed_plugin(desired_enabled: bool, safe_mode: bool) -> bool {
-    desired_enabled && !safe_mode
+fn should_auto_start_installed_plugin(id: &str, desired_enabled: bool, safe_mode: bool) -> bool {
+    // The selected fallback shell is started through the dedicated package
+    // lifecycle below. Running it through the installed-plugin approval pass
+    // again can overwrite its Running state with a stale approval failure.
+    id != "nickel-default" && desired_enabled && !safe_mode
 }
 
 fn external_plugin_settings(
@@ -1383,6 +1395,9 @@ impl LiveShell {
             plugin_settings,
             external_plugin_packages,
             application_search: Default::default(),
+            application_catalog_cache: [None, None],
+            #[cfg(test)]
+            application_catalog_builds: 0,
             feature_client: Default::default(),
             shortcut_capability_observed: false,
             primary_panel_key: crate::plugin_panel::surface_key(),
@@ -1486,6 +1501,7 @@ impl LiveShell {
             .collect::<Vec<_>>()
         {
             if should_auto_start_installed_plugin(
+                &id,
                 plugin_activation.desired_enabled(&id, false),
                 safe_mode,
             ) {
@@ -3154,7 +3170,7 @@ impl LiveShell {
         ))
     }
 
-    fn external_plugin_applications(&self, plugin_id: &str) -> Option<serde_json::Value> {
+    fn external_plugin_applications(&mut self, plugin_id: &str) -> Option<serde_json::Value> {
         let package = self.external_plugin_packages.get(plugin_id)?;
         if !package
             .manifest
@@ -3165,23 +3181,45 @@ impl LiveShell {
         }
         // Running-only entries include window titles/identities; retain the
         // separate WindowsRead grant rather than expanding ApplicationsRead.
-        let windows = if package
+        let include_running = package
             .manifest
             .capabilities
-            .contains(&nickel_core::plugins::PluginCapability::WindowsRead)
-        {
+            .contains(&nickel_core::plugins::PluginCapability::WindowsRead);
+        let index = usize::from(include_running);
+        let windows = if include_running {
             self.windows.as_slice()
         } else {
             &[]
         };
-        Some(crate::application_capabilities::include_running(
-            &self.launcher,
-            windows,
-        ))
+        let revision = self.launcher.taskbar_revision();
+        if let Some(cached) = self.application_catalog_cache[index].as_ref()
+            && Arc::ptr_eq(&cached.launcher_revision, revision)
+            && cached.windows.as_slice() == windows
+        {
+            return Some(cached.value.clone());
+        }
+        let value = crate::application_capabilities::include_running(&self.launcher, windows);
+        #[cfg(test)]
+        {
+            self.application_catalog_builds = self.application_catalog_builds.saturating_add(1);
+        }
+        self.application_catalog_cache[index] = Some(ApplicationCatalogCache {
+            launcher_revision: Arc::clone(revision),
+            windows: windows.to_vec(),
+            value: value.clone(),
+        });
+        Some(value)
     }
 
     fn plugin_application_search(&self, plugin_id: &str) -> Option<serde_json::Value> {
-        self.external_plugin_applications(plugin_id)?;
+        let package = self.external_plugin_packages.get(plugin_id)?;
+        if !package
+            .manifest
+            .capabilities
+            .contains(&nickel_core::plugins::PluginCapability::ApplicationsRead)
+        {
+            return None;
+        }
         let mut snapshot = self.application_search.snapshot(&self.launcher, plugin_id);
         snapshot["status"] = self
             .launcher_status
@@ -3848,17 +3886,31 @@ impl LiveShell {
         width: u32,
         height: u32,
     ) -> Option<Vec<PaintCommand>> {
+        let replicated_surface = self.plugin_surface_hosts.get(key).map(|(surface, _)| {
+            (
+                surface.output == nickel_core::plugins::PluginOutputScope::All,
+                surface.width,
+                surface.height,
+            )
+        })?;
         let desktop = self.desktop_host.application();
         let output = output.or(Some(desktop.active_output.as_str()));
         let available = desktop
             .outputs
             .iter()
             .find(|candidate| Some(candidate.id.as_str()) == output);
-        let viewport = serde_json::json!({
-            "width": width, "height": height, "output": output,
-            "availableWidth": available.map(|output| output.work_area.width),
-            "availableHeight": available.map(|output| output.work_area.height),
-        });
+        let viewport = if replicated_surface.0 {
+            serde_json::json!({
+                "width": replicated_surface.1, "height": replicated_surface.2,
+                "output": null, "availableWidth": null, "availableHeight": null,
+            })
+        } else {
+            serde_json::json!({
+                "width": width, "height": height, "output": output,
+                "availableWidth": available.map(|output| output.work_area.width),
+                "availableHeight": available.map(|output| output.work_area.height),
+            })
+        };
         let dependency_ids = self
             .plugin_panel_host_for(key)?
             .application()
@@ -3953,6 +4005,15 @@ impl LiveShell {
                     } else {
                         false
                     };
+                if resource_changed || dependency_changed || application_images_changed {
+                    tracing::warn!(
+                        surface = %key.surface_id,
+                        resource_changed,
+                        dependency_changed,
+                        application_images_changed,
+                        "plugin projection change source"
+                    );
+                }
                 Ok(resource_changed || dependency_changed || application_images_changed)
             })();
             let projected = match projected {
@@ -9917,17 +9978,20 @@ impl LiveShell {
         limit: Option<usize>,
         authority: Option<nickel_ui::NormalizedIngressAuthority>,
     ) -> nickel_ui::HostEventOutcome {
-        let _ = self.plugin_panel_scene(key, size.0, size.1);
-        let Some(host) = self.plugin_panel_host_for(key) else {
-            return nickel_ui::HostEventOutcome::default();
-        };
-        let mut outcome = host.step(HostBatch {
+        let batch = HostBatch {
             surface_size: Some(size),
             clipboard_text_limit: limit,
             events: vec![event],
             normalized_authorities: authority.into_iter().collect(),
             ..HostBatch::default()
-        });
+        };
+        if !passive_pointer_batch(&batch) {
+            let _ = self.plugin_panel_scene(key, size.0, size.1);
+        }
+        let Some(host) = self.plugin_panel_host_for(key) else {
+            return nickel_ui::HostEventOutcome::default();
+        };
+        let mut outcome = host.step(batch);
         let effects = host.application_mut().take_effects();
         if let Some(error) = host.application_mut().take_runtime_failure() {
             self.fail_plugin_panel_runtime(&key.plugin_id, error);

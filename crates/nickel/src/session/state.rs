@@ -2696,6 +2696,9 @@ pub struct NickelSession {
         Option<(nickel_ui::InternalSurfaceId, nickel_ui::InternalSurfaceId)>,
     /// Latest motion is reduced immediately; scene work is bounded by frames.
     pending_desktop_scenes: HashSet<nickel_ui::InternalSurfaceId>,
+    /// A reconciliation flush may itself observe a topology change. The outer
+    /// reconciliation owns applying that change after its current pass.
+    reconciling_internal_shell_outputs: bool,
     internal_shell_timer: InternalShellTimer,
     internal_system_status_source: Option<smithay::reexports::calloop::RegistrationToken>,
     pub loop_signal: LoopSignal,
@@ -5263,6 +5266,14 @@ impl NickelSession {
             .chain(codex_deadline)
             .chain(self.internal_ui.next_deadline())
             .min();
+        if deadline.is_some_and(|deadline| deadline <= Instant::now()) {
+            tracing::warn!(
+                ?shell_deadline,
+                ?codex_deadline,
+                internal_ui_deadline = ?self.internal_ui.next_deadline(),
+                "internal shell deadline remained due"
+            );
+        }
         self.arm_internal_shell_timer(deadline);
     }
 
@@ -5367,6 +5378,10 @@ impl NickelSession {
     }
 
     pub(crate) fn reconcile_internal_shell_outputs(&mut self) {
+        if self.internal_shell.is_none() || self.reconciling_internal_shell_outputs {
+            return;
+        }
+        self.reconciling_internal_shell_outputs = true;
         let before = self
             .internal_shell
             .as_ref()
@@ -5383,6 +5398,7 @@ impl NickelSession {
             // plan was built. Apply that accepted descriptor to native slots.
             self.reconcile_internal_shell_outputs_once();
         }
+        self.reconciling_internal_shell_outputs = false;
     }
 
     fn reconcile_internal_shell_outputs_once(&mut self) {
@@ -5398,7 +5414,7 @@ impl NickelSession {
         // Deliver cancellation while old runtime-to-coordinator identities still
         // exist. Tombstones retain ownership of eventual releases after rebuild.
         self.internal_ui.retire_normalized_touch_surfaces();
-        self.flush_internal_shell_input();
+        self.flush_internal_shell_input_inner(false);
         let outputs = self.internal_outputs();
         let mut previous = std::mem::take(&mut self.internal_shell_surfaces);
         let Some(shell) = self.internal_shell.as_mut() else {
@@ -6995,6 +7011,10 @@ impl NickelSession {
     }
 
     pub(crate) fn flush_internal_shell_input(&mut self) {
+        self.flush_internal_shell_input_inner(true);
+    }
+
+    fn flush_internal_shell_input_inner(&mut self, dismiss_popovers: bool) {
         let stop = self
             .remote_indicator_surfaces
             .values()
@@ -7012,7 +7032,9 @@ impl NickelSession {
         self.flush_native_clipboard_results();
         let events = self.internal_ui.drain_routed_events();
         if events.is_empty() || self.internal_shell.is_none() {
-            self.dismiss_unfocused_internal_popovers();
+            if dismiss_popovers {
+                self.dismiss_unfocused_internal_popovers();
+            }
             return;
         }
         let reverse = self
@@ -7165,7 +7187,9 @@ impl NickelSession {
         {
             self.focus_internal_surface(runtime);
         }
-        self.dismiss_unfocused_internal_popovers();
+        if dismiss_popovers {
+            self.dismiss_unfocused_internal_popovers();
+        }
         self.wake_internal_shell();
     }
 
@@ -8764,6 +8788,7 @@ impl NickelSession {
             remote_indicator_accessibility: HashMap::new(),
             remote_indicator_accessibility_wake,
             pending_desktop_scenes: HashSet::new(),
+            reconciling_internal_shell_outputs: false,
             internal_file_surfaces: HashMap::new(),
             internal_file_drag_serial: None,
             internal_file_context_popup: None,

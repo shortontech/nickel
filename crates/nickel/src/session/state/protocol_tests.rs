@@ -8159,6 +8159,39 @@ fn control_center_hides_on_client_or_internal_focus_transfer_and_stays_hidden() 
 }
 
 #[test]
+fn opening_control_center_while_launcher_is_open_does_not_reenter_output_reconciliation() {
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+            let (_event_loop, mut session) = internal_shell_test_session();
+
+            assert!(session.toggle_internal_launcher());
+            session
+                .notify_global_shortcut(nickel_session_protocol::ShortcutAction::ShowControlCenter);
+            session.flush_internal_shell_input();
+
+            assert!(!session.reconciling_internal_shell_outputs);
+            let shell = session.internal_shell.as_ref().unwrap();
+            let visible_ephemeral_surfaces = shell
+                .surfaces()
+                .iter()
+                .filter(|surface| {
+                    matches!(
+                        surface.role,
+                        crate::winit_shell::SurfaceRole::Launcher
+                            | crate::winit_shell::SurfaceRole::ControlCenter
+                    ) && shell.visible(surface.id)
+                })
+                .count();
+            assert!(visible_ephemeral_surfaces <= 1);
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
 fn launcher_sidebar_press_is_not_dismissed_for_a_client_underneath() {
     use nickel_session_protocol::{InputState, TestInput, TestPointerButton};
     use nickel_ui::backend::PaintCommand;

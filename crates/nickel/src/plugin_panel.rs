@@ -139,6 +139,7 @@ pub struct PluginPanelApplication {
     expected_surface_id: Option<String>,
     runtime_surface_id: String,
     projection_data: Option<String>,
+    projection_value: Option<Value>,
     overlay_open: bool,
     dispatch_removed_focus: bool,
     images: PluginImages,
@@ -696,10 +697,9 @@ impl PluginPanelApplication {
                 .map(|owner| Ok((owner.clone(), host.snapshot(owner)?.clone())))
                 .collect::<Result<std::collections::BTreeMap<_, _>, String>>()?
         };
-        let projection_data = Some(
-            serde_json::to_string(&snapshots[&host.borrow().resolution().active])
-                .map_err(|error| error.to_string())?,
-        );
+        let projection_value = snapshots[&host.borrow().resolution().active].clone();
+        let projection_data =
+            Some(serde_json::to_string(&projection_value).map_err(|error| error.to_string())?);
         Ok(Self {
             runtime,
             node,
@@ -711,6 +711,7 @@ impl PluginPanelApplication {
             expected_surface_id: Some(surface.id.clone()),
             runtime_surface_id: surface.id.clone(),
             projection_data,
+            projection_value: Some(projection_value),
             overlay_open: false,
             dispatch_removed_focus: false,
             images,
@@ -1048,6 +1049,7 @@ impl PluginPanelApplication {
             )?;
             state.events = rendered.events;
             self.projection_data = Some(serialized);
+            self.projection_value = Some(data);
             return Ok(true);
         }
         let previous_data = self
@@ -1081,6 +1083,7 @@ impl PluginPanelApplication {
             }
         };
         self.node = node;
+        self.projection_value = serde_json::from_str(&serialized).ok();
         self.projection_data = Some(serialized);
         self.last_error = None;
         Ok(true)
@@ -1150,6 +1153,9 @@ impl PluginPanelApplication {
             manifest: manifest.clone(),
             expected_surface_id: expected_surface_id.map(str::to_owned),
             runtime_surface_id: runtime_surface_id.to_owned(),
+            projection_value: data
+                .as_deref()
+                .and_then(|data| serde_json::from_str(data).ok()),
             projection_data: data,
             overlay_open: false,
             dispatch_removed_focus: false,
@@ -1221,11 +1227,19 @@ impl PluginPanelApplication {
             return Ok(false);
         }
         Self::validate_host_fields(&self.manifest, fields)?;
-        let Some(data) = self.projection_data.as_deref() else {
+        let Some(data) = self.projection_value.as_ref() else {
             return Err("plugin has no external projection".into());
         };
-        let mut data: Value = serde_json::from_str(data)
-            .map_err(|error| format!("invalid external plugin projection: {error}"))?;
+        let object = data
+            .as_object()
+            .ok_or("external plugin projection must be an object")?;
+        if fields
+            .iter()
+            .all(|(field, value)| object.get(*field) == Some(*value))
+        {
+            return Ok(false);
+        }
+        let mut data = data.clone();
         let object = data
             .as_object_mut()
             .ok_or("external plugin projection must be an object")?;
@@ -1385,7 +1399,7 @@ impl PluginPanelApplication {
         &mut self,
         providers: &std::collections::BTreeMap<String, Vec<(&str, Value)>>,
     ) -> Result<bool, String> {
-        let Some(state) = &self.composition else {
+        let Some(state) = &mut self.composition else {
             return Ok(false);
         };
         let mut host = state.host.borrow_mut();
@@ -1401,15 +1415,31 @@ impl PluginPanelApplication {
                 .map(|(name, value)| (*name, value))
                 .collect::<Vec<_>>();
             Self::validate_host_fields(manifest, &references)?;
-            let mut data = host.snapshot(owner)?.clone();
+            let mut data = state.snapshots.get(owner).cloned().unwrap_or_else(|| {
+                host.snapshot(owner)
+                    .expect("known composition owner")
+                    .clone()
+            });
             let object = data
                 .as_object_mut()
                 .ok_or("package snapshot must be an object")?;
+            let changed_fields = fields
+                .iter()
+                .filter(|(name, value)| object.get(*name) != Some(value))
+                .map(|(name, _)| *name)
+                .collect::<Vec<_>>();
+            if !changed_fields.is_empty() {
+                tracing::warn!(dependency = %id, ?changed_fields, "composition dependency changed");
+            }
             for (name, value) in fields {
                 object.insert((*name).into(), value.clone());
             }
+            let surface_changed = state.snapshots.get(owner) != Some(&data);
             if host.snapshot(owner)? != &data {
                 host.update_snapshot(owner, &data)?;
+            }
+            if surface_changed {
+                state.snapshots.insert(owner.clone(), data);
                 changed = true;
             }
         }
@@ -2771,6 +2801,7 @@ impl PluginPanelApplication {
             expected_surface_id: None,
             runtime_surface_id: String::new(),
             projection_data: Some(snapshot.to_string()),
+            projection_value: Some(snapshot.clone()),
             overlay_open: false,
             dispatch_removed_focus: false,
             images: PluginImages::new(),
@@ -5209,6 +5240,7 @@ mod tests {
         )
         .unwrap();
         assert!(app.sync_host_data_field("audio", &next).unwrap());
+        assert!(!app.sync_host_data_field("audio", &next).unwrap());
         assert!(format!("{:?}", app.node).contains("65"));
     }
 
