@@ -111,6 +111,7 @@ impl WindowRequest {
         );
         let valid_size = |requested: Length, granted: u32| {
             matches!(requested, Length::Percent(1.0))
+                || matches!(requested, Length::MaxContent)
                 || matches!(requested, Length::Px(value) if value >= 1.0
                     && (value == granted as f32 || (bounded_size && value < granted as f32)))
         };
@@ -521,6 +522,18 @@ fn apply_container_style<Message>(
     if let Some(radius) = style.radius {
         container = container.radius(radius);
     }
+    if let Some(shadow) = style.box_shadow {
+        container = container.box_shadow(shadow);
+    }
+    if let Some(blur) = style.backdrop_blur {
+        container = container.backdrop_blur(blur);
+    }
+    if let Some(magnification) = style.proximity_magnification {
+        container = container.proximity_magnification(magnification);
+    }
+    if let Some(duration) = style.transition_duration_ms {
+        container = container.transition_duration_ms(duration);
+    }
     if style.border_width.is_some() || style.border_color.is_some() {
         container = if style.border_color.or(style.color).unwrap_or(0) == 0 {
             container.clear_border()
@@ -796,6 +809,25 @@ impl PanelNode {
             surface.offset_y = offset.round() as i32;
         }
         Ok(Some(surface))
+    }
+
+    pub fn requested_surface_lengths(&self, stylesheet: &StyleSheet) -> Option<(Length, Length)> {
+        let Self::Surface {
+            id,
+            class_name,
+            width,
+            height,
+            window_request: Some(_),
+            ..
+        } = self
+        else {
+            return None;
+        };
+        let style = stylesheet.resolve("window", id.as_deref(), class_name.as_deref());
+        Some((
+            style.width.unwrap_or(*width),
+            style.height.unwrap_or(*height),
+        ))
     }
 
     pub fn retained_bytes(&self) -> u64 {
@@ -1218,8 +1250,13 @@ impl PanelNode {
                         .map(|size| Length::Px(size as f32))
                         .ok_or_else(|| format!("{kind} {name} must be 1 to 8192")),
                     Some(Value::String(percent)) if percent == "100%" => Ok(Length::Percent(1.0)),
+                    Some(Value::String(keyword)) if keyword == "max-content" => {
+                        Ok(Length::MaxContent)
+                    }
                     None | Some(Value::Null) => Ok(Length::Percent(1.0)),
-                    _ => Err(format!("{kind} {name} must be 1 to 8192 or 100%")),
+                    _ => Err(format!(
+                        "{kind} {name} must be 1 to 8192, 100%, or max-content"
+                    )),
                 };
                 let id = value
                     .get("id")

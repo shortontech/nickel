@@ -102,6 +102,90 @@ fn captured_drag_releases_on_another_drop_target() {
 }
 
 #[test]
+fn proximity_magnification_eases_hover_and_neighbor_geometry() {
+    let view = || {
+        Row::new()
+            .children([
+                Button::new(TestMessage::Named("left"), "L")
+                    .id("left")
+                    .width(40.0)
+                    .height(40.0),
+                Button::new(TestMessage::Named("center"), "C")
+                    .id("center")
+                    .width(40.0)
+                    .height(40.0),
+                Button::new(TestMessage::Named("right"), "R")
+                    .id("right")
+                    .width(40.0)
+                    .height(40.0),
+            ])
+            .into_element()
+            .proximity_magnification(ProximityMagnification {
+                maximum_scale: 1.5,
+                radius: 1,
+            })
+            .transition_duration_ms(1_000.0)
+    };
+    let mut state = UiStateStore::default();
+    state.set_hovered(Some(UiId::from("root/center")));
+    let resting = UiFrame::layout_with_state(view(), Rect::new(0.0, 0.0, 240.0, 80.0), &mut state);
+    let width = |frame: &UiFrame<TestMessage>, id: &str| {
+        frame
+            .resolved_layout()
+            .find(&UiId::from(id))
+            .unwrap()
+            .allocated
+            .size
+            .width
+    };
+    assert_eq!(width(&resting, "root/center"), 40.0);
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let first = UiFrame::layout_with_state(view(), Rect::new(0.0, 0.0, 240.0, 80.0), &mut state);
+    let center_first = width(&first, "root/center");
+    let left_first = width(&first, "root/left");
+    assert!(center_first > left_first && left_first > 40.0);
+
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let second = UiFrame::layout_with_state(view(), Rect::new(0.0, 0.0, 240.0, 80.0), &mut state);
+    assert!(
+        width(&second, "root/center") > center_first,
+        "second={}, first={center_first}, active={}",
+        width(&second, "root/center"),
+        state.geometry_animation_active()
+    );
+    assert!(state.geometry_animation_active());
+}
+
+#[test]
+fn pointer_departure_clears_proximity_hover() {
+    let view = || {
+        Row::new()
+            .child(
+                Button::new(TestMessage::Named("item"), "Item")
+                    .id("item")
+                    .width(40.0)
+                    .height(40.0),
+            )
+            .into_element()
+            .proximity_magnification(ProximityMagnification {
+                maximum_scale: 1.5,
+                radius: 1,
+            })
+    };
+    let mut state = UiStateStore::default();
+    let frame = UiFrame::layout_with_state(view(), Rect::new(0.0, 0.0, 100.0, 60.0), &mut state);
+    frame.handle_event(
+        &mut state,
+        UiEvent::PointerMoved(Point { x: 20.0, y: 20.0 }),
+    );
+    assert!(state.hovered().is_some());
+
+    frame.handle_event(&mut state, UiEvent::PointerCancelled);
+
+    assert_eq!(state.hovered(), None);
+}
+
+#[test]
 fn declarative_drag_target_captures_motion_beyond_its_bounds() {
     let tree = UiFrame::layout(
         Container::new()
@@ -2005,6 +2089,27 @@ fn intrinsic_measurement_covers_empty_and_nested_flex_content() {
     assert_eq!(
         empty_grid.measure(Constraints::unbounded()),
         Size::new(6.0, 6.0)
+    );
+}
+
+#[test]
+fn max_content_measurement_reserves_the_proximity_animation_envelope() {
+    let row = Row::<()>::new()
+        .children([
+            Container::new().width(40.0).height(40.0),
+            Container::new().width(40.0).height(40.0),
+            Container::new().width(40.0).height(40.0),
+        ])
+        .into_element()
+        .proximity_magnification(ProximityMagnification {
+            maximum_scale: 1.5,
+            radius: 1,
+        })
+        .width_length(Length::MaxContent);
+
+    assert_eq!(
+        UiFrame::preferred_size(row, Size::new(500.0, 500.0)),
+        Size::new(160.0, 60.0)
     );
 }
 

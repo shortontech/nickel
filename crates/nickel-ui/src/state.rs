@@ -1,4 +1,8 @@
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use crate::{DismissReason, FocusReturn, OverlayAnchor, OverlayId};
 use crate::{DocumentSelection, SelectionDocument, TextEditor};
@@ -127,6 +131,8 @@ struct PointerModalityState {
     input_modality: InputModality,
     window_focused: bool,
     observed_window_focus: Option<bool>,
+    position: Option<crate::Point>,
+    hover_fraction: f32,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -277,6 +283,16 @@ pub struct UiStateStore {
     overlays: OverlayState,
     text_context: Option<TextContextSession>,
     clipboard_text: Option<String>,
+    geometry_animations: HashMap<UiId, GeometryAnimation>,
+    geometry_animation_active: bool,
+    geometry_animation_frame: Instant,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct GeometryAnimation {
+    value: f32,
+    target: f32,
+    updated_at: Instant,
 }
 
 impl Default for UiStateStore {
@@ -287,6 +303,7 @@ impl Default for UiStateStore {
 
 impl UiStateStore {
     pub fn with_retention_frames(retention_frames: u64) -> Self {
+        let now = Instant::now();
         Self {
             focus_generation: 0,
             clipboard_text_limit: None,
@@ -305,6 +322,8 @@ impl UiStateStore {
                 input_modality: InputModality::default(),
                 window_focused: true,
                 observed_window_focus: None,
+                position: None,
+                hover_fraction: 0.5,
             },
             navigation: NavigationState::default(),
             text: TextSelectionState {
@@ -316,6 +335,9 @@ impl UiStateStore {
             overlays: OverlayState::default(),
             text_context: None,
             clipboard_text: None,
+            geometry_animations: HashMap::new(),
+            geometry_animation_active: false,
+            geometry_animation_frame: now,
         }
     }
 
@@ -569,6 +591,81 @@ impl UiStateStore {
 
     pub fn hovered(&self) -> Option<&UiId> {
         self.pointer.hovered.as_ref()
+    }
+
+    pub(crate) fn set_pointer_position(
+        &mut self,
+        position: crate::Point,
+        hover_fraction: f32,
+    ) -> Invalidation {
+        let hover_fraction = hover_fraction.clamp(0.0, 1.0);
+        if self.pointer.position == Some(position)
+            && (self.pointer.hover_fraction - hover_fraction).abs() < f32::EPSILON
+        {
+            Invalidation::None
+        } else {
+            self.pointer.position = Some(position);
+            self.pointer.hover_fraction = hover_fraction;
+            Invalidation::Layout
+        }
+    }
+
+    pub(crate) fn hover_fraction(&self) -> f32 {
+        self.pointer.hover_fraction
+    }
+
+    pub(crate) fn animate_geometry_scale(
+        &mut self,
+        id: UiId,
+        target: f32,
+        duration_ms: f32,
+    ) -> f32 {
+        let animation = self
+            .geometry_animations
+            .entry(id)
+            .or_insert(GeometryAnimation {
+                value: 1.0,
+                target,
+                updated_at: self.geometry_animation_frame,
+            });
+        if duration_ms <= 0.0 {
+            animation.value = target;
+            animation.target = target;
+            return target;
+        }
+        // Drive convergence from elapsed time, not an assumed frame cadence.
+        // A moving pointer may retarget every layout as magnified geometry
+        // shifts; retaining the previous timestamp prevents those small target
+        // changes from restarting the transition indefinitely.
+        let target_changed = (animation.target - target).abs() > f32::EPSILON;
+        let was_settled = (animation.value - animation.target).abs() < 0.005;
+        let elapsed_ms = if target_changed && was_settled {
+            0.0
+        } else {
+            self.geometry_animation_frame
+                .saturating_duration_since(animation.updated_at)
+                .as_secs_f32()
+                * 1_000.0
+        };
+        animation.updated_at = self.geometry_animation_frame;
+        animation.target = target;
+        let alpha = 1.0 - (-5.0 * elapsed_ms / duration_ms).exp();
+        animation.value += (target - animation.value) * alpha.clamp(0.0, 1.0);
+        if (animation.value - target).abs() < 0.005 {
+            animation.value = target;
+        } else {
+            self.geometry_animation_active = true;
+        }
+        animation.value
+    }
+
+    pub(crate) fn begin_geometry_animation_frame(&mut self) {
+        self.geometry_animation_active = false;
+        self.geometry_animation_frame = Instant::now();
+    }
+
+    pub(crate) fn geometry_animation_active(&self) -> bool {
+        self.geometry_animation_active
     }
 
     pub fn pressed(&self) -> Option<&UiId> {

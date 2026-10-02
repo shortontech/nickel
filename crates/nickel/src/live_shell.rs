@@ -5459,12 +5459,13 @@ impl LiveShell {
         );
         push("launcher-preferences", self.launcher_preference_deadline);
         push("lock", self.lock_deadline);
+        push("control", self.control_deadline);
         push(
-            "control",
-            self.control_deadline.or_else(|| {
-                self.plugin_panel_host_ref(&self.active_shell_surface_key("quick-settings"))
-                    .and_then(|host| host.next_deadline())
-            }),
+            "plugin-surface",
+            self.plugin_surface_hosts
+                .values()
+                .filter_map(|(_, host)| host.next_deadline())
+                .min(),
         );
         push("screenshot", self.screenshot.next_deadline());
         push(
@@ -5604,7 +5605,38 @@ impl LiveShell {
                 changed.push(SurfaceRole::ControlCenter);
             }
         }
+        let due_plugin_surfaces = self
+            .plugin_surface_hosts
+            .iter()
+            .filter(|(_, (_, host))| host.next_deadline().is_some_and(|deadline| now >= deadline))
+            .map(|(key, (surface, _))| (key.clone(), (surface.width, surface.height)))
+            .collect::<Vec<_>>();
+        for (key, size) in due_plugin_surfaces {
+            let outcome = self.plugin_surface_host_event(&key, HostEvent::Poll, size, None, None);
+            if outcome.changed {
+                changed.push(self.plugin_surface_redraw_role(&key));
+            }
+        }
         changed
+    }
+
+    fn plugin_surface_redraw_role(
+        &self,
+        key: &nickel_core::plugins::PluginSurfaceKey,
+    ) -> SurfaceRole {
+        if self.taskbar_surface_key().as_ref() == Some(key) {
+            return SurfaceRole::Taskbar;
+        }
+        match key.surface_id.as_str() {
+            "launcher" => SurfaceRole::Launcher,
+            "quick-settings" => SurfaceRole::ControlCenter,
+            "notifications" => SurfaceRole::Notification,
+            "volume-osd" => SurfaceRole::VolumeOsd,
+            "window-preview" => SurfaceRole::WindowPreview,
+            "window-menu" => SurfaceRole::WindowContextMenu,
+            "keyboard" => SurfaceRole::OnScreenKeyboard,
+            _ => SurfaceRole::Panel,
+        }
     }
 
     pub fn poll_deadlines(&mut self, now: Instant) -> ShellDeadlineOutcome {

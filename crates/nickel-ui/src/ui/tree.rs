@@ -6,7 +6,10 @@ mod layout;
 mod scrollbar;
 mod selection;
 use emission::emit_element;
-use layout::{apply_transient_state, explicit_px, layout_element, resolve_grid_columns};
+use layout::{
+    apply_transient_state, explicit_px, layout_element, resolve_grid_columns,
+    scale_explicit_geometry,
+};
 pub use scrollbar::ScrollExtent;
 #[cfg(test)]
 use scrollbar::{SCROLLBAR_GUTTER, SCROLLBAR_HIT_THICKNESS, SCROLLBAR_INSET};
@@ -18,6 +21,60 @@ use selection::{
     SelectionGlyph, SelectionRegionBuilder, SelectionRegionLayout, SelectionRunGeometry,
     document_selection_generation, selection_document_generation,
 };
+
+/// Expand a measurement-only tree to the largest layout reachable by a
+/// proximity animation. Native max-content surfaces are allocated once, so
+/// measuring only the resting frame would clip later animated frames.
+fn reserve_proximity_animation_envelope<Message: Clone>(element: &mut Element<Message>) {
+    for child in &mut element.children {
+        reserve_proximity_animation_envelope(child);
+    }
+    let Some(magnification) = element.style.proximity_magnification else {
+        return;
+    };
+    let Kind::Flex(axis) = &element.kind else {
+        return;
+    };
+    let axis = *axis;
+    if element.children.is_empty() {
+        return;
+    }
+
+    let original = element.children.clone();
+    let mut best = original.clone();
+    let mut best_extent = 0.0_f32;
+    // Influence is piecewise linear between child centers. Its extrema occur
+    // at a center or at either edge of a child's pointer interval.
+    for hovered in 0..original.len() {
+        for hover_fraction in [0.0_f32, 0.5, 1.0] {
+            element.children.clone_from(&original);
+            let pointer_index = hovered as f32 + hover_fraction - 0.5;
+            for (index, child) in element.children.iter_mut().enumerate() {
+                let distance = (index as f32 - pointer_index).abs();
+                let scale = if distance > magnification.radius as f32 + 0.5 {
+                    1.0
+                } else {
+                    let influence = 1.0 - distance / (magnification.radius as f32 + 1.0);
+                    1.0 + (magnification.maximum_scale - 1.0) * influence
+                };
+                scale_explicit_geometry(child, scale);
+            }
+            let size = measure_element(
+                element,
+                Constraints::loose(Size::new(f32::INFINITY, f32::INFINITY)),
+            );
+            let extent = match axis {
+                Axis::Horizontal => size.width,
+                Axis::Vertical => size.height,
+            };
+            if extent > best_extent {
+                best_extent = extent;
+                best.clone_from(&element.children);
+            }
+        }
+    }
+    element.children = best;
+}
 
 #[derive(Clone, Debug)]
 struct HitRegion<Message> {
@@ -1502,6 +1559,31 @@ impl<Message: Clone> UiFrame<Message> {
         Self::layout_internal(root, bounds, false)
     }
 
+    /// Measure a declarative root without forcing it to occupy a presentation
+    /// surface. Hosts use this to resolve intrinsic native-surface dimensions.
+    pub fn preferred_size(root: impl Component<Message>, maximum: Size) -> Size {
+        let root = root.into_element();
+        let measurement_maximum = Size::new(
+            if root.style.width == Length::MaxContent {
+                f32::INFINITY
+            } else {
+                maximum.width
+            },
+            if root.style.height == Length::MaxContent {
+                f32::INFINITY
+            } else {
+                maximum.height
+            },
+        );
+        let mut envelope = root.clone();
+        reserve_proximity_animation_envelope(&mut envelope);
+        let preferred = measure_element(&envelope, Constraints::loose(measurement_maximum));
+        Size::new(
+            preferred.width.min(maximum.width),
+            preferred.height.min(maximum.height),
+        )
+    }
+
     pub fn layout_with_diagnostics(root: impl Component<Message>, bounds: Rect) -> Self {
         Self::layout_internal(root, bounds, true)
     }
@@ -1526,6 +1608,7 @@ impl<Message: Clone> UiFrame<Message> {
             |id| UiId::from("root").scoped(id.as_str()),
         );
         state.begin_frame();
+        state.begin_geometry_animation_frame();
         apply_transient_state(&mut root, &root_id, state);
         let mut tree = Self {
             diagnostics_enabled: diagnostics,
@@ -3012,7 +3095,15 @@ impl<Message: Clone> UiFrame<Message> {
                     .scrollbar_at(point)
                     .map(|(scroll, axis)| scrollbar_id(&scroll.id, axis))
                     .or_else(|| self.id_at(point).cloned());
-                let mut invalidation = state.set_hovered(hovered);
+                let hover_fraction = hovered
+                    .as_ref()
+                    .and_then(|id| self.hits.iter().rev().find(|hit| &hit.id == id))
+                    .map_or(0.5, |hit| {
+                        ((point.x - hit.rect.origin.x) / hit.rect.size.width.max(1.0))
+                            .clamp(0.0, 1.0)
+                    });
+                let pointer_invalidation = state.set_pointer_position(point, hover_fraction);
+                let mut invalidation = state.set_hovered(hovered).merge(pointer_invalidation);
                 if let Some(captured) = state.captured()
                     && let Some(message) = self.drag_message(captured, DragPhase::Moved, point)
                 {
@@ -3348,6 +3439,7 @@ impl<Message: Clone> UiFrame<Message> {
                 state
                     .set_pressed(None)
                     .merge(state.set_capture(None))
+                    .merge(state.set_hovered(None))
                     .merge(Invalidation::Paint)
             }
             UiEvent::Scroll { point, delta_y } => {

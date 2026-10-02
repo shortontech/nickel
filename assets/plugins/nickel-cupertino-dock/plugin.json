@@ -1,0 +1,122 @@
+{
+  "api_version": 1,
+  "id": "nickel-cupertino-dock",
+  "name": "Nickel Cupertino Dock",
+  "author": "Nickel",
+  "version": "0.1.0",
+  "entry": "main.js",
+  "stylesheet": "ui.css",
+  "composition": {
+    "api_version": 1,
+    "id": "nickel-cupertino-dock",
+    "version": "0.1.0",
+    "extends": "nickel-default",
+    "requires": {
+      "nickel-default": "^0.2"
+    },
+    "replaces": {
+      "shell": "./main.js#Shell",
+      "shell.taskbar": "./main.js#Taskbar"
+    }
+  },
+  "capabilities": [
+    "applications-launch",
+    "applications-pin",
+    "applications-read",
+    "features-read",
+    "on-screen-keyboard-read",
+    "on-screen-keyboard-show",
+    "projects-menu-show",
+    "tray-activate",
+    "tray-context",
+    "tray-read",
+    "windows-context",
+    "windows-focus",
+    "windows-read"
+  ],
+  "surfaces": [
+    {
+      "id": "taskbar",
+      "kind": "dock",
+      "width": 600,
+      "height": 112,
+      "bottom_offset": 10,
+      "output": "all"
+    },
+    {
+      "id": "settings",
+      "kind": "window",
+      "width": 1100,
+      "height": 800,
+      "initially_open": false
+    },
+    {
+      "id": "launcher",
+      "kind": "overlay",
+      "width": 608,
+      "height": 628,
+      "anchor": "bottom-left",
+      "offset_x": 8,
+      "offset_y": -112,
+      "initially_open": false
+    },
+    {
+      "id": "quick-settings",
+      "kind": "overlay",
+      "width": 420,
+      "height": 600,
+      "anchor": "top-right",
+      "passive": true,
+      "initially_open": false
+    },
+    {
+      "id": "notifications",
+      "kind": "overlay",
+      "width": 420,
+      "height": 180,
+      "anchor": "top-right",
+      "passive": true,
+      "initially_open": false
+    },
+    {
+      "id": "window-menu",
+      "kind": "window",
+      "width": 320,
+      "height": 400,
+      "anchor": "top-left",
+      "initially_open": false
+    },
+    {
+      "id": "volume-osd",
+      "kind": "overlay",
+      "width": 420,
+      "height": 96,
+      "anchor": "bottom-center",
+      "passive": true,
+      "initially_open": false
+    },
+    {
+      "id": "window-preview",
+      "kind": "overlay",
+      "width": 300,
+      "height": 214,
+      "initially_open": false
+    },
+    {
+      "id": "run",
+      "kind": "window",
+      "width": 620,
+      "height": 180,
+      "initially_open": false
+    },
+    {
+      "id": "keyboard",
+      "kind": "overlay",
+      "width": 1056,
+      "height": 640,
+      "anchor": "bottom-left",
+      "passive": true,
+      "initially_open": false
+    }
+  ]
+}

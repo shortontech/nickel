@@ -486,6 +486,7 @@ impl SoftwareRenderer {
     fn draw_command(&mut self, index: usize, command: &PaintCommand, clips: &mut Vec<Rect>) {
         let clip = *clips.last().expect("clip stack always has the surface");
         match command {
+            PaintCommand::BackdropBlur { .. } => {}
             PaintCommand::Fill { rect, color } | PaintCommand::OverlayFill { rect, color } => {
                 self.fill_round(physical_rect(*rect, self.scale), 0.0, 0b1111, *color, clip);
             }
@@ -1113,14 +1114,10 @@ impl SoftwareRenderer {
             .saturating_mul(bounds.size.height.ceil().max(0.0) as u64);
         self.for_pixels(bounds, |renderer, x, y| {
             let source_x =
-                (((x as f32 + 0.5 - rect.origin.x) / rect.size.width) * image.width() as f32)
-                    .floor()
-                    .clamp(0.0, image.width().saturating_sub(1) as f32) as u32;
+                ((x as f32 + 0.5 - rect.origin.x) / rect.size.width) * image.width() as f32 - 0.5;
             let source_y =
-                (((y as f32 + 0.5 - rect.origin.y) / rect.size.height) * image.height() as f32)
-                    .floor()
-                    .clamp(0.0, image.height().saturating_sub(1) as f32) as u32;
-            let pixel = image.get_pixel(source_x, source_y).0;
+                ((y as f32 + 0.5 - rect.origin.y) / rect.size.height) * image.height() as f32 - 0.5;
+            let pixel = bilinear_sample(image, source_x, source_y);
             renderer.blend(
                 px(x),
                 px(y),
@@ -1158,6 +1155,41 @@ impl SoftwareRenderer {
     }
 }
 
+fn bilinear_sample(image: &image::RgbaImage, x: f32, y: f32) -> [u8; 4] {
+    let max_x = image.width().saturating_sub(1) as f32;
+    let max_y = image.height().saturating_sub(1) as f32;
+    let x = x.clamp(0.0, max_x);
+    let y = y.clamp(0.0, max_y);
+    let x0 = x.floor() as u32;
+    let y0 = y.floor() as u32;
+    let x1 = (x0 + 1).min(image.width() - 1);
+    let y1 = (y0 + 1).min(image.height() - 1);
+    let tx = x - x0 as f32;
+    let ty = y - y0 as f32;
+    let weights = [
+        ((1.0 - tx) * (1.0 - ty), image.get_pixel(x0, y0).0),
+        (tx * (1.0 - ty), image.get_pixel(x1, y0).0),
+        ((1.0 - tx) * ty, image.get_pixel(x0, y1).0),
+        (tx * ty, image.get_pixel(x1, y1).0),
+    ];
+    let alpha = weights
+        .iter()
+        .map(|(weight, pixel)| weight * f32::from(pixel[3]))
+        .sum::<f32>();
+    let mut result = [0; 4];
+    result[3] = alpha.round().clamp(0.0, 255.0) as u8;
+    if alpha > 0.0 {
+        for channel in 0..3 {
+            let premultiplied = weights
+                .iter()
+                .map(|(weight, pixel)| weight * f32::from(pixel[channel]) * f32::from(pixel[3]))
+                .sum::<f32>();
+            result[channel] = (premultiplied / alpha).round().clamp(0.0, 255.0) as u8;
+        }
+    }
+    result
+}
+
 fn command_bounds(command: &PaintCommand) -> Option<Rect> {
     match command {
         PaintCommand::Fill { rect, .. }
@@ -1171,7 +1203,9 @@ fn command_bounds(command: &PaintCommand) -> Option<Rect> {
         PaintCommand::Text { bounds, .. }
         | PaintCommand::StyledText { bounds, .. }
         | PaintCommand::Image { bounds, .. } => Some(*bounds),
-        PaintCommand::PushClip(_) | PaintCommand::PopClip => None,
+        PaintCommand::BackdropBlur { .. } | PaintCommand::PushClip(_) | PaintCommand::PopClip => {
+            None
+        }
     }
 }
 
@@ -1389,7 +1423,23 @@ fn px(value: u32) -> u32 {
 mod tests {
     use nickel_core::resource_owner::{DependencyOwnerKind, dependency_owner_diagnostics};
 
-    use super::{PaintCommand, Pixel, Rect, SoftwareRenderer, TextAlign, command_intersects_clip};
+    use super::{
+        PaintCommand, Pixel, Rect, SoftwareRenderer, TextAlign, bilinear_sample,
+        command_intersects_clip,
+    };
+
+    #[test]
+    fn image_scaling_bilinearly_filters_premultiplied_alpha() {
+        let image = image::RgbaImage::from_fn(2, 1, |x, _| {
+            if x == 0 {
+                image::Rgba([255, 255, 255, 255])
+            } else {
+                image::Rgba([0, 0, 0, 0])
+            }
+        });
+        let sample = bilinear_sample(&image, 0.5, 0.0);
+        assert_eq!(sample, [255, 255, 255, 128]);
+    }
 
     #[test]
     fn rounded_border_preserves_center_and_corner_background_at_multiple_scales() {
