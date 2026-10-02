@@ -1182,7 +1182,7 @@ fn apply_transient_state_with_parent<Message>(
     }
 }
 
-fn scale_explicit_geometry<Message>(element: &mut Element<Message>, scale: f32) {
+pub(super) fn scale_explicit_geometry<Message>(element: &mut Element<Message>, scale: f32) {
     if let Length::Px(width) = element.style.width {
         element.style.width = Length::Px(width * scale);
     }

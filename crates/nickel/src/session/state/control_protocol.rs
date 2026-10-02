@@ -1046,6 +1046,7 @@ impl NickelSession {
                     .as_ref()
                     .map(crate::session::backend::udev::UdevData::identify_badge_diagnostics)
                     .unwrap_or_default();
+                let shell_timer = self.internal_shell_timer_counters();
                 ServerMessage::CacheDiagnostics(Box::new(
                     nickel_session_protocol::CacheDiagnostics {
                         internal_ui_surfaces: u16::try_from(internal_ui.surfaces)
@@ -1083,6 +1084,11 @@ impl NickelSession {
                         )
                         .unwrap_or(u16::MAX),
                         internal_shell_wallpaper_bytes: shell_images.wallpaper_bytes as u64,
+                        internal_shell_timer_armed: shell_timer.armed,
+                        internal_shell_timer_cancelled: shell_timer.cancelled,
+                        internal_shell_timer_fired: shell_timer.fired,
+                        internal_shell_timer_polls: shell_timer.polls,
+                        internal_shell_timer_redraw_requests: shell_timer.redraw_requests,
                         preview_entries: u16::try_from(self.preview_frames.len())
                             .unwrap_or(u16::MAX),
                         native_preview_work: {

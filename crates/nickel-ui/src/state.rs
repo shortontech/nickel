@@ -291,9 +291,8 @@ pub struct UiStateStore {
 #[derive(Clone, Copy, Debug)]
 struct GeometryAnimation {
     value: f32,
-    start: f32,
     target: f32,
-    started_at: Instant,
+    updated_at: Instant,
 }
 
 impl Default for UiStateStore {
@@ -626,34 +625,33 @@ impl UiStateStore {
             .entry(id)
             .or_insert(GeometryAnimation {
                 value: 1.0,
-                start: 1.0,
                 target,
-                started_at: self.geometry_animation_frame,
+                updated_at: self.geometry_animation_frame,
             });
         if duration_ms <= 0.0 {
             animation.value = target;
-            animation.start = target;
             animation.target = target;
             return target;
         }
-        // Drive transitions from elapsed time, not an assumed 16 ms rebuild.
-        // Presentation cadence can then follow a 60, 120, or 144 Hz output
-        // without changing the perceived duration of the animation.
+        // Drive convergence from elapsed time, not an assumed frame cadence.
+        // A moving pointer may retarget every layout as magnified geometry
+        // shifts; retaining the previous timestamp prevents those small target
+        // changes from restarting the transition indefinitely.
         let target_changed = (animation.target - target).abs() > f32::EPSILON;
-        if target_changed {
-            animation.start = animation.value;
-            animation.target = target;
-            animation.started_at = self.geometry_animation_frame;
-        }
-        let elapsed_ms = self
-            .geometry_animation_frame
-            .saturating_duration_since(animation.started_at)
-            .as_secs_f32()
-            * 1_000.0;
-        let progress = (elapsed_ms / duration_ms).clamp(0.0, 1.0);
-        let eased = 1.0 - (1.0 - progress).powi(3);
-        animation.value = animation.start + (animation.target - animation.start) * eased;
-        if progress >= 1.0 {
+        let was_settled = (animation.value - animation.target).abs() < 0.005;
+        let elapsed_ms = if target_changed && was_settled {
+            0.0
+        } else {
+            self.geometry_animation_frame
+                .saturating_duration_since(animation.updated_at)
+                .as_secs_f32()
+                * 1_000.0
+        };
+        animation.updated_at = self.geometry_animation_frame;
+        animation.target = target;
+        let alpha = 1.0 - (-5.0 * elapsed_ms / duration_ms).exp();
+        animation.value += (target - animation.value) * alpha.clamp(0.0, 1.0);
+        if (animation.value - target).abs() < 0.005 {
             animation.value = target;
         } else {
             self.geometry_animation_active = true;

@@ -4,8 +4,8 @@ window.cupertino-dock {
     width: max-content;
     height: 100%;
     bottom: 10px;
-    /* Reserve transparent overflow for neighbor magnification and the shadow. */
-    padding: 8px 42px 6px;
+    /* Max-content reserves the animation envelope; these insets style the shadow. */
+    padding: 8px 16px 6px;
     align-items: end;
     background: transparent;
 }
@@ -58,4 +58,4 @@ button.dock-button:active, button.dock-utility:active, button.dock-clock:active 
     border-color: #fefefe8f;
 }
 
-/* Its shelf and surface use intrinsic sizing rather than an icon-count formula. */
+/* Intrinsic content plus effects determine shelf and surface sizing. */

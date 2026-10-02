@@ -899,6 +899,16 @@ pub struct CacheDiagnostics {
     pub internal_shell_wallpaper_entries: u16,
     #[serde(default)]
     pub internal_shell_wallpaper_bytes: u64,
+    #[serde(default)]
+    pub internal_shell_timer_armed: u64,
+    #[serde(default)]
+    pub internal_shell_timer_cancelled: u64,
+    #[serde(default)]
+    pub internal_shell_timer_fired: u64,
+    #[serde(default)]
+    pub internal_shell_timer_polls: u64,
+    #[serde(default)]
+    pub internal_shell_timer_redraw_requests: u64,
     pub preview_entries: u16,
     pub preview_capacity: u16,
     pub preview_bytes: u64,

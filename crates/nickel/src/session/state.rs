@@ -7132,8 +7132,10 @@ impl NickelSession {
                 #[cfg(feature = "backend-udev")]
                 self.schedule_native_ui_frame();
             }
-            // Keep existing application deadlines; passive hover has no effects
-            // requiring an immediate session snapshot or plugin data refresh.
+            // Passive hover may start a presentation-only animation. Arm its
+            // application deadline without forcing a session snapshot or data
+            // refresh on every pointer sample.
+            self.schedule_internal_shell_deadline();
             return;
         }
         if plugin_surfaces_changed {
@@ -7149,6 +7151,7 @@ impl NickelSession {
                 #[cfg(feature = "backend-udev")]
                 self.schedule_native_ui_frame();
             }
+            self.schedule_internal_shell_deadline();
             return;
         }
         changed.extend(self.pending_desktop_scenes.drain());
