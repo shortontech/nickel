@@ -252,6 +252,9 @@ declare function useApplications(): ReadonlyArray<Readonly<NickelApplication>>;
 declare function useApplications<T>(selector: (applications: ReadonlyArray<Readonly<NickelApplication>>) => T): T;
 declare function useNotifications(): Readonly<NickelNotificationSnapshot>;
 declare function useNotifications<T>(selector: (notifications: Readonly<NickelNotificationSnapshot>) => T): T;
+declare function useWorkspaces(): Readonly<NickelWorkspaceSnapshot>;
+declare function useWorkspaces<T>(selector: (workspaces: Readonly<NickelWorkspaceSnapshot>) => T): T;
+declare function useWorkspace(): Readonly<{id:string;active:boolean}>|null;
 interface NickelThemePalette {
     readonly background:NickelColor; readonly panel:NickelColor; readonly surface:NickelColor;
     readonly surfaceHover:NickelColor; readonly text:NickelColor; readonly muted:NickelColor;
@@ -403,7 +406,7 @@ interface NickelPluginStatus {
 
 /** Read clients return copies; missing grants produce empty or unavailable snapshots. */
 interface NickelContribution {readonly id:string;readonly provider:string;readonly version:string;readonly key:string;readonly component:NickelComponent}
-interface NickelWorkspaceSnapshot extends NickelAvailability {revision?:string;workspaces:ReadonlyArray<Readonly<{id:string;active:boolean}>>;activeWorkspace?:string|null;operations:Readonly<{switch?:boolean;create?:boolean;remove?:boolean}>}
+interface NickelWorkspaceSnapshot extends NickelAvailability {readonly generation:number;readonly writable:boolean;revision:string|null;workspaces:ReadonlyArray<Readonly<{id:string;active:boolean}>>;activeWorkspace:string|null;operations:Readonly<{switch:boolean;create:boolean;remove:boolean}>}
 type NickelProjectionMode = "internal"|"duplicate"|"extend"|"external";
 interface NickelClockSnapshot {unixMilliseconds:number;utcOffsetMinutes:number}
 interface NickelAvailability { available: boolean; reason?: string | null }

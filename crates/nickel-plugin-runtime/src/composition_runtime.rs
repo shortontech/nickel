@@ -3194,6 +3194,60 @@ mod tests {
     }
 
     #[test]
+    fn composition_host_publishes_workspace_writability_without_revision_change() {
+        let package = package(
+            "workspace-shell",
+            "globalThis.workspaceObservation=null;\nexport function Taskbar(){const value=useWorkspaces();workspaceObservation=value;return h(Text,null,(useWorkspace()?.id??'none')+':'+String(value.writable));}\nexport function QuickSettings(){return h(Text,null,'settings');}\nexport default Taskbar;",
+            None,
+        );
+        let owner = PackageIdentity {
+            id: "workspace-shell".into(),
+            version: package
+                .manifest
+                .composition
+                .as_ref()
+                .unwrap()
+                .version
+                .parse()
+                .unwrap(),
+        };
+        let first = serde_json::json!({"workspaces":{"available":true,"revision":"same","workspaces":[{"id":"1","active":true}],"activeWorkspace":"1","operations":{"switch":true}}});
+        let mut host = ShellCompositionRuntime::new(
+            &BTreeMap::from([("workspace-shell".into(), package)]),
+            "workspace-shell",
+            &BTreeMap::from([(owner.clone(), first)]),
+        )
+        .unwrap();
+        let mount = host
+            .mount(&host.component("shell.taskbar").unwrap())
+            .unwrap();
+        assert!(
+            host.render(&mount, &serde_json::json!({}))
+                .unwrap()
+                .node
+                .to_string()
+                .contains("1:true")
+        );
+        host.update_snapshot(&owner,&serde_json::json!({"workspaces":{"available":true,"revision":"same","workspaces":[{"id":"1","active":true}],"activeWorkspace":"1","operations":{}}})).unwrap();
+        assert!(
+            host.render(&mount, &serde_json::json!({}))
+                .unwrap()
+                .node
+                .to_string()
+                .contains("1:false")
+        );
+        let runtime = host.shared_owner_runtime(&owner).unwrap();
+        assert!(
+            runtime
+                .borrow_mut()
+                .eval_json::<bool>(
+                    "workspaceObservation.generation===2 && workspaceObservation.revision==='same'"
+                )
+                .unwrap()
+        );
+    }
+
+    #[test]
     fn composition_host_publishes_effective_theme_independently_of_other_stores() {
         let package = package(
             "theme-shell",

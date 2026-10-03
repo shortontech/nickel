@@ -281,6 +281,9 @@ impl JsxRuntime {
         {
             self.set_notifications_store(notifications)?;
         }
+        if let Some(workspaces) = data.get("workspaces") {
+            self.set_workspaces_store(workspaces)?;
+        }
         // Effective presentation state is globally readable and deliberately
         // separate from the capability-gated appearance configuration client.
         if let Some(appearance) = data.get("appearance") {
@@ -406,6 +409,25 @@ impl JsxRuntime {
         setter
             .as_callable()
             .ok_or("notifications store setter is not callable")?
+            .call(&JsValue::undefined(), &[snapshot], &mut self.context)
+            .map(|changed| changed.to_boolean())
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn set_workspaces_store(&mut self, snapshot: &Value) -> Result<bool, String> {
+        if self.invalidated {
+            return Err("runtime checkpoint was invalidated".into());
+        }
+        let snapshot =
+            JsValue::from_json(snapshot, &mut self.context).map_err(|error| error.to_string())?;
+        let setter = self
+            .context
+            .global_object()
+            .get(js_string!("__nickelSetWorkspacesStore"), &mut self.context)
+            .map_err(|error| error.to_string())?;
+        setter
+            .as_callable()
+            .ok_or("workspaces store setter is not callable")?
             .call(&JsValue::undefined(), &[snapshot], &mut self.context)
             .map(|changed| changed.to_boolean())
             .map_err(|error| error.to_string())
@@ -1200,6 +1222,59 @@ mod tests {
                 &serde_json::json!({"notification":null,"history":[],"visible":true}),
             )
             .unwrap();
+        assert!(
+            !rejected
+                .eval_json::<bool>("JSON.parse(__nickelReconciliationRequest()).requested")
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn workspaces_store_separates_observation_generation_from_mutation_revision() {
+        let mut runtime=super::JsxRuntime::new("globalThis.seen=[];function App(){const all=useWorkspaces();const active=useWorkspace();seen.push({all,active});return h(Text,null,active?.id??'none')}",None).unwrap();
+        let first = serde_json::json!({"available":true,"revision":"topology-1","workspaces":[{"id":"1","active":true},{"id":"2","active":false}],"activeWorkspace":"1","operations":{"switch":true,"create":true,"remove":true}});
+        assert!(runtime.set_workspaces_store(&first).unwrap());
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        assert!(!runtime.set_workspaces_store(&first).unwrap());
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        assert!(runtime.eval_json::<bool>("seen[0].all===seen[1].all && seen[0].active===seen[1].active && Object.isFrozen(seen[0].all) && Object.isFrozen(seen[0].all.workspaces[0])").unwrap());
+        let locked = serde_json::json!({"available":true,"revision":"topology-1","workspaces":[{"id":"1","active":true},{"id":"2","active":false}],"activeWorkspace":"1","operations":{}});
+        assert!(runtime.set_workspaces_store(&locked).unwrap());
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        assert!(runtime.eval_json::<bool>("seen[1].active===seen[2].active && seen[2].all.revision==='topology-1' && seen[2].all.generation===2 && seen[2].all.writable===false").unwrap());
+        let switched = serde_json::json!({"available":true,"revision":"topology-2","workspaces":[{"id":"1","active":false},{"id":"2","active":true}],"activeWorkspace":"2","operations":{"switch":true}});
+        runtime.set_workspaces_store(&switched).unwrap();
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        assert_eq!(
+            runtime
+                .eval_json::<String>("JSON.stringify(seen[3].active.id)")
+                .unwrap(),
+            "2"
+        );
+    }
+
+    #[test]
+    fn workspace_updates_are_isolated_and_rejected_subscriptions_roll_back() {
+        let source = "globalThis.runs={app:0,workspace:0,windows:0,sibling:0};function Workspace(){runs.workspace++;return h(Text,null,useWorkspace()?.id??'none')}function Windows(){runs.windows++;return h(Text,null,String(useWindows().length))}function Sibling(){runs.sibling++;return h(Text,null,'stable')}function App(){runs.app++;return h(Window,{},h(Workspace),h(Windows),h(Sibling))}";
+        let mut runtime = super::JsxRuntime::new(source, None).unwrap();
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        runtime.set_workspaces_store(&serde_json::json!({"available":true,"revision":"one","workspaces":[{"id":"1","active":true}],"operations":{}})).unwrap();
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        assert_eq!(
+            runtime
+                .eval_json::<serde_json::Value>("JSON.stringify(runs)")
+                .unwrap(),
+            serde_json::json!({"app":1,"workspace":2,"windows":1,"sibling":1})
+        );
+        let mut rejected = super::JsxRuntime::new(
+            "function App(){return h(Text,null,String(useWorkspaces().available))}",
+            None,
+        )
+        .unwrap();
+        rejected
+            .render("__nickelRender()", |_| Err::<(), _>("reject".into()))
+            .unwrap_err();
+        rejected.set_workspaces_store(&serde_json::json!({"available":false,"reason":"absent","workspaces":[],"operations":{}})).unwrap();
         assert!(
             !rejected
                 .eval_json::<bool>("JSON.parse(__nickelReconciliationRequest()).requested")

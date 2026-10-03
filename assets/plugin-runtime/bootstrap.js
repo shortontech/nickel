@@ -104,6 +104,9 @@ let __surfaceStore = {generation:0, snapshot:Object.freeze({
 let __windowsStore = {generation:0, snapshot:Object.freeze([])};
 let __applicationsStore = {generation:0, snapshot:Object.freeze([])};
 let __notificationsStore = {generation:0, snapshot:Object.freeze({notification:null,history:Object.freeze([]),visible:false})};
+let __workspacesStore = {generation:0, snapshot:Object.freeze({generation:0,available:false,reason:null,
+    writable:false,revision:null,workspaces:Object.freeze([]),activeWorkspace:null,
+    operations:Object.freeze({switch:false,create:false,remove:false})})};
 let __themeStore = {generation:0, snapshot:Object.freeze({
     generation:0, mode:'unknown', accent:null, accentHue:null, accentIntensity:null,
     reducedMotion:null, reducedTransparency:null, palette:null
@@ -836,6 +839,68 @@ function useNotifications(selector) {
     entry.generation=__notificationsStore.generation;
     return entry.value;
 }
+
+function __nickelWorkspaceEqual(left,right) { return left.id===right.id && left.active===right.active; }
+function __nickelWorkspaceSnapshot(value,generation) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)
+        || !Array.isArray(value.workspaces) || value.workspaces.length>32)
+        throw Error('invalid bounded workspaces snapshot');
+    const previous=new Map(__workspacesStore.snapshot.workspaces.map(workspace=>[workspace.id,workspace])), seen=new Set();
+    const workspaces=Object.freeze(value.workspaces.map(workspace=>{
+        if (!workspace || typeof workspace!=='object' || Array.isArray(workspace)
+            || typeof workspace.id!=='string' || !workspace.id.length || workspace.id.length>64 || seen.has(workspace.id))
+            throw Error('invalid public workspace');
+        seen.add(workspace.id);
+        const copy=Object.freeze({id:workspace.id,active:workspace.active===true}), retained=previous.get(copy.id);
+        return retained&&__nickelWorkspaceEqual(retained,copy)?retained:copy;
+    }));
+    const available=value.available===true;
+    const reason=value.reason===undefined||value.reason===null?null
+        :typeof value.reason==='string'&&value.reason.length<=480?value.reason
+        :(()=>{throw Error('invalid workspace reason')})();
+    const revision=value.revision===undefined||value.revision===null?null
+        :typeof value.revision==='string'&&value.revision.length<=128?value.revision
+        :(()=>{throw Error('invalid workspace revision')})();
+    const activeWorkspace=value.activeWorkspace===undefined||value.activeWorkspace===null
+        ?workspaces.find(workspace=>workspace.active)?.id??null
+        :typeof value.activeWorkspace==='string'&&seen.has(value.activeWorkspace)?value.activeWorkspace
+        :(()=>{throw Error('invalid active workspace')})();
+    const source=value.operations??{};
+    if (!source || typeof source!=='object' || Array.isArray(source)) throw Error('invalid workspace operations');
+    const operations=Object.freeze({switch:source.switch===true,create:source.create===true,remove:source.remove===true});
+    return Object.freeze({generation,available,reason,writable:operations.switch||operations.create||operations.remove,
+        revision,workspaces,activeWorkspace,operations});
+}
+function __nickelSetWorkspacesStore(value) {
+    const generation=__workspacesStore.generation+1, snapshot=__nickelWorkspaceSnapshot(value,generation), previous=__workspacesStore.snapshot;
+    const unchanged=previous.available===snapshot.available&&previous.reason===snapshot.reason
+        &&previous.writable===snapshot.writable&&previous.revision===snapshot.revision
+        &&previous.activeWorkspace===snapshot.activeWorkspace
+        &&previous.operations.switch===snapshot.operations.switch&&previous.operations.create===snapshot.operations.create
+        &&previous.operations.remove===snapshot.operations.remove&&previous.workspaces.length===snapshot.workspaces.length
+        &&previous.workspaces.every((workspace,index)=>workspace===snapshot.workspaces[index]);
+    if (unchanged) return false;
+    if (__pendingRender!==null||__pendingEvent!==null) throw Error('cannot publish changed workspaces store during a render or event');
+    const retainedOperations=previous.operations.switch===snapshot.operations.switch&&previous.operations.create===snapshot.operations.create
+        &&previous.operations.remove===snapshot.operations.remove?previous.operations:snapshot.operations;
+    const retained=Object.freeze({...snapshot,operations:retainedOperations});
+    __workspacesStore={generation,snapshot:retained};
+    __nickelForEachSurfaceHooks((hooks,dirty)=>{for(const [owner,slots] of hooks)for(const entry of slots){
+        if(entry?.kind!=='workspaces-store')continue;
+        try{const selected=entry.selector?entry.selector(retained):retained;entry.storeError=undefined;if(!Object.is(selected,entry.value))dirty.add(owner);}
+        catch(error){entry.storeError=error;dirty.add(owner);}
+    }});return true;
+}
+function useWorkspaces(selector) {
+    if(__currentComponent===null)throw Error('useWorkspaces requires a component');
+    if(selector!==undefined&&typeof selector!=='function')throw TypeError('useWorkspaces selector must be a function');
+    const slot=__hookIndex++,hooks=__componentHooks.get(__currentComponent),normalized=selector??null;let entry=hooks[slot];
+    if(!entry||(entry.kind==='workspaces-store'&&entry.selector!==normalized))hooks[slot]=entry={kind:'workspaces-store',selector:normalized,value:undefined,generation:0};
+    if(entry.kind!=='workspaces-store')throw Error('hook order changed');
+    entry.storeError=undefined;entry.value=normalized?normalized(__workspacesStore.snapshot):__workspacesStore.snapshot;entry.generation=__workspacesStore.generation;return entry.value;
+}
+const __nickelSelectWorkspace=snapshot=>snapshot.workspaces.find(workspace=>workspace.id===snapshot.activeWorkspace)??null;
+function useWorkspace(){return useWorkspaces(__nickelSelectWorkspace);}
 
 const __nickelThemePaletteFields = ['background','panel','surface','surfaceHover','text','muted',
     'accent','accentSoft','complement'];
