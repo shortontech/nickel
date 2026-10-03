@@ -167,7 +167,7 @@ impl JsxModuleGraph {
 function __nickelComponentProxy(selection) {
     const local = __nickelLocalComponents[selection.contract ? 'export:' + selection.contract : 'contribution:' + selection.contribution];
     if (local) return __nickelPublicComponents.get(local);
-    return function HostComponent(props) {
+    return __nickelMarkNonRetainedComponent(function HostComponent(props) {
         function encode(value) {
             if (__nickelIsComponentDeclaration(value)) return encode(__nickelResolveVirtual(value));
             if (__nickelIsContext(value)) throw TypeError('contexts cannot cross package ownership boundaries; pass bounded values as props');
@@ -185,7 +185,7 @@ function __nickelComponentProxy(selection) {
         }
         props = encode(props);
         return __nickelVirtualNativeNode({kind:'__packageComponent', ...selection, props});
-    };
+    });
 }
 function __nickelHydrateComponentProps(value) {
     if (Array.isArray(value)) return value.map(__nickelHydrateComponentProps);

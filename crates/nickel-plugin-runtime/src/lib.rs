@@ -293,6 +293,159 @@ impl JsxRuntime {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn local_leaf_update_executes_only_the_dirty_component() {
+        let source = r#"
+            globalThis.runs = {app:0, branch:0, leaf:0, sibling:0};
+            function Leaf() { runs.leaf++; const [value,setValue]=useState(0); return h(Button,{onClick:()=>setValue(value+1)},String(value)); }
+            function Sibling() { runs.sibling++; return h(Text,{},'stable'); }
+            function Branch() { runs.branch++; return h(Column,{},h(Leaf),h(Sibling)); }
+            function App() { runs.app++; return h(Window,{},h(Branch)); }
+        "#;
+        let mut runtime = super::JsxRuntime::new(source, None).unwrap();
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        let outcome = runtime
+            .dispatch_scheduled("__nickelDispatchBatchScheduled([[0,null]])", |node| {
+                Ok(node.clone())
+            })
+            .unwrap();
+        assert!(matches!(outcome, super::ScheduledRender::Rendered { .. }));
+        runtime.finish_event(true).unwrap();
+        assert_eq!(
+            runtime
+                .eval_json::<serde_json::Value>("JSON.stringify(runs)")
+                .unwrap(),
+            serde_json::json!({"app":1,"branch":1,"leaf":2,"sibling":1})
+        );
+    }
+
+    #[test]
+    fn keyed_siblings_retain_outputs_when_one_owner_changes() {
+        let source = r#"
+            globalThis.runs = {left:0, right:0};
+            function Item({name}) {
+                runs[name]++;
+                const [value,setValue]=useState(0);
+                return h(Button,{onClick:()=>setValue(value+1)},`${name}:${value}`);
+            }
+            function App() { return h(Window,{},h(Item,{key:'left',name:'left'}),h(Item,{key:'right',name:'right'})); }
+        "#;
+        let mut runtime = super::JsxRuntime::new(source, None).unwrap();
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        runtime
+            .dispatch_scheduled("__nickelDispatchBatchScheduled([[0,null]])", |_| Ok(()))
+            .unwrap();
+        runtime.finish_event(true).unwrap();
+        assert_eq!(
+            runtime
+                .eval_json::<serde_json::Value>("JSON.stringify(runs)")
+                .unwrap(),
+            serde_json::json!({"left":2,"right":1})
+        );
+    }
+
+    #[test]
+    fn reducer_and_surface_store_updates_execute_only_their_owners() {
+        let source = r#"
+            globalThis.runs = {app:0, reducer:0, store:0, sibling:0};
+            function ReducerLeaf() {
+                runs.reducer++;
+                const [value,dispatch]=useReducer(value=>value+1,0);
+                return h(Button,{onClick:()=>dispatch()},String(value));
+            }
+            function StoreLeaf() { runs.store++; return h(Text,{},String(useSurface().logicalSize?.width ?? 0)); }
+            function Sibling() { runs.sibling++; return h(Text,{},'stable'); }
+            function App() { runs.app++; return h(Window,{},h(ReducerLeaf),h(StoreLeaf),h(Sibling)); }
+        "#;
+        let mut runtime = super::JsxRuntime::new(source, None).unwrap();
+        runtime
+            .set_surface_store(
+                "mount",
+                &serde_json::json!({"id":"main","kind":"window","width":640,"height":480}),
+            )
+            .unwrap();
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        runtime
+            .dispatch_scheduled("__nickelDispatchBatchScheduled([[0,null]])", |_| Ok(()))
+            .unwrap();
+        runtime.finish_event(true).unwrap();
+        runtime
+            .set_surface_store(
+                "mount",
+                &serde_json::json!({"id":"main","kind":"window","width":800,"height":480}),
+            )
+            .unwrap();
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        assert_eq!(
+            runtime
+                .eval_json::<serde_json::Value>("JSON.stringify(runs)")
+                .unwrap(),
+            serde_json::json!({"app":1,"reducer":2,"store":2,"sibling":1})
+        );
+    }
+
+    #[test]
+    fn provider_change_executes_consumers_but_not_unrelated_siblings() {
+        let source = r#"
+            const Value = createContext('cold');
+            globalThis.runs = {app:0, consumer:0, sibling:0};
+            function Consumer() { runs.consumer++; return h(Text,{},useContext(Value)); }
+            function Sibling() { runs.sibling++; return h(Text,{},'stable'); }
+            function App() {
+                runs.app++;
+                const [value,setValue]=useState('cold');
+                return h(Window,{},h(Button,{onClick:()=>setValue('warm')},'change'),
+                    h(Value.Provider,{value},h(Consumer),h(Sibling)));
+            }
+        "#;
+        let mut runtime = super::JsxRuntime::new(source, None).unwrap();
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        let outcome = runtime
+            .dispatch_scheduled("__nickelDispatchBatchScheduled([[0,null]])", |node| {
+                Ok(node.clone())
+            })
+            .unwrap();
+        let super::ScheduledRender::Rendered { value, .. } = outcome else {
+            panic!("provider update must render");
+        };
+        runtime.finish_event(true).unwrap();
+        assert!(value.to_string().contains("warm"));
+        assert_eq!(
+            runtime
+                .eval_json::<serde_json::Value>("JSON.stringify(runs)")
+                .unwrap(),
+            serde_json::json!({"app":2,"consumer":2,"sibling":1})
+        );
+    }
+
+    #[test]
+    fn incrementally_resolved_output_matches_a_cold_render() {
+        let source = r#"
+            globalThis.initial ??= 0;
+            function Leaf() { const [value,setValue]=useState(initial); return h(Button,{onClick:()=>setValue(value+1)},String(value)); }
+            function Stable() { return h(Text,{className:'stable'},'same'); }
+            function App() { return h(Window,{className:'root'},h(Leaf),h(Stable)); }
+        "#;
+        let mut incremental = super::JsxRuntime::new(source, None).unwrap();
+        incremental.render("__nickelRender()", |_| Ok(())).unwrap();
+        let updated = incremental
+            .dispatch_scheduled("__nickelDispatchBatchScheduled([[0,null]])", |node| {
+                Ok(node.clone())
+            })
+            .unwrap();
+        incremental.finish_event(true).unwrap();
+        let super::ScheduledRender::Rendered { value: updated, .. } = updated else {
+            panic!("leaf update must render");
+        };
+
+        let mut cold = super::JsxRuntime::new(source, None).unwrap();
+        cold.eval("initial = 1").unwrap();
+        let expected = cold
+            .render("__nickelRender()", |node| Ok(node.clone()))
+            .unwrap();
+        assert_eq!(updated, expected);
+    }
+
+    #[test]
     fn virtual_event_bindings_are_opaque_until_materialized() {
         let source = r#"
             globalThis.virtualNode = null;

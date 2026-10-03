@@ -77,6 +77,7 @@ const MenuItem = 'menu-item';
 const __componentIds = new WeakMap();
 let __nextComponentId = 0;
 let __componentHooks = new Map();
+let __componentRecords = new Map();
 let __visitedComponents = new Set();
 let __componentChildren = new Map();
 let __currentComponent = null;
@@ -85,6 +86,8 @@ let __handlers = [];
 let __previousHandlers = [];
 const __handlerBindings = new WeakSet();
 const __virtualNativeNodes = new WeakSet();
+const __nonRetainedComponents = new WeakSet();
+let __incrementalRender = false;
 let __effects = [];
 let __listKeyErrors = [];
 let __pendingRender = null;
@@ -663,6 +666,7 @@ function __nickelSelectSurface(id) {
     if (id === __activeSurface) return;
     if (__activeSurface) __surfaceStates.set(__activeSurface, {
         hooks: __componentHooks,
+        records: __componentRecords,
         handlers: __handlers,
         previousHandlers: __previousHandlers,
         effects: __effects,
@@ -672,6 +676,7 @@ function __nickelSelectSurface(id) {
     });
     const state = __surfaceStates.get(id);
     __componentHooks = state?.hooks ?? new Map();
+    __componentRecords = state?.records ?? new Map();
     __handlers = state?.handlers ?? [];
     __previousHandlers = state?.previousHandlers ?? [];
     __effects = state?.effects ?? [];
@@ -698,6 +703,7 @@ function __nickelDropSurface(id) {
     __surfaceApps.delete(id);
     if (id !== __activeSurface) return;
     __componentHooks = new Map();
+    __componentRecords = new Map();
     __handlers = [];
     __previousHandlers = [];
     __effects = [];
@@ -906,6 +912,37 @@ function __nickelIsComponentDeclaration(value) {
     return value !== null && typeof value === 'object' && __componentDeclarations.has(value);
 }
 
+function __nickelMarkNonRetainedComponent(component) {
+    __nonRetainedComponents.add(component);
+    return component;
+}
+
+function __nickelSameDeclaration(previous, next) {
+    if (!previous || previous.component !== next.component || previous.key !== next.key) return false;
+    const left = previous.props ?? {};
+    const right = next.props ?? {};
+    const leftKeys = Object.keys(left);
+    const rightKeys = Object.keys(right);
+    if (leftKeys.length !== rightKeys.length) return false;
+    for (const key of leftKeys)
+        if (!Object.prototype.hasOwnProperty.call(right, key) || !Object.is(left[key], right[key]))
+            return false;
+    if (previous.children.length !== next.children.length) return false;
+    return previous.children.every((child, index) => Object.is(child, next.children[index]));
+}
+
+function __nickelDirtyAtOrBelow(path) {
+    if (!__incrementalRender) return true;
+    for (const dirty of __dirtyComponents)
+        if (dirty === path || dirty.startsWith(`${path}/`)) return true;
+    return false;
+}
+
+function __nickelMarkRetainedVisited(path) {
+    for (const retained of __componentRecords.keys())
+        if (retained === path || retained.startsWith(`${path}/`)) __visitedComponents.add(retained);
+}
+
 function __nickelResolveDeclaration(declaration) {
     const kind = declaration.component;
     let type = __componentIds.get(kind);
@@ -923,13 +960,20 @@ function __nickelResolveDeclaration(declaration) {
     if (__visitedComponents.has(path)) throw Error(`duplicate component key ${identity}`);
     __visitedComponents.add(path);
     if (!__componentHooks.has(path)) __componentHooks.set(path, []);
+    const retained = __componentRecords.get(path);
+    const execute = !__incrementalRender || !retained || __nonRetainedComponents.has(kind)
+        || __dirtyComponents.has(path) || !__nickelSameDeclaration(retained.declaration, declaration);
+    if (!execute && !__nickelDirtyAtOrBelow(path)) {
+        __nickelMarkRetainedVisited(path);
+        return retained.output;
+    }
     const previous = __currentComponent;
     const previousIndex = __hookIndex;
     __currentComponent = path;
     __hookIndex = 0;
     try {
         const context = __contextProviders.get(kind);
-        let result;
+        let raw;
         if (context) {
             const values = __contextValues.get(context) ?? [];
             if (!__contextValues.has(context)) __contextValues.set(context, values);
@@ -941,26 +985,34 @@ function __nickelResolveDeclaration(declaration) {
                         __dirtyComponents.add(owner);
             values.push({provider:path, value});
             try {
-                result = declaration.children.length === 1 ? declaration.children[0] : declaration.children;
-                result = __nickelResolveVirtual(result);
+                raw = declaration.children.length === 1 ? declaration.children[0] : declaration.children;
+                const result = __nickelResolveVirtual(raw);
+                const output = __nickelApplyDeclarationKey(declaration, result);
+                __componentRecords.set(path, {kind, declaration, raw, output});
+                return output;
             } finally {
                 values.pop();
                 if (!values.length) __contextValues.delete(context);
             }
         } else {
-            result = kind({...declaration.props, children:declaration.children});
-            result = __nickelResolveVirtual(result);
+            raw = execute ? kind({...declaration.props, children:declaration.children}) : retained.raw;
+            const result = __nickelResolveVirtual(raw);
+            if (execute && __hookIndex !== __componentHooks.get(path).length) throw Error('hook order changed');
+            const output = __nickelApplyDeclarationKey(declaration, result);
+            __componentRecords.set(path, {kind, declaration, raw, output});
+            return output;
         }
-        if (__hookIndex !== __componentHooks.get(path).length) throw Error('hook order changed');
-        const node = result;
-        if (declaration.key === undefined || node === null || typeof node !== 'object' || Array.isArray(node))
-            return node;
-        const keyed = {...node, key:declaration.key};
-        return __virtualNativeNodes.has(node) ? __nickelVirtualNativeNode(keyed) : keyed;
     } finally {
         __currentComponent = previous;
         __hookIndex = previousIndex;
     }
+}
+
+function __nickelApplyDeclarationKey(declaration, node) {
+    if (declaration.key === undefined || node === null || typeof node !== 'object' || Array.isArray(node))
+        return node;
+    const keyed = {...node, key:declaration.key};
+    return __virtualNativeNodes.has(node) ? __nickelVirtualNativeNode(keyed) : keyed;
 }
 
 function __nickelResolveVirtual(value) {
@@ -1085,10 +1137,11 @@ function h(kind, props, ...children) {
 
 function __nickelRollbackRender() {
     if (__pendingRender !== null) {
-        const {handlers, previousHandlers, hooks, values, effectsLength, dirty} = __pendingRender;
+        const {handlers, previousHandlers, hooks, records, values, effectsLength, dirty} = __pendingRender;
         __handlers = handlers;
         __previousHandlers = previousHandlers;
         __nickelRestoreHooks(hooks, values, effectsLength);
+        __componentRecords = records;
         __dirtyComponents = dirty;
         __pendingRender = null;
     }
@@ -1110,10 +1163,11 @@ function __nickelRestoreHooks(hooks, values, effectsLength) {
 
 function __nickelRollbackEvent() {
     if (__pendingEvent === null) return;
-    const {handlers, previousHandlers, hooks, values, effectsLength, effects, dirty} = __pendingEvent;
+    const {handlers, previousHandlers, hooks, records, values, effectsLength, effects, dirty} = __pendingEvent;
     __handlers = handlers;
     __previousHandlers = previousHandlers;
     __nickelRestoreHooks(hooks, values, effectsLength);
+    __componentRecords = records;
     __effects = effects;
     __dirtyComponents = dirty;
     __pendingEvent = null;
@@ -1155,9 +1209,12 @@ function __nickelRender(component = __nickelActiveEntry()) {
     const previousHooks = new Map(Array.from(__componentHooks, ([path, hooks]) => [path, hooks.slice()]));
     const previousValues = Array.from(__componentHooks.values(), hooks => hooks.map(entry =>
         entry.kind === 'ref' ? entry.value.current : entry.value));
+    const previousRecords = __componentRecords;
     __pendingRender = {handlers: previousHandlers, previousHandlers: olderHandlers, hooks: previousHooks,
-        values: previousValues, effectsLength: __effects.length, dirty:new Set(__dirtyComponents),
+        records:previousRecords, values: previousValues, effectsLength: __effects.length, dirty:new Set(__dirtyComponents),
         passiveEffects: [], removedEffects: [], reducerEntries: []};
+    __componentRecords = new Map(__componentRecords);
+    __incrementalRender = __dirtyComponents.size > 0;
     __handlers = [];
     __previousHandlers = previousHandlers;
     __listKeyErrors = [];
@@ -1174,6 +1231,7 @@ function __nickelRender(component = __nickelActiveEntry()) {
                 for (const entry of __componentHooks.get(path))
                     if (entry?.kind === 'effect') __pendingRender.removedEffects.push(entry);
                 __componentHooks.delete(path);
+                __componentRecords.delete(path);
             }
         }
         return JSON.stringify(node);
@@ -1197,7 +1255,8 @@ function __nickelDispatchBatch(events, previous = false) {
     const values = Array.from(__componentHooks.values(), slots => slots.map(entry =>
         entry.kind === 'ref' ? entry.value.current : entry.value));
     const effectsLength = __effects.length;
-    __pendingEvent = {handlers: __handlers, previousHandlers: __previousHandlers, hooks, values,
+    __pendingEvent = {handlers: __handlers, previousHandlers: __previousHandlers, hooks,
+        records:__componentRecords, values,
         effectsLength, effects: __effects.slice(), dirty:new Set(__dirtyComponents)};
     try {
         for (const [action, value] of events) {
@@ -1219,7 +1278,8 @@ function __nickelDispatchBatchScheduled(events, previous = false) {
     const values = Array.from(__componentHooks.values(), slots => slots.map(entry =>
         entry.kind === 'ref' ? entry.value.current : entry.value));
     const effectsLength = __effects.length;
-    __pendingEvent = {handlers:__handlers, previousHandlers:__previousHandlers, hooks, values,
+    __pendingEvent = {handlers:__handlers, previousHandlers:__previousHandlers, hooks,
+        records:__componentRecords, values,
         effectsLength, effects:__effects.slice(), dirty:new Set(__dirtyComponents)};
     try {
         for (const [action, value] of events) {
@@ -1262,15 +1322,16 @@ function __nickelBeginCheckpoint() {
         }
         return result;
     }
-    function state(hooks, handlers, previousHandlers, effects, data, dirty, surfaceStore) {
+    function state(hooks, records, handlers, previousHandlers, effects, data, dirty, surfaceStore) {
         return {hooks:new Map(Array.from(hooks, ([path, slots]) => [path, slots.slice()])),
+            records:new Map(records),
             values:Array.from(hooks.values(), slots => slots.map(entry => copy(entry.kind === 'ref' ? entry.value.current : entry.value))),
             handlers:handlers.slice(), previousHandlers:previousHandlers.slice(), effects:copy(effects), data,
             dirty:new Set(dirty), surfaceStore};
     }
-    const active = state(__componentHooks, __handlers, __previousHandlers, __effects, __nickelData, __dirtyComponents, __surfaceStore);
+    const active = state(__componentHooks, __componentRecords, __handlers, __previousHandlers, __effects, __nickelData, __dirtyComponents, __surfaceStore);
     const surfaces = new Map(Array.from(__surfaceStates, ([id, value]) => [id,
-        state(value.hooks, value.handlers, value.previousHandlers, value.effects, value.data, value.dirty, value.surfaceStore)]));
+        state(value.hooks, value.records, value.handlers, value.previousHandlers, value.effects, value.data, value.dirty, value.surfaceStore)]));
     __compositionCheckpoint = {active, surfaces, graph:seen, extensible, apps:new Map(__surfaceApps), activeSurface:__activeSurface,
         settingsValues:copy(__settingsValues), settingsSnapshot:copy(__settingsSnapshot), settingsPagesSnapshot:copy(__settingsPagesSnapshot)};
 }
@@ -1300,7 +1361,7 @@ function __nickelFinishCheckpoint(accepted) {
             const values = state.values[index++];
             slots.forEach((entry, slot) => { if (entry.kind === 'ref') entry.value.current = original(values[slot]); else entry.value = original(values[slot]); });
         }
-        return {hooks:state.hooks, handlers:state.handlers, previousHandlers:state.previousHandlers,
+        return {hooks:state.hooks, records:state.records, handlers:state.handlers, previousHandlers:state.previousHandlers,
             effects:original(state.effects), data:state.data, dirty:state.dirty,
             surfaceStore:state.surfaceStore};
     }
@@ -1309,7 +1370,7 @@ function __nickelFinishCheckpoint(accepted) {
     __surfaceApps.clear();
     for (const [id, app] of checkpoint.apps) __surfaceApps.set(id, app);
     const active = restore(checkpoint.active);
-    __componentHooks = active.hooks; __handlers = active.handlers; __previousHandlers = active.previousHandlers;
+    __componentHooks = active.hooks; __componentRecords = active.records; __handlers = active.handlers; __previousHandlers = active.previousHandlers;
     __effects = active.effects; __nickelData = active.data; __activeSurface = checkpoint.activeSurface;
     __dirtyComponents = active.dirty;
     __surfaceStore = active.surfaceStore;
