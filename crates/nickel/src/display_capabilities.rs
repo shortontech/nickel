@@ -13,6 +13,10 @@ pub(crate) fn revision(outputs: &[OutputSnapshot]) -> String {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::items_after_test_module,
+    reason = "revision tests stay adjacent to the revision function they cover"
+)]
 mod tests {
     use super::*;
     #[test]
@@ -149,7 +153,7 @@ pub(crate) fn projection_layout(
                 y: entry.y,
                 enabled: entry.enabled,
                 scale_120: entry.scale.units(),
-                mode: output.current_mode.clone(),
+                mode: output.current_mode,
                 transform: Some(output.transform),
             }
         })

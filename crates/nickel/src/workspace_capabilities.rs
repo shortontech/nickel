@@ -64,13 +64,12 @@ impl WorkspaceEffect {
         {
             return Err("workspace observation is stale or operation unavailable".into());
         }
-        if let Some(id) = self.id {
-            if !snapshot["workspaces"]
+        if let Some(id) = self.id
+            && !snapshot["workspaces"]
                 .as_array()
-                .is_some_and(|entries| entries.iter().any(|entry| entry["id"] == id.to_string()))
-            {
-                return Err("workspace no longer exists".into());
-            }
+                .is_some_and(|entries| entries.iter().any(|entry| entry["id"] == id))
+        {
+            return Err("workspace no longer exists".into());
         }
         Ok(())
     }

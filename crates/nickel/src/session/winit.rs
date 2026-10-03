@@ -1167,6 +1167,10 @@ fn capture_bound_framebuffer(
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the rendering helper mirrors an explicit framebuffer rectangle and blur radius"
+)]
 fn blurred_backdrop_buffer(
     renderer: &mut GlesRenderer,
     framebuffer: &GlesTarget<'_>,

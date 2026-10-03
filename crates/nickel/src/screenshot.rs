@@ -455,11 +455,6 @@ impl ScreenshotTool {
         self.host.application().image.is_some() || self.host.application().error_visible
     }
 
-    #[cfg(test)]
-    pub fn confirmed(&self) -> bool {
-        self.host.application().confirmed
-    }
-
     pub fn hide(&mut self) {
         self.capture_deadline = None;
         self.pending_pointer = None;

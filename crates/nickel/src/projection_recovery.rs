@@ -343,7 +343,7 @@ mod tests {
         let extend = host
             .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
                 role: nickel_ui::SemanticRole::Button,
-                name: localizer.text("control-center-display-extend").into(),
+                name: localizer.text("control-center-display-extend"),
             })
             .unwrap();
         host.perform_semantic_action(
@@ -357,7 +357,7 @@ mod tests {
         let keep = host
             .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
                 role: nickel_ui::SemanticRole::Button,
-                name: localizer.text("control-center-keep").into(),
+                name: localizer.text("control-center-keep"),
             })
             .unwrap();
         host.perform_semantic_action(

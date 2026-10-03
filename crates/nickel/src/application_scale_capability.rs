@@ -140,10 +140,10 @@ impl ApplicationScaleService {
             .and_then(|path| Self::snapshot_at(&path, &*backend()));
         match result {
             Ok(mut snapshot) => {
-                if let Some((revision, result)) = &self.last_result {
-                    if snapshot["revision"].as_str() == Some(revision) {
-                        snapshot["last_result"] = result.clone();
-                    }
+                if let Some((revision, result)) = &self.last_result
+                    && snapshot["revision"].as_str() == Some(revision)
+                {
+                    snapshot["last_result"] = result.clone();
                 }
                 snapshot
             }
@@ -311,9 +311,11 @@ mod tests {
     #[test]
     fn application_scale_preserves_existing_toolkit_ownership() {
         let path = path();
-        let mut settings = ApplicationScaleSettings::default();
-        settings.owned_gtk_previous = Some("1".into());
-        settings.owned_gtk_applied = Some("2".into());
+        let settings = ApplicationScaleSettings {
+            owned_gtk_previous: Some("1".into()),
+            owned_gtk_applied: Some("2".into()),
+            ..Default::default()
+        };
         let mut journal = ApplicationScaleJournal::open(path.clone()).unwrap();
         journal.load().unwrap();
         journal.persist(&settings).unwrap();

@@ -89,6 +89,10 @@ pub(super) struct PreparedChange {
     staged: PreparedLauncherPreferences,
 }
 
+#[expect(
+    dead_code,
+    reason = "favorite reorder semantics are retained for remote-shell protocol parity"
+)]
 pub(super) enum SemanticFavoriteAction {
     MoveLeft(String),
     MoveRight(String),

@@ -1249,8 +1249,8 @@ fn wait_for_plugin_native_memory(
             .iter()
             .find(|plugin| plugin.id == id)
             .ok_or_else(|| format!("missing plugin {id} while awaiting memory"))?;
-        if let Some(bytes) = plugin.memory.native_ui_bytes {
-            if bytes > 0
+        if let Some(bytes) = plugin.memory.native_ui_bytes
+            && bytes > 0
                 && plugin
                     .memory
                     .tracked_peak_bytes
@@ -1258,7 +1258,6 @@ fn wait_for_plugin_native_memory(
             {
                 return Ok(bytes);
             }
-        }
         if Instant::now() >= deadline {
             let surfaces = checked(test_input, environment, &["surfaces"])?;
             return Err(format!(

@@ -7,7 +7,9 @@ use nickel_ui::{
 
 const DISMISS_DRAG_THRESHOLD: f32 = 96.0;
 const DISMISS_ANIMATION: std::time::Duration = std::time::Duration::from_millis(180);
+#[cfg(test)]
 pub(crate) const NOTIFICATION_MAX_WIDTH: u32 = 420;
+#[cfg(test)]
 pub(crate) const NOTIFICATION_MAX_HEIGHT: u32 = 320;
 const NOTIFICATION_PADDING: f32 = 20.0;
 const NOTIFICATION_SECTION_GAP: f32 = 8.0;
@@ -434,6 +436,7 @@ impl NotificationApp {
 
 pub type NotificationHost = UiHost<NotificationApp>;
 
+#[cfg(test)]
 pub(crate) fn preferred_notification_surface_size(
     notification: &DesktopNotification,
     _palette: ThemePalette,

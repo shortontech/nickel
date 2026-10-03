@@ -5,6 +5,10 @@ use nickel_remote_control::semantics::{
 };
 use nickel_remote_control::{DesktopPermit, leases::ResourceId};
 
+#[expect(
+    dead_code,
+    reason = "favorite reorder semantics are retained for remote-shell protocol parity"
+)]
 pub(super) enum ShellActionStep {
     Command(crate::platform::ShellCommand),
     Device {

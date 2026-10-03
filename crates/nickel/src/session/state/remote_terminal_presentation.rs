@@ -6,7 +6,7 @@ use crate::remote_policy::{
 use nickel_core::terminal_settings::{PreparedTerminalSettings, TerminalSettings, settings_path};
 use nickel_remote_control::{
     DesktopPermit,
-    terminal_presentation::{CursorStyle, Preferences, Snapshot, Transaction},
+    terminal_presentation::{Preferences, Snapshot, Transaction},
 };
 use nickel_storage::{RegularFileRevision, regular_file_revision};
 use std::{io, path::PathBuf};
@@ -323,6 +323,7 @@ impl NickelSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nickel_remote_control::terminal_presentation::CursorStyle;
 
     #[test]
     fn presentation_change_preserves_launch_policy_and_rejects_aba() {

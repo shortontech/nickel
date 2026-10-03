@@ -56,17 +56,17 @@ impl KeyboardRequest {
         {
             return Err("keyboard observation is stale or unavailable".into());
         }
-        if let Some(id) = &self.id {
-            if !snapshot["rows"].as_array().is_some_and(|rows| {
+        if let Some(id) = &self.id
+            && !snapshot["rows"].as_array().is_some_and(|rows| {
                 rows.iter().any(|row| {
                     row.as_array().is_some_and(|keys| {
                         keys.iter()
                             .any(|key| key["id"].as_str() == Some(id) && key["enabled"] == true)
                     })
                 })
-            }) {
-                return Err("keyboard key is unavailable".into());
-            }
+            })
+        {
+            return Err("keyboard key is unavailable".into());
         }
         Ok(())
     }

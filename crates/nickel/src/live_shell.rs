@@ -155,7 +155,6 @@ pub(crate) enum CodexApprovalOwner {
 
 const PANEL_TRAY_ICON_SIZE: u32 = 18;
 const PREVIEW_LEAVE_DELAY: Duration = Duration::from_millis(500);
-const PREVIEW_HOVER_DELAY: Duration = Duration::from_millis(300);
 const PREVIEW_REFRESH_INTERVAL: Duration = Duration::from_millis(500);
 #[cfg(target_os = "linux")]
 const RECURRING_DIAGNOSTIC_INTERVAL: Duration = Duration::from_secs(30);
@@ -1029,6 +1028,10 @@ impl LiveShell {
     pub(crate) fn codex_available(&self) -> bool {
         self.launcher.codex_available()
     }
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "convenience constructor is used by shell tests")
+    )]
     pub fn new() -> Result<Self, String> {
         Self::new_with_hosts(default_session_host(), default_file_window_host())
     }
@@ -1255,12 +1258,9 @@ impl LiveShell {
         // activation still goes through the same reviewed lifecycle as disk sources.
         let package = crate::bundled_plugin_assets::load_package("nickel-default")?;
         let id = package.manifest.id.clone();
-        if !external_plugin_packages.contains_key(&id) {
+        if let std::collections::btree_map::Entry::Vacant(e) = external_plugin_packages.entry(id) {
             plugin_registry.register(package.manifest.clone())?;
-            external_plugin_packages.insert(
-                id,
-                nickel_core::plugins::PluginPackageSource::embedded(package),
-            );
+            e.insert(nickel_core::plugins::PluginPackageSource::embedded(package));
         }
         let plugin_settings = plugin_registry
             .entries()
@@ -2130,21 +2130,24 @@ impl LiveShell {
             SurfaceRole::Taskbar => true,
 
             SurfaceRole::Launcher => true,
-            SurfaceRole::ControlCenter => self
-                .quick_settings_surface_active()
-                .then(|| {
-                    self.plugin_panel_host_ref(&self.active_shell_surface_key("quick-settings"))
-                        .unwrap()
-                        .remote_access_protected()
-                })
-                .unwrap_or_else(|| {
-                    !self
-                        .control_host
-                        .application()
-                        .view_state()
-                        .trusted_visible()
-                        || self.control_host.remote_access_protected()
-                }),
+            SurfaceRole::ControlCenter => {
+                if self.quick_settings_surface_active() {
+                    {
+                        self.plugin_panel_host_ref(&self.active_shell_surface_key("quick-settings"))
+                            .unwrap()
+                            .remote_access_protected()
+                    }
+                } else {
+                    {
+                        !self
+                            .control_host
+                            .application()
+                            .view_state()
+                            .trusted_visible()
+                            || self.control_host.remote_access_protected()
+                    }
+                }
+            }
             SurfaceRole::Notification => {
                 self.trusted_notification_visible()
                     || self.notification_host.remote_access_protected()
@@ -2173,7 +2176,8 @@ impl LiveShell {
         if self.locked {
             return None;
         }
-        let snapshot = match role {
+
+        match role {
             SurfaceRole::Desktop => output
                 .filter(|output| *output != self.desktop_active_viewport)
                 .and_then(|output| self.desktop_viewports.get(output))
@@ -2201,8 +2205,7 @@ impl LiveShell {
                 .or_else(|| Some(self.screenshot.layout_snapshot())),
             SurfaceRole::OnScreenKeyboard => Some(self.keyboard_host.layout_snapshot()),
             _ => None,
-        };
-        snapshot
+        }
     }
 
     pub fn scene(&mut self, role: SurfaceRole, width: u32, height: u32) -> Vec<PaintCommand> {
@@ -2776,6 +2779,7 @@ impl LiveShell {
         self.plugin_surface_hosts.contains_key(&key).then_some(key)
     }
 
+    #[cfg(test)]
     fn default_shell_surface_key(surface: &str) -> nickel_core::plugins::PluginSurfaceKey {
         nickel_core::plugins::PluginSurfaceKey {
             plugin_id: "nickel-default".into(),
@@ -3790,7 +3794,7 @@ impl LiveShell {
         }
         #[cfg(target_os = "linux")]
         {
-            return Some(match self.session_host.projection_outputs() {
+            Some(match self.session_host.projection_outputs() {
                 Ok(outputs) => serde_json::json!({"available": true, "outputs": outputs,
                     "revision": crate::display_capabilities::revision(&outputs),
                     "projectionModes": if !self.control_host.application().view_state().trusted_visible() {crate::display_capabilities::projection_modes(&outputs)} else {serde_json::json!([])},
@@ -3803,7 +3807,7 @@ impl LiveShell {
                 Err(error) => {
                     serde_json::json!({"available": false, "reason": error, "outputs": [], "application_scale": self.application_scale_service.snapshot(), "operations": {"setApplicationScale": true, "identify": false}})
                 }
-            });
+            })
         }
         #[cfg(target_os = "windows")]
         {
@@ -4700,10 +4704,10 @@ impl LiveShell {
                 .participating_owners()
                 .find(|owner| owner.id == provider)
                 .cloned();
-            if let Some(owner) = owner {
-                if std::rc::Rc::ptr_eq(&runtime, &host.shared_owner_runtime(&owner)?) {
-                    host.update_snapshot(&owner, &data)?;
-                }
+            if let Some(owner) = owner
+                && std::rc::Rc::ptr_eq(&runtime, &host.shared_owner_runtime(&owner)?)
+            {
+                host.update_snapshot(&owner, &data)?;
             }
         }
         runtime.borrow_mut().begin_transaction()?;
@@ -4881,7 +4885,7 @@ impl LiveShell {
         for (host, owner) in &composed {
             let mut host = host.borrow_mut();
             let mut data = host.snapshot(owner)?.clone();
-            data["settings"] = serde_json::to_value(&values).map_err(|error| error.to_string())?;
+            data["settings"] = serde_json::to_value(values).map_err(|error| error.to_string())?;
             host.update_snapshot(owner, &data)?;
         }
         for (_, host) in self.plugin_surface_hosts.values_mut() {
@@ -5593,22 +5597,6 @@ impl LiveShell {
         result
     }
 
-    pub(crate) fn notification_preferred_surface_size(
-        &self,
-        maximum: (u32, u32),
-    ) -> Option<(u32, u32)> {
-        if self.notification_history_visible {
-            return None;
-        }
-        self.notification.as_ref().map(|notification| {
-            crate::notification_view::preferred_notification_surface_size(
-                notification,
-                self.palette,
-                maximum,
-            )
-        })
-    }
-
     pub fn next_host_deadline(&self) -> Option<Instant> {
         self.host_deadline_sources()
             .into_iter()
@@ -5900,10 +5888,8 @@ impl LiveShell {
         {
             let reverted = self.revert_plugin_display_layout(None);
             outcome.visibility_changed |= reverted;
-            if !reverted {
-                if let Some(preview) = self.display_preview.as_mut() {
-                    preview.deadline = now + Duration::from_secs(1);
-                }
+            if !reverted && let Some(preview) = self.display_preview.as_mut() {
+                preview.deadline = now + Duration::from_secs(1);
             }
         }
         outcome
@@ -5926,6 +5912,7 @@ impl LiveShell {
         outcome.changed | self.apply_notification_effects()
     }
 
+    #[cfg(test)]
     pub(crate) fn notification_host_input(
         &mut self,
         input: nickel_input::InputEvent,
@@ -7024,13 +7011,12 @@ impl LiveShell {
                         && self.projection_chooser.pending().is_none()
                     {
                         #[cfg(target_os = "linux")]
-                        if let Ok(outputs) = self.session_host.projection_outputs() {
-                            if let Some(layout) =
+                        if let Ok(outputs) = self.session_host.projection_outputs()
+                            && let Some(layout) =
                                 crate::display_capabilities::projection_layout(&outputs, mode)
-                            {
-                                changed |= self
-                                    .preview_plugin_display_layout(plugin_id, layout, &revision);
-                            }
+                        {
+                            changed |=
+                                self.preview_plugin_display_layout(plugin_id, layout, &revision);
                         }
                         #[cfg(not(target_os = "linux"))]
                         let _ = (mode, revision);

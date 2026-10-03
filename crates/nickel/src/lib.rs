@@ -2752,15 +2752,15 @@ pub fn run() -> Result<(), String> {
         }
         let (project_menu_changed, mut due_codex_redraw) = codex.poll_due(Instant::now());
         due_codex_redraw.extend(approval_redraw);
-        if project_menu_changed && state.surface_visible(SurfaceRole::CodexProjectMenu) {
-            if let Some(id) = shell
+        if project_menu_changed
+            && state.surface_visible(SurfaceRole::CodexProjectMenu)
+            && let Some(id) = shell
                 .surfaces()
                 .find(|surface| surface.role() == SurfaceRole::CodexProjectMenu)
                 .map(|surface| surface.id())
-            {
-                codex.project_menu_surface = Some(id);
-                due_codex_redraw.push(id);
-            }
+        {
+            codex.project_menu_surface = Some(id);
+            due_codex_redraw.push(id);
         }
         state.sync_codex_approval_notifications(codex.approval_notifications());
         project_menu_changed_since_refresh |= project_menu_changed;
@@ -3298,16 +3298,16 @@ pub fn run() -> Result<(), String> {
                 };
                 let (logical_width, logical_height) = entry.window().size();
                 let role = entry.role();
-                if state.surface_visible(role) {
-                    if let Some((commands, damage)) = scene_for_native_surface(
+                if state.surface_visible(role)
+                    && let Some((commands, damage)) = scene_for_native_surface(
                         &shell,
                         &mut state,
                         surface,
                         logical_width,
                         logical_height,
-                    ) {
-                        shell.present_with_damage(surface, &commands, damage.as_deref())?;
-                    }
+                    )
+                {
+                    shell.present_with_damage(surface, &commands, damage.as_deref())?;
                 }
             }
             Some(ShellEvent::Redraw(_)) => {}
@@ -3386,16 +3386,14 @@ pub fn run() -> Result<(), String> {
         if fast_subscription.is_due(Instant::now()) {
             let refresh_now = Instant::now();
             let project_menu_changed = std::mem::take(&mut project_menu_changed_since_refresh);
-            if project_menu_changed {
-                if let Some(host) = codex.project_menu_host.as_mut() {
-                    let snapshot = &host.application_mut().state;
-                    tracing::info!(
-                        status = ?snapshot.status,
-                        authenticated = snapshot.account.authenticated,
-                        project_count = snapshot.projects.len(),
-                        "Codex project discovery changed"
-                    );
-                }
+            if project_menu_changed && let Some(host) = codex.project_menu_host.as_mut() {
+                let snapshot = &host.application_mut().state;
+                tracing::info!(
+                    status = ?snapshot.status,
+                    authenticated = snapshot.account.authenticated,
+                    project_count = snapshot.projects.len(),
+                    "Codex project discovery changed"
+                );
             }
             if let Some(host) = codex.project_menu_host.as_mut() {
                 let snapshot = &host.application_mut().state;

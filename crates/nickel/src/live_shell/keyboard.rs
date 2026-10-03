@@ -525,13 +525,13 @@ impl LiveShell {
                     self.set_keyboard_visible(false);
                 }
                 KeyboardEffect::Input { key, modifiers } => {
-                    if let (Some(epoch), Some(input)) = (epoch, keyboard_input(key, modifiers)) {
-                        if self.session_host.keyboard_input(epoch, input).is_err() {
-                            self.keyboard_host
-                                .application_mut()
-                                .recipient_changed(false);
-                            self.keyboard_recipient = None;
-                        }
+                    if let (Some(epoch), Some(input)) = (epoch, keyboard_input(key, modifiers))
+                        && self.session_host.keyboard_input(epoch, input).is_err()
+                    {
+                        self.keyboard_host
+                            .application_mut()
+                            .recipient_changed(false);
+                        self.keyboard_recipient = None;
                     }
                 }
             }

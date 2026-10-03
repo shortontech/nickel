@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use nickel_core::theme::{Appearance, ThemeMode, ThemePalette};
+use nickel_core::theme::{Appearance, ThemePalette};
 use nickel_ui::{ActionKind, ControllerFamily, SemanticRole};
 use nickel_ui_testkit::{
     DEFAULT_ACCESSIBILITY, DEFAULT_LOCALE, DEFAULT_SCALE, Fixture, FixtureMetadata,
@@ -12,7 +12,6 @@ use nickel_codex_ui::ChatApplication;
 
 use crate::{
     live_shell::{DesktopApplication, LockApplication},
-    platform::{AudioStatus, BluetoothStatus, NetworkStatus, WorkspaceSummary},
     plugin_panel::{PluginImages, PluginPanelApplication},
     projection_recovery::ProjectionRecoveryApp,
     screenshot::ScreenshotApp,
@@ -69,22 +68,6 @@ const PROJECT_VARIANTS: &[FixtureVariant] = &[
     variant("search", "Search", 920, 680),
     variant("empty", "Empty", 920, 680),
 ];
-
-const RTL_LOCALE: nickel_ui_testkit::LocalePreset = nickel_ui_testkit::LocalePreset {
-    id: "ar-SA",
-    direction: nickel_ui_testkit::FixtureDirection::RightToLeft,
-};
-const SCALE_2X: nickel_ui_testkit::ScalePreset = nickel_ui_testkit::ScalePreset {
-    id: "2x",
-    factor: 2.0,
-};
-const HIGH_CONTRAST: nickel_ui_testkit::AccessibilityPreset =
-    nickel_ui_testkit::AccessibilityPreset {
-        id: "high-contrast",
-        high_contrast: true,
-        reduced_motion: false,
-        reduced_transparency: true,
-    };
 
 macro_rules! metadata {
     ($name:ident, $id:literal, $title:literal, $description:literal, $variants:ident, $tags:expr) => {
@@ -175,27 +158,6 @@ pub struct ScreenshotFixture;
 pub struct WindowPreviewFixture;
 pub struct ProjectionRecoveryFixture;
 pub struct CodexProjectMenuFixture;
-
-fn fixture_palette(theme: FixtureTheme) -> ThemePalette {
-    match theme {
-        FixtureTheme::Light => ThemePalette::from_appearance(Appearance {
-            mode: ThemeMode::Light,
-            ..Appearance::default()
-        }),
-        FixtureTheme::Dark => palette(),
-        FixtureTheme::HighContrast => ThemePalette {
-            background: 0x101114,
-            panel: 0x17191d,
-            surface: 0x111111,
-            surface_hover: 0x222222,
-            text: 0xffffff,
-            muted: 0xd8d8d8,
-            accent: 0xffff00,
-            accent_soft: 0x333300,
-            complement: 0x00ffff,
-        },
-    }
-}
 
 impl Fixture for RuntimeFixture {
     type App = DesktopApplication;

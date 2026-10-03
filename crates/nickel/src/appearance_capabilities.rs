@@ -87,10 +87,10 @@ impl AppearanceEffect {
                 if transaction.generation == 0 {
                     return Err("wallpaper observation is unavailable".into());
                 }
-                if let wallpaper::Change::SelectApprovedImage { image_id } = &transaction.change {
-                    if image_id.is_empty() || image_id.len() > 512 {
-                        return Err("invalid wallpaper identity".into());
-                    }
+                if let wallpaper::Change::SelectApprovedImage { image_id } = &transaction.change
+                    && (image_id.is_empty() || image_id.len() > 512)
+                {
+                    return Err("invalid wallpaper identity".into());
                 }
                 Ok(Self::Wallpaper {
                     generation: transaction.generation,
@@ -141,14 +141,13 @@ impl AppearanceEffect {
             change: wallpaper::Change::SelectApprovedImage { image_id },
             ..
         } = self
-        {
-            if !snapshot["images"].as_array().is_some_and(|images| {
+            && !snapshot["images"].as_array().is_some_and(|images| {
                 images
                     .iter()
                     .any(|image| image["id"].as_str() == Some(image_id))
-            }) {
-                return Err("wallpaper identity is stale".into());
-            }
+            })
+        {
+            return Err("wallpaper identity is stale".into());
         }
         Ok(())
     }
@@ -338,11 +337,11 @@ impl AppearanceCapabilities {
             }
         };
         self.refresh(effect.resource());
-        if let AppearanceEffect::Wallpaper { change, .. } = effect {
-            if let Some(snapshot) = &mut self.wallpaper_snapshot {
-                snapshot["selected_image_decoded"] =
-                    matches!(change, wallpaper::Change::SelectApprovedImage { .. }).into();
-            }
+        if let AppearanceEffect::Wallpaper { change, .. } = effect
+            && let Some(snapshot) = &mut self.wallpaper_snapshot
+        {
+            snapshot["selected_image_decoded"] =
+                matches!(change, wallpaper::Change::SelectApprovedImage { .. }).into();
         }
         Ok(committed)
     }

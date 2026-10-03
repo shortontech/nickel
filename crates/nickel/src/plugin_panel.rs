@@ -115,7 +115,7 @@ fn bundled_stylesheet(
         let root = std::path::Path::new(&root);
         if root.join(&manifest.id).exists() {
             Cow::Owned(PluginPackage::load_stylesheet(
-                &root.join(&manifest.id),
+                root.join(&manifest.id),
                 manifest,
             )?)
         } else {
@@ -7636,7 +7636,7 @@ mod tests {
 
     #[test]
     fn external_preview_actions_use_grants_instead_of_plugin_identity() {
-        for (request, capability, expected) in [(
+        let (request, capability, expected) = (
             "{type: 'windowPreviews.action', action: 'activate', window: '71', revision: 'r1'}",
             PluginCapability::WindowsFocus,
             PluginEffect::WindowPreviewRequest {
@@ -7644,34 +7644,33 @@ mod tests {
                 revision: "r1".into(),
                 action: PreviewAction::Activate(crate::model::WindowId(71)),
             },
-        )] {
-            let mut external_manifest = manifest().clone();
-            external_manifest.id = "org.example.desktop-controls".into();
-            external_manifest.capabilities.clear();
-            let mut package = PluginPackage {
-                modules: Vec::new(),
-                manifest: external_manifest,
-                images: Default::default(),
-                stylesheet: String::new(),
-                source: format!(
-                    "function App() {{ return h(FixedWindow, {{width: '100%', height: '100%', onEscape: () => nickel.request({request})}}); }}"
-                ),
-            };
-            let mut denied = PluginPanelApplication::from_package(&package).unwrap();
-            denied.shortcut_outcome(Shortcut::Escape);
-            assert!(denied.take_effects().is_empty());
-            package.manifest.capabilities.push(capability);
-            let mut missing_read = PluginPanelApplication::from_package(&package).unwrap();
-            missing_read.shortcut_outcome(Shortcut::Escape);
-            assert!(missing_read.take_effects().is_empty());
-            package
-                .manifest
-                .capabilities
-                .push(PluginCapability::WindowsRead);
-            let mut granted = PluginPanelApplication::from_package(&package).unwrap();
-            granted.shortcut_outcome(Shortcut::Escape);
-            assert_eq!(granted.take_effects(), vec![expected]);
-        }
+        );
+        let mut external_manifest = manifest().clone();
+        external_manifest.id = "org.example.desktop-controls".into();
+        external_manifest.capabilities.clear();
+        let mut package = PluginPackage {
+            modules: Vec::new(),
+            manifest: external_manifest,
+            images: Default::default(),
+            stylesheet: String::new(),
+            source: format!(
+                "function App() {{ return h(FixedWindow, {{width: '100%', height: '100%', onEscape: () => nickel.request({request})}}); }}"
+            ),
+        };
+        let mut denied = PluginPanelApplication::from_package(&package).unwrap();
+        denied.shortcut_outcome(Shortcut::Escape);
+        assert!(denied.take_effects().is_empty());
+        package.manifest.capabilities.push(capability);
+        let mut missing_read = PluginPanelApplication::from_package(&package).unwrap();
+        missing_read.shortcut_outcome(Shortcut::Escape);
+        assert!(missing_read.take_effects().is_empty());
+        package
+            .manifest
+            .capabilities
+            .push(PluginCapability::WindowsRead);
+        let mut granted = PluginPanelApplication::from_package(&package).unwrap();
+        granted.shortcut_outcome(Shortcut::Escape);
+        assert_eq!(granted.take_effects(), vec![expected]);
     }
 
     #[test]
@@ -8014,14 +8013,13 @@ mod tests {
         }
     }
 
-    fn settings_admission_runtime() -> Result<
-        (
-            std::collections::BTreeMap<String, PluginPackage>,
-            PluginSurface,
-            std::rc::Rc<std::cell::RefCell<ShellCompositionRuntime>>,
-        ),
-        String,
-    > {
+    type AdmissionRuntime = (
+        std::collections::BTreeMap<String, PluginPackage>,
+        PluginSurface,
+        std::rc::Rc<std::cell::RefCell<ShellCompositionRuntime>>,
+    );
+
+    fn settings_admission_runtime() -> Result<AdmissionRuntime, String> {
         let package = crate::bundled_plugin_assets::load_package("nickel-default")?;
         let surface = package
             .manifest
@@ -8093,7 +8091,7 @@ mod tests {
                         "configured":{"custom_image_configured":false,"position":"fill"},
                         "images":[],"chooser":{"available":true,"pending":false,"result":null}},
                 });
-                if let Some(projection) = validation_surface_projection(package, &surface) {
+                if let Some(projection) = validation_surface_projection(package, surface) {
                     data.as_object_mut()
                         .unwrap()
                         .extend(projection.as_object().unwrap().clone());
@@ -8105,7 +8103,7 @@ mod tests {
             catalog,
             "nickel-default",
             &snapshots,
-            &surface,
+            surface,
             Some(host.clone()),
         )?;
         Ok(application)
@@ -8346,16 +8344,7 @@ mod tests {
         mounts_closed: usize,
     }
 
-    fn taskbar_admission_setup(
-        active: &str,
-    ) -> Result<
-        (
-            std::collections::BTreeMap<String, PluginPackage>,
-            PluginSurface,
-            std::rc::Rc<std::cell::RefCell<ShellCompositionRuntime>>,
-        ),
-        String,
-    > {
+    fn taskbar_admission_setup(active: &str) -> Result<AdmissionRuntime, String> {
         let default = crate::bundled_plugin_assets::load_package("nickel-default")?;
         let mut catalog =
             std::collections::BTreeMap::from([(default.manifest.id.clone(), default)]);

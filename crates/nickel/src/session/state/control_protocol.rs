@@ -63,6 +63,10 @@ fn shell_surface_identity_valid(identity: &nickel_session_protocol::ShellSurface
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::items_after_test_module,
+    reason = "surface identity tests stay adjacent to the validator they cover"
+)]
 mod shell_surface_identity_tests {
     use super::shell_surface_identity_valid;
     use nickel_session_protocol::{
@@ -1395,10 +1399,10 @@ impl NickelSession {
                     Ok(settings) => settings,
                     Err(error) => return protocol_error(ErrorCode::InvalidRequest, error),
                 };
-                if !self.locked {
-                    if let Err(error) = self.apply_remote_codex_preference(&settings) {
-                        return protocol_error(ErrorCode::InvalidRequest, error);
-                    }
+                if !self.locked
+                    && let Err(error) = self.apply_remote_codex_preference(&settings)
+                {
+                    return protocol_error(ErrorCode::InvalidRequest, error);
                 }
                 self.apply_configured_workspace_count();
                 self.notify_shell_settings_changed();

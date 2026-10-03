@@ -2466,6 +2466,10 @@ fn resolve_application_id(native_app_id: &str, launcher: &Launcher) -> Option<Ap
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::items_after_test_module,
+    reason = "Linux adapter tests remain beside their private helpers"
+)]
 mod tests {
     use super::protocol_preview_image;
     use notify::event::{AccessKind, CreateKind, ModifyKind, RemoveKind};

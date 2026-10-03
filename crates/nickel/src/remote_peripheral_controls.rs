@@ -14,6 +14,10 @@ const MAX_OBSERVATIONS: usize = 16;
 
 /// Preserve the native failure class without returning provider text, which may
 /// contain private printer names, document titles, or volume paths.
+#[cfg_attr(
+    not(any(test, target_os = "windows")),
+    expect(dead_code, reason = "the observation adapter is owned by Windows")
+)]
 pub(crate) fn observation_failure(error: PeripheralError) -> String {
     match error.class {
         PeripheralFailureClass::Authorization => "peripheral observation permission denied",

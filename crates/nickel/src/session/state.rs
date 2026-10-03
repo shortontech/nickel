@@ -5158,6 +5158,13 @@ impl NickelSession {
         }
     }
 
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "default-mode wrapper is exercised by protocol tests"
+        )
+    )]
     pub(crate) fn enable_internal_shell(
         &mut self,
         host: std::sync::Arc<dyn crate::session_host::SessionHost>,
@@ -5177,6 +5184,7 @@ impl NickelSession {
         )
     }
 
+    #[cfg(test)]
     fn enable_internal_shell_with_system_updates(
         &mut self,
         host: std::sync::Arc<dyn crate::session_host::SessionHost>,
@@ -5502,7 +5510,7 @@ impl NickelSession {
                 shell.panel_edge(),
             );
             if let Some(key) = surface.plugin.as_ref() {
-                adjust_internal_plugin_surface_placement(&mut placement, key, &shell, &outputs);
+                adjust_internal_plugin_surface_placement(&mut placement, key, shell, &outputs);
                 if *key == shell.active_shell_surface_key("quick-settings") {
                     let preferred = match shell.panel_edge() {
                         crate::winit_shell::PanelEdge::Top => {

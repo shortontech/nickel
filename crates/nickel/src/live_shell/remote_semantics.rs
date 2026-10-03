@@ -318,11 +318,9 @@ impl LiveShell {
     #[cfg(target_os = "linux")]
     pub(crate) fn resolve_remote_installed_launch(
         &mut self,
-        effect: &RemoteShellEffect,
+        _effect: &RemoteShellEffect,
     ) -> Result<Option<Application>, String> {
-        let selected = match effect {
-            _ => None,
-        };
+        let selected = None;
         match selected {
             Some(Some(application)) => Ok(Some(application)),
             Some(None) => Err("selected application is unavailable".into()),

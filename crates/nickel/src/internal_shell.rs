@@ -2220,7 +2220,7 @@ mod tests {
             height: 600,
             scale: 1.0,
         };
-        coordinator.set_outputs(&[output.clone()]);
+        coordinator.set_outputs(std::slice::from_ref(&output));
         let desktop = coordinator
             .surface(SurfaceRole::Desktop, Some("nested"))
             .unwrap();
@@ -2228,7 +2228,7 @@ mod tests {
         assert_eq!(desktop.plugin, None);
         assert!(coordinator.visible(id));
 
-        coordinator.set_outputs(&[output.clone()]);
+        coordinator.set_outputs(std::slice::from_ref(&output));
         let retained = coordinator
             .surface(SurfaceRole::Desktop, Some("nested"))
             .unwrap();
