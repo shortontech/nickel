@@ -2675,6 +2675,35 @@ fn stock_window_menu_dismisses_after_native_window_focus_loss() {
 }
 
 #[test]
+fn child_window_surface_observation_tracks_geometry_then_native_focus() {
+    with_package_runtime_stack(|| {
+        let mut shell = LiveShell::new().unwrap();
+        assert!(shell.set_default_shell_surface_visible("quick-settings", true));
+        let key = shell.active_shell_surface_key("quick-settings");
+        shell
+            .plugin_panel_scene_for_output(&key, Some("primary"), 720, 540)
+            .unwrap();
+        let observation = shell
+            .plugin_panel_host_ref(&key)
+            .unwrap()
+            .application()
+            .surface_observation();
+        assert_eq!(observation["output"], "primary");
+        assert_eq!(observation["visible"], true);
+        assert_eq!(observation["focused"], true);
+
+        assert!(shell.plugin_panel_host_window_focus_for(&key, false, 720, 540));
+        let observation = shell
+            .plugin_panel_host_ref(&key)
+            .unwrap()
+            .application()
+            .surface_observation();
+        assert_eq!(observation["output"], "primary");
+        assert_eq!(observation["focused"], false);
+    });
+}
+
+#[test]
 fn selected_launcher_and_run_never_use_reserved_launcher_presentation() {
     with_package_runtime_stack(|| {
         let mut shell = LiveShell::new().expect("live shell");

@@ -148,6 +148,7 @@ pub struct PluginPanelApplication {
     images: PluginImages,
     stylesheet: StyleSheet,
     composition: Option<CompositionPanelState>,
+    surface_snapshot: Value,
 }
 
 pub(crate) fn package_images(package: &PluginPackage) -> Result<PluginImages, String> {
@@ -614,6 +615,106 @@ impl PluginPanelApplication {
             .drop_surface(&self.runtime_surface_id)
     }
 
+    /// Publish compositor/native-window facts for this exact mount. Callers
+    /// publish geometry before focus so focus observers cannot see stale
+    /// placement from the same host event.
+    pub(crate) fn sync_surface_authority(
+        &mut self,
+        output: Option<&str>,
+        available_size: Option<(f32, f32)>,
+        scale_factor: Option<f32>,
+        focused: Option<bool>,
+        visible: Option<bool>,
+    ) -> Result<bool, String> {
+        let mut next = self.surface_snapshot.clone();
+        let object = next
+            .as_object_mut()
+            .ok_or("surface snapshot must be an object")?;
+        object.insert("output".into(), output.map_or(Value::Null, Value::from));
+        let (available_width, available_height) = available_size
+            .map(|(width, height)| (Value::from(width), Value::from(height)))
+            .unwrap_or((Value::Null, Value::Null));
+        object.insert("availableWidth".into(), available_width);
+        object.insert("availableHeight".into(), available_height);
+        object.insert(
+            "scaleFactor".into(),
+            scale_factor.map_or(Value::Null, Value::from),
+        );
+        object.insert("focused".into(), focused.map_or(Value::Null, Value::from));
+        object.insert("visible".into(), visible.map_or(Value::Null, Value::from));
+        if next == self.surface_snapshot {
+            return Ok(false);
+        }
+        if let Some(state) = &self.composition {
+            state
+                .host
+                .borrow_mut()
+                .update_mount_surface(&state.mount, next.clone())?;
+        } else {
+            let mut runtime = self.runtime.borrow_mut();
+            runtime.select_surface(&self.runtime_surface_id)?;
+            runtime.set_surface_store(
+                &format!("plugin-surface:{}", self.runtime_surface_id),
+                &next,
+            )?;
+        }
+        self.surface_snapshot = next;
+        Ok(true)
+    }
+
+    pub(crate) fn sync_surface_geometry(
+        &mut self,
+        output: Option<&str>,
+        available_size: Option<(f32, f32)>,
+        scale_factor: Option<f32>,
+        visible: Option<bool>,
+    ) -> Result<bool, String> {
+        let focused = self
+            .surface_snapshot
+            .get("focused")
+            .and_then(Value::as_bool);
+        self.sync_surface_authority(output, available_size, scale_factor, focused, visible)
+    }
+
+    pub(crate) fn sync_surface_focus(&mut self, focused: bool) -> Result<bool, String> {
+        let output = self
+            .surface_snapshot
+            .get("output")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let available_size = self
+            .surface_snapshot
+            .get("availableWidth")
+            .and_then(Value::as_f64)
+            .zip(
+                self.surface_snapshot
+                    .get("availableHeight")
+                    .and_then(Value::as_f64),
+            )
+            .map(|(width, height)| (width as f32, height as f32));
+        let scale_factor = self
+            .surface_snapshot
+            .get("scaleFactor")
+            .and_then(Value::as_f64)
+            .map(|scale| scale as f32);
+        let visible = self
+            .surface_snapshot
+            .get("visible")
+            .and_then(Value::as_bool);
+        self.sync_surface_authority(
+            output.as_deref(),
+            available_size,
+            scale_factor,
+            Some(focused),
+            visible,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn surface_observation(&self) -> &Value {
+        &self.surface_snapshot
+    }
+
     pub(crate) fn from_package_surface_with_runtime(
         package: &PluginPackage,
         settings: &std::collections::BTreeMap<String, serde_json::Value>,
@@ -733,6 +834,10 @@ impl PluginPanelApplication {
                 .collect::<Result<std::collections::BTreeMap<_, _>, String>>()?
         };
         let projection_value = snapshots[&host.borrow().resolution().active].clone();
+        let surface_snapshot = projection_value
+            .get("surface")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}));
         let projection_data =
             Some(serde_json::to_string(&projection_value).map_err(|error| error.to_string())?);
         Ok(Self {
@@ -759,6 +864,7 @@ impl PluginPanelApplication {
                 manifests,
                 snapshots,
             }),
+            surface_snapshot,
         })
     }
 
@@ -1206,6 +1312,11 @@ impl PluginPanelApplication {
                 1,
             )?
         };
+        let surface_snapshot = data
+            .as_deref()
+            .and_then(|data| serde_json::from_str::<Value>(data).ok())
+            .and_then(|data| data.get("surface").cloned())
+            .unwrap_or_else(|| serde_json::json!({}));
         Ok(Self {
             runtime,
             accepted,
@@ -1226,6 +1337,7 @@ impl PluginPanelApplication {
             images: PluginImages::new(),
             stylesheet: StyleSheet::default(),
             composition: None,
+            surface_snapshot,
         })
     }
 
@@ -2879,6 +2991,7 @@ impl PluginPanelApplication {
             images: PluginImages::new(),
             stylesheet: StyleSheet::compile("")?,
             composition: None,
+            surface_snapshot: serde_json::json!({}),
         };
         scope.apply_rendered_effects(
             Ok(Some(accepted)),
@@ -3997,6 +4110,59 @@ mod tests {
             PluginPanelApplication::validate_package(&package)
                 .unwrap_or_else(|error| panic!("{name} validation failed: {error}"));
         }
+    }
+
+    #[test]
+    fn native_surface_authority_is_ordered_deduplicated_and_mount_scoped() {
+        let source = "globalThis.observedSurface=null; function App(){observedSurface=useSurface();return h(Panel,{id:'main'},h(Text,null,'surface'));}";
+        let mut left = PluginPanelApplication::new_with_manifest_for_surface_and_scope(
+            source,
+            manifest(),
+            Some(
+                serde_json::json!({"surface":{"id":"main","kind":"panel","width":320,"height":48}})
+                    .to_string(),
+            ),
+            Some("main"),
+            None,
+            "left",
+        )
+        .unwrap();
+        let mut right = PluginPanelApplication::new_with_manifest_for_surface_and_scope(
+            source,
+            manifest(),
+            Some(
+                serde_json::json!({"surface":{"id":"main","kind":"panel","width":320,"height":48}})
+                    .to_string(),
+            ),
+            Some("main"),
+            Some(left.shared_runtime()),
+            "right",
+        )
+        .unwrap();
+
+        assert!(
+            left.sync_surface_geometry(
+                Some("DP-1"),
+                Some((1920.0, 1032.0)),
+                Some(1.25),
+                Some(true)
+            )
+            .unwrap()
+        );
+        assert!(left.sync_surface_focus(true).unwrap());
+        assert!(!left.sync_surface_focus(true).unwrap());
+        left.runtime.borrow_mut().select_surface("left").unwrap();
+        assert!(left.runtime.borrow_mut().eval_json::<bool>("__surfaceStore.snapshot.output === 'DP-1' && __surfaceStore.snapshot.availableSize.height === 1032 && __surfaceStore.snapshot.scaleFactor === 1.25 && __surfaceStore.snapshot.focused === true && __surfaceStore.generation === 3").unwrap());
+
+        right.runtime.borrow_mut().select_surface("right").unwrap();
+        assert!(right.runtime.borrow_mut().eval_json::<bool>("__surfaceStore.snapshot.output === null && __surfaceStore.snapshot.focused === null").unwrap());
+        assert!(
+            right
+                .sync_surface_geometry(Some("DP-2"), Some((1280.0, 680.0)), Some(2.0), Some(true))
+                .unwrap()
+        );
+        left.runtime.borrow_mut().select_surface("left").unwrap();
+        assert!(left.runtime.borrow_mut().eval_json::<bool>("__surfaceStore.snapshot.output === 'DP-1' && __surfaceStore.snapshot.focused === true").unwrap());
     }
 
     #[test]

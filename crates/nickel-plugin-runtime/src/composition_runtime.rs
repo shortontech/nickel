@@ -3002,6 +3002,35 @@ mod tests {
                 .unwrap(),
             1
         );
+
+        let changed = host
+            .update_mount_surface(
+                &mount,
+                serde_json::json!({
+                    "id":"settings", "kind":"window", "width":800, "height":600,
+                    "output":"DP-2", "availableWidth":760, "availableHeight":560,
+                    "scaleFactor":1.5, "focused":true, "visible":true
+                }),
+            )
+            .unwrap();
+        assert!(changed);
+        assert!(
+            !host
+                .update_mount_surface(
+                    &mount,
+                    serde_json::json!({
+                        "id":"settings", "kind":"window", "width":800, "height":600,
+                        "output":"DP-2", "availableWidth":760, "availableHeight":560,
+                        "scaleFactor":1.5, "focused":true, "visible":true
+                    }),
+                )
+                .unwrap()
+        );
+        host.render(&mount, &serde_json::json!({})).unwrap();
+        assert!(runtime
+            .borrow_mut()
+            .eval_json::<bool>("surfaceObservation.output === 'DP-2' && surfaceObservation.availableSize.width === 760 && surfaceObservation.scaleFactor === 1.5 && surfaceObservation.focused === true && surfaceObservation.visible === true")
+            .unwrap());
     }
 
     #[test]

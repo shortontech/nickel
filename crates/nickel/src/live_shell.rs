@@ -3908,6 +3908,15 @@ impl LiveShell {
                 "availableHeight": available.map(|output| output.work_area.height),
             })
         };
+        let surface_authority = if replicated_surface.0 {
+            (None, None, None)
+        } else {
+            (
+                output.map(str::to_owned),
+                available.map(|output| (output.work_area.width, output.work_area.height)),
+                available.map(|output| output.scale),
+            )
+        };
         let dependency_ids = self
             .plugin_panel_host_for(key)?
             .application()
@@ -3958,6 +3967,17 @@ impl LiveShell {
         let result = (|| {
             let host = self.plugin_panel_host_for(key)?;
             let projected = (|| -> Result<bool, String> {
+                // Geometry is published first. Focus is a distinct UiHost fact,
+                // so hooks never observe a new focus paired with stale output
+                // or scale state from this presentation pass.
+                let geometry_changed = host.application_mut().sync_surface_geometry(
+                    surface_authority.0.as_deref(),
+                    surface_authority.1,
+                    surface_authority.2,
+                    Some(true),
+                )?;
+                let window_focused = host.inspect().window_focused;
+                let focus_changed = host.application_mut().sync_surface_focus(window_focused)?;
                 application_images.extend(preview_images);
                 let fields = [
                     ("viewport", Some(&viewport)),
@@ -4011,7 +4031,11 @@ impl LiveShell {
                         "plugin projection change source"
                     );
                 }
-                Ok(resource_changed || dependency_changed || application_images_changed)
+                Ok(geometry_changed
+                    || focus_changed
+                    || resource_changed
+                    || dependency_changed
+                    || application_images_changed)
             })();
             let projected = match projected {
                 Ok(changed) => changed,
@@ -5910,7 +5934,7 @@ impl LiveShell {
     fn step_generic_plugin_surface(
         &mut self,
         key: &nickel_core::plugins::PluginSurfaceKey,
-        batch: HostBatch,
+        mut batch: HostBatch,
         keyboard_epoch: Option<u64>,
     ) -> bool {
         self.plugin_pointer_paint = None;
@@ -5919,6 +5943,12 @@ impl LiveShell {
             let Some(host) = self.plugin_panel_host_for(key) else {
                 return false;
             };
+            if let Some(focused) = batch.window_focused {
+                match host.application_mut().sync_surface_focus(focused) {
+                    Ok(changed) => batch.application_changed |= changed,
+                    Err(error) => return self.fail_plugin_panel_runtime(&key.plugin_id, error),
+                }
+            }
             step_plugin_host(host, None, batch).map(|(outcome, _)| {
                 let paint_only = pointer_only
                     && outcome.messages.is_empty()
