@@ -12,6 +12,7 @@ pub mod layout;
 pub mod on_screen_keyboard;
 pub mod overlay;
 pub mod primitives;
+pub mod retained_surface;
 mod runtime;
 pub mod state;
 pub mod text_context_menu;
@@ -52,6 +53,12 @@ pub use overlay::{
 };
 pub use primitives::{
     ActionRegion, ArtworkPresentation, ItemPresentation, StatusRegion, SurfaceScaffold, ToolRegion,
+};
+pub use retained_surface::{
+    RetainedSurfaceChanges, RetainedSurfaceDiagnostics, RetainedSurfaceHost, RetainedSurfaceInput,
+    RetainedSurfaceInteraction, RetainedSurfaceLifecycle, RetainedSurfaceLimits,
+    RetainedSurfaceModel, RetainedSurfaceOutput, RetainedSurfaceRevisions, RetainedSurfaceSemantic,
+    RetainedSurfaceSnapshot,
 };
 #[cfg(target_os = "windows")]
 pub use runtime::run_with_adapter_on_any_thread;
