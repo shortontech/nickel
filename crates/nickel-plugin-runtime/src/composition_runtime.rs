@@ -107,6 +107,8 @@ struct ExpansionState {
     root: u64,
     events: BTreeMap<u64, ComponentEventHandle>,
     visited: std::collections::BTreeSet<String>,
+    native_ids: std::collections::BTreeSet<String>,
+    handler_slots: std::collections::BTreeSet<String>,
 }
 
 #[derive(Clone)]
@@ -1118,6 +1120,8 @@ impl ShellCompositionRuntime {
             root,
             events: BTreeMap::new(),
             visited: std::collections::BTreeSet::new(),
+            native_ids: std::collections::BTreeSet::new(),
+            handler_slots: std::collections::BTreeSet::new(),
         };
         let node = self.expand_node(
             "root",
@@ -1180,9 +1184,11 @@ impl ShellCompositionRuntime {
             {
                 return Err("foreign or stale owned child".into());
             }
+            let mut owned = grant.node;
+            namespace_native_metadata(&mut owned, path, 0)?;
             return self.expand_node(
                 path,
-                grant.node,
+                owned,
                 &grant.events,
                 grant.source,
                 expansion,
@@ -1238,9 +1244,11 @@ impl ShellCompositionRuntime {
             let props =
                 self.transport_callback_props(props, source_events, &mount, source_mount, depth)?;
             let rendered = self.render(&mount, &props)?;
+            let mut embedded = rendered.node;
+            namespace_native_metadata(&mut embedded, &key, 0)?;
             return self.expand_node(
                 &key,
-                rendered.node,
+                embedded,
                 &rendered.events,
                 mount.id,
                 expansion,
@@ -1248,6 +1256,7 @@ impl ShellCompositionRuntime {
             );
         }
         if let Value::Object(object) = &mut node {
+            validate_native_metadata(object, expansion)?;
             let owner = &self.mounts[&source_mount].reference.owner;
             for field in ["asset", "icon"] {
                 if let Some(Value::String(name)) = object.get_mut(field) {
@@ -1939,6 +1948,84 @@ fn bounded_json(value: &Value) -> Result<(), String> {
     serde_json::to_writer(Budget(MAX_JSON_BYTES), value)
         .map_err(|_| "composition JSON exceeds size limit".into())
 }
+
+fn namespace_native_metadata(value: &mut Value, prefix: &str, depth: usize) -> Result<(), String> {
+    if depth > MAX_TREE_DEPTH || prefix.len() > 512 {
+        return Err("native identity namespace exceeds limit".into());
+    }
+    match value {
+        Value::Array(values) => {
+            for value in values {
+                namespace_native_metadata(value, prefix, depth + 1)?;
+            }
+        }
+        Value::Object(object) => {
+            if let Some(id) = object.get_mut("__nativeId") {
+                let identity = id
+                    .as_str()
+                    .ok_or("native node identity must be a string")?
+                    .to_owned();
+                if identity.is_empty() || identity.len() > 512 {
+                    return Err("native node identity exceeds limit".into());
+                }
+                *id = Value::String(format!("{prefix}::{identity}"));
+            }
+            if let Some(slots) = object.get_mut("__handlerSlots") {
+                let slots = slots
+                    .as_object_mut()
+                    .ok_or("native handler slots must be an object")?;
+                for slot in slots.values_mut() {
+                    let value = slot
+                        .as_str()
+                        .ok_or("native handler slot must be a string")?;
+                    if value.is_empty() || value.len() > 640 {
+                        return Err("native handler slot exceeds limit".into());
+                    }
+                    *slot = Value::String(format!("{prefix}::{value}"));
+                }
+            }
+            for child in object.values_mut() {
+                namespace_native_metadata(child, prefix, depth + 1)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn validate_native_metadata(
+    object: &serde_json::Map<String, Value>,
+    expansion: &mut ExpansionState,
+) -> Result<(), String> {
+    let Some(id) = object.get("__nativeId") else {
+        if object.contains_key("__handlerSlots") {
+            return Err("native handler slots require a node identity".into());
+        }
+        return Ok(());
+    };
+    let id = id.as_str().ok_or("native node identity must be a string")?;
+    if id.is_empty() || id.len() > 1024 || !expansion.native_ids.insert(id.to_owned()) {
+        return Err("invalid or duplicate native node identity".into());
+    }
+    if let Some(slots) = object.get("__handlerSlots") {
+        let slots = slots
+            .as_object()
+            .ok_or("native handler slots must be an object")?;
+        for slot in slots.values() {
+            let slot = slot
+                .as_str()
+                .ok_or("native handler slot must be a string")?;
+            if slot.is_empty()
+                || slot.len() > 1280
+                || !slot.starts_with(id.split("::").next().unwrap_or(id))
+                || !expansion.handler_slots.insert(slot.to_owned())
+            {
+                return Err("invalid or duplicate native handler slot".into());
+            }
+        }
+    }
+    Ok(())
+}
 fn rewrite_events(
     value: &mut Value,
     runtime: u64,
@@ -2342,6 +2429,27 @@ mod tests {
         let tree = host
             .render_expanded(&root, &serde_json::json!({}), |_| Ok(()))
             .unwrap();
+        fn native_ids(value: &Value, found: &mut std::collections::BTreeSet<String>) {
+            match value {
+                Value::Array(values) => {
+                    for value in values {
+                        native_ids(value, found);
+                    }
+                }
+                Value::Object(object) => {
+                    if let Some(id) = object.get("__nativeId").and_then(Value::as_str) {
+                        assert!(found.insert(id.to_owned()), "duplicate composed ID {id}");
+                    }
+                    for value in object.values() {
+                        native_ids(value, found);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut accepted_ids = std::collections::BTreeSet::new();
+        native_ids(&tree.node, &mut accepted_ids);
+        assert!(accepted_ids.iter().any(|id| id.contains("::root")));
         assert!(tree.node.to_string().contains("provider0"));
         assert!(tree.node.to_string().contains("independent-page"));
         let stale_event = tree.events[&0].clone();
@@ -2349,6 +2457,9 @@ mod tests {
         let tree = host
             .dispatch_expanded(&root, &stale_event, &Value::Null, |_| Ok(()))
             .unwrap();
+        let mut updated_ids = std::collections::BTreeSet::new();
+        native_ids(&tree.node, &mut updated_ids);
+        assert_eq!(accepted_ids, updated_ids);
         assert!(tree.node.to_string().contains("provider1"));
         let stale_effect = host.take_effects().remove(0);
         assert_eq!(stale_effect.owner().id, "provider");
