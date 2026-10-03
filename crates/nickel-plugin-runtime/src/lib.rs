@@ -1018,7 +1018,15 @@ impl JsxRuntime {
 
     /// Bounded render diagnostics plus per-mount execution and transport profiles.
     pub fn runtime_diagnostics(&mut self) -> Result<Value, String> {
-        self.eval_json("__nickelRuntimeDiagnostics()")
+        let mut diagnostics: Value = self.eval_json("__nickelRuntimeDiagnostics()")?;
+        let object = diagnostics
+            .as_object_mut()
+            .ok_or("runtime diagnostics did not return an object")?;
+        object.insert(
+            "engine".into(),
+            serde_json::to_value(self.engine.diagnostics()).map_err(|error| error.to_string())?,
+        );
+        Ok(diagnostics)
     }
 
     fn report_host_profile(
@@ -1785,6 +1793,7 @@ mod tests {
         assert_eq!(profile["componentExecutions"], 2);
         assert_eq!(profile["patches"], 1);
         assert_eq!(profile["patchOperations"], 1);
+        assert!(profile["patchGenerationMillis"].is_u64());
         assert_eq!(profile["lifecycleCommits"], 2);
         assert!(profile["coldTreeTransportBytes"].as_u64().unwrap() > 0);
         assert!(profile["patchEnvelopeTransportBytes"].as_u64().unwrap() > 0);
@@ -1794,6 +1803,28 @@ mod tests {
         assert_eq!(profile["typedPatchApplyMicros"], 48);
         assert_eq!(profile["timingPrecision"], "wall-clock-milliseconds");
         assert_eq!(profile["hostTimingPrecision"], "wall-clock-microseconds");
+        let engine = &diagnostics["engine"];
+        assert!(engine["invocations"].as_u64().unwrap() > 0);
+        assert_eq!(engine["failedInvocations"], 0);
+        assert_eq!(engine["deadlineTerminations"], 0);
+        assert_eq!(
+            engine["microtaskCheckpoints"], engine["invocations"],
+            "every successful synchronous V8 turn owns one explicit checkpoint"
+        );
+        assert!(engine["javascriptMicros"].is_u64());
+        assert!(engine["bridgeMicros"].is_u64());
+        assert!(engine["microtaskMicros"].is_u64());
+        assert!(engine["gcCollections"].is_u64());
+        assert!(engine["gcMicros"].is_u64());
+        assert!(engine["usedHeapBytes"].as_u64().unwrap() > 0);
+        assert!(
+            engine["peakUsedHeapBytes"].as_u64().unwrap()
+                >= engine["usedHeapBytes"].as_u64().unwrap()
+        );
+        assert!(
+            engine["heapLimitBytes"].as_u64().unwrap()
+                >= engine["totalHeapBytes"].as_u64().unwrap()
+        );
 
         runtime.select_surface("settings").unwrap();
         runtime

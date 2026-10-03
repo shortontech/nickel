@@ -286,7 +286,8 @@ function __nickelProfile() {
             if(retired!==undefined)__mountProfiles.delete(retired);
         }
         profile={surface:__activeSurface,mount:__surfaceStore.snapshot.mountId,renders:0,componentExecutions:0,
-            componentExecutionMillis:0,reconciliationMillis:0,patches:0,patchOperations:0,patchNodesVisited:0,
+            componentExecutionMillis:0,reconciliationMillis:0,patchGenerationMillis:0,
+            patches:0,patchOperations:0,patchNodesVisited:0,
             lifecycleCommits:0,lifecycleCommitMillis:0,timingPrecision:'wall-clock-milliseconds',
             hostTimingPrecision:'wall-clock-microseconds',
             nativeValidationMicros:0,coldTreeTransportBytes:0,patchEnvelopeTransportBytes:0,
@@ -2243,12 +2244,17 @@ function __nickelRender(component = __nickelActiveEntry(), patchOnly = false) {
     __hookIndex = 0;
     try {
         const virtual = __nickelResolveVirtual(h(component, {}));
-        const result = patchOnly ? __nickelDirtyNativePatch(__pendingRender.records) : (() => {
+        let result;
+        if (patchOnly) {
+            const patchStarted=Date.now();
+            try { result=__nickelDirtyNativePatch(__pendingRender.records); }
+            finally { profile.patchGenerationMillis+=Math.max(0,Date.now()-patchStarted); }
+        } else {
             const node = __nickelMaterializeVirtual(virtual);
             __nickelAttachNativeRecords();
             __pendingRender.candidateNode = node;
-            return node;
-        })();
+            result=node;
+        }
         const root = patchOnly ? virtual : result;
         if (root?.kind === 'window' && __listKeyErrors.length) throw Error(__listKeyErrors[0]);
         for (const path of __componentHooks.keys()) {

@@ -6,6 +6,24 @@
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
+#[derive(Clone, Copy, Debug, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct EngineDiagnostics {
+    pub invocations: u64,
+    pub failed_invocations: u64,
+    pub deadline_terminations: u64,
+    pub javascript_micros: u64,
+    pub bridge_micros: u64,
+    pub microtask_checkpoints: u64,
+    pub microtask_micros: u64,
+    pub gc_collections: u64,
+    pub gc_micros: u64,
+    pub used_heap_bytes: usize,
+    pub peak_used_heap_bytes: usize,
+    pub total_heap_bytes: usize,
+    pub heap_limit_bytes: usize,
+}
+
 mod implementation {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -27,6 +45,45 @@ mod implementation {
     }
 
     struct DeadlineGuard(Arc<AtomicU64>);
+
+    #[derive(Default)]
+    struct GcDiagnostics {
+        collections: u64,
+        micros: u64,
+        started: Option<Instant>,
+    }
+
+    unsafe extern "C" fn gc_prologue(
+        _isolate: v8::UnsafeRawIsolatePtr,
+        _kind: v8::GCType,
+        _flags: v8::GCCallbackFlags,
+        data: *mut std::ffi::c_void,
+    ) {
+        // SAFETY: `data` points at the engine-owned boxed state, which remains
+        // pinned for the complete isolate lifetime. V8 invokes GC callbacks on
+        // the isolate's owning thread and does not re-enter this callback.
+        let state = unsafe { &mut *data.cast::<GcDiagnostics>() };
+        state.started = Some(Instant::now());
+    }
+
+    unsafe extern "C" fn gc_epilogue(
+        _isolate: v8::UnsafeRawIsolatePtr,
+        _kind: v8::GCType,
+        _flags: v8::GCCallbackFlags,
+        data: *mut std::ffi::c_void,
+    ) {
+        // SAFETY: see `gc_prologue`; both callbacks receive the same stable
+        // engine-owned allocation.
+        let state = unsafe { &mut *data.cast::<GcDiagnostics>() };
+        state.collections = state.collections.saturating_add(1);
+        if let Some(started) = state.started.take() {
+            state.micros = state.micros.saturating_add(elapsed_micros(started));
+        }
+    }
+
+    fn elapsed_micros(started: Instant) -> u64 {
+        started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64
+    }
 
     impl Drop for DeadlineGuard {
         fn drop(&mut self) {
@@ -83,6 +140,8 @@ mod implementation {
         context: v8::Global<v8::Context>,
         isolate: v8::OwnedIsolate,
         active_deadline: Arc<AtomicU64>,
+        diagnostics: EngineDiagnostics,
+        gc_diagnostics: Box<GcDiagnostics>,
     }
 
     impl JavascriptEngine {
@@ -96,6 +155,10 @@ mod implementation {
                 v8::CreateParams::default().heap_limits(INITIAL_HEAP_BYTES, MAX_HEAP_BYTES);
             let mut isolate = v8::Isolate::new(params);
             isolate.set_microtasks_policy(v8::MicrotasksPolicy::Explicit);
+            let mut gc_diagnostics = Box::<GcDiagnostics>::default();
+            let gc_data = (&mut *gc_diagnostics as *mut GcDiagnostics).cast();
+            isolate.add_gc_prologue_callback(gc_prologue, gc_data, v8::GCType::kGCTypeAll);
+            isolate.add_gc_epilogue_callback(gc_epilogue, gc_data, v8::GCType::kGCTypeAll);
             let context = {
                 v8::scope!(let scope, &mut isolate);
                 let context = v8::Context::new(scope, Default::default());
@@ -105,11 +168,28 @@ mod implementation {
             // live. Keeping idle isolates unentered permits package runtimes
             // to be retained and destroyed in arbitrary ownership order.
             unsafe { isolate.exit() };
+            let heap = isolate.get_heap_statistics();
             Self {
                 context,
                 isolate,
                 active_deadline: Arc::new(AtomicU64::new(0)),
+                diagnostics: EngineDiagnostics {
+                    used_heap_bytes: heap.used_heap_size(),
+                    peak_used_heap_bytes: heap.used_heap_size(),
+                    total_heap_bytes: heap.total_heap_size(),
+                    heap_limit_bytes: heap.heap_size_limit(),
+                    ..EngineDiagnostics::default()
+                },
+                gc_diagnostics,
             }
+        }
+
+        pub(crate) fn diagnostics(&mut self) -> EngineDiagnostics {
+            self.refresh_heap_diagnostics();
+            let mut diagnostics = self.diagnostics;
+            diagnostics.gc_collections = self.gc_diagnostics.collections;
+            diagnostics.gc_micros = self.gc_diagnostics.micros;
+            diagnostics
         }
 
         pub(crate) fn eval(&mut self, source: &str) -> Result<(), String> {
@@ -118,6 +198,7 @@ mod implementation {
 
         pub(crate) fn eval_json<T: DeserializeOwned>(&mut self, source: &str) -> Result<T, String> {
             let value = self.eval_value(source)?;
+            let bridge_started = Instant::now();
             let context = self.context.clone();
             // SAFETY: calls are synchronous and `JsxRuntime` already requires
             // exclusive access, so this isolate cannot be entered elsewhere.
@@ -135,6 +216,11 @@ mod implementation {
             })();
             // SAFETY: every handle/context scope created above has dropped.
             unsafe { self.isolate.exit() };
+            self.diagnostics.bridge_micros = self
+                .diagnostics
+                .bridge_micros
+                .saturating_add(elapsed_micros(bridge_started));
+            self.refresh_heap_diagnostics();
             result
         }
 
@@ -157,6 +243,7 @@ mod implementation {
         fn eval_value(&mut self, source: &str) -> Result<v8::Global<v8::Value>, String> {
             let deadline = self.arm_deadline();
             let context = self.context.clone();
+            let invocation_started = Instant::now();
             // SAFETY: calls are synchronous and exclusively borrow the owner.
             unsafe { self.isolate.enter() };
             let result = (|| {
@@ -165,6 +252,7 @@ mod implementation {
                 let scope = &mut v8::ContextScope::new(scope, context);
                 let scope = std::pin::pin!(v8::TryCatch::new(scope));
                 let mut scope = scope.init();
+                let javascript_started = Instant::now();
                 let source =
                     v8::String::new(&scope, source).ok_or("JavaScript source is too large")?;
                 let script = match v8::Script::compile(&scope, source, None) {
@@ -187,22 +275,54 @@ mod implementation {
                         return Err(error);
                     }
                 };
+                let javascript_micros = elapsed_micros(javascript_started);
+                let microtask_started = Instant::now();
                 scope.perform_microtask_checkpoint();
-                Ok(v8::Global::new(&scope, value))
+                let microtask_micros = elapsed_micros(microtask_started);
+                Ok((
+                    v8::Global::new(&scope, value),
+                    javascript_micros,
+                    microtask_micros,
+                ))
             })();
             // SAFETY: every handle/context scope created above has dropped.
             unsafe { self.isolate.exit() };
             drop(deadline);
+            self.diagnostics.invocations = self.diagnostics.invocations.saturating_add(1);
+            if let Ok((_, javascript_micros, microtask_micros)) = &result {
+                self.diagnostics.javascript_micros = self
+                    .diagnostics
+                    .javascript_micros
+                    .saturating_add(*javascript_micros);
+                self.diagnostics.microtask_checkpoints =
+                    self.diagnostics.microtask_checkpoints.saturating_add(1);
+                self.diagnostics.microtask_micros = self
+                    .diagnostics
+                    .microtask_micros
+                    .saturating_add(*microtask_micros);
+                let accounted = javascript_micros.saturating_add(*microtask_micros);
+                self.diagnostics.bridge_micros = self
+                    .diagnostics
+                    .bridge_micros
+                    .saturating_add(elapsed_micros(invocation_started).saturating_sub(accounted));
+            } else {
+                self.diagnostics.failed_invocations =
+                    self.diagnostics.failed_invocations.saturating_add(1);
+            }
+            self.refresh_heap_diagnostics();
             if self.isolate.is_execution_terminating() {
                 self.isolate.cancel_terminate_execution();
+                self.diagnostics.deadline_terminations =
+                    self.diagnostics.deadline_terminations.saturating_add(1);
                 return Err("JavaScript execution deadline exceeded".into());
             }
-            result
+            result.map(|(value, _, _)| value)
         }
 
         fn call_global(&mut self, name: &str, arguments: &[Value]) -> Result<bool, String> {
             let deadline = self.arm_deadline();
             let context = self.context.clone();
+            let invocation_started = Instant::now();
             // SAFETY: calls are synchronous and exclusively borrow the owner.
             unsafe { self.isolate.enter() };
             let result = (|| {
@@ -223,6 +343,7 @@ mod implementation {
                     .map(|value| json_to_v8(&mut scope, value))
                     .collect::<Result<Vec<_>, _>>()?;
                 let receiver = v8::undefined(&scope).into();
+                let javascript_started = Instant::now();
                 let result = match function.call(&scope, receiver, &arguments) {
                     Some(result) => result,
                     None => {
@@ -233,18 +354,56 @@ mod implementation {
                         return Err(error);
                     }
                 };
+                let javascript_micros = elapsed_micros(javascript_started);
                 let result = result.boolean_value(&scope);
+                let microtask_started = Instant::now();
                 scope.perform_microtask_checkpoint();
-                Ok(result)
+                let microtask_micros = elapsed_micros(microtask_started);
+                Ok((result, javascript_micros, microtask_micros))
             })();
             // SAFETY: every handle/context scope created above has dropped.
             unsafe { self.isolate.exit() };
             drop(deadline);
+            self.diagnostics.invocations = self.diagnostics.invocations.saturating_add(1);
+            if let Ok((_, javascript_micros, microtask_micros)) = &result {
+                self.diagnostics.javascript_micros = self
+                    .diagnostics
+                    .javascript_micros
+                    .saturating_add(*javascript_micros);
+                self.diagnostics.microtask_checkpoints =
+                    self.diagnostics.microtask_checkpoints.saturating_add(1);
+                self.diagnostics.microtask_micros = self
+                    .diagnostics
+                    .microtask_micros
+                    .saturating_add(*microtask_micros);
+                let accounted = javascript_micros.saturating_add(*microtask_micros);
+                self.diagnostics.bridge_micros = self
+                    .diagnostics
+                    .bridge_micros
+                    .saturating_add(elapsed_micros(invocation_started).saturating_sub(accounted));
+            } else {
+                self.diagnostics.failed_invocations =
+                    self.diagnostics.failed_invocations.saturating_add(1);
+            }
+            self.refresh_heap_diagnostics();
             if self.isolate.is_execution_terminating() {
                 self.isolate.cancel_terminate_execution();
+                self.diagnostics.deadline_terminations =
+                    self.diagnostics.deadline_terminations.saturating_add(1);
                 return Err("JavaScript execution deadline exceeded".into());
             }
-            result
+            result.map(|(value, _, _)| value)
+        }
+
+        fn refresh_heap_diagnostics(&mut self) {
+            let heap = self.isolate.get_heap_statistics();
+            self.diagnostics.used_heap_bytes = heap.used_heap_size();
+            self.diagnostics.peak_used_heap_bytes = self
+                .diagnostics
+                .peak_used_heap_bytes
+                .max(heap.used_heap_size());
+            self.diagnostics.total_heap_bytes = heap.total_heap_size();
+            self.diagnostics.heap_limit_bytes = heap.heap_size_limit();
         }
 
         fn arm_deadline(&self) -> DeadlineGuard {
