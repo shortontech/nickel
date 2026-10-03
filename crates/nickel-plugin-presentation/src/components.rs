@@ -4499,6 +4499,16 @@ fn mutate_target(
     if source.get("__nativeId").and_then(Value::as_str) == Some(target) {
         return operation(source, typed);
     }
+    if let Some(roots) = source.as_array_mut() {
+        let root = roots
+            .iter_mut()
+            .find(|root| {
+                root.get("__nativeId").and_then(Value::as_str) == Some(target)
+                    || source_contains_id(root, target)
+            })
+            .ok_or_else(|| format!("native patch target {target:?} disappeared"))?;
+        return mutate_target(root, typed, target, visited, operation);
+    }
     let children = source
         .get_mut("children")
         .and_then(Value::as_array_mut)
@@ -4609,6 +4619,23 @@ fn replace_source_and_typed(
         *typed = replacement_typed.clone();
         return Ok(());
     }
+    if let Some(roots) = source.as_array_mut() {
+        let root = roots
+            .iter_mut()
+            .find(|root| {
+                root.get("__nativeId").and_then(Value::as_str) == Some(target)
+                    || source_contains_id(root, target)
+            })
+            .ok_or_else(|| format!("native patch target {target:?} disappeared"))?;
+        return replace_source_and_typed(
+            root,
+            typed,
+            target,
+            replacement,
+            replacement_typed,
+            visited,
+        );
+    }
     let source_children = source
         .get_mut("children")
         .and_then(Value::as_array_mut)
@@ -4655,6 +4682,12 @@ fn replace_source_and_typed(
 }
 
 fn source_contains_id(value: &Value, target: &str) -> bool {
+    if let Some(values) = value.as_array() {
+        return values.iter().any(|value| {
+            value.get("__nativeId").and_then(Value::as_str) == Some(target)
+                || source_contains_id(value, target)
+        });
+    }
     value
         .get("children")
         .and_then(Value::as_array)
@@ -4880,7 +4913,32 @@ pub fn render_retained_panel_validated(
 mod class_lookup_tests {
     use super::{PanelNode, RetainedPanelTree};
     use nickel_plugin_runtime::{NativePatchCounters, NativePatchEnvelope, NativePatchOperation};
-    use serde_json::json;
+    use serde_json::{Value, json};
+
+    #[test]
+    fn namespaced_target_below_fragment_root_matches_cold_tree() {
+        let target =
+            "root/#1/export:shell.taskbar::root/#0/@io.nickel.codex.project.7bad8b9af270552f";
+        let root = json!({"kind":"column","__nativeId":"root","children":[
+            {"kind":"text","__nativeId":target,"children":["old"]}
+        ]});
+        let replacement = json!({"kind":"text","__nativeId":target,"children":["new"]});
+        let mut source = Value::Array(vec![root.clone()]);
+        let mut typed = PanelNode::parse(&root).unwrap();
+        let replacement_typed = PanelNode::parse(&replacement).unwrap();
+        let mut visited = 0;
+        super::replace_source_and_typed(
+            &mut source,
+            &mut typed,
+            target,
+            &replacement,
+            &replacement_typed,
+            &mut visited,
+        )
+        .unwrap();
+        assert_eq!(source[0]["children"][0], replacement);
+        assert_eq!(typed, PanelNode::parse(&source[0]).unwrap());
+    }
 
     #[test]
     fn retained_admission_indexes_identity_and_preserves_cold_typed_tree() {

@@ -1619,6 +1619,7 @@ impl ShellCompositionRuntime {
             operations.retain(|operation| {
                 !matches!(operation, NativePatchOperation::ReplaceHandlerSlot { .. })
             });
+            operations = normalize_atomic_operations(operations);
             let nodes_mutated = operations.len() as u64;
             let patch = NativePatchEnvelope {
                 version: 1,
@@ -3030,6 +3031,51 @@ fn diff_native_subtree(
     Ok(())
 }
 
+fn normalize_atomic_operations(operations: Vec<NativePatchOperation>) -> Vec<NativePatchOperation> {
+    fn target(operation: &NativePatchOperation) -> &str {
+        match operation {
+            NativePatchOperation::SetPrimitive { target, .. }
+            | NativePatchOperation::ReplaceSubtree { target, .. } => target,
+            NativePatchOperation::ReplaceHandlerSlot { slot, .. } => slot,
+            NativePatchOperation::InsertChild { parent, .. }
+            | NativePatchOperation::RemoveChild { parent, .. }
+            | NativePatchOperation::MoveChild { parent, .. } => parent,
+        }
+    }
+    fn below(candidate: &str, ancestor: &str) -> bool {
+        candidate
+            .strip_prefix(ancestor)
+            .is_some_and(|suffix| suffix.starts_with('/') || suffix.starts_with("::"))
+    }
+    let mut normalized = Vec::with_capacity(operations.len());
+    let mut covered = Vec::<String>::new();
+    for operation in operations {
+        let operation_target = target(&operation);
+        if covered
+            .iter()
+            .any(|ancestor| below(operation_target, ancestor))
+        {
+            continue;
+        }
+        if let NativePatchOperation::ReplaceSubtree {
+            target: replaced_target,
+            ..
+        } = &operation
+        {
+            normalized.retain(|prior| !below(target(prior), replaced_target));
+            covered.retain(|prior| !below(prior, replaced_target));
+            covered.push(replaced_target.clone());
+        }
+        if let NativePatchOperation::RemoveChild { child_id, .. } = &operation {
+            normalized.retain(|prior| !below(target(prior), child_id));
+            covered.retain(|prior| !below(prior, child_id));
+            covered.push(child_id.clone());
+        }
+        normalized.push(operation);
+    }
+    normalized
+}
+
 #[allow(clippy::too_many_arguments)]
 fn translate_package_patch(
     patch: NativePatchEnvelope,
@@ -4221,6 +4267,33 @@ mod tests {
         assert!(operations.iter().any(|operation| matches!(operation, NativePatchOperation::ReplaceHandlerSlot { slot, action } if slot == "a::action" && *action == 9)));
         assert!(!operations.iter().any(|operation| matches!(operation, NativePatchOperation::ReplaceSubtree { target, .. } if target == "root")));
         assert!(visited >= 2);
+    }
+
+    #[test]
+    fn atomic_patch_suppresses_work_below_replaced_ancestor() {
+        let replacement = serde_json::json!({
+            "kind":"Column","__nativeId":"root/owner","children":[
+                {"kind":"Text","key":"fresh","__nativeId":"root/owner/@fresh","children":["cold"]}
+            ]
+        });
+        let operations = normalize_atomic_operations(vec![
+            NativePatchOperation::ReplaceSubtree {
+                target: "root/owner".into(),
+                node: replacement.clone(),
+            },
+            NativePatchOperation::SetPrimitive {
+                target: "root/owner/@retired".into(),
+                property: "children".into(),
+                value: serde_json::json!(["stale"]),
+            },
+        ]);
+        assert_eq!(
+            operations,
+            vec![NativePatchOperation::ReplaceSubtree {
+                target: "root/owner".into(),
+                node: replacement,
+            }]
+        );
     }
 
     #[test]
