@@ -4091,11 +4091,11 @@ impl<A: Application> UiHost<A> {
         cancellation.telemetry.nodes_measured = cancellation
             .telemetry
             .nodes_measured
-            .saturating_add(resources.node_count);
+            .saturating_add(resources.nodes_measured);
         cancellation.telemetry.nodes_placed = cancellation
             .telemetry
             .nodes_placed
-            .saturating_add(resources.node_count);
+            .saturating_add(resources.nodes_placed);
         cancellation.telemetry.paint_commands_emitted = cancellation
             .telemetry
             .paint_commands_emitted
@@ -6826,7 +6826,10 @@ mod tests {
         assert_eq!(outcome.telemetry.retained_paint_refreshes, 0);
         assert_eq!(outcome.telemetry.semantic_nodes_reused, 0);
         assert_eq!(outcome.telemetry.view_calls, 1);
-        assert!(outcome.telemetry.nodes_measured > 0);
+        // The changed view context still requires declarative reconciliation,
+        // but unchanged fixed geometry is retained across that rebuild.
+        assert_eq!(outcome.telemetry.nodes_measured, 0);
+        assert_eq!(outcome.telemetry.nodes_placed, 0);
         assert_eq!(host.application().views.get(), 1);
         assert!(host.inspect().keyboard_focus.is_some());
     }

@@ -42,6 +42,7 @@ impl DirtyPhases {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct RetainedPhaseData {
     pub(crate) measured: Option<Size>,
+    measured_constraints: Option<[u32; 2]>,
     pub(crate) allocated: Option<Rect>,
     pub(crate) paint: Vec<PaintCommand>,
     pub(crate) interaction_revision: u64,
@@ -590,8 +591,43 @@ impl RetainedNodeArena {
     pub(crate) fn capture_layout(&mut self, id: &UiId, measured: Size, allocated: Rect) {
         if let Some(node) = self.nodes.values_mut().find(|node| &node.ui_id == id) {
             node.phases.measured = Some(measured);
+            node.phases.measured_constraints = Some([
+                allocated.size.width.to_bits(),
+                allocated.size.height.to_bits(),
+            ]);
             node.phases.allocated = Some(allocated);
         }
+    }
+
+    pub(crate) fn measured_for(&self, id: &UiId, constraints: Size) -> Option<Size> {
+        let node = self.nodes.values().find(|node| &node.ui_id == id)?;
+        (!node.dirty.contains(DirtyPhases::MEASURE)
+            && node.phases.measured_constraints
+                == Some([constraints.width.to_bits(), constraints.height.to_bits()]))
+        .then_some(node.phases.measured)
+        .flatten()
+    }
+
+    /// Returns whether measurement and placement records for the complete
+    /// declaration subtree remain valid. Callers may reuse geometry only when
+    /// the incoming parent allocation also matches the recorded allocation.
+    pub(crate) fn subtree_layout_is_clean(&self, id: &UiId) -> bool {
+        let Some(node) = self.nodes.values().find(|node| &node.ui_id == id) else {
+            return false;
+        };
+        self.subtree_layout_is_clean_from(node.id)
+    }
+
+    fn subtree_layout_is_clean_from(&self, id: RetainedNodeId) -> bool {
+        let node = &self.nodes[&id];
+        !node.dirty.contains(DirtyPhases::MEASURE)
+            && !node.dirty.contains(DirtyPhases::PLACE)
+            && node.phases.measured.is_some()
+            && node.phases.allocated.is_some()
+            && node
+                .children
+                .iter()
+                .all(|child| self.subtree_layout_is_clean_from(*child))
     }
 
     pub(crate) fn node_count(&self) -> usize {
@@ -759,6 +795,72 @@ mod tests {
         );
     }
 
+    #[test]
+    fn semantic_and_paint_only_change_executes_no_measurement_or_placement() {
+        let bounds = Rect::new(0.0, 0.0, 320.0, 120.0);
+        let make_view = |label: &str, color| {
+            Column::new()
+                .width(320.0)
+                .height(120.0)
+                .child(
+                    Text::<()>::new(label)
+                        .id("label")
+                        .width(120.0)
+                        .height(24.0)
+                        .foreground(color),
+                )
+                .into_element()
+        };
+        let mut retained_state = UiStateStore::default();
+        let first = UiFrame::resolve(
+            make_view("before", 0xff11_2233),
+            FrameRequest::new(bounds, &mut retained_state),
+        );
+        assert_eq!(first.resource_diagnostics().nodes_measured, 2);
+        assert_eq!(first.resource_diagnostics().nodes_placed, 2);
+
+        let next = UiFrame::resolve_against(
+            make_view("after", 0xff33_2211),
+            FrameRequest::new(bounds, &mut retained_state),
+            &first,
+        );
+        let work = next.resource_diagnostics();
+        assert_eq!(work.nodes_measured, 0);
+        assert_eq!(work.nodes_placed, 0);
+
+        let mut cold_state = UiStateStore::default();
+        let cold = UiFrame::resolve(
+            make_view("after", 0xff33_2211),
+            FrameRequest::new(bounds, &mut cold_state),
+        );
+        assert_eq!(next.resolved_layout(), cold.resolved_layout());
+        assert_eq!(next.commands(), cold.commands());
+        assert_eq!(next.semantic_nodes(), cold.semantic_nodes());
+    }
+
+    #[test]
+    fn changed_constraints_reject_geometry_and_measurement_reuse() {
+        let view = || {
+            Column::new()
+                .child(keyed_text("a", "A"))
+                .child(keyed_text("b", "B"))
+                .into_element()
+        };
+        let mut state = UiStateStore::default();
+        let first = UiFrame::resolve(
+            view(),
+            FrameRequest::new(Rect::new(0.0, 0.0, 240.0, 120.0), &mut state),
+        );
+        let next = UiFrame::resolve_against(
+            view(),
+            FrameRequest::new(Rect::new(0.0, 0.0, 280.0, 120.0), &mut state),
+            &first,
+        );
+        let work = next.resource_diagnostics();
+        assert!(work.nodes_measured > 0);
+        assert!(work.nodes_placed > 0);
+    }
+
     proptest! {
         #[test]
         fn incremental_reconciliation_matches_a_cold_frame(
@@ -784,6 +886,7 @@ mod tests {
                 FrameRequest::new(bounds, &mut retained_state),
             );
             for (operation, key) in operations {
+                let order_before = order.clone();
                 match operation {
                     0 if !order.contains(&key) => order.insert((key as usize) % (order.len() + 1), key),
                     1 if order.len() > 1 => order.retain(|candidate| *candidate != key),
@@ -803,6 +906,11 @@ mod tests {
                     FrameRequest::new(bounds, &mut next_state),
                     &retained,
                 );
+                if order == order_before {
+                    let work = next.resource_diagnostics();
+                    prop_assert_eq!(work.nodes_measured, 0);
+                    prop_assert_eq!(work.nodes_placed, 0);
+                }
                 let mut cold_state = retained_state.clone();
                 let cold = UiFrame::resolve(
                     make_view(&order, &values),
@@ -815,5 +923,77 @@ mod tests {
                 retained_state = next_state;
             }
         }
+    }
+
+    #[cfg(not(debug_assertions))]
+    #[test]
+    #[ignore = "release-profile retained layout admission benchmark"]
+    fn retained_layout_release_admission_skips_work_and_beats_cold_resolution() {
+        const NODES: usize = 500;
+        const ITERATIONS: usize = 12;
+        const SAMPLES: usize = 5;
+
+        fn view(generation: usize) -> Element<()> {
+            Column::new()
+                .children((0..NODES).map(|index| {
+                    keyed_text(
+                        &format!("item-{index}"),
+                        &format!(
+                            "generation {generation}: retained measurement admission item {index} \
+                             with enough shaped text to make cold work observable"
+                        ),
+                    )
+                }))
+                .into_element()
+        }
+
+        fn median(mut samples: Vec<std::time::Duration>) -> std::time::Duration {
+            samples.sort_unstable();
+            samples[samples.len() / 2]
+        }
+
+        let bounds = Rect::new(0.0, 0.0, 900.0, 800.0);
+        let mut retained_state = UiStateStore::default();
+        let mut retained =
+            UiFrame::resolve(view(0), FrameRequest::new(bounds, &mut retained_state));
+        let mut retained_samples = Vec::with_capacity(SAMPLES);
+        let mut cold_samples = Vec::with_capacity(SAMPLES);
+        let mut generation = 1;
+        for _ in 0..SAMPLES {
+            let started = std::time::Instant::now();
+            for _ in 0..ITERATIONS {
+                let next = UiFrame::resolve_against(
+                    view(generation),
+                    FrameRequest::new(bounds, &mut retained_state),
+                    &retained,
+                );
+                let work = next.resource_diagnostics();
+                assert_eq!(work.nodes_measured, 0);
+                assert_eq!(work.nodes_placed, 0);
+                retained = next;
+                generation += 1;
+            }
+            retained_samples.push(started.elapsed());
+
+            let started = std::time::Instant::now();
+            for _ in 0..ITERATIONS {
+                let mut state = UiStateStore::default();
+                let cold =
+                    UiFrame::resolve(view(generation), FrameRequest::new(bounds, &mut state));
+                assert_eq!(cold.resource_diagnostics().nodes_measured, NODES + 1);
+                std::hint::black_box(cold.commands());
+                generation += 1;
+            }
+            cold_samples.push(started.elapsed());
+        }
+        let retained = median(retained_samples);
+        let cold = median(cold_samples);
+        eprintln!(
+            "retained-layout admission: nodes={NODES} iterations={ITERATIONS} retained-median={retained:?} cold-median={cold:?}"
+        );
+        assert!(
+            retained.as_nanos().saturating_mul(5) <= cold.as_nanos().saturating_mul(4),
+            "retained layout must be at least 20% faster: retained={retained:?}, cold={cold:?}"
+        );
     }
 }

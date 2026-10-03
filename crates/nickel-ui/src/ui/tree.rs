@@ -416,6 +416,10 @@ pub struct FrameResourceDiagnostics {
     pub retained_nodes_removed: usize,
     pub retained_nodes_moved: usize,
     pub retained_nodes_replaced: usize,
+    /// Resolver nodes whose intrinsic measurement actually executed for this frame.
+    pub nodes_measured: usize,
+    /// Resolver nodes whose placement actually executed for this frame.
+    pub nodes_placed: usize,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -523,6 +527,9 @@ impl ResolvedLayout {
 #[derive(Clone, Debug)]
 pub struct UiFrame<Message = String> {
     retained_nodes: super::retained::RetainedNodeArena,
+    retained_layout: HashMap<UiId, ResolvedNode>,
+    nodes_measured: usize,
+    nodes_placed: usize,
     declaration_root: Option<Element<Message>>,
     declaration_root_id: Option<UiId>,
     commands: Vec<PaintCommand>,
@@ -564,6 +571,9 @@ impl<Message> Default for UiFrame<Message> {
     fn default() -> Self {
         Self {
             retained_nodes: super::retained::RetainedNodeArena::default(),
+            retained_layout: HashMap::new(),
+            nodes_measured: 0,
+            nodes_placed: 0,
             declaration_root: None,
             declaration_root_id: None,
             commands: Vec::new(),
@@ -1596,14 +1606,12 @@ impl<Message: Clone> UiFrame<Message> {
     }
     /// Resolves a declarative view into the canonical retained frame.
     pub fn resolve(root: impl Component<Message>, request: FrameRequest<'_>) -> Self {
-        let mut tree = Self::layout_with_state_and_diagnostics(
+        Self::layout_with_state_and_diagnostics(
             root,
             request.viewport,
             request.state,
             request.diagnostics == DiagnosticMode::Collect,
-        );
-        tree.reconcile_retained_nodes(None);
-        tree
+        )
     }
 
     /// Resolve a fresh declaration while carrying stable native node identity
@@ -1613,29 +1621,22 @@ impl<Message: Clone> UiFrame<Message> {
         request: FrameRequest<'_>,
         previous: &Self,
     ) -> Self {
-        let mut tree = Self::layout_with_state_and_diagnostics(
+        Self::layout_with_state_and_diagnostics_against(
             root,
             request.viewport,
             request.state,
             request.diagnostics == DiagnosticMode::Collect,
-        );
-        tree.reconcile_retained_nodes(Some(previous));
-        tree
+            previous,
+        )
     }
 
-    fn reconcile_retained_nodes(&mut self, previous: Option<&Self>) {
-        let Some(root) = self.declaration_root.as_ref() else {
-            return;
-        };
-        let mut arena = previous
-            .map(|previous| previous.retained_nodes.clone())
-            .unwrap_or_default();
-        arena.reconcile(root);
-        self.retained_nodes = arena;
-        for node in self.resolved.nodes() {
-            self.retained_nodes
-                .capture_layout(&node.id, node.preferred, node.allocated);
+    fn reusable_geometry(&self, id: &UiId, bounds: Rect) -> Option<&ResolvedNode> {
+        if !self.retained_nodes.subtree_layout_is_clean(id) {
+            return None;
         }
+        self.retained_layout
+            .get(id)
+            .filter(|node| approximately_same_rect(node.allocated, bounds))
     }
 
     fn selection_hit_at(
@@ -1750,6 +1751,32 @@ impl<Message: Clone> UiFrame<Message> {
         state: &mut UiStateStore,
         diagnostics: bool,
     ) -> Self {
+        Self::layout_with_state_and_diagnostics_impl(root, bounds, state, diagnostics, None)
+    }
+
+    fn layout_with_state_and_diagnostics_against(
+        root: impl Component<Message>,
+        bounds: Rect,
+        state: &mut UiStateStore,
+        diagnostics: bool,
+        previous: &Self,
+    ) -> Self {
+        Self::layout_with_state_and_diagnostics_impl(
+            root,
+            bounds,
+            state,
+            diagnostics,
+            Some(previous),
+        )
+    }
+
+    fn layout_with_state_and_diagnostics_impl(
+        root: impl Component<Message>,
+        bounds: Rect,
+        state: &mut UiStateStore,
+        diagnostics: bool,
+        previous: Option<&Self>,
+    ) -> Self {
         let mut root = root.into_element();
         let declaration_root = root.clone();
         let root_id = root.id.as_ref().map_or_else(
@@ -1764,8 +1791,23 @@ impl<Message: Clone> UiFrame<Message> {
             declaration_root_id: Some(root_id.clone()),
             diagnostics_enabled: diagnostics,
             viewport: bounds,
+            retained_nodes: previous
+                .map(|previous| previous.retained_nodes.clone())
+                .unwrap_or_default(),
+            retained_layout: previous
+                .map(|previous| {
+                    previous
+                        .resolved
+                        .nodes
+                        .iter()
+                        .cloned()
+                        .map(|node| (node.id.clone(), node))
+                        .collect()
+                })
+                .unwrap_or_default(),
             ..Self::default()
         };
+        tree.retained_nodes.reconcile(&root);
         layout_element(&root, &root_id, bounds, None, None, &mut tree);
         let initial = tree
             .resolved
@@ -1832,6 +1874,11 @@ impl<Message: Clone> UiFrame<Message> {
         state.end_frame();
         state.reconcile_live_targets();
         tree.apply_interaction_state(state);
+        for node in tree.resolved.nodes() {
+            tree.retained_nodes
+                .capture_layout(&node.id, node.preferred, node.allocated);
+        }
+        tree.retained_layout.clear();
         tree.release_build_scratch();
         tree
     }
@@ -2907,6 +2954,8 @@ impl<Message: Clone> UiFrame<Message> {
             retained_nodes_removed: retained.removed,
             retained_nodes_moved: retained.moved,
             retained_nodes_replaced: retained.replaced,
+            nodes_measured: self.nodes_measured,
+            nodes_placed: self.nodes_placed,
         }
     }
 

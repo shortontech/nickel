@@ -8,8 +8,24 @@ pub(super) fn layout_element<Message: Clone>(
     inherited_clip: Option<Rect>,
     tree: &mut UiFrame<Message>,
 ) -> usize {
-    let rect = bounds;
-    let preferred = measure_element(element, Constraints::loose(bounds.size));
+    let reusable = geometry_reuse_safe(element)
+        .then(|| tree.reusable_geometry(id, bounds))
+        .flatten()
+        .cloned();
+    let rect = reusable.as_ref().map_or(bounds, |node| node.allocated);
+    let cached_measurement = tree.retained_nodes.measured_for(id, bounds.size);
+    let preferred = reusable.as_ref().map_or_else(
+        || {
+            cached_measurement.unwrap_or_else(|| {
+                tree.nodes_measured = tree.nodes_measured.saturating_add(1);
+                measure_element(element, Constraints::loose(bounds.size))
+            })
+        },
+        |node| node.preferred,
+    );
+    if reusable.is_none() {
+        tree.nodes_placed = tree.nodes_placed.saturating_add(1);
+    }
     let node_index = tree.resolved.nodes.len();
     let interaction = InteractionState {
         interactive: (element.message.is_some() || element.context_message.is_some())
@@ -241,6 +257,26 @@ pub(super) fn layout_element<Message: Clone>(
     } else {
         inherited_clip
     };
+    if reusable.is_some() {
+        for (index, child) in element.children.iter().enumerate() {
+            let child_id = resolved_child_id(id, child, index);
+            let Some((allocated, clip)) = tree
+                .retained_layout
+                .get(&child_id)
+                .map(|node| (node.allocated, node.clip))
+            else {
+                // The arena's clean-subtree proof requires every child to have
+                // a phase record, so an absent resolved node is corruption.
+                debug_assert!(false, "clean retained child lacks resolved geometry");
+                continue;
+            };
+            child_indices.push(layout_element(
+                child, &child_id, allocated, foreground, clip, tree,
+            ));
+        }
+        tree.resolved.nodes[node_index].children = child_indices;
+        return node_index;
+    }
     match &element.kind {
         Kind::Text { .. }
         | Kind::StyledText { .. }
@@ -697,6 +733,16 @@ pub(super) fn layout_element<Message: Clone>(
     }
     tree.resolved.nodes[node_index].children = child_indices;
     node_index
+}
+
+fn geometry_reuse_safe<Message>(element: &Element<Message>) -> bool {
+    let owns_auxiliary_layout_records = matches!(
+        element.kind,
+        Kind::Grid { .. } | Kind::VerticalScroll { .. }
+    ) || matches!(element.kind, Kind::Dropdown { .. })
+        || matches!(element.style.overflow_x, Overflow::Scroll | Overflow::Auto)
+        || matches!(element.style.overflow_y, Overflow::Scroll | Overflow::Auto);
+    !owns_auxiliary_layout_records && element.children.iter().all(geometry_reuse_safe)
 }
 
 fn resolved_child_id<Message>(parent: &UiId, child: &Element<Message>, index: usize) -> UiId {
