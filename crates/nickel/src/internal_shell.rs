@@ -2694,102 +2694,110 @@ mod tests {
 
     #[test]
     fn native_screenshot_copy_uses_the_host_clipboard_authority() {
-        use nickel_input::{
-            DeviceId, EventOrder, InputEvent, KeyEdge, PointerButton, PointerEvent,
-        };
-        use std::sync::atomic::{AtomicUsize, Ordering};
+        with_package_runtime_stack(|| {
+            use nickel_input::{
+                DeviceId, EventOrder, InputEvent, KeyEdge, PointerButton, PointerEvent,
+            };
+            use std::sync::atomic::{AtomicUsize, Ordering};
 
-        struct CopyHost(Arc<AtomicUsize>);
-        impl SessionHost for CopyHost {
-            fn dispatch(&self, _: ShellCommand) -> Result<(), SessionRequestError> {
-                Ok(())
+            struct CopyHost(Arc<AtomicUsize>);
+            impl SessionHost for CopyHost {
+                fn dispatch(&self, _: ShellCommand) -> Result<(), SessionRequestError> {
+                    Ok(())
+                }
+
+                fn capture_desktop(
+                    &self,
+                    _: Option<&str>,
+                ) -> crate::session_host::DesktopCapturePoll {
+                    crate::session_host::DesktopCapturePoll::Ready(Ok(
+                        crate::platform::DesktopCapture {
+                            image: image::RgbaImage::new(4, 4),
+                        },
+                    ))
+                }
+
+                fn copy_image(&self, image: image::RgbaImage) -> Result<(), String> {
+                    assert!(image.width() > 0 && image.height() > 0);
+                    self.0.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                }
             }
 
-            fn capture_desktop(&self, _: Option<&str>) -> crate::session_host::DesktopCapturePoll {
-                crate::session_host::DesktopCapturePoll::Ready(Ok(
-                    crate::platform::DesktopCapture {
-                        image: image::RgbaImage::new(4, 4),
+            let copies = Arc::new(AtomicUsize::new(0));
+            let mut coordinator = InternalShellCoordinator::new(
+                Arc::new(CopyHost(copies.clone())),
+                PanelEdge::Bottom,
+            )
+            .unwrap();
+            coordinator.set_outputs(&[InternalOutput {
+                x: 0,
+                y: 0,
+                name: "nested".into(),
+                width: 800,
+                height: 600,
+                scale: 1.0,
+            }]);
+            coordinator
+                .global_shortcut(nickel_session_protocol::ShortcutAction::ShowScreenshotTool);
+            coordinator.poll(Instant::now() + std::time::Duration::from_millis(100));
+            let id = coordinator
+                .surface(SurfaceRole::Screenshot, None)
+                .unwrap()
+                .id;
+            let scene = coordinator.scene(id).unwrap();
+            let image = scene
+                .iter()
+                .find_map(|command| match command {
+                    PaintCommand::Image { bounds, .. } => Some(*bounds),
+                    _ => None,
+                })
+                .expect("native screenshot renders the captured host image");
+            let point = |fraction: f32| nickel_input::Point {
+                x: f64::from(image.origin.x + image.size.width * fraction),
+                y: f64::from(image.origin.y + image.size.height * fraction),
+            };
+            let send = |coordinator: &mut InternalShellCoordinator, position, edge, order| {
+                coordinator.step_slot_changes(
+                    id,
+                    HostBatch {
+                        events: vec![nickel_ui::HostEvent::Normalized {
+                            input: InputEvent::Pointer(PointerEvent::Button {
+                                device: DeviceId(1),
+                                order: EventOrder(order),
+                                position: Some(position),
+                                button: PointerButton::Primary,
+                                edge,
+                            }),
+                            clipboard_text: None,
+                        }],
+                        ..Default::default()
                     },
-                ))
+                );
+            };
+            send(&mut coordinator, point(0.25), KeyEdge::Pressed, 1);
+            send(&mut coordinator, point(0.75), KeyEdge::Released, 2);
+            for order in [3, 5] {
+                send(&mut coordinator, point(0.5), KeyEdge::Pressed, order);
+                send(&mut coordinator, point(0.5), KeyEdge::Released, order + 1);
             }
-
-            fn copy_image(&self, image: image::RgbaImage) -> Result<(), String> {
-                assert!(image.width() > 0 && image.height() > 0);
-                self.0.fetch_add(1, Ordering::SeqCst);
-                Ok(())
-            }
-        }
-
-        let copies = Arc::new(AtomicUsize::new(0));
-        let mut coordinator =
-            InternalShellCoordinator::new(Arc::new(CopyHost(copies.clone())), PanelEdge::Bottom)
-                .unwrap();
-        coordinator.set_outputs(&[InternalOutput {
-            x: 0,
-            y: 0,
-            name: "nested".into(),
-            width: 800,
-            height: 600,
-            scale: 1.0,
-        }]);
-        coordinator.global_shortcut(nickel_session_protocol::ShortcutAction::ShowScreenshotTool);
-        coordinator.poll(Instant::now() + std::time::Duration::from_millis(100));
-        let id = coordinator
-            .surface(SurfaceRole::Screenshot, None)
-            .unwrap()
-            .id;
-        let scene = coordinator.scene(id).unwrap();
-        let image = scene
-            .iter()
-            .find_map(|command| match command {
-                PaintCommand::Image { bounds, .. } => Some(*bounds),
-                _ => None,
-            })
-            .expect("native screenshot renders the captured host image");
-        let point = |fraction: f32| nickel_input::Point {
-            x: f64::from(image.origin.x + image.size.width * fraction),
-            y: f64::from(image.origin.y + image.size.height * fraction),
-        };
-        let send = |coordinator: &mut InternalShellCoordinator, position, edge, order| {
-            coordinator.step_slot_changes(
-                id,
-                HostBatch {
-                    events: vec![nickel_ui::HostEvent::Normalized {
-                        input: InputEvent::Pointer(PointerEvent::Button {
-                            device: DeviceId(1),
-                            order: EventOrder(order),
-                            position: Some(position),
-                            button: PointerButton::Primary,
-                            edge,
-                        }),
-                        clipboard_text: None,
-                    }],
-                    ..Default::default()
-                },
-            );
-        };
-        send(&mut coordinator, point(0.25), KeyEdge::Pressed, 1);
-        send(&mut coordinator, point(0.75), KeyEdge::Released, 2);
-        for order in [3, 5] {
-            send(&mut coordinator, point(0.5), KeyEdge::Pressed, order);
-            send(&mut coordinator, point(0.5), KeyEdge::Released, order + 1);
-        }
-        let scene = coordinator.scene(id).unwrap();
-        let copy = scene
-            .iter()
-            .find_map(|command| match command {
-                PaintCommand::Text { text, bounds, .. } if text == "Copy" => Some(*bounds),
-                _ => None,
-            })
-            .expect("confirmed native selection exposes Copy");
-        let copy = nickel_input::Point {
-            x: f64::from(copy.origin.x + copy.size.width / 2.0),
-            y: f64::from(copy.origin.y + copy.size.height / 2.0),
-        };
-        send(&mut coordinator, copy, KeyEdge::Pressed, 7);
-        send(&mut coordinator, copy, KeyEdge::Released, 8);
-        assert_eq!(copies.load(Ordering::SeqCst), 1);
-        assert!(!coordinator.visible(id));
+            let scene = coordinator.scene(id).unwrap();
+            let copy = scene
+                .iter()
+                .find_map(|command| match command {
+                    PaintCommand::Text { text, bounds, .. } if text == "Copy" => Some(*bounds),
+                    _ => None,
+                })
+                .expect("confirmed native selection exposes Copy");
+            let copy = nickel_input::Point {
+                x: f64::from(copy.origin.x + copy.size.width / 2.0),
+                y: f64::from(copy.origin.y + copy.size.height / 2.0),
+            };
+            send(&mut coordinator, copy, KeyEdge::Pressed, 7);
+            send(&mut coordinator, copy, KeyEdge::Released, 8);
+            assert_eq!(copies.load(Ordering::SeqCst), 1);
+            assert!(!coordinator.visible(id));
+        });
     }
 
     #[test]
