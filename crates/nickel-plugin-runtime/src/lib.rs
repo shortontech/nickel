@@ -191,7 +191,7 @@ pub enum ScheduledRender<T> {
     },
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, serde::Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct NativePatchEnvelope {
     pub version: u8,
@@ -199,7 +199,7 @@ pub struct NativePatchEnvelope {
     pub counters: NativePatchCounters,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, serde::Serialize, PartialEq)]
 #[serde(tag = "op", rename_all = "camelCase")]
 pub enum NativePatchOperation {
     SetPrimitive {
@@ -237,7 +237,7 @@ pub enum NativePatchOperation {
     },
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, serde::Serialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct NativePatchCounters {
     pub nodes_visited: u64,

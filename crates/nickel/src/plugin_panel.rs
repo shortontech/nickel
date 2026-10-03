@@ -3027,6 +3027,12 @@ impl PluginPanelApplication {
                             }
                         }
                     }
+                    ScheduledExpandedBatch::Patched { .. } => {
+                        host.finish_transaction(false)?;
+                        return Err(
+                            "passive composition reconciliation returned an event patch".into()
+                        );
+                    }
                 }
             } else {
                 let generation = self.next_generation;
@@ -3284,30 +3290,36 @@ impl nickel_ui::Application for PluginPanelApplication {
                     })
                     .collect::<Result<Vec<_>, String>>()?;
                 let mut host = state.host.borrow_mut();
+                let accepted_tree = self.accepted.clone();
 
                 let outcome = host.dispatch_expanded_batch_scheduled_pending_validated(
                     &state.mount,
                     &events,
-                    |value| {
-                        let node = parse_panel_for_manifest(
-                            value,
+                    &state.events,
+                    |patch, _, generation| {
+                        let mut candidate = accepted_tree;
+                        let transport_bytes = serde_json::to_vec(patch)
+                            .map_err(|error| error.to_string())?
+                            .len();
+                        candidate.apply_patch(
+                            patch,
                             &self.manifest,
                             self.expected_surface_id.as_deref(),
+                            &self.stylesheet,
+                            generation,
+                            transport_bytes,
                         )?;
-                        if let Some(id) = &self.expected_surface_id {
-                            let surface = self
-                                .manifest
-                                .surfaces
-                                .iter()
-                                .find(|surface| &surface.id == id)
-                                .ok_or("composed surface grant is missing")?;
-                            node.requested_surface(surface, &self.stylesheet)?;
-                        }
-                        Ok(node)
+                        Ok(candidate)
                     },
                 )?;
                 let accepted = match outcome {
                     ScheduledExpandedBatch::Unchanged => None,
+                    ScheduledExpandedBatch::Patched {
+                        events, validated, ..
+                    } => {
+                        state.events = events;
+                        Some(validated)
+                    }
                     ScheduledExpandedBatch::Rendered {
                         rendered,
                         validated: _,

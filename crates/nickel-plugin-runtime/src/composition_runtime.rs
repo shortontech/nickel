@@ -13,7 +13,10 @@ use nickel_core::package_composition::{
 use nickel_core::plugins::PluginPackage;
 use serde_json::Value;
 
-use crate::{JsxModuleGraph, JsxRuntime, ModuleSource, ScheduledRender};
+use crate::{
+    JsxModuleGraph, JsxRuntime, ModuleSource, NativePatchCounters, NativePatchEnvelope,
+    NativePatchOperation, ScheduledRender,
+};
 
 static NEXT_RUNTIME: AtomicU64 = AtomicU64::new(1);
 static NEXT_SHARED_MOUNT: AtomicU64 = AtomicU64::new(1);
@@ -73,6 +76,7 @@ impl OwnedComponentEffect {
     }
 }
 
+#[derive(Clone)]
 pub struct RenderedComponent {
     pub node: Value,
     /// Node action indices address this host-owned table, not a JS runtime.
@@ -101,6 +105,13 @@ pub enum ScheduledExpandedBatch<T> {
         validated: T,
         reconciliation_requested: bool,
     },
+    Patched {
+        patch: NativePatchEnvelope,
+        events: BTreeMap<u64, ComponentEventHandle>,
+        generation: u64,
+        validated: T,
+        reconciliation_requested: bool,
+    },
 }
 
 struct ExpansionState {
@@ -109,6 +120,7 @@ struct ExpansionState {
     visited: std::collections::BTreeSet<String>,
     native_ids: std::collections::BTreeSet<String>,
     handler_slots: std::collections::BTreeSet<String>,
+    next_event: u64,
 }
 
 #[derive(Clone)]
@@ -1072,7 +1084,12 @@ impl ShellCompositionRuntime {
         &mut self,
         root: &ComponentMount,
         events: &[(ComponentEventHandle, Value)],
-        validate: impl FnOnce(&Value) -> Result<T, String>,
+        accepted_events: &BTreeMap<u64, ComponentEventHandle>,
+        validate: impl FnOnce(
+            &NativePatchEnvelope,
+            &BTreeMap<u64, ComponentEventHandle>,
+            u64,
+        ) -> Result<T, String>,
     ) -> Result<ScheduledExpandedBatch<T>, String> {
         self.begin_transaction()?;
         let result = (|| {
@@ -1091,7 +1108,12 @@ impl ShellCompositionRuntime {
                 }
             }
 
-            let mut changed = false;
+            let generations_before = self
+                .mounts
+                .iter()
+                .map(|(id, mount)| (*id, mount.generation))
+                .collect::<BTreeMap<_, _>>();
+            let mut rendered_mounts = BTreeMap::new();
             let mut reconciliation_requested = false;
             let mut offset = 0;
             while offset < events.len() {
@@ -1105,18 +1127,125 @@ impl ShellCompositionRuntime {
                     .map(|(handle, value)| serde_json::json!([handle.action, value]))
                     .collect::<Vec<_>>();
                 let outcome = self.render_mount_scheduled(mount, Value::Array(batch))?;
-                changed |= outcome.rendered.is_some() || outcome.requires_expansion;
+                if outcome.requires_expansion {
+                    return Err(
+                        "cross-boundary callback updates require a future multi-boundary patch"
+                            .into(),
+                    );
+                }
+                if let Some(rendered) = outcome.rendered {
+                    rendered_mounts.insert(mount, rendered);
+                }
                 reconciliation_requested |= outcome.reconciliation_requested;
                 offset = end;
             }
 
-            if !changed {
+            let changed = self
+                .mounts
+                .iter()
+                .filter(|(id, mount)| generations_before.get(id) != Some(&mount.generation))
+                .map(|(id, _)| *id)
+                .collect::<Vec<_>>();
+            if changed.is_empty() {
                 return Ok(ScheduledExpandedBatch::Unchanged);
             }
-            let props = self.mounts[&root.id].props.clone();
-            let (rendered, validated) = self.render_expanded_validated(root, &props, validate)?;
-            Ok(ScheduledExpandedBatch::Rendered {
-                rendered,
+            if changed.len() != 1 {
+                return Err(
+                    "one dispatch changed multiple composition ownership boundaries".into(),
+                );
+            }
+            let mount_id = changed[0];
+            if mount_id == root.id {
+                return Err(
+                    "root-local composition patches require direct native patch transport".into(),
+                );
+            }
+            let (boundary, _) = self
+                .nested_mounts
+                .iter()
+                .find(|((owner, _), mount)| *owner == root.id && mount.id == mount_id)
+                .map(|((_, path), mount)| (path.clone(), mount.clone()))
+                .ok_or("dirty composition mount has no ownership boundary")?;
+            let affected_mounts = self
+                .nested_mounts
+                .iter()
+                .filter(|((owner, path), _)| {
+                    *owner == root.id
+                        && (path == &boundary
+                            || path
+                                .strip_prefix(&boundary)
+                                .is_some_and(|suffix| suffix.starts_with('/')))
+                })
+                .map(|(_, mount)| mount.id)
+                .collect::<std::collections::BTreeSet<_>>();
+            let mut retained_events = accepted_events
+                .iter()
+                .filter(|(_, handle)| !affected_mounts.contains(&handle.mount))
+                .map(|(token, handle)| (*token, handle.clone()))
+                .collect::<BTreeMap<_, _>>();
+            let next_event = retained_events
+                .last_key_value()
+                .map_or(0, |(token, _)| token.saturating_add(1));
+            let rendered = rendered_mounts
+                .remove(&mount_id)
+                .ok_or("dirty composition mount omitted its scheduled render")?;
+            let generation = rendered.generation;
+            let mut expansion = ExpansionState {
+                root: root.id,
+                events: std::mem::take(&mut retained_events),
+                visited: std::collections::BTreeSet::new(),
+                native_ids: std::collections::BTreeSet::new(),
+                handler_slots: std::collections::BTreeSet::new(),
+                next_event,
+            };
+            let mut replacement = rendered.node;
+            namespace_native_metadata(&mut replacement, &boundary, 0)?;
+            replacement = self.expand_node(
+                &boundary,
+                replacement,
+                &rendered.events,
+                mount_id,
+                &mut expansion,
+                0,
+            )?;
+            let target = replacement
+                .get("__nativeId")
+                .and_then(Value::as_str)
+                .ok_or("composition ownership boundary has no native identity")?
+                .to_owned();
+            let patch = NativePatchEnvelope {
+                version: 1,
+                operations: vec![NativePatchOperation::ReplaceSubtree {
+                    target,
+                    node: replacement,
+                }],
+                counters: NativePatchCounters {
+                    nodes_visited: 1,
+                    nodes_mutated: 1,
+                },
+            };
+            let validated = validate(&patch, &expansion.events, generation)?;
+            let removed = self
+                .nested_mounts
+                .keys()
+                .filter(|(owner, path)| {
+                    *owner == root.id
+                        && path != &boundary
+                        && path
+                            .strip_prefix(&boundary)
+                            .is_some_and(|suffix| suffix.starts_with('/'))
+                        && !expansion.visited.contains(path)
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            for key in removed {
+                let mount = self.nested_mounts.remove(&key).unwrap();
+                self.unmount(&mount)?;
+            }
+            Ok(ScheduledExpandedBatch::Patched {
+                patch,
+                events: expansion.events,
+                generation,
                 validated,
                 reconciliation_requested,
             })
@@ -1174,6 +1303,7 @@ impl ShellCompositionRuntime {
             visited: std::collections::BTreeSet::new(),
             native_ids: std::collections::BTreeSet::new(),
             handler_slots: std::collections::BTreeSet::new(),
+            next_event: 0,
         };
         let node = self.expand_node(
             "root",
@@ -1354,7 +1484,11 @@ impl ShellCompositionRuntime {
                             .get(&value.as_u64().ok_or("invalid host event token")?)
                             .ok_or("unknown host event token")?
                             .clone();
-                        let token = expansion.events.len() as u64;
+                        let token = expansion.next_event;
+                        expansion.next_event = expansion
+                            .next_event
+                            .checked_add(1)
+                            .ok_or("expanded event identity exhausted")?;
                         expansion.events.insert(token, handle);
                         *value = Value::from(token);
                     } else {
@@ -1770,6 +1904,18 @@ impl ShellCompositionRuntime {
         };
         let generation_before_effects = self.next_generation;
         self.drain_effects(&owner, id, previous_generation, true)?;
+        if rendered.is_some() {
+            for grant in self.callbacks.values_mut() {
+                if grant.receiver == id && grant.generation == previous_generation {
+                    grant.generation = generation;
+                }
+            }
+            for grant in self.children.values_mut() {
+                if grant.receiver == id && grant.generation == previous_generation {
+                    grant.generation = generation;
+                }
+            }
+        }
         Ok(ScheduledComponentDispatch {
             rendered,
             reconciliation_requested,
@@ -2581,6 +2727,78 @@ mod tests {
         assert_eq!(host.take_effects()[0].owner().id, "child");
         host.unmount(&mount).unwrap();
         assert!(host.dispatch(&tree.events[&0], &Value::Null).is_err());
+    }
+
+    #[test]
+    fn scheduled_cross_package_leaf_update_emits_one_namespaced_boundary_patch() {
+        let mut base = package(
+            "base",
+            "export function Shell(){return h(Column,null,h(Text,{key:'clean'},'clean'),h(nickel.component('shell.taskbar')));}\nexport function Taskbar(){}\nexport function QuickSettings(){}\nexport default Shell;",
+            None,
+        );
+        base.manifest
+            .composition
+            .as_mut()
+            .unwrap()
+            .exports
+            .insert("shell".into(), "./main.js#Shell".into());
+        let child = package(
+            "child",
+            "export function Taskbar(){const [count,setCount]=useState(0);return h(Button,{key:'leaf',onClick:()=>setCount(count+1)},'leaf'+count);}\nexport default Taskbar;",
+            Some("base"),
+        );
+        let mut host = ShellCompositionRuntime::new(
+            &BTreeMap::from([("base".into(), base), ("child".into(), child)]),
+            "child",
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let root = host.mount(&host.component("shell").unwrap()).unwrap();
+        let initial = host
+            .render_expanded(&root, &serde_json::json!({}), |_| Ok(()))
+            .unwrap();
+        let clean_id = initial.node["children"][0]["__nativeId"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let event = initial.events[&0].clone();
+        assert!(
+            host.dispatch_expanded_batch_scheduled_pending_validated(
+                &root,
+                &[(event.clone(), Value::Null)],
+                &initial.events,
+                |_, _, _| Err::<(), _>("native rejected patch".into()),
+            )
+            .is_err()
+        );
+        // Rejection rolls every package runtime and generation back, leaving
+        // the previously accepted native handler authoritative.
+        let outcome = host
+            .dispatch_expanded_batch_scheduled_pending_validated(
+                &root,
+                &[(event, Value::Null)],
+                &initial.events,
+                |patch, events, _| {
+                    assert_eq!(patch.operations.len(), 1);
+                    let NativePatchOperation::ReplaceSubtree { target, node } =
+                        &patch.operations[0]
+                    else {
+                        panic!("package-local update must replace its ownership boundary")
+                    };
+                    assert!(target.contains("export:shell.taskbar"));
+                    assert_eq!(node["children"][0], "leaf1");
+                    assert_eq!(events.len(), 1);
+                    assert!(!node.to_string().contains(&clean_id));
+                    Ok(())
+                },
+            )
+            .unwrap();
+        let ScheduledExpandedBatch::Patched { patch, events, .. } = outcome else {
+            panic!("dirty nested mount must emit a patch")
+        };
+        assert_eq!(patch.counters.nodes_mutated, 1);
+        assert_eq!(events.len(), 1);
+        host.finish_transaction(true).unwrap();
     }
 
     #[test]
