@@ -1160,6 +1160,18 @@ impl JsxRuntime {
         ))
     }
 
+    /// Record one host-owned typed patch application without retaining the
+    /// patch, candidate tree, or validation error in JavaScript diagnostics.
+    pub fn report_typed_patch_apply(
+        &mut self,
+        application_micros: u64,
+        accepted: bool,
+    ) -> Result<(), String> {
+        self.eval(&format!(
+            "__nickelReportTypedPatchApply({application_micros},{accepted})"
+        ))
+    }
+
     pub fn finish_event(&mut self, accepted: bool) -> Result<(), String> {
         if accepted {
             self.settings_revision = self.settings_revision.wrapping_add(1);
@@ -1892,6 +1904,8 @@ mod tests {
         assert!(matches!(outcome, super::ScheduledPatch::Patched { .. }));
         runtime.finish_patch_render(true).unwrap();
         runtime.finish_event(true).unwrap();
+        runtime.report_typed_patch_apply(37, true).unwrap();
+        runtime.report_typed_patch_apply(11, false).unwrap();
         let diagnostics = runtime.runtime_diagnostics().unwrap();
         let profile = &diagnostics["profiles"][0];
         assert_eq!(profile["surface"], "default");
@@ -1903,7 +1917,11 @@ mod tests {
         assert!(profile["coldTreeTransportBytes"].as_u64().unwrap() > 0);
         assert!(profile["patchEnvelopeTransportBytes"].as_u64().unwrap() > 0);
         assert!(profile["nativeValidationMicros"].is_u64());
+        assert_eq!(profile["typedPatchApplyAttempts"], 2);
+        assert_eq!(profile["typedPatchApplyRejections"], 1);
+        assert_eq!(profile["typedPatchApplyMicros"], 48);
         assert_eq!(profile["timingPrecision"], "wall-clock-milliseconds");
+        assert_eq!(profile["hostTimingPrecision"], "wall-clock-microseconds");
 
         runtime.select_surface("settings").unwrap();
         runtime

@@ -6,6 +6,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
 use nickel_core::package_composition::{
     PackageIdentity, ResolvedShellPackage, resolve_shell_package,
@@ -1691,7 +1692,14 @@ impl ShellCompositionRuntime {
                     handle.generation = mount.generation;
                 }
             }
-            let validated = match validate(&patch, &expansion.events, generation) {
+            let application_started = Instant::now();
+            let validation = validate(&patch, &expansion.events, generation);
+            let application_micros = application_started
+                .elapsed()
+                .as_micros()
+                .min(u128::from(u64::MAX)) as u64;
+            self.report_mount_patch_application(root.id, application_micros, validation.is_ok())?;
+            let validated = match validation {
                 Ok(validated) => validated,
                 Err(error) => {
                     rejected_native = Some(NativeRejection {
@@ -1763,6 +1771,28 @@ impl ShellCompositionRuntime {
             }
         }
         result
+    }
+
+    fn report_mount_patch_application(
+        &mut self,
+        mount: u64,
+        application_micros: u64,
+        accepted: bool,
+    ) -> Result<(), String> {
+        let owner = self
+            .mounts
+            .get(&mount)
+            .ok_or("retired component mount")?
+            .reference
+            .owner
+            .clone();
+        let package = self
+            .packages
+            .get_mut(&owner)
+            .ok_or("retired component owner")?;
+        let mut runtime = package.runtime.borrow_mut();
+        runtime.select_surface(&surface(mount))?;
+        runtime.report_typed_patch_apply(application_micros, accepted)
     }
 
     /// Reconcile state queued by passive effects after the preceding committed
@@ -5010,6 +5040,21 @@ mod tests {
         assert_eq!(validated.expansion_nodes, 0);
         assert_eq!(validated.tree_bytes, 0);
         host.finish_transaction(true).unwrap();
+        let owner = host.mounts[&root.id].reference.owner.clone();
+        let diagnostics = host.packages[&owner]
+            .runtime
+            .borrow_mut()
+            .runtime_diagnostics()
+            .unwrap();
+        let profile = diagnostics["profiles"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|profile| profile["surface"] == surface(root.id))
+            .unwrap();
+        assert_eq!(profile["typedPatchApplyAttempts"], 1);
+        assert_eq!(profile["typedPatchApplyRejections"], 0);
+        assert!(profile["typedPatchApplyMicros"].is_u64());
     }
 
     #[test]

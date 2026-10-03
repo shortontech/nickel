@@ -4,6 +4,7 @@
 use std::{
     borrow::Cow,
     sync::{Arc, OnceLock},
+    time::Instant,
 };
 
 use nickel_core::package_composition::PackageIdentity;
@@ -3086,6 +3087,7 @@ impl PluginPanelApplication {
                         ..
                     }) => {
                         let mut candidate = self.accepted.clone();
+                        let application_started = Instant::now();
                         let accepted = candidate.apply_patch(
                             &patch,
                             &self.manifest,
@@ -3094,7 +3096,13 @@ impl PluginPanelApplication {
                             generation,
                             transport_bytes,
                         );
+                        let application_micros = application_started
+                            .elapsed()
+                            .as_micros()
+                            .min(u128::from(u64::MAX))
+                            as u64;
                         let mut runtime = self.runtime.borrow_mut();
+                        runtime.report_typed_patch_apply(application_micros, accepted.is_ok())?;
                         runtime.finish_patch_render(accepted.is_ok())?;
                         runtime.finish_event(accepted.is_ok())?;
                         match accepted {
@@ -3419,20 +3427,28 @@ impl nickel_ui::Application for PluginPanelApplication {
                                 ..
                             } => {
                                 let mut candidate = self.accepted.clone();
-                                candidate
-                                    .apply_patch(
-                                        &patch,
-                                        &self.manifest,
-                                        self.expected_surface_id.as_deref(),
-                                        &self.stylesheet,
-                                        generation,
-                                        transport_bytes,
-                                    )
-                                    .map_err(|error| {
-                                        validation_rejected = true;
-                                        native_failure = Some((dirty_components, error.clone()));
-                                        error
-                                    })?;
+                                let application_started = Instant::now();
+                                let accepted = candidate.apply_patch(
+                                    &patch,
+                                    &self.manifest,
+                                    self.expected_surface_id.as_deref(),
+                                    &self.stylesheet,
+                                    generation,
+                                    transport_bytes,
+                                );
+                                let application_micros = application_started
+                                    .elapsed()
+                                    .as_micros()
+                                    .min(u128::from(u64::MAX))
+                                    as u64;
+                                runtime.report_typed_patch_apply(
+                                    application_micros,
+                                    accepted.is_ok(),
+                                )?;
+                                accepted.inspect_err(|error| {
+                                    validation_rejected = true;
+                                    native_failure = Some((dirty_components, error.clone()));
+                                })?;
                                 Ok(Some(candidate))
                             }
                         });

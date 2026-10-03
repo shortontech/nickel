@@ -283,11 +283,20 @@ function __nickelProfile() {
         profile={surface:__activeSurface,mount:__surfaceStore.snapshot.mountId,renders:0,componentExecutions:0,
             componentExecutionMillis:0,reconciliationMillis:0,patches:0,patchOperations:0,patchNodesVisited:0,
             lifecycleCommits:0,lifecycleCommitMillis:0,timingPrecision:'wall-clock-milliseconds',
+            hostTimingPrecision:'wall-clock-microseconds',
             nativeValidationMicros:0,coldTreeTransportBytes:0,patchEnvelopeTransportBytes:0,
+            typedPatchApplyAttempts:0,typedPatchApplyRejections:0,typedPatchApplyMicros:0,
             consecutiveEffectTurns:0};
         __mountProfiles.set(__activeSurface,profile);
     }
     profile.mount=__surfaceStore.snapshot.mountId;return profile;
+}
+function __nickelReportTypedPatchApply(micros,accepted) {
+    const profile=__nickelProfile();
+    if(!Number.isSafeInteger(micros)||micros<0)return;
+    profile.typedPatchApplyAttempts++;
+    if(!accepted)profile.typedPatchApplyRejections++;
+    profile.typedPatchApplyMicros+=micros;
 }
 function __nickelReportHostProfile(transportKind,nativeValidationMicros,transportBytes) {
     const profile=__nickelProfile();
