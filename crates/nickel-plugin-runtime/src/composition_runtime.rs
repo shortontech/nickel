@@ -716,6 +716,24 @@ impl ShellCompositionRuntime {
         })
     }
 
+    /// Replace the host-owned observation attached to one native mount.
+    pub fn update_mount_surface(
+        &mut self,
+        mount: &ComponentMount,
+        surface: Value,
+    ) -> Result<bool, String> {
+        self.validate_mount(mount)?;
+        let state = self
+            .mounts
+            .get_mut(&mount.id)
+            .ok_or("retired component mount")?;
+        if state.surface.as_ref() == Some(&surface) {
+            return Ok(false);
+        }
+        state.surface = Some(surface);
+        Ok(true)
+    }
+
     /// Begin a bounded transaction spanning every participating owner context.
     /// IDs remain monotonic so rolled-back mount/callback handles cannot be reused.
     pub fn begin_transaction(&mut self) -> Result<(), String> {

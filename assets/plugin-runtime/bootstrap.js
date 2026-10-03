@@ -87,6 +87,7 @@ let __previousHandlers = [];
 const __handlerBindings = new WeakSet();
 const __virtualNativeNodes = new WeakSet();
 const __nonRetainedComponents = new WeakSet();
+const __memoComponents = new WeakMap();
 let __incrementalRender = false;
 let __effects = [];
 let __listKeyErrors = [];
@@ -115,6 +116,29 @@ let __themeStore = {generation:0, snapshot:Object.freeze({
 })};
 let __capabilityStore = {generation:0, known:Object.freeze([]), snapshot:Object.freeze({})};
 let __nickelData = Object.freeze({query: '', results: []});
+const __nickelExternalSubscriptions = new WeakMap();
+const __nickelExternalSnapshots = new WeakMap();
+function __nickelStoreContract(name, read) {
+    const subscribe=()=>{throw Error('Nickel store subscriptions are installed only by useSyncExternalStore');};
+    const getSnapshot=()=>read().snapshot;
+    const descriptor=Object.freeze({name,read});
+    __nickelExternalSubscriptions.set(subscribe,descriptor);__nickelExternalSnapshots.set(getSnapshot,descriptor);
+    return Object.freeze({subscribe,getSnapshot});
+}
+const NickelStores=Object.freeze({
+    windows:__nickelStoreContract('windows',()=>__windowsStore),applications:__nickelStoreContract('applications',()=>__applicationsStore),
+    notifications:__nickelStoreContract('notifications',()=>__notificationsStore),workspaces:__nickelStoreContract('workspaces',()=>__workspacesStore),
+    outputs:__nickelStoreContract('outputs',()=>__outputsStore),locale:__nickelStoreContract('locale',()=>__localeStore),
+    theme:__nickelStoreContract('theme',()=>__themeStore),capabilities:__nickelStoreContract('capabilities',()=>__capabilityStore)
+});
+function __nickelNotifyExternalStore(name) {
+    __nickelForEachSurfaceHooks((hooks,dirty)=>{for(const [owner,slots] of hooks)for(const entry of slots){
+        if(entry?.kind!=='sync-external-store'||entry.store.name!==name)continue;
+        try{const state=entry.store.read(),snapshot=entry.getSnapshot();entry.storeError=undefined;
+            if(state.generation!==entry.generation||!Object.is(snapshot,entry.value))dirty.add(owner);
+        }catch(error){entry.storeError=error;dirty.add(owner);}
+    }});
+}
 let __activeSurface = 'default';
 const __surfaceStates = new Map();
 const __surfaceApps = new Map();
@@ -662,6 +686,7 @@ function __nickelSetWindowsStore(value) {
         return false;
     const generation = __windowsStore.generation + 1;
     __windowsStore = {generation, snapshot:windows};
+    __nickelNotifyExternalStore('windows');
     __nickelForEachSurfaceHooks((hooks, dirty) => {
         for (const [owner, slots] of hooks) {
             for (const entry of slots) {
@@ -736,6 +761,7 @@ function __nickelSetApplicationsStore(value) {
         throw Error('cannot publish changed applications store during a render or event');
     const generation = __applicationsStore.generation + 1;
     __applicationsStore = {generation, snapshot:applications};
+    __nickelNotifyExternalStore('applications');
     __nickelForEachSurfaceHooks((hooks, dirty) => {
         for (const [owner, slots] of hooks) for (const entry of slots) {
             if (entry?.kind !== 'applications-store') continue;
@@ -816,6 +842,7 @@ function __nickelSetNotificationsStore(value) {
         throw Error('cannot publish changed notifications store during a render or event');
     const generation = __notificationsStore.generation + 1;
     __notificationsStore = {generation,snapshot};
+    __nickelNotifyExternalStore('notifications');
     __nickelForEachSurfaceHooks((hooks, dirty) => {
         for (const [owner, slots] of hooks) for (const entry of slots) {
             if (entry?.kind !== 'notifications-store') continue;
@@ -887,6 +914,7 @@ function __nickelSetWorkspacesStore(value) {
         &&previous.operations.remove===snapshot.operations.remove?previous.operations:snapshot.operations;
     const retained=Object.freeze({...snapshot,operations:retainedOperations});
     __workspacesStore={generation,snapshot:retained};
+    __nickelNotifyExternalStore('workspaces');
     __nickelForEachSurfaceHooks((hooks,dirty)=>{for(const [owner,slots] of hooks)for(const entry of slots){
         if(entry?.kind!=='workspaces-store')continue;
         try{const selected=entry.selector?entry.selector(retained):retained;entry.storeError=undefined;if(!Object.is(selected,entry.value))dirty.add(owner);}
@@ -927,7 +955,7 @@ function __nickelSetOutputsStore(value){
     const revision=value.revision==null?null:typeof value.revision==='string'&&value.revision.length<=128?value.revision:(()=>{throw Error('invalid output revision')})();
     if(previous.available===available&&previous.reason===reason&&previous.revision===revision&&previous.outputs.length===outputs.length&&previous.outputs.every((output,index)=>output===outputs[index]))return false;
     if(__pendingRender!==null||__pendingEvent!==null)throw Error('cannot publish changed outputs store during a render or event');
-    const generation=__outputsStore.generation+1,snapshot=Object.freeze({generation,available,reason,revision,outputs});__outputsStore={generation,snapshot};
+    const generation=__outputsStore.generation+1,snapshot=Object.freeze({generation,available,reason,revision,outputs});__outputsStore={generation,snapshot};__nickelNotifyExternalStore('outputs');
     __nickelForEachSurfaceHooks((hooks,dirty)=>{for(const [owner,slots] of hooks)for(const entry of slots){if(entry?.kind!=='outputs-store')continue;
         try{const selected=entry.selector?entry.selector(snapshot):snapshot;entry.storeError=undefined;if(!Object.is(selected,entry.value))dirty.add(owner);}catch(error){entry.storeError=error;dirty.add(owner);}}});return true;
 }
@@ -943,11 +971,29 @@ function __nickelSetLocaleStore(value){
     const direction=known?(value.direction??'ltr'):'ltr';if(direction!=='ltr'&&direction!=='rtl')throw Error('invalid locale direction');
     const previous=__localeStore.snapshot;if(previous.tag===tag&&previous.direction===direction&&previous.known===known)return false;
     if(__pendingRender!==null||__pendingEvent!==null)throw Error('cannot publish changed locale store during a render or event');
-    const generation=__localeStore.generation+1,snapshot=Object.freeze({generation,tag,direction,known});__localeStore={generation,snapshot};
+    const generation=__localeStore.generation+1,snapshot=Object.freeze({generation,tag,direction,known});__localeStore={generation,snapshot};__nickelNotifyExternalStore('locale');
     __nickelForEachSurfaceHooks((hooks,dirty)=>{for(const [owner,slots] of hooks)for(const entry of slots)if(entry?.kind==='locale-store'&&!Object.is(snapshot,entry.value))dirty.add(owner);});return true;
 }
 function useLocale(){if(__currentComponent===null)throw Error('useLocale requires a component');const slot=__hookIndex++,hooks=__componentHooks.get(__currentComponent);let entry=hooks[slot];
     if(!entry)hooks[slot]=entry={kind:'locale-store',value:undefined,generation:0};if(entry.kind!=='locale-store')throw Error('hook order changed');entry.value=__localeStore.snapshot;entry.generation=__localeStore.generation;return entry.value;}
+function useSyncExternalStore(subscribe,getSnapshot) {
+    if(__currentComponent===null)throw Error('useSyncExternalStore requires a component');
+    const store=__nickelExternalSubscriptions.get(subscribe),snapshotStore=__nickelExternalSnapshots.get(getSnapshot);
+    if(!store||store!==snapshotStore)throw TypeError('useSyncExternalStore requires a matching branded NickelStores contract');
+    const slot=__hookIndex++,hooks=__componentHooks.get(__currentComponent);let entry=hooks[slot];
+    if(!entry||(entry.kind==='sync-external-store'&&(entry.store!==store||entry.getSnapshot!==getSnapshot)))
+        hooks[slot]=entry={kind:'sync-external-store',store,getSnapshot,value:undefined,generation:0};
+    if(entry.kind!=='sync-external-store')throw Error('hook order changed');
+    const before=store.read(),value=getSnapshot(),after=store.read();
+    if(before.generation!==after.generation||!Object.is(value,after.snapshot))throw Error('external store changed during render');
+    entry.storeError=undefined;entry.value=value;entry.generation=after.generation;return value;
+}
+
+function memo(component,compare) {
+    if(typeof component!=='function')throw TypeError('memo component must be a function');
+    if(compare!==undefined&&typeof compare!=='function')throw TypeError('memo comparison must be a function');
+    const wrapped=props=>component(props);__memoComponents.set(wrapped,{component,compare:compare??null});return wrapped;
+}
 
 const __nickelThemePaletteFields = ['background','panel','surface','surfaceHover','text','muted',
     'accent','accentSoft','complement'];
@@ -1002,6 +1048,7 @@ function __nickelSetThemeStore(value) {
         && __nickelThemePaletteFields.every(field => __themeStore.snapshot.palette[field] === snapshot.palette[field]))
         snapshot = Object.freeze({...snapshot, palette:__themeStore.snapshot.palette});
     __themeStore = {generation, snapshot};
+    __nickelNotifyExternalStore('theme');
     __nickelForEachSurfaceHooks((hooks, dirty) => {
         for (const [owner, slots] of hooks) for (const entry of slots) {
             if (entry?.kind !== 'theme-store') continue;
@@ -1073,6 +1120,7 @@ function __nickelSetCapabilityStore(value) {
     }
     const generation = previous.generation + 1;
     __capabilityStore = {generation, known, snapshot:Object.freeze(entries)};
+    __nickelNotifyExternalStore('capabilities');
     __nickelForEachSurfaceHooks((hooks, dirty) => {
         for (const [owner, slots] of hooks) for (const entry of slots)
             if (entry?.kind === 'capability-store' && !Object.is(entries[entry.capability], entry.value)) dirty.add(owner);
@@ -1439,6 +1487,20 @@ function __nickelSameDeclaration(previous, next) {
     return previous.children.every((child, index) => Object.is(child, next.children[index]));
 }
 
+function __nickelMemoProps(declaration) {
+    const props={...declaration.props};
+    if(declaration.children.length===1)props.children=declaration.children[0];
+    else if(declaration.children.length>1)props.children=declaration.children;
+    return props;
+}
+function __nickelMemoSame(previous,next,configuration) {
+    if(!previous||previous.component!==next.component||previous.key!==next.key)return false;
+    const left=__nickelMemoProps(previous),right=__nickelMemoProps(next);
+    if(configuration.compare)return configuration.compare(left,right)===true;
+    const leftKeys=Object.keys(left),rightKeys=Object.keys(right);return leftKeys.length===rightKeys.length
+        &&leftKeys.every(key=>Object.prototype.hasOwnProperty.call(right,key)&&Object.is(left[key],right[key]));
+}
+
 function __nickelDirtyAtOrBelow(path) {
     if (!__incrementalRender) return true;
     for (const dirty of __dirtyComponents)
@@ -1469,8 +1531,11 @@ function __nickelResolveDeclaration(declaration) {
     __visitedComponents.add(path);
     if (!__componentHooks.has(path)) __componentHooks.set(path, []);
     const retained = __componentRecords.get(path);
+    const memoConfiguration=__memoComponents.get(kind);
+    const declarationSame=memoConfiguration?__nickelMemoSame(retained?.declaration,declaration,memoConfiguration)
+        :__nickelSameDeclaration(retained?.declaration,declaration);
     const execute = !__incrementalRender || !retained || __nonRetainedComponents.has(kind)
-        || __dirtyComponents.has(path) || !__nickelSameDeclaration(retained.declaration, declaration);
+        || __dirtyComponents.has(path) || !declarationSame;
     if (!execute && !__nickelDirtyAtOrBelow(path)) {
         __nickelMarkRetainedVisited(path);
         return retained.output;

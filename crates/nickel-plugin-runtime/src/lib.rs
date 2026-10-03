@@ -1477,6 +1477,138 @@ mod tests {
     }
 
     #[test]
+    fn sync_external_store_accepts_only_branded_contracts_and_tracks_generation() {
+        let source = r#"
+            globalThis.runs={app:0,store:0,sibling:0};globalThis.seen=[];
+            function Store(){runs.store++;const value=useSyncExternalStore(NickelStores.locale.subscribe,NickelStores.locale.getSnapshot);seen.push(value);return h(Text,null,value.tag)}
+            function Sibling(){runs.sibling++;return h(Text,null,'stable')}
+            function App(){runs.app++;return h(Window,{},h(Store),h(Sibling))}
+        "#;
+        let mut runtime = super::JsxRuntime::new(source, None).unwrap();
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        runtime
+            .set_locale_store(&serde_json::json!({"known":true,"tag":"en-US","direction":"ltr"}))
+            .unwrap();
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        assert_eq!(
+            runtime
+                .eval_json::<serde_json::Value>("JSON.stringify(runs)")
+                .unwrap(),
+            serde_json::json!({"app":1,"store":2,"sibling":1})
+        );
+        assert!(
+            runtime
+                .eval_json::<bool>("seen[1]===NickelStores.locale.getSnapshot()")
+                .unwrap()
+        );
+        assert!(runtime.eval("function Bad(){return h(Text,null,String(useSyncExternalStore(()=>()=>{},()=>0)))}__nickelSetApp(Bad);__nickelRender()").is_err());
+        assert!(
+            runtime
+                .eval("NickelStores.locale.subscribe(()=>{})")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn rejected_sync_store_render_does_not_install_subscription() {
+        let mut runtime=super::JsxRuntime::new("function App(){return h(Text,null,useSyncExternalStore(NickelStores.locale.subscribe,NickelStores.locale.getSnapshot).tag)}",None).unwrap();
+        runtime
+            .render("__nickelRender()", |_| Err::<(), _>("reject".into()))
+            .unwrap_err();
+        runtime
+            .set_locale_store(&serde_json::json!({"known":true,"tag":"fr-FR","direction":"ltr"}))
+            .unwrap();
+        assert!(
+            !runtime
+                .eval_json::<bool>("JSON.parse(__nickelReconciliationRequest()).requested")
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn memo_skips_props_but_not_store_or_context_updates() {
+        let source = r#"
+            const Context=createContext('cold');globalThis.runs={app:0,plain:0,custom:0,store:0,context:0};
+            function Plain({label}){runs.plain++;return h(Text,null,label)}const MemoPlain=memo(Plain);
+            function Custom({label}){runs.custom++;return h(Text,null,label)}const MemoCustom=memo(Custom,()=>true);
+            function Store(){runs.store++;return h(Text,null,useLocale().tag)}const MemoStore=memo(Store);
+            function Consumer(){runs.context++;return h(Text,null,useContext(Context))}const MemoConsumer=memo(Consumer);
+            function App(){runs.app++;const [step,setStep]=useState(0);return h(Window,{},h(Button,{onClick:()=>setStep(v=>v+1)},'next'),h(MemoPlain,{label:step%2?'b':'a'}),h(MemoCustom,{label:String(step)}),h(MemoStore),h(Context.Provider,{value:step%2?'warm':'cold'},h(MemoConsumer)))}
+        "#;
+        let mut runtime = super::JsxRuntime::new(source, None).unwrap();
+        let initial = runtime
+            .render("__nickelRender()", |value| Ok(value.clone()))
+            .unwrap();
+        runtime
+            .dispatch_scheduled("__nickelDispatchBatchScheduled([[0,null]])", |value| {
+                Ok(value.clone())
+            })
+            .unwrap();
+        runtime.finish_event(true).unwrap();
+        assert_eq!(
+            runtime
+                .eval_json::<serde_json::Value>("JSON.stringify(runs)")
+                .unwrap(),
+            serde_json::json!({"app":2,"plain":2,"custom":1,"store":1,"context":2})
+        );
+        runtime
+            .set_locale_store(&serde_json::json!({"known":true,"tag":"de-DE","direction":"ltr"}))
+            .unwrap();
+        let incremental = runtime
+            .render("__nickelRender()", |value| Ok(value.clone()))
+            .unwrap();
+        assert_eq!(runtime.eval_json::<u64>("runs.store").unwrap(), 2);
+        assert_eq!(incremental["children"][2]["children"][0], "0");
+        assert_eq!(incremental["children"][3]["children"][0], "de-DE");
+        assert_ne!(initial, incremental);
+    }
+
+    #[test]
+    fn memo_compare_errors_roll_back_the_accepted_tree() {
+        let source = "let fail=true;function Child({value}){return h(Text,null,String(value))}const Memo=memo(Child,()=>{if(fail){fail=false;throw Error('compare failed')}return true});function App(){const [value,setValue]=useState(0);return h(Button,{onClick:()=>setValue(1)},h(Memo,{value}))}";
+        let mut runtime = super::JsxRuntime::new(source, None).unwrap();
+        let initial = runtime
+            .render("__nickelRender()", |value| Ok(value.clone()))
+            .unwrap();
+        assert!(
+            runtime
+                .dispatch_scheduled("__nickelDispatchBatchScheduled([[0,null]])", |value| Ok(
+                    value.clone()
+                ))
+                .is_err()
+        );
+        runtime.finish_event(false).unwrap();
+        let restored = runtime
+            .render("__nickelRender()", |value| Ok(value.clone()))
+            .unwrap();
+        assert_eq!(initial, restored);
+    }
+
+    #[test]
+    fn default_memo_incremental_output_matches_cold_render() {
+        let source = "function Child({value}){return h(Text,null,String(value))}const Memo=memo(Child);function App(){const [value,setValue]=useState(nickel.data.initial);return h(Button,{onClick:()=>setValue(1)},h(Memo,{value}))}";
+        let mut incremental = super::JsxRuntime::new(source, Some(r#"{"initial":0}"#)).unwrap();
+        incremental
+            .render("__nickelRender()", |value| Ok(value.clone()))
+            .unwrap();
+        let updated = match incremental
+            .dispatch_scheduled("__nickelDispatchBatchScheduled([[0,null]])", |value| {
+                Ok(value.clone())
+            })
+            .unwrap()
+        {
+            super::ScheduledRender::Rendered { value, .. } => value,
+            super::ScheduledRender::Unchanged => panic!("memo update must render"),
+        };
+        incremental.finish_event(true).unwrap();
+        let mut cold = super::JsxRuntime::new(source, Some(r#"{"initial":1}"#)).unwrap();
+        let expected = cold
+            .render("__nickelRender()", |value| Ok(value.clone()))
+            .unwrap();
+        assert_eq!(updated, expected);
+    }
+
+    #[test]
     fn theme_store_is_always_readable_versioned_and_structurally_shared() {
         let source = r#"
             globalThis.observed=[];

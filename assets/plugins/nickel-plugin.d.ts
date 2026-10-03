@@ -260,6 +260,20 @@ declare function useOutputs(): Readonly<NickelOutputsSnapshot>;
 declare function useOutputs<T>(selector:(outputs:Readonly<NickelOutputsSnapshot>)=>T):T;
 interface NickelLocaleSnapshot {readonly generation:number;readonly tag:string;readonly direction:"ltr"|"rtl";readonly known:boolean}
 declare function useLocale():Readonly<NickelLocaleSnapshot>;
+interface NickelExternalStore<T> {readonly subscribe:(listener:()=>void)=>()=>void;readonly getSnapshot:()=>T}
+declare const NickelStores:Readonly<{
+    windows:NickelExternalStore<ReadonlyArray<Readonly<NickelNativeWindow>>>;
+    applications:NickelExternalStore<ReadonlyArray<Readonly<NickelApplication>>>;
+    notifications:NickelExternalStore<Readonly<NickelNotificationSnapshot>>;
+    workspaces:NickelExternalStore<Readonly<NickelWorkspaceSnapshot>>;
+    outputs:NickelExternalStore<Readonly<NickelOutputsSnapshot>>;
+    locale:NickelExternalStore<Readonly<NickelLocaleSnapshot>>;
+    theme:NickelExternalStore<Readonly<NickelThemeSnapshot>>;
+    capabilities:NickelExternalStore<Readonly<Record<NickelCapability,Readonly<NickelCapabilitySnapshot>>>>;
+}>;
+/** Only matching functions from a host-branded NickelStores entry are accepted. */
+declare function useSyncExternalStore<T>(subscribe:NickelExternalStore<T>["subscribe"],getSnapshot:NickelExternalStore<T>["getSnapshot"]):T;
+declare function memo<P>(component:NickelComponent<P>,compare?:(previous:Readonly<P & {children?:NickelChild}>,next:Readonly<P & {children?:NickelChild}>)=>boolean):NickelComponent<P>;
 interface NickelThemePalette {
     readonly background:NickelColor; readonly panel:NickelColor; readonly surface:NickelColor;
     readonly surfaceHover:NickelColor; readonly text:NickelColor; readonly muted:NickelColor;
