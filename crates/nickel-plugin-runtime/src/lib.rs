@@ -4,6 +4,7 @@
 //! the Boa context and the bootstrap's render and event transactions.
 
 use boa_engine::{Context, JsValue, Source, js_string};
+use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
@@ -28,6 +29,29 @@ pub struct JsxRuntime {
     settings_data: Option<std::rc::Rc<Value>>,
     checkpoint: Option<(u64, Option<std::rc::Rc<Value>>)>,
     invalidated: bool,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum ScheduledRender<T> {
+    Unchanged,
+    Rendered {
+        value: T,
+        dirty_components: Vec<String>,
+        reconciliation_requested: bool,
+    },
+}
+
+#[derive(Deserialize)]
+struct ScheduledRenderWire {
+    rendered: bool,
+    #[serde(default)]
+    dirty: Vec<String>,
+    node: Option<Value>,
+}
+
+#[derive(Deserialize)]
+struct ReconciliationRequest {
+    requested: bool,
 }
 
 impl JsxRuntime {
@@ -158,6 +182,41 @@ impl JsxRuntime {
         parsed
     }
 
+    /// Dispatch an event batch through the retained hook scheduler. If no
+    /// state or reducer value changed, no component is executed and no native
+    /// tree needs validation. A rendered result is still a complete tree until
+    /// the typed subtree mutation protocol is implemented.
+    pub fn dispatch_scheduled<T>(
+        &mut self,
+        expression: &str,
+        parse: impl FnOnce(&Value) -> Result<T, String>,
+    ) -> Result<ScheduledRender<T>, String> {
+        let outcome = self.eval_json::<ScheduledRenderWire>(expression)?;
+        if !outcome.rendered {
+            if outcome.node.is_some() || !outcome.dirty.is_empty() {
+                return Err("invalid unchanged scheduler outcome".into());
+            }
+            return Ok(ScheduledRender::Unchanged);
+        }
+        let node = outcome.node.ok_or("scheduled render omitted its tree")?;
+        let parsed = parse(&node);
+        self.eval(if parsed.is_ok() {
+            "__nickelCommitRender()"
+        } else {
+            "__nickelRollbackRender()"
+        })
+        .map_err(|error| format!("could not finalize scheduled plugin render: {error}"))?;
+        let value = parsed?;
+        let reconciliation_requested = self
+            .eval_json::<ReconciliationRequest>("__nickelReconciliationRequest()")?
+            .requested;
+        Ok(ScheduledRender::Rendered {
+            value,
+            dirty_components: outcome.dirty,
+            reconciliation_requested,
+        })
+    }
+
     /// Checkpoint bootstrap-owned hooks, surface handlers and queued effects.
     /// Plain object/array hook values preserve identity on rollback. Unsupported
     /// or irreversible restoration invalidates execution. Package globals and
@@ -252,6 +311,89 @@ mod tests {
                 .eval_json::<u64>("observed[1].state + observed[1].reduced")
                 .unwrap(),
             0
+        );
+    }
+
+    #[test]
+    fn scheduled_dispatch_skips_render_when_hook_values_do_not_change() {
+        let source = r#"
+            globalThis.renders = 0;
+            function App() {
+                renders++;
+                const [state, setState] = useState(0);
+                const [reduced, dispatch] = useReducer((value, action) => action === 'same' ? value : value + 1, 0);
+                return h(Button, {onClick: () => { setState(value => value); dispatch('same'); }}, String(state + reduced));
+            }
+        "#;
+        let mut runtime = super::JsxRuntime::new(source, None).unwrap();
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        let outcome = runtime
+            .dispatch_scheduled("__nickelDispatchBatchScheduled([[0,null]])", |_| Ok(()))
+            .unwrap();
+        assert_eq!(outcome, super::ScheduledRender::Unchanged);
+        runtime.finish_event(true).unwrap();
+        assert_eq!(
+            runtime.eval_json::<u64>("JSON.stringify(renders)").unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn scheduled_dispatch_reports_dirty_owner_and_effect_follow_up() {
+        let source = r#"
+            function App() {
+                const [state, setState] = useState(0);
+                const [derived, setDerived] = useState(0);
+                useEffect(() => { if (state === 1) setDerived(2); }, [state]);
+                return h(Button, {onClick: () => setState(1)}, String(state + derived));
+            }
+        "#;
+        let mut runtime = super::JsxRuntime::new(source, None).unwrap();
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        let outcome = runtime
+            .dispatch_scheduled("__nickelDispatchBatchScheduled([[0,null]])", |node| {
+                Ok(node.clone())
+            })
+            .unwrap();
+        let super::ScheduledRender::Rendered {
+            value,
+            dirty_components,
+            reconciliation_requested,
+        } = outcome
+        else {
+            panic!("changed state must render");
+        };
+        assert_eq!(value["children"][0], "1");
+        assert_eq!(dirty_components.len(), 1);
+        assert!(reconciliation_requested);
+        runtime.finish_event(true).unwrap();
+    }
+
+    #[test]
+    fn rejected_scheduled_render_restores_state_and_dirty_scheduler() {
+        let source = r#"
+            function App() {
+                const [state, setState] = useState(0);
+                return h(Button, {onClick: () => setState(1)}, String(state));
+            }
+        "#;
+        let mut runtime = super::JsxRuntime::new(source, None).unwrap();
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        runtime
+            .dispatch_scheduled("__nickelDispatchBatchScheduled([[0,null]])", |_| {
+                Err::<(), _>("native rejection".into())
+            })
+            .unwrap_err();
+        runtime.finish_event(false).unwrap();
+        let tree = runtime
+            .render("__nickelRender()", |node| Ok(node.clone()))
+            .unwrap();
+        assert_eq!(tree["children"][0], "0");
+        assert!(
+            !runtime
+                .eval_json::<super::ReconciliationRequest>("__nickelReconciliationRequest()")
+                .unwrap()
+                .requested
         );
     }
 

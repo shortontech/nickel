@@ -13,7 +13,7 @@ use nickel_core::package_composition::{
 use nickel_core::plugins::PluginPackage;
 use serde_json::Value;
 
-use crate::{JsxModuleGraph, JsxRuntime, ModuleSource};
+use crate::{JsxModuleGraph, JsxRuntime, ModuleSource, ScheduledRender};
 
 static NEXT_RUNTIME: AtomicU64 = AtomicU64::new(1);
 static NEXT_SHARED_MOUNT: AtomicU64 = AtomicU64::new(1);
@@ -77,6 +77,11 @@ pub struct RenderedComponent {
     pub node: Value,
     /// Node action indices address this host-owned table, not a JS runtime.
     pub events: BTreeMap<u64, ComponentEventHandle>,
+}
+
+pub struct ScheduledComponentDispatch {
+    pub rendered: Option<RenderedComponent>,
+    pub reconciliation_requested: bool,
 }
 
 struct ExpansionState {
@@ -792,6 +797,30 @@ impl ShellCompositionRuntime {
         self.dispatch_validated(handle, value, |_| Ok(()))
     }
 
+    /// Dispatch through the hook scheduler without forcing a root render when
+    /// every state/reducer update is referentially unchanged. This is the
+    /// retained bridge prerequisite; rendered outcomes remain complete trees.
+    pub fn dispatch_scheduled(
+        &mut self,
+        handle: &ComponentEventHandle,
+        value: &Value,
+    ) -> Result<ScheduledComponentDispatch, String> {
+        self.transactional(|host| {
+            bounded_json(value)?;
+            let mount = host
+                .mounts
+                .get(&handle.mount)
+                .ok_or("retired component event")?;
+            if handle.runtime != host.id
+                || mount.generation != handle.generation
+                || mount.reference.owner != handle.owner
+            {
+                return Err("foreign or stale component event".into());
+            }
+            host.render_mount_scheduled(handle.mount, serde_json::json!([[handle.action, value]]))
+        })
+    }
+
     /// Accept a production renderer's tree validation before committing hooks,
     /// handlers or effects. Rejection rolls back the existing render transaction.
     pub fn render_validated(
@@ -1498,6 +1527,77 @@ impl ShellCompositionRuntime {
         self.mounts.get_mut(&id).unwrap().generation = generation;
         self.drain_effects(&owner, id, previous_generation, event.is_some())?;
         Ok(rendered)
+    }
+
+    fn render_mount_scheduled(
+        &mut self,
+        id: u64,
+        events: Value,
+    ) -> Result<ScheduledComponentDispatch, String> {
+        let catalog_script = self.contribution_catalog_script();
+        let state = &self.mounts[&id];
+        let owner = state.reference.owner.clone();
+        let previous_generation = state.generation;
+        let generation = self
+            .next_generation
+            .checked_add(1)
+            .ok_or("component generation exhausted")?;
+        let package = self
+            .packages
+            .get_mut(&owner)
+            .ok_or("retired component owner")?;
+        let mut runtime = package.runtime.borrow_mut();
+        runtime.eval(&catalog_script)?;
+        runtime.select_surface(&surface(id))?;
+        let mut data = package.data.clone();
+        let object = data
+            .as_object_mut()
+            .ok_or("package snapshot must be an object")?;
+        if let Some(surface) = &state.surface {
+            object.insert("surface".into(), surface.clone());
+        }
+        object.insert("__componentProps".into(), state.props.clone());
+        runtime.set_data_value(data)?;
+        let expression = format!("__nickelDispatchBatchScheduled({events})");
+        let outcome = runtime.dispatch_scheduled(&expression, |value| {
+            bounded_json(value)?;
+            let mut node = value.clone();
+            let mut owned_events = BTreeMap::new();
+            rewrite_events(
+                &mut node,
+                self.id,
+                id,
+                generation,
+                &owner,
+                &mut owned_events,
+                &mut TreeBudget::default(),
+                0,
+            )?;
+            Ok(RenderedComponent {
+                node,
+                events: owned_events,
+            })
+        });
+        runtime.finish_event(outcome.is_ok())?;
+        let outcome = outcome?;
+        drop(runtime);
+        let (rendered, reconciliation_requested) = match outcome {
+            ScheduledRender::Unchanged => (None, false),
+            ScheduledRender::Rendered {
+                value,
+                reconciliation_requested,
+                ..
+            } => {
+                self.next_generation = generation;
+                self.mounts.get_mut(&id).unwrap().generation = generation;
+                (Some(value), reconciliation_requested)
+            }
+        };
+        self.drain_effects(&owner, id, previous_generation, true)?;
+        Ok(ScheduledComponentDispatch {
+            rendered,
+            reconciliation_requested,
+        })
     }
 
     fn drain_effects(
@@ -2504,5 +2604,37 @@ mod tests {
             .render_expanded(&shell_mount, &serde_json::json!({}), |_| Ok(()))
             .unwrap();
         assert!(rendered.node.to_string().contains("child"));
+    }
+
+    #[test]
+    fn scheduled_noop_keeps_mount_generation_and_skips_component_render() {
+        let package = package(
+            "scheduler",
+            "globalThis.renders=0;\nexport function Taskbar(){renders++;const [value,setValue]=useState(0);return h(Button,{onClick:()=>setValue(current=>current)},String(value));}\nexport function QuickSettings(){return h(Text,null,'settings');}\nexport default Taskbar;",
+            None,
+        );
+        let mut host = ShellCompositionRuntime::new(
+            &BTreeMap::from([("scheduler".into(), package)]),
+            "scheduler",
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let reference = host.component("shell.taskbar").unwrap();
+        let mount = host.mount(&reference).unwrap();
+        let tree = host.render(&mount, &serde_json::json!({})).unwrap();
+        let event = tree.events[&0].clone();
+
+        let outcome = host.dispatch_scheduled(&event, &Value::Null).unwrap();
+        assert!(outcome.rendered.is_none());
+        assert!(!outcome.reconciliation_requested);
+        assert_eq!(
+            host.shared_owner_runtime(reference.owner())
+                .unwrap()
+                .borrow_mut()
+                .eval_json::<u64>("JSON.stringify(renders)")
+                .unwrap(),
+            1
+        );
+        assert!(host.dispatch_scheduled(&event, &Value::Null).is_ok());
     }
 }

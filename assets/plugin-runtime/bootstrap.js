@@ -87,6 +87,7 @@ let __effects = [];
 let __listKeyErrors = [];
 let __pendingRender = null;
 let __pendingEvent = null;
+let __dirtyComponents = new Set();
 let __nickelData = Object.freeze({query: '', results: []});
 let __activeSurface = 'default';
 const __surfaceStates = new Map();
@@ -583,13 +584,15 @@ function __nickelSelectSurface(id) {
         handlers: __handlers,
         previousHandlers: __previousHandlers,
         effects: __effects,
-        data: __nickelData
+        data: __nickelData,
+        dirty: __dirtyComponents
     });
     const state = __surfaceStates.get(id);
     __componentHooks = state?.hooks ?? new Map();
     __handlers = state?.handlers ?? [];
     __previousHandlers = state?.previousHandlers ?? [];
     __effects = state?.effects ?? [];
+    __dirtyComponents = state?.dirty ?? new Set();
     __nickelData = state?.data ?? Object.freeze({query: '', results: []});
     __visitedComponents = new Set();
     __componentChildren = new Map();
@@ -611,6 +614,7 @@ function __nickelDropSurface(id) {
     __handlers = [];
     __previousHandlers = [];
     __effects = [];
+    __dirtyComponents = new Set();
     __nickelData = Object.freeze({query: '', results: []});
     __visitedComponents = new Set();
     __componentChildren = new Map();
@@ -639,7 +643,10 @@ function useState(initial) {
         entry.set = next => {
             if (__componentHooks.get(owner)?.[slot] !== entry) return;
             const value = typeof next === 'function' ? next(entry.value) : next;
-            if (!Object.is(value, entry.value)) entry.value = value;
+            if (!Object.is(value, entry.value)) {
+                entry.value = value;
+                __dirtyComponents.add(owner);
+            }
         };
         hooks[slot] = entry;
     }
@@ -660,7 +667,10 @@ function useReducer(reducer, initialArg, init) {
         entry.dispatch = action => {
             if (__componentHooks.get(owner)?.[slot] !== entry) return;
             const value = entry.reducer(entry.value, action);
-            if (!Object.is(value, entry.value)) entry.value = value;
+            if (!Object.is(value, entry.value)) {
+                entry.value = value;
+                __dirtyComponents.add(owner);
+            }
         };
         hooks[slot] = entry;
     }
@@ -833,10 +843,11 @@ function h(kind, props, ...children) {
 
 function __nickelRollbackRender() {
     if (__pendingRender !== null) {
-        const {handlers, previousHandlers, hooks, values, effectsLength} = __pendingRender;
+        const {handlers, previousHandlers, hooks, values, effectsLength, dirty} = __pendingRender;
         __handlers = handlers;
         __previousHandlers = previousHandlers;
         __nickelRestoreHooks(hooks, values, effectsLength);
+        __dirtyComponents = dirty;
         __pendingRender = null;
     }
     __nickelRollbackEvent();
@@ -857,11 +868,12 @@ function __nickelRestoreHooks(hooks, values, effectsLength) {
 
 function __nickelRollbackEvent() {
     if (__pendingEvent === null) return;
-    const {handlers, previousHandlers, hooks, values, effectsLength, effects} = __pendingEvent;
+    const {handlers, previousHandlers, hooks, values, effectsLength, effects, dirty} = __pendingEvent;
     __handlers = handlers;
     __previousHandlers = previousHandlers;
     __nickelRestoreHooks(hooks, values, effectsLength);
     __effects = effects;
+    __dirtyComponents = dirty;
     __pendingEvent = null;
 }
 
@@ -869,6 +881,7 @@ function __nickelCommitRender() {
     const pending = __pendingRender;
     __pendingRender = null;
     if (pending === null) return;
+    __dirtyComponents.clear();
     for (const entry of pending.reducerEntries) {
         entry.reducer = entry.nextReducer;
         delete entry.nextReducer;
@@ -901,7 +914,8 @@ function __nickelRender(component = __nickelActiveEntry()) {
     const previousValues = Array.from(__componentHooks.values(), hooks => hooks.map(entry =>
         entry.kind === 'ref' ? entry.value.current : entry.value));
     __pendingRender = {handlers: previousHandlers, previousHandlers: olderHandlers, hooks: previousHooks,
-        values: previousValues, effectsLength: __effects.length, passiveEffects: [], removedEffects: [], reducerEntries: []};
+        values: previousValues, effectsLength: __effects.length, dirty:new Set(__dirtyComponents),
+        passiveEffects: [], removedEffects: [], reducerEntries: []};
     __handlers = [];
     __previousHandlers = previousHandlers;
     __listKeyErrors = [];
@@ -941,7 +955,7 @@ function __nickelDispatchBatch(events, previous = false) {
         entry.kind === 'ref' ? entry.value.current : entry.value));
     const effectsLength = __effects.length;
     __pendingEvent = {handlers: __handlers, previousHandlers: __previousHandlers, hooks, values,
-        effectsLength, effects: __effects.slice()};
+        effectsLength, effects: __effects.slice(), dirty:new Set(__dirtyComponents)};
     try {
         for (const [action, value] of events) {
             const handler = (previous ? __previousHandlers : __handlers)[action];
@@ -952,6 +966,34 @@ function __nickelDispatchBatch(events, previous = false) {
         __nickelRollbackEvent();
         throw error;
     }
+}
+
+// Structured scheduler entry point. It deliberately still produces a complete
+// tree when dirty; the native mutation protocol can replace that payload later.
+function __nickelDispatchBatchScheduled(events, previous = false) {
+    if (!events.length) return JSON.stringify({rendered:false, dirty:[]});
+    const hooks = new Map(Array.from(__componentHooks, ([path, slots]) => [path, slots.slice()]));
+    const values = Array.from(__componentHooks.values(), slots => slots.map(entry =>
+        entry.kind === 'ref' ? entry.value.current : entry.value));
+    const effectsLength = __effects.length;
+    __pendingEvent = {handlers:__handlers, previousHandlers:__previousHandlers, hooks, values,
+        effectsLength, effects:__effects.slice(), dirty:new Set(__dirtyComponents)};
+    try {
+        for (const [action, value] of events) {
+            const handler = (previous ? __previousHandlers : __handlers)[action];
+            if (handler) handler(value);
+        }
+        const dirty = Array.from(__dirtyComponents);
+        if (!dirty.length) return JSON.stringify({rendered:false, dirty});
+        return JSON.stringify({rendered:true, dirty, node:JSON.parse(__nickelRender())});
+    } catch (error) {
+        __nickelRollbackEvent();
+        throw error;
+    }
+}
+
+function __nickelReconciliationRequest() {
+    return JSON.stringify({requested:__dirtyComponents.size > 0, dirty:Array.from(__dirtyComponents)});
 }
 
 // Native composition checkpoints cover bootstrap-owned presentation state.
@@ -977,13 +1019,15 @@ function __nickelBeginCheckpoint() {
         }
         return result;
     }
-    function state(hooks, handlers, previousHandlers, effects, data) {
+    function state(hooks, handlers, previousHandlers, effects, data, dirty) {
         return {hooks:new Map(Array.from(hooks, ([path, slots]) => [path, slots.slice()])),
             values:Array.from(hooks.values(), slots => slots.map(entry => copy(entry.kind === 'ref' ? entry.value.current : entry.value))),
-            handlers:handlers.slice(), previousHandlers:previousHandlers.slice(), effects:copy(effects), data};
+            handlers:handlers.slice(), previousHandlers:previousHandlers.slice(), effects:copy(effects), data,
+            dirty:new Set(dirty)};
     }
-    const active = state(__componentHooks, __handlers, __previousHandlers, __effects, __nickelData);
-    const surfaces = new Map(Array.from(__surfaceStates, ([id, value]) => [id, state(value.hooks, value.handlers, value.previousHandlers, value.effects, value.data)]));
+    const active = state(__componentHooks, __handlers, __previousHandlers, __effects, __nickelData, __dirtyComponents);
+    const surfaces = new Map(Array.from(__surfaceStates, ([id, value]) => [id,
+        state(value.hooks, value.handlers, value.previousHandlers, value.effects, value.data, value.dirty)]));
     __compositionCheckpoint = {active, surfaces, graph:seen, extensible, apps:new Map(__surfaceApps), activeSurface:__activeSurface,
         settingsValues:copy(__settingsValues), settingsSnapshot:copy(__settingsSnapshot), settingsPagesSnapshot:copy(__settingsPagesSnapshot)};
 }
@@ -1013,7 +1057,8 @@ function __nickelFinishCheckpoint(accepted) {
             const values = state.values[index++];
             slots.forEach((entry, slot) => { if (entry.kind === 'ref') entry.value.current = original(values[slot]); else entry.value = original(values[slot]); });
         }
-        return {hooks:state.hooks, handlers:state.handlers, previousHandlers:state.previousHandlers, effects:original(state.effects), data:state.data};
+        return {hooks:state.hooks, handlers:state.handlers, previousHandlers:state.previousHandlers,
+            effects:original(state.effects), data:state.data, dirty:state.dirty};
     }
     __surfaceStates.clear();
     for (const [id, state] of checkpoint.surfaces) __surfaceStates.set(id, restore(state));
@@ -1022,6 +1067,7 @@ function __nickelFinishCheckpoint(accepted) {
     const active = restore(checkpoint.active);
     __componentHooks = active.hooks; __handlers = active.handlers; __previousHandlers = active.previousHandlers;
     __effects = active.effects; __nickelData = active.data; __activeSurface = checkpoint.activeSurface;
+    __dirtyComponents = active.dirty;
     __settingsValues = original(checkpoint.settingsValues); __settingsSnapshot = original(checkpoint.settingsSnapshot); __settingsPagesSnapshot = original(checkpoint.settingsPagesSnapshot);
     __visitedComponents = new Set(); __componentChildren = new Map(); __currentComponent = null; __hookIndex = 0; __listKeyErrors = [];
 }
