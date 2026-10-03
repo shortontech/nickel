@@ -15,7 +15,7 @@ use serde_json::Value;
 
 use crate::{
     JsxModuleGraph, JsxRuntime, ModuleSource, NativePatchCounters, NativePatchEnvelope,
-    NativePatchOperation, ScheduledRender,
+    NativePatchOperation, ScheduledPatch, ScheduledRender,
 };
 
 static NEXT_RUNTIME: AtomicU64 = AtomicU64::new(1);
@@ -129,6 +129,11 @@ struct PatchExpansion {
     rendered: BTreeMap<u64, RenderedComponent>,
 }
 
+struct PatchedMountDispatch {
+    patch: Option<NativePatchEnvelope>,
+    reconciliation_requested: bool,
+}
+
 #[derive(Clone)]
 struct CallbackGrant {
     receiver: u64,
@@ -172,6 +177,12 @@ struct MountState {
     surface: Option<Value>,
 }
 
+#[derive(Clone, Default)]
+struct MountPatchAuthority {
+    /// Package-local handler slot -> stable expanded event token.
+    slots: BTreeMap<String, u64>,
+}
+
 struct CompositionCheckpoint {
     mounts: BTreeMap<u64, MountState>,
     effects: Vec<OwnedComponentEffect>,
@@ -180,6 +191,7 @@ struct CompositionCheckpoint {
     children: BTreeMap<u64, OwnedChildGrant>,
     data: BTreeMap<PackageIdentity, Value>,
     scheduled_renders: BTreeMap<u64, RenderedComponent>,
+    patch_authority: BTreeMap<u64, MountPatchAuthority>,
 }
 
 /// One generic composition host, one context/module cache per package.
@@ -199,6 +211,7 @@ pub struct ShellCompositionRuntime {
     next_callback: u64,
     callback_depth: usize,
     scheduled_renders: BTreeMap<u64, RenderedComponent>,
+    patch_authority: BTreeMap<u64, MountPatchAuthority>,
     checkpoint: Option<CompositionCheckpoint>,
 }
 
@@ -301,6 +314,7 @@ impl ShellCompositionRuntime {
             next_callback: 0,
             callback_depth: 0,
             scheduled_renders: BTreeMap::new(),
+            patch_authority: BTreeMap::new(),
             checkpoint: None,
         };
         let contribution_catalog = host
@@ -787,6 +801,7 @@ impl ShellCompositionRuntime {
                 .map(|(owner, package)| (owner.clone(), package.data.clone()))
                 .collect(),
             scheduled_renders: self.scheduled_renders.clone(),
+            patch_authority: self.patch_authority.clone(),
         });
         Ok(())
     }
@@ -818,6 +833,7 @@ impl ShellCompositionRuntime {
                 }
             }
             self.scheduled_renders = checkpoint.scheduled_renders;
+            self.patch_authority = checkpoint.patch_authority;
         }
         if let Some(error) = failure {
             self.effects.clear();
@@ -1126,10 +1142,20 @@ impl ShellCompositionRuntime {
                 .map(|(id, mount)| (*id, mount.generation))
                 .collect::<BTreeMap<_, _>>();
             let mut rendered_mounts = BTreeMap::new();
+            let mut patched_mounts = BTreeMap::new();
             let mut reconciliation_requested = false;
             if events.is_empty() {
                 let mount_ids = self.mounts.keys().copied().collect::<Vec<_>>();
                 for mount in mount_ids {
+                    if self.patch_authority.contains_key(&mount) {
+                        let outcome = self.render_mount_patched(mount, Value::Array(Vec::new()))?;
+                        if let Some(patch) = outcome.patch {
+                            patched_mounts.insert(mount, patch);
+                        }
+                        rendered_mounts.append(&mut self.scheduled_renders);
+                        reconciliation_requested |= outcome.reconciliation_requested;
+                        continue;
+                    }
                     let outcome = self.render_mount_scheduled(mount, Value::Array(Vec::new()))?;
                     if let Some(rendered) = outcome.rendered {
                         rendered_mounts.insert(mount, rendered);
@@ -1149,6 +1175,16 @@ impl ShellCompositionRuntime {
                     .iter()
                     .map(|(handle, value)| serde_json::json!([handle.action, value]))
                     .collect::<Vec<_>>();
+                if self.patch_authority.contains_key(&mount) {
+                    let outcome = self.render_mount_patched(mount, Value::Array(batch))?;
+                    if let Some(patch) = outcome.patch {
+                        patched_mounts.insert(mount, patch);
+                    }
+                    rendered_mounts.append(&mut self.scheduled_renders);
+                    reconciliation_requested |= outcome.reconciliation_requested;
+                    offset = end;
+                    continue;
+                }
                 let outcome = self.render_mount_scheduled(mount, Value::Array(batch))?;
                 if let Some(rendered) = outcome.rendered {
                     rendered_mounts.insert(mount, rendered);
@@ -1219,12 +1255,18 @@ impl ShellCompositionRuntime {
                 })
                 .map(|(_, mount)| mount.id)
                 .chain(changed.iter().copied())
+                .filter(|mount| !patched_mounts.contains_key(mount))
                 .collect::<std::collections::BTreeSet<_>>();
             let mut retained_events = accepted_events
                 .iter()
                 .filter(|(_, handle)| !affected_mounts.contains(&handle.mount))
                 .map(|(token, handle)| (*token, handle.clone()))
                 .collect::<BTreeMap<_, _>>();
+            for handle in retained_events.values_mut() {
+                if patched_mounts.contains_key(&handle.mount) {
+                    handle.generation = self.mounts[&handle.mount].generation;
+                }
+            }
             let next_event = retained_events
                 .last_key_value()
                 .map_or(0, |(token, _)| token.saturating_add(1));
@@ -1245,6 +1287,26 @@ impl ShellCompositionRuntime {
             let mut patch_nodes_visited = 0;
             let mut generation = 0;
             for (boundary, mount_id, namespace) in &boundaries {
+                if let Some(local_patch) = patched_mounts.remove(mount_id) {
+                    generation = generation.max(self.mounts[mount_id].generation);
+                    translate_package_patch(
+                        local_patch,
+                        if *namespace {
+                            Some(boundary.as_str())
+                        } else {
+                            None
+                        },
+                        *mount_id,
+                        &self.mounts[mount_id].reference.owner,
+                        self.id,
+                        self.mounts[mount_id].generation,
+                        &mut self.patch_authority,
+                        &mut expansion,
+                        &mut operations,
+                        &mut patch_nodes_visited,
+                    )?;
+                    continue;
+                }
                 let rendered = patch_expansion
                     .as_mut()
                     .unwrap()
@@ -1279,6 +1341,12 @@ impl ShellCompositionRuntime {
                     &mut patch_nodes_visited,
                 )?;
             }
+            // Expanded handler tokens are stable host authority. Both direct
+            // patches and complete callback renders update their handle table;
+            // the renderer does not need a slot mutation for the same token.
+            operations.retain(|operation| {
+                !matches!(operation, NativePatchOperation::ReplaceHandlerSlot { .. })
+            });
             let nodes_mutated = operations.len() as u64;
             let patch = NativePatchEnvelope {
                 version: 1,
@@ -1382,6 +1450,7 @@ impl ShellCompositionRuntime {
             let mount = self.nested_mounts.remove(&key).unwrap();
             self.unmount(&mount)?;
         }
+        self.rebuild_patch_authority(root, &node, &expansion.events)?;
         Ok((
             RenderedComponent {
                 node,
@@ -1390,6 +1459,71 @@ impl ShellCompositionRuntime {
             },
             validated,
         ))
+    }
+
+    fn rebuild_patch_authority(
+        &mut self,
+        root: u64,
+        node: &Value,
+        events: &BTreeMap<u64, ComponentEventHandle>,
+    ) -> Result<(), String> {
+        let prefixes = self
+            .nested_mounts
+            .iter()
+            .filter(|((owner, _), _)| *owner == root)
+            .map(|((_, path), mount)| (mount.id, format!("{path}::")))
+            .collect::<BTreeMap<_, _>>();
+        let mut authority = BTreeMap::<u64, MountPatchAuthority>::new();
+        fn visit(
+            value: &Value,
+            events: &BTreeMap<u64, ComponentEventHandle>,
+            prefixes: &BTreeMap<u64, String>,
+            authority: &mut BTreeMap<u64, MountPatchAuthority>,
+        ) -> Result<(), String> {
+            match value {
+                Value::Object(object) => {
+                    if let Some(slots) = object.get("__handlerSlots").and_then(Value::as_object) {
+                        for (property, slot) in slots {
+                            let token = object
+                                .get(property)
+                                .and_then(Value::as_u64)
+                                .ok_or("accepted handler slot has no event token")?;
+                            let handle = events
+                                .get(&token)
+                                .ok_or("accepted handler token has no authority")?;
+                            let global_slot = slot
+                                .as_str()
+                                .ok_or("accepted handler slot is not a string")?;
+                            let local_slot = prefixes
+                                .get(&handle.mount)
+                                .and_then(|prefix| global_slot.strip_prefix(prefix))
+                                .unwrap_or(global_slot);
+                            authority
+                                .entry(handle.mount)
+                                .or_default()
+                                .slots
+                                .insert(local_slot.to_owned(), token);
+                        }
+                    }
+                    for value in object.values() {
+                        visit(value, events, prefixes, authority)?;
+                    }
+                }
+                Value::Array(values) => {
+                    for value in values {
+                        visit(value, events, prefixes, authority)?;
+                    }
+                }
+                _ => {}
+            }
+            Ok(())
+        }
+        visit(node, events, &prefixes, &mut authority)?;
+        for mount in std::iter::once(root).chain(prefixes.keys().copied()) {
+            self.patch_authority
+                .insert(mount, authority.remove(&mount).unwrap_or_default());
+        }
+        Ok(())
     }
 
     fn expand_node(
@@ -2011,6 +2145,80 @@ impl ShellCompositionRuntime {
         })
     }
 
+    fn render_mount_patched(
+        &mut self,
+        id: u64,
+        events: Value,
+    ) -> Result<PatchedMountDispatch, String> {
+        let catalog_script = self.contribution_catalog_script();
+        let state = &self.mounts[&id];
+        let owner = state.reference.owner.clone();
+        let surface_snapshot = state
+            .surface
+            .clone()
+            .unwrap_or_else(|| serde_json::json!({}));
+        let previous_generation = state.generation;
+        let generation = self
+            .next_generation
+            .checked_add(1)
+            .ok_or("component generation exhausted")?;
+        let package = self
+            .packages
+            .get_mut(&owner)
+            .ok_or("retired component owner")?;
+        let mut runtime = package.runtime.borrow_mut();
+        runtime.eval(&catalog_script)?;
+        runtime.select_surface(&surface(id))?;
+        runtime.set_surface_store(&surface(id), &surface_snapshot)?;
+        let mut data = package.data.clone();
+        let object = data
+            .as_object_mut()
+            .ok_or("package snapshot must be an object")?;
+        if let Some(surface) = &state.surface {
+            object.insert("surface".into(), surface.clone());
+        }
+        object.insert("__componentProps".into(), state.props.clone());
+        runtime.set_data_value(data)?;
+        let expression = format!("__nickelDispatchBatchPatched({events})");
+        let outcome = runtime.dispatch_patched(&expression);
+        // This accepts the package-local retained tree provisionally. The outer
+        // composition checkpoint still restores it if native validation or any
+        // sibling/callback render fails.
+        runtime.finish_patch_render(outcome.is_ok())?;
+        runtime.finish_event(outcome.is_ok())?;
+        let outcome = outcome?;
+        drop(runtime);
+        let (patch, reconciliation_requested) = match outcome {
+            ScheduledPatch::Unchanged => (None, false),
+            ScheduledPatch::Patched {
+                patch,
+                reconciliation_requested,
+                ..
+            } => {
+                self.next_generation = generation;
+                self.mounts.get_mut(&id).unwrap().generation = generation;
+                (Some(patch), reconciliation_requested)
+            }
+        };
+        self.drain_effects(&owner, id, previous_generation, true)?;
+        if patch.is_some() {
+            for grant in self.callbacks.values_mut() {
+                if grant.receiver == id && grant.generation == previous_generation {
+                    grant.generation = generation;
+                }
+            }
+            for grant in self.children.values_mut() {
+                if grant.receiver == id && grant.generation == previous_generation {
+                    grant.generation = generation;
+                }
+            }
+        }
+        Ok(PatchedMountDispatch {
+            patch,
+            reconciliation_requested,
+        })
+    }
+
     fn drain_effects(
         &mut self,
         owner: &PackageIdentity,
@@ -2411,6 +2619,236 @@ fn diff_native_subtree(
             target: target.to_owned(),
             node: after.clone(),
         }),
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn translate_package_patch(
+    patch: NativePatchEnvelope,
+    namespace: Option<&str>,
+    mount: u64,
+    owner: &PackageIdentity,
+    runtime: u64,
+    generation: u64,
+    authorities: &mut BTreeMap<u64, MountPatchAuthority>,
+    expansion: &mut ExpansionState,
+    output: &mut Vec<NativePatchOperation>,
+    visited: &mut u64,
+) -> Result<(), String> {
+    fn namespaced(namespace: Option<&str>, value: String) -> String {
+        namespace.map_or(value.clone(), |prefix| format!("{prefix}::{value}"))
+    }
+    fn rewrite_payload(
+        value: &mut Value,
+        namespace: Option<&str>,
+        mount: u64,
+        owner: &PackageIdentity,
+        runtime: u64,
+        generation: u64,
+        authority: &mut MountPatchAuthority,
+        expansion: &mut ExpansionState,
+        depth: usize,
+    ) -> Result<(), String> {
+        if depth > MAX_TREE_DEPTH {
+            return Err("native patch payload exceeds depth limit".into());
+        }
+        if matches!(
+            value.get("kind").and_then(Value::as_str),
+            Some("__packageComponent" | "__packageChild")
+        ) {
+            return Err("structural package transport requires a retained ownership splice".into());
+        }
+        match value {
+            Value::Array(values) => {
+                for value in values {
+                    rewrite_payload(
+                        value,
+                        namespace,
+                        mount,
+                        owner,
+                        runtime,
+                        generation,
+                        authority,
+                        expansion,
+                        depth + 1,
+                    )?;
+                }
+            }
+            Value::Object(object) => {
+                let slots = object
+                    .get("__handlerSlots")
+                    .and_then(Value::as_object)
+                    .cloned()
+                    .unwrap_or_default();
+                for (property, value) in object.iter_mut() {
+                    if property == "__handlerSlots" {
+                        continue;
+                    }
+                    if is_action(property) && !value.is_null() {
+                        let action = value.as_u64().ok_or("invalid patched component action")?;
+                        let slot = slots
+                            .get(property)
+                            .and_then(Value::as_str)
+                            .ok_or("patched action has no stable handler slot")?
+                            .to_owned();
+                        let token = expansion.next_event;
+                        expansion.next_event = token
+                            .checked_add(1)
+                            .ok_or("expanded event identity exhausted")?;
+                        expansion.events.insert(
+                            token,
+                            ComponentEventHandle {
+                                runtime,
+                                mount,
+                                generation,
+                                action,
+                                owner: owner.clone(),
+                            },
+                        );
+                        authority.slots.insert(slot, token);
+                        *value = Value::from(token);
+                    } else {
+                        rewrite_payload(
+                            value,
+                            namespace,
+                            mount,
+                            owner,
+                            runtime,
+                            generation,
+                            authority,
+                            expansion,
+                            depth + 1,
+                        )?;
+                    }
+                }
+                if let Some(prefix) = namespace {
+                    if let Some(id) = object
+                        .get_mut("__nativeId")
+                        .and_then(|value| value.as_str())
+                        .map(str::to_owned)
+                    {
+                        object.insert(
+                            "__nativeId".into(),
+                            Value::String(format!("{prefix}::{id}")),
+                        );
+                    }
+                    if let Some(slots) = object
+                        .get_mut("__handlerSlots")
+                        .and_then(Value::as_object_mut)
+                    {
+                        for slot in slots.values_mut() {
+                            let local = slot.as_str().ok_or("invalid handler slot")?;
+                            *slot = Value::String(format!("{prefix}::{local}"));
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+    let authority = authorities.entry(mount).or_default();
+    for operation in patch.operations {
+        *visited = visited.saturating_add(1);
+        match operation {
+            NativePatchOperation::SetPrimitive {
+                target,
+                property,
+                value,
+            } => output.push(NativePatchOperation::SetPrimitive {
+                target: namespaced(namespace, target),
+                property,
+                value,
+            }),
+            NativePatchOperation::ReplaceHandlerSlot { slot, action } => {
+                let token = *authority
+                    .slots
+                    .get(&slot)
+                    .ok_or("patched handler slot has no retained authority")?;
+                expansion.events.insert(
+                    token,
+                    ComponentEventHandle {
+                        runtime,
+                        mount,
+                        generation,
+                        action: action as u64,
+                        owner: owner.clone(),
+                    },
+                );
+                // The renderer already addresses this stable expanded token.
+                // Only its host-owned action authority changes.
+            }
+            NativePatchOperation::InsertChild {
+                parent,
+                key,
+                child_id,
+                index,
+                mut node,
+            } => {
+                rewrite_payload(
+                    &mut node, namespace, mount, owner, runtime, generation, authority, expansion,
+                    0,
+                )?;
+                output.push(NativePatchOperation::InsertChild {
+                    parent: namespaced(namespace, parent),
+                    key,
+                    child_id: namespaced(namespace, child_id),
+                    index,
+                    node,
+                });
+            }
+            NativePatchOperation::RemoveChild {
+                parent,
+                key,
+                child_id,
+                index,
+            } => {
+                authority.slots.retain(|slot, token| {
+                    let keep = !slot.starts_with(&child_id);
+                    if !keep {
+                        expansion.events.remove(token);
+                    }
+                    keep
+                });
+                output.push(NativePatchOperation::RemoveChild {
+                    parent: namespaced(namespace, parent),
+                    key,
+                    child_id: namespaced(namespace, child_id),
+                    index,
+                });
+            }
+            NativePatchOperation::MoveChild {
+                parent,
+                key,
+                child_id,
+                from,
+                to,
+            } => output.push(NativePatchOperation::MoveChild {
+                parent: namespaced(namespace, parent),
+                key,
+                child_id: namespaced(namespace, child_id),
+                from,
+                to,
+            }),
+            NativePatchOperation::ReplaceSubtree { target, mut node } => {
+                authority.slots.retain(|slot, token| {
+                    let keep = !slot.starts_with(&target);
+                    if !keep {
+                        expansion.events.remove(token);
+                    }
+                    keep
+                });
+                rewrite_payload(
+                    &mut node, namespace, mount, owner, runtime, generation, authority, expansion,
+                    0,
+                )?;
+                output.push(NativePatchOperation::ReplaceSubtree {
+                    target: namespaced(namespace, target),
+                    node,
+                });
+            }
+        }
     }
     Ok(())
 }

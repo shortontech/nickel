@@ -1314,7 +1314,8 @@ function __nickelSelectSurface(id) {
         effects: __effects,
         data: __nickelData,
         dirty: __dirtyComponents,
-        surfaceStore: __surfaceStore
+        surfaceStore: __surfaceStore,
+        acceptedNativeTree: __acceptedNativeTree
     });
     const state = __surfaceStates.get(id);
     __componentHooks = state?.hooks ?? new Map();
@@ -1327,6 +1328,7 @@ function __nickelSelectSurface(id) {
         generation:0, mountId:null, id:null, kind:null, logicalSize:null,
         output:null, availableSize:null, scaleFactor:null, focused:null, visible:null
     })};
+    __acceptedNativeTree = state?.acceptedNativeTree ?? null;
     __nickelData = state?.data ?? Object.freeze({query: '', results: []});
     __visitedComponents = new Set();
     __componentChildren = new Map();
@@ -1351,6 +1353,7 @@ function __nickelDropSurface(id) {
     __previousHandlers = [];
     __effects = [];
     __dirtyComponents = new Set();
+    __acceptedNativeTree = null;
     __surfaceStore = {generation:0, snapshot:Object.freeze({
         generation:0, mountId:null, id:null, kind:null, logicalSize:null,
         output:null, availableSize:null, scaleFactor:null, focused:null, visible:null
@@ -2215,16 +2218,16 @@ function __nickelBeginCheckpoint() {
         }
         return result;
     }
-    function state(hooks, records, handlers, previousHandlers, effects, data, dirty, surfaceStore) {
+    function state(hooks, records, handlers, previousHandlers, effects, data, dirty, surfaceStore, acceptedNativeTree) {
         return {hooks:new Map(Array.from(hooks, ([path, slots]) => [path, slots.slice()])),
             records:new Map(records),
             values:Array.from(hooks.values(), slots => slots.map(entry => copy(entry.kind === 'ref' ? entry.value.current : entry.value))),
             handlers:handlers.slice(), previousHandlers:previousHandlers.slice(), effects:copy(effects), data,
-            dirty:new Set(dirty), surfaceStore};
+            dirty:new Set(dirty), surfaceStore, acceptedNativeTree:copy(acceptedNativeTree)};
     }
-    const active = state(__componentHooks, __componentRecords, __handlers, __previousHandlers, __effects, __nickelData, __dirtyComponents, __surfaceStore);
+    const active = state(__componentHooks, __componentRecords, __handlers, __previousHandlers, __effects, __nickelData, __dirtyComponents, __surfaceStore, __acceptedNativeTree);
     const surfaces = new Map(Array.from(__surfaceStates, ([id, value]) => [id,
-        state(value.hooks, value.records, value.handlers, value.previousHandlers, value.effects, value.data, value.dirty, value.surfaceStore)]));
+        state(value.hooks, value.records, value.handlers, value.previousHandlers, value.effects, value.data, value.dirty, value.surfaceStore, value.acceptedNativeTree)]));
     __compositionCheckpoint = {active, surfaces, graph:seen, extensible, apps:new Map(__surfaceApps), activeSurface:__activeSurface,
         settingsValues:copy(__settingsValues), settingsSnapshot:copy(__settingsSnapshot), settingsPagesSnapshot:copy(__settingsPagesSnapshot)};
 }
@@ -2256,7 +2259,7 @@ function __nickelFinishCheckpoint(accepted) {
         }
         return {hooks:state.hooks, records:state.records, handlers:state.handlers, previousHandlers:state.previousHandlers,
             effects:original(state.effects), data:state.data, dirty:state.dirty,
-            surfaceStore:state.surfaceStore};
+            surfaceStore:state.surfaceStore, acceptedNativeTree:original(state.acceptedNativeTree)};
     }
     __surfaceStates.clear();
     for (const [id, state] of checkpoint.surfaces) __surfaceStates.set(id, restore(state));
@@ -2267,6 +2270,7 @@ function __nickelFinishCheckpoint(accepted) {
     __effects = active.effects; __nickelData = active.data; __activeSurface = checkpoint.activeSurface;
     __dirtyComponents = active.dirty;
     __surfaceStore = active.surfaceStore;
+    __acceptedNativeTree = active.acceptedNativeTree;
     __settingsValues = original(checkpoint.settingsValues); __settingsSnapshot = original(checkpoint.settingsSnapshot); __settingsPagesSnapshot = original(checkpoint.settingsPagesSnapshot);
     __visitedComponents = new Set(); __componentChildren = new Map(); __currentComponent = null; __hookIndex = 0; __listKeyErrors = [];
 }
