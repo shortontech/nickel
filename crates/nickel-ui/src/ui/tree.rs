@@ -648,6 +648,14 @@ fn paint_refresh_preserves_geometry<Message>(element: &Element<Message>) -> bool
             .all(paint_refresh_preserves_geometry)
 }
 
+fn pointer_position_affects_geometry<Message>(element: &Element<Message>) -> bool {
+    element.style.proximity_magnification.is_some()
+        || element
+            .children
+            .iter()
+            .any(pointer_position_affects_geometry)
+}
+
 fn independent_output_reuse_safe<Message>(element: &Element<Message>) -> bool {
     !matches!(
         element.kind,
@@ -3789,7 +3797,12 @@ impl<Message: Clone> UiFrame<Message> {
                         ((point.x - hit.rect.origin.x) / hit.rect.size.width.max(1.0))
                             .clamp(0.0, 1.0)
                     });
+                let position_affects_geometry = self
+                    .declaration_root
+                    .as_ref()
+                    .is_some_and(pointer_position_affects_geometry);
                 let pointer_invalidation = match state.set_pointer_position(point, hover_fraction) {
+                    _ if !position_affects_geometry => Invalidation::None,
                     Invalidation::Layout
                         if self
                             .declaration_root

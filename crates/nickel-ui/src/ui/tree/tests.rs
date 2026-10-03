@@ -186,6 +186,83 @@ fn pointer_departure_clears_proximity_hover() {
 }
 
 #[test]
+fn motion_within_one_hover_target_does_not_repaint_position_independent_tree() {
+    let tree = UiFrame::layout(
+        Button::new(TestMessage::Named("press"), "Button")
+            .id("button")
+            .width(100.0)
+            .height(40.0),
+        Rect::new(0.0, 0.0, 120.0, 60.0),
+    );
+    let mut state = UiStateStore::default();
+    assert_eq!(
+        tree.handle_event(
+            &mut state,
+            UiEvent::PointerMoved(Point { x: 10.0, y: 10.0 }),
+        )
+        .invalidation,
+        Invalidation::Paint
+    );
+    for x in 11..90 {
+        assert_eq!(
+            tree.handle_event(
+                &mut state,
+                UiEvent::PointerMoved(Point {
+                    x: x as f32,
+                    y: 20.0,
+                }),
+            )
+            .invalidation,
+            Invalidation::None
+        );
+    }
+    assert_eq!(
+        tree.handle_event(
+            &mut state,
+            UiEvent::PointerMoved(Point {
+                x: 1_000.0,
+                y: 1_000.0,
+            }),
+        )
+        .invalidation,
+        Invalidation::Paint
+    );
+}
+
+#[test]
+fn proximity_magnification_keeps_coordinate_dependent_motion_live() {
+    let mut state = UiStateStore::default();
+    let tree = UiFrame::layout_with_state(
+        Row::new()
+            .child(
+                Button::new(TestMessage::Named("item"), "Item")
+                    .id("item")
+                    .width(100.0)
+                    .height(40.0),
+            )
+            .into_element()
+            .proximity_magnification(ProximityMagnification {
+                maximum_scale: 1.5,
+                radius: 1,
+            }),
+        Rect::new(0.0, 0.0, 120.0, 60.0),
+        &mut state,
+    );
+    tree.handle_event(
+        &mut state,
+        UiEvent::PointerMoved(Point { x: 10.0, y: 10.0 }),
+    );
+    assert_eq!(
+        tree.handle_event(
+            &mut state,
+            UiEvent::PointerMoved(Point { x: 80.0, y: 10.0 }),
+        )
+        .invalidation,
+        Invalidation::Layout
+    );
+}
+
+#[test]
 fn declarative_drag_target_captures_motion_beyond_its_bounds() {
     let tree = UiFrame::layout(
         Container::new()
