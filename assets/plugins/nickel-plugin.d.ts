@@ -240,6 +240,8 @@ declare function useState<T>(initial: T | (() => T)): [T, (next: T | ((previous:
 declare function useReducer<S, A>(reducer: (state: S, action: A) => S, initialState: S): [S, (action: A) => void];
 declare function useReducer<S, A, I>(reducer: (state: S, action: A) => S, initialArg: I, init: (initialArg: I) => S): [S, (action: A) => void];
 declare function useRef<T>(initial: T): { current: T };
+/** Stable, opaque ID for accessibility relationships within this component's mounted surface. */
+declare function useId(): string;
 declare function useEffect(setup: () => void | (() => void), dependencies?: ReadonlyArray<unknown>): void;
 interface NickelSurfaceSnapshot {
     readonly generation:number;

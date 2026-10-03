@@ -776,6 +776,20 @@ function useRef(initial) {
     return hooks[slot].value;
 }
 
+function useId() {
+    if (__currentComponent === null) throw Error('useId requires a component');
+    const owner = __currentComponent;
+    const slot = __hookIndex++;
+    const hooks = __componentHooks.get(owner);
+    if (!hooks[slot]) {
+        const surface = encodeURIComponent(__activeSurface);
+        const component = encodeURIComponent(owner);
+        hooks[slot] = {kind: 'id', value: `:nickel:${surface}:${component}:${slot}:`};
+    }
+    if (hooks[slot].kind !== 'id') throw Error('hook order changed');
+    return hooks[slot].value;
+}
+
 function __nickelDepsEqual(left, right) {
     return left !== undefined && right !== undefined && left.length === right.length
         && left.every((value, index) => Object.is(value, right[index]));

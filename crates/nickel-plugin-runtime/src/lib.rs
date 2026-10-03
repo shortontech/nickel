@@ -293,6 +293,88 @@ impl JsxRuntime {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn ids_are_stable_opaque_and_distinct_by_hook_component_and_surface() {
+        let source = r#"
+            globalThis.ids ||= [];
+            function Child() { return h(Text, null, useId()); }
+            function App() {
+                const first = useId();
+                const second = useId();
+                ids.push([first, second]);
+                return h(Window, {}, h(Text, null, first), h(Text, null, second), h(Child));
+            }
+        "#;
+        let mut runtime = super::JsxRuntime::new(source, None).unwrap();
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        assert!(
+            runtime
+                .eval_json::<bool>("ids[0][0] === ids[1][0] && ids[0][1] === ids[1][1]")
+                .unwrap()
+        );
+        assert!(
+            runtime
+                .eval_json::<bool>("ids[0][0] !== ids[0][1]")
+                .unwrap()
+        );
+        let default_id = runtime
+            .eval_json::<String>("JSON.stringify(ids[0][0])")
+            .unwrap();
+        assert!(default_id.starts_with(":nickel:default:"));
+
+        runtime.register_surface_entry("other", source).unwrap();
+        runtime.select_surface("other").unwrap();
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        let other_id = runtime
+            .eval_json::<String>("JSON.stringify(ids[ids.length - 1][0])")
+            .unwrap();
+        assert_ne!(default_id, other_id);
+        assert!(other_id.starts_with(":nickel:other:"));
+    }
+
+    #[test]
+    fn rejected_render_does_not_admit_id_hook_state() {
+        let source = r#"
+            globalThis.ids = [];
+            function App() { const id = useId(); ids.push(id); return h(Text, null, id); }
+        "#;
+        let mut runtime = super::JsxRuntime::new(source, None).unwrap();
+        runtime
+            .render("__nickelRender()", |_| Err::<(), _>("reject".into()))
+            .unwrap_err();
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        assert!(
+            runtime
+                .eval_json::<bool>("ids.length === 2 && ids[0] === ids[1]")
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn retired_surface_ids_do_not_retain_live_hook_state() {
+        let source = r#"
+            globalThis.ids ||= [];
+            function App() { const id = useId(); ids.push(id); return h(Text, null, id); }
+        "#;
+        let mut runtime = super::JsxRuntime::new(source, None).unwrap();
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        runtime.drop_surface("default").unwrap();
+        runtime.register_surface_entry("default", source).unwrap();
+        runtime.select_surface("default").unwrap();
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        assert!(
+            runtime
+                .eval_json::<bool>("ids.length === 2 && ids[0] !== ids[1]")
+                .unwrap()
+        );
+        assert!(
+            runtime
+                .eval_json::<bool>("__componentHooks.size === 1")
+                .unwrap()
+        );
+    }
+
+    #[test]
     fn react_style_hooks_preserve_identity_and_memoize_with_object_is() {
         let source = r#"
             globalThis.observed = [];
