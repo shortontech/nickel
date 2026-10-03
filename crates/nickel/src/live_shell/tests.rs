@@ -2575,6 +2575,40 @@ fn selected_shell_overlay_reopen_reuses_quiescent_bounded_host() {
 }
 
 #[test]
+fn held_open_launcher_survives_taskbar_clock_patch_through_mixed_flow_children() {
+    with_package_runtime_stack(|| {
+        let mut shell = LiveShell::new().unwrap();
+        shell.global_shortcut(crate::platform::GlobalShortcut::ShowLauncher);
+        let launcher = LiveShell::default_shell_surface_key("launcher");
+        let taskbar = LiveShell::default_shell_surface_key("taskbar");
+        assert!(shell.plugin_panel_scene(&launcher, 608, 628).is_some());
+        assert!(shell.plugin_panel_scene(&taskbar, 1920, 56).is_some());
+
+        let mut clock = crate::clock_capabilities::snapshot();
+        clock["unixMilliseconds"] = serde_json::Value::from(
+            clock["unixMilliseconds"]
+                .as_i64()
+                .unwrap()
+                .saturating_add(60_000),
+        );
+        assert!(
+            shell
+                .plugin_panel_host_for(&taskbar)
+                .unwrap()
+                .application_mut()
+                .sync_host_data_field("clock", &clock)
+                .unwrap()
+        );
+        assert!(shell.plugin_panel_scene(&taskbar, 1920, 56).is_some());
+        assert!(shell.plugin_panel_scene(&launcher, 608, 628).is_some());
+        assert_eq!(
+            shell.plugin_registry.get("nickel-default").unwrap().health,
+            nickel_core::plugins::PluginHealth::Running
+        );
+    });
+}
+
+#[test]
 fn launcher_passive_pointer_motion_never_creates_component_mounts_or_wakeups() {
     with_package_runtime_stack(|| {
         let mut shell = LiveShell::new().unwrap();

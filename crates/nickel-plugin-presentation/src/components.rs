@@ -4621,6 +4621,29 @@ fn find_handler_slot(value: &Value, requested: &str) -> Option<(String, String)>
     })
 }
 
+fn mutate_source_only(
+    source: &mut Value,
+    target: &str,
+    operation: &mut impl FnMut(&mut Value, &mut PanelNode) -> Result<(), String>,
+) -> Result<(), String> {
+    if source.get("__nativeId").and_then(Value::as_str) == Some(target) {
+        let mut typed = PanelNode::parse(source)?;
+        return operation(source, &mut typed);
+    }
+    let children = source
+        .get_mut("children")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| format!("native patch target {target:?} disappeared"))?;
+    for child in children {
+        if child.get("__nativeId").and_then(Value::as_str) == Some(target)
+            || source_contains_id(child, target)
+        {
+            return mutate_source_only(child, target, operation);
+        }
+    }
+    Err(format!("native patch target {target:?} disappeared"))
+}
+
 fn mutate_target(
     source: &mut Value,
     typed: &mut PanelNode,
@@ -4648,7 +4671,14 @@ fn mutate_target(
         .ok_or_else(|| format!("native patch target {target:?} is not below a container"))?;
     let typed_children = typed_children_mut(typed)?;
     if children.len() != typed_children.len() || children.iter().any(|child| !child.is_object()) {
-        return Err("incremental target alignment requires native element children".into());
+        // Flow containers coalesce runs of primitive JSX children into typed
+        // Text nodes. Their source and typed child indices intentionally do
+        // not align. Apply the bounded mutation within this source subtree and
+        // reparse only the nearest misaligned ancestor instead of rejecting a
+        // valid retained update (for example a clock label beside elements).
+        mutate_source_only(source, target, operation)?;
+        *typed = parse_patched_node(source, typed)?;
+        return Ok(());
     }
     for (source, typed) in children.iter_mut().zip(typed_children) {
         if source.get("__nativeId").and_then(Value::as_str) == Some(target)
@@ -5351,6 +5381,64 @@ mod class_lookup_tests {
         assert_eq!(retained.node(), accepted.node());
         assert_eq!(retained.source(), accepted.source());
         assert_eq!(retained.generation(), 2);
+    }
+
+    #[test]
+    fn incremental_patch_reparses_only_misaligned_mixed_flow_ancestor() {
+        let source = json!({"kind":"column","__nativeId":"root","children":[
+            null, "Pinned applications: ", 7, null,
+            {"kind":"button","__nativeId":"root/@clock","key":"clock","action":0,
+             "__handlerSlots":{"action":"root/@clock:action"},"children":["12:00 PM"]}
+        ]});
+        let manifest = nickel_core::plugins::PluginManifest {
+            composition: None,
+            api_version: 1,
+            id: "test".into(),
+            name: "Test".into(),
+            author: None,
+            version: None,
+            entry: "index.js".into(),
+            stylesheet: None,
+            images: Vec::new(),
+            surfaces: Vec::new(),
+            validation_data: Default::default(),
+            capabilities: Vec::new(),
+            settings: Vec::new(),
+        };
+        let stylesheet = super::StyleSheet::compile("").unwrap();
+        let mut retained = RetainedPanelTree::admit(&source, &manifest, None, 1).unwrap();
+        let patch = NativePatchEnvelope {
+            version: 1,
+            operations: vec![
+                NativePatchOperation::SetPrimitive {
+                    target: "root/@clock".into(),
+                    property: "children".into(),
+                    value: json!(["12:01 PM"]),
+                },
+                NativePatchOperation::ReplaceHandlerSlot {
+                    slot: "root/@clock:action".into(),
+                    action: 4,
+                },
+            ],
+            counters: NativePatchCounters {
+                nodes_visited: 1,
+                nodes_mutated: 2,
+                ..Default::default()
+            },
+        };
+        retained
+            .apply_patch(&patch, &manifest, None, &stylesheet, 2, 48)
+            .unwrap();
+        let expected = json!({"kind":"column","__nativeId":"root","children":[
+            null, "Pinned applications: ", 7, null,
+            {"kind":"button","__nativeId":"root/@clock","key":"clock","action":4,
+             "__handlerSlots":{"action":"root/@clock:action"},"children":["12:01 PM"]}
+        ]});
+        assert_eq!(retained.source(), &expected);
+        assert_eq!(
+            retained.node(),
+            &super::parse_panel_for_manifest(&expected, &manifest, None).unwrap()
+        );
     }
 
     #[test]
