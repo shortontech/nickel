@@ -7151,11 +7151,11 @@ impl NickelSession {
                 self.request_output_redraw();
                 #[cfg(feature = "backend-udev")]
                 self.schedule_native_ui_frame();
+                // A real hover transition may start a presentation-only
+                // animation. A redundant same-target sample cannot introduce
+                // a deadline, so leave the existing one-shot untouched.
+                self.schedule_internal_shell_deadline();
             }
-            // Passive hover may start a presentation-only animation. Arm its
-            // application deadline without forcing a session snapshot or data
-            // refresh on every pointer sample.
-            self.schedule_internal_shell_deadline();
             return;
         }
         if plugin_surfaces_changed {
@@ -7171,7 +7171,6 @@ impl NickelSession {
                 #[cfg(feature = "backend-udev")]
                 self.schedule_native_ui_frame();
             }
-            self.schedule_internal_shell_deadline();
             return;
         }
         changed.extend(self.pending_desktop_scenes.drain());
