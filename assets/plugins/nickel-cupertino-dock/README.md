@@ -1,8 +1,9 @@
 # Nickel Cupertino Dock
 
-This derived shell keeps the default Nickel launcher, Settings, Quick Settings,
-notifications, and companion surfaces while replacing the edge taskbar with a
-centered floating dock.
+This experimental derived shell keeps the default Nickel launcher, Settings,
+Quick Settings, notifications, and companion surfaces while replacing the edge
+taskbar with a centered floating dock. The ordinary shell path is stable, but
+the dock's animation performance is still being optimized and can feel sluggish.
 
 The dock uses Nickel's native CSS subset: translucent paint, a light border,
 rounded app tiles, running indicators, a separated utility area, a soft native

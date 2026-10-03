@@ -65,8 +65,8 @@ development.
 - A GPU-rendered desktop with a selectable JSX shell, native icons, previews,
   application grouping, and task switching.
 - An application launcher with fuzzy search, pinned apps, and launch history.
-- Two bundled shells: the default Nickel taskbar and a derived Cupertino-style
-  floating dock.
+- Two bundled shells: the production default Nickel taskbar and an experimental
+  Cupertino-style floating dock.
 - Controller navigation with PlayStation, Xbox, Switch, and generic gamepads.
   Confirm and cancel follow the controller family, because muscle memory is a
   user interface contract.
@@ -78,13 +78,14 @@ development.
 
 ## Shells and themes
 
-Nickel ships two production shell packages:
+Nickel ships a production default shell and an experimental derived theme:
 
 - **Nickel Default Shell** supplies the taskbar, launcher, Settings, Quick
   Settings, notifications, window controls, previews, and companion surfaces.
-- **Nickel Cupertino Dock** inherits the default shell and replaces its taskbar
-  with a centered floating dock, while retaining the rest of the default
-  experience.
+- **Nickel Cupertino Dock (experimental)** inherits the default shell and
+  replaces its taskbar with a centered floating dock, while retaining the rest
+  of the default experience. Its animated dock is still being optimized and can
+  feel sluggish today.
 
 Choose the active shell from the Plugins page in Settings. Shells are ordinary,
 versioned packages: they can export and replace components, declare their native
@@ -144,10 +145,11 @@ owner to pretend the letters are in Xbox places.
 
 ## Project status
 
-Nickel is under active development, but the JSX shell path is production—not an
-experiment or a preview architecture. The default shell and derived Cupertino
-dock run through the same package, composition, rendering, and capability paths
-available to shell developers.
+Nickel is under active development, but the JSX shell path and default shell are
+production—not an experiment or a preview architecture. The derived Cupertino
+dock uses those same package, composition, rendering, and capability paths, but
+the theme itself remains experimental while its animation performance is
+improved.
 
 The desktop, launcher, Settings, task switching, controller navigation, and
 bundled applications are usable today. Work remains across platform coverage,
@@ -166,7 +168,7 @@ accessibility, hardware integration, and the direct Linux session.
 - [Default shell package](assets/plugins/nickel-default/README.md) — the stock
   JSX shell and its public component contracts.
 - [Cupertino Dock](assets/plugins/nickel-cupertino-dock/README.md) — the bundled
-  derived shell and live-preview workflow.
+  experimental theme and live-preview workflow.
 - [Active specifications](specs/) and [completed specifications](specs/done/).
 
 ## Contributing
