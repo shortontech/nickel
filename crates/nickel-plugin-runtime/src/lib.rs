@@ -1555,6 +1555,298 @@ mod tests {
     }
 
     #[test]
+    fn generated_jsx_updates_match_cold_oracle_through_production_patch_scheduler() {
+        use super::{NativePatchEnvelope, NativePatchOperation, ScheduledPatch};
+
+        const SOURCE: &str = r#"
+            const OracleContext=createContext('missing');
+            function Item({item,revision}) {
+                const context=useContext(OracleContext);
+                const windows=useWindows(values=>values.map(value=>value.title).join('|'));
+                return h(Text,{key:'native-'+item},`${item}:${revision}:${context}:${windows}`);
+            }
+            function App() {
+                const initial=nickel.data.oracle;
+                const [items,setItems]=useState(initial.items);
+                const [state,setState]=useState(initial.state);
+                const [reduced,dispatch]=useReducer((value,delta)=>value+delta,initial.reduced);
+                const [context,setContext]=useState(initial.context);
+                const [revision,setRevision]=useState(initial.revision);
+                return h(Window,{id:'oracle'},
+                    h(Button,{id:'mutate',key:'mutate',onClick:update=>{
+                        setItems(update.items);setState(update.state);dispatch(update.delta);
+                        setContext(update.context);setRevision(update.revision);
+                    }},'mutate'),
+                    h(Text,{id:'state',key:'state'},`${state}:${reduced}`),
+                    h(OracleContext.Provider,{key:'provider',value:context},
+                        h(Column,{id:'items'},...items.map(item=>h(Item,{key:'item-'+item,item,revision})))));
+            }
+        "#;
+
+        #[derive(Clone)]
+        struct Model {
+            items: Vec<u8>,
+            state: u64,
+            reduced: u64,
+            context: String,
+            revision: u64,
+            window_revision: u64,
+        }
+
+        fn data(model: &Model) -> Value {
+            serde_json::json!({"oracle":{"items":model.items,"state":model.state,
+                "reduced":model.reduced,"context":model.context,"revision":model.revision}})
+        }
+
+        fn windows(model: &Model) -> Value {
+            serde_json::json!([{"id":"window","title":format!("Window {}",model.window_revision),
+                "active":true,"canActivate":true}])
+        }
+
+        fn find_native_mut<'a>(value: &'a mut Value, id: &str) -> Option<&'a mut Value> {
+            if value.get("__nativeId").and_then(Value::as_str) == Some(id) {
+                return Some(value);
+            }
+            match value {
+                Value::Array(values) => values
+                    .iter_mut()
+                    .find_map(|value| find_native_mut(value, id)),
+                Value::Object(object) => object
+                    .values_mut()
+                    .find_map(|value| find_native_mut(value, id)),
+                _ => None,
+            }
+        }
+
+        fn find_handler_mut<'a>(
+            value: &'a mut Value,
+            slot: &str,
+        ) -> Option<(&'a mut Value, String)> {
+            if let Some(property) = value
+                .get("__handlerSlots")
+                .and_then(Value::as_object)
+                .and_then(|slots| {
+                    slots.iter().find_map(|(property, candidate)| {
+                        (candidate.as_str() == Some(slot)).then(|| property.clone())
+                    })
+                })
+            {
+                return Some((value, property));
+            }
+            match value {
+                Value::Array(values) => values
+                    .iter_mut()
+                    .find_map(|value| find_handler_mut(value, slot)),
+                Value::Object(object) => object
+                    .values_mut()
+                    .find_map(|value| find_handler_mut(value, slot)),
+                _ => None,
+            }
+        }
+
+        fn apply_patch(tree: &mut Value, patch: &NativePatchEnvelope) {
+            for operation in &patch.operations {
+                match operation {
+                    NativePatchOperation::SetPrimitive {
+                        target,
+                        property,
+                        value,
+                    } => {
+                        find_native_mut(tree, target).unwrap()[property] = value.clone();
+                    }
+                    NativePatchOperation::ReplaceHandlerSlot { slot, action } => {
+                        let (node, property) = find_handler_mut(tree, slot).unwrap();
+                        node[&property] = serde_json::json!(action);
+                    }
+                    NativePatchOperation::InsertChild {
+                        parent,
+                        child_id,
+                        index,
+                        node,
+                        ..
+                    } => {
+                        assert_eq!(node["__nativeId"], child_id.as_str());
+                        find_native_mut(tree, parent).unwrap()["children"]
+                            .as_array_mut()
+                            .unwrap()
+                            .insert(*index, node.clone());
+                    }
+                    NativePatchOperation::RemoveChild {
+                        parent,
+                        child_id,
+                        index,
+                        ..
+                    } => {
+                        let children = find_native_mut(tree, parent).unwrap()["children"]
+                            .as_array_mut()
+                            .unwrap();
+                        assert_eq!(children[*index]["__nativeId"], child_id.as_str());
+                        children.remove(*index);
+                    }
+                    NativePatchOperation::MoveChild {
+                        parent,
+                        child_id,
+                        from,
+                        to,
+                        ..
+                    } => {
+                        let children = find_native_mut(tree, parent).unwrap()["children"]
+                            .as_array_mut()
+                            .unwrap();
+                        assert_eq!(children[*from]["__nativeId"], child_id.as_str());
+                        let child = children.remove(*from);
+                        children.insert(*to, child);
+                    }
+                    NativePatchOperation::ReplaceSubtree { target, node } => {
+                        *find_native_mut(tree, target).unwrap() = node.clone();
+                    }
+                }
+            }
+        }
+
+        fn cold(model: &Model) -> Value {
+            let serialized = data(model).to_string();
+            let mut runtime = super::JsxRuntime::new(SOURCE, Some(&serialized)).unwrap();
+            runtime.set_windows_store(&windows(model)).unwrap();
+            runtime
+                .render("__nickelRender()", |node| Ok(node.clone()))
+                .unwrap()
+        }
+
+        fn native_ids(value: &Value, ids: &mut std::collections::BTreeMap<String, String>) {
+            if let (Some(key), Some(id)) = (
+                value.get("key").and_then(Value::as_str),
+                value.get("__nativeId").and_then(Value::as_str),
+            ) {
+                ids.insert(key.to_owned(), id.to_owned());
+            }
+            match value {
+                Value::Array(values) => values.iter().for_each(|value| native_ids(value, ids)),
+                Value::Object(object) => object.values().for_each(|value| native_ids(value, ids)),
+                _ => {}
+            }
+        }
+
+        for seed in [0x1234_5678_u64, 0x9abc_def0, 0x0ddc_0ffe] {
+            let mut random = seed;
+            let mut model = Model {
+                items: vec![0, 1, 2],
+                state: 0,
+                reduced: 0,
+                context: "context-0".into(),
+                revision: 0,
+                window_revision: 0,
+            };
+            let serialized = data(&model).to_string();
+            let mut runtime = super::JsxRuntime::new(SOURCE, Some(&serialized)).unwrap();
+            runtime.set_windows_store(&windows(&model)).unwrap();
+            let mut accepted = runtime
+                .render("__nickelRender()", |node| Ok(node.clone()))
+                .unwrap();
+            assert_eq!(accepted, cold(&model));
+
+            for step in 0..12_u64 {
+                random = random
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1);
+                let (operation, key) = match step {
+                    0 => (0, 6), // guaranteed insertion
+                    1 => (1, 1), // guaranteed removal
+                    2 => (2, 2), // guaranteed reorder, rejected once before admission
+                    3 => (3, 0), // guaranteed prop-only revision
+                    _ => (((random >> 32) % 4) as u8, ((random >> 40) % 7) as u8),
+                };
+                let mut next = model.clone();
+                match operation {
+                    0 if !next.items.contains(&key) => {
+                        let index = key as usize % (next.items.len() + 1);
+                        next.items.insert(index, key);
+                    }
+                    1 if next.items.len() > 1 && next.items.contains(&key) => {
+                        next.items.retain(|item| *item != key);
+                    }
+                    2 if next.items.len() > 1 => {
+                        let by = key as usize % next.items.len();
+                        next.items.rotate_left(by);
+                    }
+                    _ => next.revision += 1,
+                }
+                next.state = step + 1;
+                next.reduced += 1;
+                next.context = format!("context-{}", (random >> 48) % 5);
+                if step % 3 == 0 {
+                    next.window_revision += 1;
+                    runtime.set_windows_store(&windows(&next)).unwrap();
+                }
+
+                let mut before_ids = std::collections::BTreeMap::new();
+                native_ids(&accepted, &mut before_ids);
+                let action = accepted["children"][0]["action"].as_u64().unwrap();
+                let update = serde_json::json!({"items":next.items,"state":next.state,
+                    "delta":1,"context":next.context,"revision":next.revision});
+                let expression = format!("__nickelDispatchBatchPatched([[{action},{update}]])");
+
+                if step % 5 == 2 {
+                    let rejected = runtime.dispatch_patched(&expression).unwrap();
+                    assert!(matches!(rejected, ScheduledPatch::Patched { .. }));
+                    runtime.finish_patch_render(false).unwrap();
+                    runtime.finish_event(false).unwrap();
+                    assert_eq!(
+                        accepted,
+                        cold(&model),
+                        "rejected step changed admitted output"
+                    );
+                }
+
+                let outcome = runtime.dispatch_patched(&expression).unwrap();
+                let ScheduledPatch::Patched { patch, .. } = outcome else {
+                    panic!("generated update must produce a typed patch")
+                };
+                let has_operation = |expected: &str| {
+                    patch.operations.iter().any(|operation| {
+                        matches!(
+                            (expected, operation),
+                            ("insert", NativePatchOperation::InsertChild { .. })
+                                | ("remove", NativePatchOperation::RemoveChild { .. })
+                                | ("move", NativePatchOperation::MoveChild { .. })
+                                | ("property", NativePatchOperation::SetPrimitive { .. })
+                        )
+                    })
+                };
+                match step {
+                    0 => assert!(
+                        has_operation("insert"),
+                        "forced insert emitted no insertion"
+                    ),
+                    1 => assert!(has_operation("remove"), "forced remove emitted no removal"),
+                    2 => assert!(has_operation("move"), "forced reorder emitted no move"),
+                    3 => assert!(
+                        has_operation("property"),
+                        "forced prop update emitted no primitive update"
+                    ),
+                    _ => {}
+                }
+                assert_eq!(patch.counters.local_materializations, 0);
+                assert_eq!(patch.counters.tree_bytes, 0);
+                apply_patch(&mut accepted, &patch);
+                runtime.finish_patch_render(true).unwrap();
+                runtime.finish_event(true).unwrap();
+                model = next;
+
+                assert_eq!(accepted, cold(&model), "seed={seed:#x} step={step}");
+                let mut after_ids = std::collections::BTreeMap::new();
+                native_ids(&accepted, &mut after_ids);
+                for key in model.items.iter().map(|key| format!("native-{key}")) {
+                    if let Some(before) = before_ids.get(&key) {
+                        assert_eq!(after_ids.get(&key), Some(before), "key {key} lost identity");
+                    }
+                }
+                assert_eq!(accepted["children"][0]["action"], action);
+            }
+        }
+    }
+
+    #[test]
     fn keyed_insertion_keeps_trailing_sibling_out_of_transport() {
         let source = r#"
             function Item({name}) { return h(Text,{key:name},name); }
