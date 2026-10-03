@@ -3990,6 +3990,357 @@ mod tests {
         assert_eq!(effects[0].value()["id"], "provider-window");
     }
 
+    fn accept_scheduled_event(
+        host: &mut ShellCompositionRuntime,
+        mount: &ComponentMount,
+        event: ComponentEventHandle,
+        accepted: &RenderedComponent,
+    ) -> RenderedComponent {
+        let outcome = host
+            .dispatch_expanded_batch_scheduled_pending_validated(
+                mount,
+                &[(event, Value::Null)],
+                &accepted.events,
+                &accepted.node,
+                |_, _, _| Ok(()),
+            )
+            .unwrap();
+        if !matches!(outcome, ScheduledExpandedBatch::Patched { .. }) {
+            panic!("failure transition must emit a typed patch")
+        }
+        host.finish_transaction(true).unwrap();
+        host.render_expanded(mount, &json!({}), |_| Ok(())).unwrap()
+    }
+
+    fn package_boundary_diagnostics(host: &mut ShellCompositionRuntime, id: &str) -> Vec<Value> {
+        host.packages
+            .values_mut()
+            .find(|package| package.manifest.id == id)
+            .unwrap()
+            .runtime
+            .borrow_mut()
+            .boundary_diagnostics()
+            .unwrap()
+    }
+
+    fn same_package_surface_failure_host() -> ShellCompositionRuntime {
+        let mut base = package(
+            "base",
+            r#"
+                globalThis.failTaskbar=false;
+                function TaskbarLeaf(){const [count,setCount]=useState(0);if(failTaskbar)throw Error('taskbar render boom');return h(Column,null,h(Button,{onClick:()=>setCount(count+1)},'taskbar:'+count),h(Button,{onClick:()=>{failTaskbar=true;setCount(count+1)}},'fail taskbar'))}
+                export function Taskbar(){return h(ErrorBoundary,{fallback:(error,reset)=>h(Button,{onClick:()=>{failTaskbar=false;reset()}},'taskbar fallback:'+error.message)},h(TaskbarLeaf))}
+                function LauncherLeaf(){const [count,setCount]=useState(0);return h(Column,null,h(Button,{onClick:()=>setCount(count+1)},'launcher:'+count),h(Button,{onClick:()=>{throw Error('launcher event boom')}},'fail launcher'))}
+                export function Launcher(){return h(ErrorBoundary,{fallback:(error,reset)=>h(Button,{onClick:reset},'launcher fallback:'+error.message)},h(LauncherLeaf))}
+                export function QuickSettings(){}
+                export default Taskbar;
+            "#,
+            None,
+        );
+        base.manifest
+            .composition
+            .as_mut()
+            .unwrap()
+            .exports
+            .insert("shell.launcher".into(), "./main.js#Launcher".into());
+        ShellCompositionRuntime::new(
+            &BTreeMap::from([("base".into(), base)]),
+            "base",
+            &BTreeMap::new(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn failure_matrix_taskbar_render_isolated_from_launcher_and_recovers() {
+        let mut host = same_package_surface_failure_host();
+        let taskbar = host
+            .mount(&host.component("shell.taskbar").unwrap())
+            .unwrap();
+        let launcher = host
+            .mount(&host.component("shell.launcher").unwrap())
+            .unwrap();
+        let initial_taskbar = host
+            .render_expanded(&taskbar, &json!({}), |_| Ok(()))
+            .unwrap();
+        let initial_launcher = host
+            .render_expanded(&launcher, &json!({}), |_| Ok(()))
+            .unwrap();
+        let launcher_identity = initial_launcher.node["__nativeId"].clone();
+
+        let fallback = accept_scheduled_event(
+            &mut host,
+            &taskbar,
+            initial_taskbar.events[&1].clone(),
+            &initial_taskbar,
+        );
+        assert!(
+            fallback
+                .node
+                .to_string()
+                .contains("taskbar fallback:taskbar render boom")
+        );
+        assert_eq!(
+            host.packages.len(),
+            1,
+            "a local render failure keeps package health"
+        );
+
+        let launcher_after = accept_scheduled_event(
+            &mut host,
+            &launcher,
+            initial_launcher.events[&0].clone(),
+            &initial_launcher,
+        );
+        assert!(launcher_after.node.to_string().contains("launcher:1"));
+        assert_eq!(launcher_after.node["__nativeId"], launcher_identity);
+
+        let recovered = accept_scheduled_event(
+            &mut host,
+            &taskbar,
+            fallback.events.values().next().unwrap().clone(),
+            &fallback,
+        );
+        assert!(recovered.node.to_string().contains("taskbar:0"));
+        assert!(
+            package_boundary_diagnostics(&mut host, "base")
+                .iter()
+                .any(|entry| entry["phase"] == "render")
+        );
+        assert!(
+            host.dispatch(&initial_taskbar.events[&0], &Value::Null)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn failure_matrix_launcher_event_isolated_from_taskbar_and_resets() {
+        let mut host = same_package_surface_failure_host();
+        let taskbar = host
+            .mount(&host.component("shell.taskbar").unwrap())
+            .unwrap();
+        let launcher = host
+            .mount(&host.component("shell.launcher").unwrap())
+            .unwrap();
+        let initial_taskbar = host
+            .render_expanded(&taskbar, &json!({}), |_| Ok(()))
+            .unwrap();
+        let initial_launcher = host
+            .render_expanded(&launcher, &json!({}), |_| Ok(()))
+            .unwrap();
+        let taskbar_identity = initial_taskbar.node["__nativeId"].clone();
+
+        let fallback = accept_scheduled_event(
+            &mut host,
+            &launcher,
+            initial_launcher.events[&1].clone(),
+            &initial_launcher,
+        );
+        assert!(
+            fallback
+                .node
+                .to_string()
+                .contains("launcher fallback:launcher event boom")
+        );
+        let recovered = accept_scheduled_event(
+            &mut host,
+            &launcher,
+            fallback.events.values().next().unwrap().clone(),
+            &fallback,
+        );
+        assert!(recovered.node.to_string().contains("launcher:0"));
+
+        let taskbar_after = accept_scheduled_event(
+            &mut host,
+            &taskbar,
+            initial_taskbar.events[&0].clone(),
+            &initial_taskbar,
+        );
+        assert!(taskbar_after.node.to_string().contains("taskbar:1"));
+        assert_eq!(taskbar_after.node["__nativeId"], taskbar_identity);
+        assert_eq!(host.packages.len(), 1);
+        assert!(
+            package_boundary_diagnostics(&mut host, "base")
+                .iter()
+                .any(|entry| entry["phase"] == "event")
+        );
+    }
+
+    #[test]
+    fn failure_matrix_settings_effect_isolated_from_taskbar_and_recovers() {
+        let mut base = package(
+            "base",
+            r#"
+                globalThis.failSettings=true;
+                export function Taskbar(){const [count,setCount]=useState(0);return h(Button,{onClick:()=>setCount(count+1)},'taskbar:'+count)}
+                function SettingsLeaf(){useEffect(()=>{if(failSettings){failSettings=false;throw Error('settings effect boom')}},[]);return h(Text,null,'settings ready')}
+                export function Settings(){return h(ErrorBoundary,{fallback:(error,reset)=>h(Button,{onClick:reset},'settings fallback:'+error.message)},h(SettingsLeaf))}
+                export function QuickSettings(){}
+                export default Taskbar;
+            "#,
+            None,
+        );
+        base.manifest
+            .composition
+            .as_mut()
+            .unwrap()
+            .exports
+            .insert("shell.settings".into(), "./main.js#Settings".into());
+        let mut host = ShellCompositionRuntime::new(
+            &BTreeMap::from([("base".into(), base)]),
+            "base",
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let taskbar = host
+            .mount(&host.component("shell.taskbar").unwrap())
+            .unwrap();
+        let settings = host
+            .mount(&host.component("shell.settings").unwrap())
+            .unwrap();
+        let taskbar_tree = host
+            .render_expanded(&taskbar, &json!({}), |_| Ok(()))
+            .unwrap();
+        let taskbar_identity = taskbar_tree.node["__nativeId"].clone();
+        let settings_tree = host
+            .render_expanded(&settings, &json!({}), |_| Ok(()))
+            .unwrap();
+        assert!(settings_tree.node.to_string().contains("settings ready"));
+
+        let outcome = host
+            .reconcile_expanded_pending_validated(
+                &settings,
+                &settings_tree.events,
+                &settings_tree.node,
+                |_, _, _| Ok(()),
+            )
+            .unwrap();
+        assert!(matches!(outcome, ScheduledExpandedBatch::Patched { .. }));
+        host.finish_transaction(true).unwrap();
+        let fallback = host
+            .render_expanded(&settings, &json!({}), |_| Ok(()))
+            .unwrap();
+        assert!(
+            fallback
+                .node
+                .to_string()
+                .contains("settings fallback:settings effect boom")
+        );
+
+        let taskbar_after = accept_scheduled_event(
+            &mut host,
+            &taskbar,
+            taskbar_tree.events[&0].clone(),
+            &taskbar_tree,
+        );
+        assert!(taskbar_after.node.to_string().contains("taskbar:1"));
+        assert_eq!(taskbar_after.node["__nativeId"], taskbar_identity);
+        let recovered = accept_scheduled_event(
+            &mut host,
+            &settings,
+            fallback.events.values().next().unwrap().clone(),
+            &fallback,
+        );
+        assert!(recovered.node.to_string().contains("settings ready"));
+        assert_eq!(host.packages.len(), 1);
+        assert!(
+            package_boundary_diagnostics(&mut host, "base")
+                .iter()
+                .any(|entry| entry["phase"] == "effect")
+        );
+    }
+
+    #[test]
+    fn failure_matrix_contributed_settings_render_isolated_by_provider_boundary() {
+        let base = package(
+            "base",
+            "export function Taskbar(){const [count,setCount]=useState(0);return h(Button,{onClick:()=>setCount(count+1)},'base taskbar:'+count)}\nexport function QuickSettings(){}\nexport default Taskbar;",
+            None,
+        );
+        let mut provider = package(
+            "provider",
+            r#"
+                globalThis.failPage=false;
+                function PageLeaf(){const [count,setCount]=useState(0);if(failPage)throw Error('provider page boom');return h(Button,{onClick:()=>{failPage=true;setCount(count+1)}},'provider page:'+count)}
+                function Page(){return h(ErrorBoundary,{fallback:(error,reset)=>h(Button,{onClick:()=>{failPage=false;reset()}},'provider fallback:'+error.message)},h(PageLeaf))}
+                registerSettingsPage({id:'details',group:'Plugins',label:'Provider',component:Page});
+                export function Taskbar(){return h(Text,null,'unused')}
+                export default Taskbar;
+            "#,
+            Some("base"),
+        );
+        provider
+            .manifest
+            .composition
+            .as_mut()
+            .unwrap()
+            .replaces
+            .clear();
+        let mut host = ShellCompositionRuntime::new(
+            &BTreeMap::from([("base".into(), base), ("provider".into(), provider)]),
+            "provider",
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let mut registry = nickel_core::settings_registry::SettingsRegistry::default();
+        for (owner, package) in &host.packages {
+            package
+                .runtime
+                .borrow_mut()
+                .publish_settings(&mut registry, &owner.id)
+                .unwrap();
+        }
+        for package in host.packages.values() {
+            package
+                .runtime
+                .borrow_mut()
+                .set_settings_registry(&registry)
+                .unwrap();
+        }
+        let taskbar = host
+            .mount(&host.component("shell.taskbar").unwrap())
+            .unwrap();
+        let page = host
+            .mount(&host.registered_page("provider", "details").unwrap())
+            .unwrap();
+        let taskbar_tree = host
+            .render_expanded(&taskbar, &json!({}), |_| Ok(()))
+            .unwrap();
+        let taskbar_identity = taskbar_tree.node["__nativeId"].clone();
+        let page_tree = host.render_expanded(&page, &json!({}), |_| Ok(())).unwrap();
+        let fallback =
+            accept_scheduled_event(&mut host, &page, page_tree.events[&0].clone(), &page_tree);
+        assert!(
+            fallback
+                .node
+                .to_string()
+                .contains("provider fallback:provider page boom")
+        );
+        assert_eq!(host.packages.len(), 2);
+
+        let taskbar_after = accept_scheduled_event(
+            &mut host,
+            &taskbar,
+            taskbar_tree.events[&0].clone(),
+            &taskbar_tree,
+        );
+        assert!(taskbar_after.node.to_string().contains("base taskbar:1"));
+        assert_eq!(taskbar_after.node["__nativeId"], taskbar_identity);
+        let recovered = accept_scheduled_event(
+            &mut host,
+            &page,
+            fallback.events.values().next().unwrap().clone(),
+            &fallback,
+        );
+        assert!(recovered.node.to_string().contains("provider page:0"));
+        assert!(
+            package_boundary_diagnostics(&mut host, "provider")
+                .iter()
+                .any(|entry| entry["phase"] == "render")
+        );
+        assert!(host.dispatch(&page_tree.events[&0], &Value::Null).is_err());
+    }
+
     #[test]
     fn rejected_settings_patch_does_not_retire_taskbar_surface_or_handlers() {
         let base = package(
@@ -4530,7 +4881,7 @@ mod tests {
     }
 
     #[test]
-    fn rejected_derived_shell_patch_commits_nearest_boundary_fallback_only() {
+    fn failure_matrix_derived_shell_native_rejection_isolated_and_recovers() {
         let mut base = package(
             "base",
             "export function Shell(){return h(Column,null,h(Text,{key:'clean'},'clean sibling'),h(nickel.component('shell.taskbar')));}\nexport function Taskbar(){}\nexport function QuickSettings(){}\nexport default Shell;",
@@ -4602,7 +4953,17 @@ mod tests {
             "rejected effects stay discarded"
         );
         assert!(host.dispatch(&accepted_events[&0], &Value::Null).is_err());
-        assert!(host.dispatch(&events[&0], &Value::Null).is_ok());
+        let fallback = host
+            .render_expanded(&root, &serde_json::json!({}), |_| Ok(()))
+            .unwrap();
+        assert!(fallback.node.to_string().contains("taskbar failed:"));
+        assert!(fallback.node.to_string().contains("clean sibling"));
+        assert_eq!(fallback.events[&0].action, events[&0].action);
+        let recovered =
+            accept_scheduled_event(&mut host, &root, fallback.events[&0].clone(), &fallback);
+        assert!(recovered.node.to_string().contains("leaf0"));
+        assert!(recovered.node.to_string().contains("clean sibling"));
+        assert_eq!(host.packages.len(), 2);
         let diagnostics = host
             .packages
             .values_mut()
