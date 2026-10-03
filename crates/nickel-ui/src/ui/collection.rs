@@ -980,6 +980,162 @@ mod tests {
         );
     }
 
+    #[cfg(not(debug_assertions))]
+    #[test]
+    #[ignore = "release-profile 10,000-item virtual-list admission benchmark"]
+    fn virtual_list_10000_release_admission_bounds_native_work() {
+        use crate::{FrameRequest, release_admission::AdmissionReport};
+        use std::time::Instant;
+
+        const ITEMS: usize = 10_000;
+        const ITEM_HEIGHT: f32 = 24.0;
+        const VIEWPORT_HEIGHT: f32 = 480.0;
+        const OVERSCAN: f32 = 48.0;
+        const FIRST_ITEM: usize = 4_000;
+        const SAMPLES: usize = 20;
+        const ITERATIONS_PER_SAMPLE: usize = 2;
+
+        fn view(offset: f32, rendered: Rc<Cell<usize>>) -> Element<()> {
+            Collection::try_new(
+                CollectionState::Ready((0..ITEMS).collect()),
+                |item| *item,
+                move |item| {
+                    rendered.set(rendered.get() + 1);
+                    Text::<()>::new(format!("Virtual item {item:05}"))
+                },
+            )
+            .expect("10,000 stable integer keys are unique")
+            .id("virtual-admission")
+            .presentation(CollectionPresentation::VirtualList {
+                item_height: ITEM_HEIGHT,
+                offset,
+                viewport_height: VIEWPORT_HEIGHT,
+                overscan: OVERSCAN,
+            })
+            .into_element()
+        }
+
+        fn assert_oracle(incremental: &UiFrame<()>, cold: &UiFrame<()>) {
+            assert_eq!(incremental.resolved_layout(), cold.resolved_layout());
+            assert_eq!(incremental.commands(), cold.commands());
+            assert_eq!(incremental.semantic_nodes(), cold.semantic_nodes());
+            assert_eq!(
+                incremental.accessibility_nodes(),
+                cold.accessibility_nodes()
+            );
+            assert_eq!(
+                incremental.interaction_record_counts(),
+                cold.interaction_record_counts()
+            );
+        }
+
+        let bounds = Rect::new(0.0, 0.0, 900.0, VIEWPORT_HEIGHT);
+        let offsets = [
+            FIRST_ITEM as f32 * ITEM_HEIGHT,
+            (FIRST_ITEM + 1) as f32 * ITEM_HEIGHT,
+        ];
+        let initial_rendered = Rc::new(Cell::new(0));
+        let mut retained_state = UiStateStore::default();
+        let mut retained = UiFrame::resolve(
+            view(offsets[0], initial_rendered.clone()),
+            FrameRequest::new(bounds, &mut retained_state),
+        );
+        let visible_items = initial_rendered.get();
+        assert!(
+            visible_items <= 32,
+            "virtual list constructed {visible_items} of {ITEMS} logical items"
+        );
+
+        let mut scroll_samples = Vec::with_capacity(SAMPLES * ITERATIONS_PER_SAMPLE);
+        let mut cold_samples = Vec::with_capacity(SAMPLES);
+        let mut expected_work = None;
+        let mut expected_rendered = None;
+        for sample in 0..SAMPLES {
+            for iteration in 0..ITERATIONS_PER_SAMPLE {
+                let offset = offsets[(sample * ITERATIONS_PER_SAMPLE + iteration + 1) % 2];
+                let rendered = Rc::new(Cell::new(0));
+                let started = Instant::now();
+                let next = UiFrame::resolve_against(
+                    view(offset, rendered.clone()),
+                    FrameRequest::new(bounds, &mut retained_state),
+                    &retained,
+                );
+                scroll_samples.push(started.elapsed());
+
+                let work = next.resource_diagnostics();
+                expected_work.get_or_insert(work);
+                assert_eq!(expected_work, Some(work));
+                expected_rendered.get_or_insert(rendered.get());
+                assert_eq!(expected_rendered, Some(rendered.get()));
+                assert!(rendered.get() <= 32);
+                retained = next;
+            }
+        }
+
+        for sample in 0..SAMPLES {
+            let offset = offsets[sample % offsets.len()];
+            let oracle_rendered = Rc::new(Cell::new(0));
+            let incremental = UiFrame::resolve_against(
+                view(offset, oracle_rendered),
+                FrameRequest::new(bounds, &mut retained_state),
+                &retained,
+            );
+            let rendered = Rc::new(Cell::new(0));
+            let mut cold_state = UiStateStore::default();
+            let started = Instant::now();
+            let cold = UiFrame::resolve(
+                view(offset, rendered.clone()),
+                FrameRequest::new(bounds, &mut cold_state),
+            );
+            cold_samples.push(started.elapsed());
+            assert_eq!(rendered.get(), expected_rendered.expect("retained sample"));
+            assert_oracle(&incremental, &cold);
+            retained = incremental;
+        }
+
+        let work = expected_work.expect("retained work sample");
+        assert_eq!(expected_rendered, Some(26));
+        assert_eq!(work.retained_node_count, 56);
+        assert_eq!(work.retained_nodes_reused, 54);
+        assert_eq!(work.retained_nodes_created, 2);
+        assert_eq!(work.retained_nodes_removed, 2);
+        assert_eq!(work.retained_nodes_moved, 25);
+        assert_eq!(work.nodes_measured, 56);
+        assert_eq!(work.nodes_placed, 56);
+        assert_eq!(work.paint_nodes_executed, 56);
+        assert_eq!(work.interaction_nodes_executed, 56);
+        assert_eq!(work.semantic_nodes_executed, 56);
+        AdmissionReport::new("retained_virtual_list", "10000_item_one_row_scroll")
+            .metadata("items", ITEMS)
+            .metadata("visible_items", expected_rendered.expect("rendered sample"))
+            .metadata("samples", SAMPLES)
+            .metadata("iterations_per_sample", ITERATIONS_PER_SAMPLE)
+            .work("logical_items", ITEMS)
+            .work(
+                "visible_items_constructed",
+                expected_rendered.expect("rendered sample"),
+            )
+            .work("retained_node_count", work.retained_node_count)
+            .work("retained_nodes_reused", work.retained_nodes_reused)
+            .work("retained_nodes_created", work.retained_nodes_created)
+            .work("retained_nodes_removed", work.retained_nodes_removed)
+            .work("retained_nodes_moved", work.retained_nodes_moved)
+            .work("nodes_measured", work.nodes_measured)
+            .work("nodes_placed", work.nodes_placed)
+            .work("paint_nodes_executed", work.paint_nodes_executed)
+            .work("paint_nodes_reused", work.paint_nodes_reused)
+            .work(
+                "interaction_nodes_executed",
+                work.interaction_nodes_executed,
+            )
+            .work("interaction_nodes_reused", work.interaction_nodes_reused)
+            .work("semantic_nodes_executed", work.semantic_nodes_executed)
+            .work("semantic_nodes_reused", work.semantic_nodes_reused)
+            .timings("one_row_scroll", &scroll_samples)
+            .timings("cold", &cold_samples)
+            .emit();
+    }
+
     #[test]
     fn selected_and_disabled_contracts_are_accessible_and_noninteractive() {
         let tree = UiFrame::layout(
