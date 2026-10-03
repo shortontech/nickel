@@ -10,8 +10,10 @@ use nickel_core::package_composition::PackageIdentity;
 use nickel_core::plugins::{
     PluginCapability, PluginManifest, PluginPackage, PluginSurface, PluginSurfaceKind,
 };
-use nickel_plugin_presentation::components::parse_panel_for_manifest;
-use nickel_plugin_presentation::components::{PanelNode, render_panel, render_panel_validated};
+use nickel_plugin_presentation::components::{
+    PanelNode, RetainedPanelTree, parse_panel_for_manifest, render_retained_panel,
+    render_retained_panel_validated,
+};
 pub use nickel_plugin_presentation::components::{PluginImages, PluginMessage};
 use nickel_plugin_runtime::composition_runtime::{
     ComponentEventHandle, ComponentMount, ScheduledExpandedBatch, ShellCompositionRuntime,
@@ -130,7 +132,8 @@ pub fn enabled() -> bool {
 
 pub struct PluginPanelApplication {
     runtime: std::rc::Rc<std::cell::RefCell<JsxRuntime>>,
-    node: PanelNode,
+    accepted: RetainedPanelTree,
+    next_generation: u64,
     effects: Vec<PluginEffect>,
     pending_transient: Option<(OverlayId, UiId)>,
     last_error: Option<String>,
@@ -445,15 +448,20 @@ fn package_stylesheet(package: &PluginPackage) -> Result<StyleSheet, String> {
 impl PluginPanelApplication {
     pub fn resolved_surface(&self, grant: &PluginSurface) -> Result<PluginSurface, String> {
         let mut surface = self
-            .node
+            .accepted
+            .node()
             .requested_surface(grant, &self.stylesheet)
             .map(|surface| surface.unwrap_or_else(|| grant.clone()))?;
-        let Some((width, height)) = self.node.requested_surface_lengths(&self.stylesheet) else {
+        let Some((width, height)) = self
+            .accepted
+            .node()
+            .requested_surface_lengths(&self.stylesheet)
+        else {
             return Ok(surface);
         };
         if matches!(width, Length::MaxContent) || matches!(height, Length::MaxContent) {
             let preferred = UiFrame::preferred_size(
-                self.node.view(&self.images, &self.stylesheet),
+                self.accepted.node().view(&self.images, &self.stylesheet),
                 Size::new(grant.width as f32, grant.height as f32),
             );
             if matches!(width, Length::MaxContent) {
@@ -467,7 +475,10 @@ impl PluginPanelApplication {
     }
 
     pub(crate) fn button_message(&self, id: &str) -> Option<PluginMessage> {
-        self.node.button_action(id).map(PluginMessage::Click)
+        self.accepted
+            .node()
+            .button_action(id)
+            .map(PluginMessage::Click)
     }
 
     pub fn bundled() -> Result<Self, String> {
@@ -700,14 +711,20 @@ impl PluginPanelApplication {
             }
             images
         };
-        let (rendered, node) = host.borrow_mut().render_expanded_validated(
+        let (rendered, ()) = host.borrow_mut().render_expanded_validated(
             &mount,
             &serde_json::json!({}),
             |value| {
-                let node = parse_panel_for_manifest(value, &manifest, Some(&surface.id))?;
-                node.requested_surface(surface, &stylesheet)?;
-                Ok(node)
+                let node = RetainedPanelTree::admit(value, &manifest, Some(&surface.id), 0)?;
+                node.node().requested_surface(surface, &stylesheet)?;
+                Ok(())
             },
+        )?;
+        let accepted = RetainedPanelTree::admit(
+            &rendered.node,
+            &manifest,
+            Some(&surface.id),
+            rendered.generation(),
         )?;
         let snapshots = {
             let host = host.borrow();
@@ -720,7 +737,8 @@ impl PluginPanelApplication {
             Some(serde_json::to_string(&projection_value).map_err(|error| error.to_string())?);
         Ok(Self {
             runtime,
-            node,
+            accepted,
+            next_generation: 1,
             effects: Vec::new(),
             pending_transient: None,
             last_error: None,
@@ -1056,15 +1074,22 @@ impl PluginPanelApplication {
             let owner = host.resolution().active.clone();
             state.snapshots.insert(owner.clone(), data.clone());
             host.update_snapshot(&owner, &data)?;
-            let (rendered, node) =
+            let (rendered, ()) =
                 host.render_expanded_validated(&state.mount, &serde_json::json!({}), |value| {
-                    parse_panel_for_manifest(
+                    RetainedPanelTree::admit(
                         value,
                         &self.manifest,
                         self.expected_surface_id.as_deref(),
+                        0,
                     )
+                    .map(|_| ())
                 })?;
-            self.node = node;
+            self.accepted = RetainedPanelTree::admit(
+                &rendered.node,
+                &self.manifest,
+                self.expected_surface_id.as_deref(),
+                rendered.generation(),
+            )?;
             state.events = rendered.events;
             self.projection_data = Some(serialized);
             self.projection_value = Some(data);
@@ -1076,7 +1101,9 @@ impl PluginPanelApplication {
             .unwrap_or("{\"query\":\"\",\"results\":[]}")
             .to_owned();
         let mut validation_rejected = false;
-        let node = {
+        let generation = self.next_generation;
+        self.next_generation = self.next_generation.saturating_add(1);
+        let accepted = {
             let mut runtime = self.runtime.borrow_mut();
             runtime.select_surface(&self.runtime_surface_id)?;
             runtime.set_data(&serialized)?;
@@ -1088,19 +1115,20 @@ impl PluginPanelApplication {
                 &format!("plugin-surface:{}", self.runtime_surface_id),
                 &surface,
             )?;
-            let result = render_panel_validated(
+            let result = render_retained_panel_validated(
                 &mut runtime,
                 &self.manifest,
                 self.expected_surface_id.as_deref(),
                 "__nickelRender()",
                 &self.stylesheet,
+                generation,
                 &mut validation_rejected,
             );
             if result.is_err() {
                 runtime.set_data(&previous_data)?;
             }
             match result {
-                Ok(node) => node,
+                Ok(accepted) => accepted,
                 Err(error) if validation_rejected => {
                     self.last_error = Some(error);
                     return Ok(false);
@@ -1108,7 +1136,7 @@ impl PluginPanelApplication {
                 Err(error) => return Err(error),
             }
         };
-        self.node = node;
+        self.accepted = accepted;
         self.projection_value = serde_json::from_str(&serialized).ok();
         self.projection_data = Some(serialized);
         self.last_error = None;
@@ -1156,7 +1184,7 @@ impl PluginPanelApplication {
                 data.as_deref(),
             )?))
         };
-        let node = {
+        let accepted = {
             let mut runtime_ref = runtime.borrow_mut();
             runtime_ref.select_surface(runtime_surface_id)?;
             if let Some(data) = data.as_deref() {
@@ -1170,16 +1198,18 @@ impl PluginPanelApplication {
                     &snapshot,
                 )?;
             }
-            render_panel(
+            render_retained_panel(
                 &mut runtime_ref,
                 manifest,
                 expected_surface_id,
                 "__nickelRender()",
+                1,
             )?
         };
         Ok(Self {
             runtime,
-            node,
+            accepted,
+            next_generation: 2,
             effects: Vec::new(),
             pending_transient: None,
             last_error: None,
@@ -1486,7 +1516,7 @@ impl PluginPanelApplication {
 
     fn apply_rendered_effects(
         &mut self,
-        rendered: Result<Option<PanelNode>, String>,
+        rendered: Result<Option<RetainedPanelTree>, String>,
         effects: Result<Vec<(PluginManifest, Value)>, String>,
         validation_rejected: bool,
     ) {
@@ -1494,7 +1524,10 @@ impl PluginPanelApplication {
             (Ok(node), Ok(effects)) => {
                 let mut approved = Vec::new();
                 let mut requested_dialog = None;
-                let effective_node = node.as_ref().unwrap_or(&self.node);
+                let effective_node = node
+                    .as_ref()
+                    .map(RetainedPanelTree::node)
+                    .unwrap_or_else(|| self.accepted.node());
                 for (effect_manifest, effect) in effects {
                     match effect.as_str() {
                         _ if effect.get("type").and_then(Value::as_str)
@@ -2800,8 +2833,8 @@ impl PluginPanelApplication {
                 }
                 self.effects.extend(approved);
                 self.pending_transient = requested_dialog;
-                if let Some(node) = node {
-                    self.node = node;
+                if let Some(accepted) = node {
+                    self.accepted = accepted;
                 }
                 self.last_error = None;
             }
@@ -2822,14 +2855,16 @@ impl PluginPanelApplication {
         effects: Vec<Value>,
         snapshot: &Value,
     ) -> Result<Vec<PluginEffect>, String> {
-        let node = parse_panel_for_manifest(
+        let accepted = RetainedPanelTree::admit(
             &serde_json::json!({"kind":"column","children":[]}),
             manifest,
             None,
+            1,
         )?;
         let mut scope = Self {
             runtime,
-            node: node.clone(),
+            accepted: accepted.clone(),
+            next_generation: 2,
             manifest: manifest.clone(),
             effects: Vec::new(),
             pending_transient: None,
@@ -2846,7 +2881,7 @@ impl PluginPanelApplication {
             composition: None,
         };
         scope.apply_rendered_effects(
-            Ok(Some(node)),
+            Ok(Some(accepted)),
             Ok(effects
                 .into_iter()
                 .map(|value| (manifest.clone(), value))
@@ -2897,7 +2932,8 @@ impl nickel_ui::Application for PluginPanelApplication {
     type Message = PluginMessage;
 
     fn window_focus_message(&self, focused: bool) -> Option<Self::Message> {
-        self.node
+        self.accepted
+            .node()
             .window_focus_action(focused)
             .map(PluginMessage::Click)
     }
@@ -2909,7 +2945,7 @@ impl nickel_ui::Application for PluginPanelApplication {
         if self.overlay_open && shortcut == Shortcut::Submit {
             return nickel_ui::ShortcutOutcome::from_changed(false);
         }
-        if let Some(action) = self.node.window_shortcut_action(shortcut) {
+        if let Some(action) = self.accepted.node().window_shortcut_action(shortcut) {
             self.update(PluginMessage::Click(action));
             return nickel_ui::ShortcutOutcome::handled(true);
         }
@@ -2978,11 +3014,14 @@ impl nickel_ui::Application for PluginPanelApplication {
         if events.is_empty() {
             return;
         }
+        let previous_accepted = self.accepted.clone();
+        let previous_effects_len = self.effects.len();
+        let previous_transient = self.pending_transient.clone();
         let composition_previous_events =
             self.composition.as_ref().map(|state| state.events.clone());
         let composition_previous_native = self.composition.as_ref().map(|_| {
             (
-                self.node.clone(),
+                self.accepted.clone(),
                 self.effects.clone(),
                 self.pending_transient.clone(),
             )
@@ -3024,15 +3063,21 @@ impl nickel_ui::Application for PluginPanelApplication {
                         Ok(node)
                     },
                 )?;
-                let node = match outcome {
+                let accepted = match outcome {
                     ScheduledExpandedBatch::Unchanged => None,
                     ScheduledExpandedBatch::Rendered {
                         rendered,
-                        validated,
+                        validated: _,
                         ..
                     } => {
+                        let generation = rendered.generation();
                         state.events = rendered.events;
-                        Some(validated)
+                        Some(RetainedPanelTree::admit(
+                            &rendered.node,
+                            &self.manifest,
+                            self.expected_surface_id.as_deref(),
+                            generation,
+                        )?)
                     }
                 };
                 let effects = host
@@ -3048,13 +3093,15 @@ impl nickel_ui::Application for PluginPanelApplication {
                         Ok((manifest, effect.value().clone()))
                     })
                     .collect::<Result<Vec<_>, String>>()?;
-                Ok((node, effects))
+                Ok((accepted, effects))
             })();
             match result {
                 Ok((node, effects)) => (Ok(node), Ok(effects)),
                 Err(error) => (Err(error), Ok(Vec::new())),
             }
         } else {
+            let generation = self.next_generation;
+            self.next_generation = self.next_generation.saturating_add(1);
             let expression = if self.dispatch_removed_focus {
                 format!("__nickelDispatchRemovedFocus({})", events[0][0])
             } else {
@@ -3070,12 +3117,13 @@ impl nickel_ui::Application for PluginPanelApplication {
                     self.last_error = Some(error);
                     return;
                 }
-                let rendered = render_panel_validated(
+                let rendered = render_retained_panel_validated(
                     &mut runtime,
                     &self.manifest,
                     self.expected_surface_id.as_deref(),
                     &expression,
                     &self.stylesheet,
+                    generation,
                     &mut validation_rejected,
                 );
                 let effects = runtime.take_effects();
@@ -3091,6 +3139,11 @@ impl nickel_ui::Application for PluginPanelApplication {
             }
         };
         self.apply_rendered_effects(rendered, effects, validation_rejected);
+        let candidate_accepted = self.accepted.clone();
+        let candidate_effects = self.effects.split_off(previous_effects_len);
+        let candidate_transient = self.pending_transient.clone();
+        self.accepted = previous_accepted;
+        self.pending_transient = previous_transient;
         if let Some(state) = &mut self.composition {
             let accepted = self.last_error.is_none();
             let mut host = state.host.borrow_mut();
@@ -3101,8 +3154,8 @@ impl nickel_ui::Application for PluginPanelApplication {
                 self.last_error = Some(error);
             }
             if self.last_error.is_some() {
-                if let Some((node, effects, transient)) = composition_previous_native {
-                    self.node = node;
+                if let Some((accepted, effects, transient)) = composition_previous_native {
+                    self.accepted = accepted;
                     self.effects = effects;
                     self.pending_transient = transient;
                 }
@@ -3111,6 +3164,10 @@ impl nickel_ui::Application for PluginPanelApplication {
                 }
                 // Supported bootstrap state and queued effects were restored;
                 // package globals and closure mutations are outside this contract.
+            } else {
+                self.accepted = candidate_accepted;
+                self.effects.extend(candidate_effects);
+                self.pending_transient = candidate_transient;
             }
             return;
         }
@@ -3122,12 +3179,16 @@ impl nickel_ui::Application for PluginPanelApplication {
         {
             self.runtime_failure = Some(error.clone());
             self.last_error = Some(error);
+        } else if self.last_error.is_none() {
+            self.accepted = candidate_accepted;
+            self.effects.extend(candidate_effects);
+            self.pending_transient = candidate_transient;
         }
     }
 
     fn view(&self, context: ViewContext) -> impl nickel_ui::View<Self::Message> {
-        if matches!(&self.node, PanelNode::Surface { .. }) {
-            AnyView::new(self.node.view(&self.images, &self.stylesheet))
+        if matches!(&self.accepted.node(), PanelNode::Surface { .. }) {
+            AnyView::new(self.accepted.node().view(&self.images, &self.stylesheet))
         } else {
             AnyView::new(
                 Column::new()
@@ -3138,7 +3199,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                         Row::new()
                             .fill_width()
                             .child(Spacer::flex())
-                            .child(self.node.view(&self.images, &self.stylesheet))
+                            .child(self.accepted.node().view(&self.images, &self.stylesheet))
                             .child(Spacer::flex()),
                     ),
             )
@@ -3148,7 +3209,7 @@ impl nickel_ui::Application for PluginPanelApplication {
     fn frame_overlays(&self, _context: ViewContext) -> Vec<FrameOverlay<Self::Message>> {
         let mut overlays = Vec::new();
         let mut transients = Vec::new();
-        self.node.transients(&mut transients);
+        self.accepted.node().transients(&mut transients);
         for transient in transients {
             match transient {
                 PanelNode::Dialog {
@@ -3203,11 +3264,11 @@ impl nickel_ui::Application for PluginPanelApplication {
                             menu = menu.item(item);
                         }
                     }
-                    overlays.push(FrameOverlay::Menu(self.node.style_overlay_menu_for(
-                        id,
-                        menu,
-                        &self.stylesheet,
-                    )));
+                    overlays.push(FrameOverlay::Menu(
+                        self.accepted
+                            .node()
+                            .style_overlay_menu_for(id, menu, &self.stylesheet),
+                    ));
                 }
                 _ => {}
             }
@@ -3221,7 +3282,7 @@ impl nickel_ui::Application for PluginPanelApplication {
 
     fn transient_dismissed(&self, id: &OverlayId) -> Option<Self::Message> {
         let dialog_id = id.as_ui_id().as_str().strip_prefix("plugin-")?;
-        match self.node.dialog(dialog_id)? {
+        match self.accepted.node().dialog(dialog_id)? {
             PanelNode::Dialog {
                 open: true,
                 close_action: Some(action),
@@ -3232,7 +3293,10 @@ impl nickel_ui::Application for PluginPanelApplication {
     }
 
     fn title(&self) -> &str {
-        self.node.window_title().unwrap_or(&self.manifest.name)
+        self.accepted
+            .node()
+            .window_title()
+            .unwrap_or(&self.manifest.name)
     }
 }
 
@@ -3570,7 +3634,7 @@ mod tests {
                 application.images[&child_asset].1.get_pixel(0, 0).0,
                 [0, 0, 255, 255]
             );
-            let native_tree = format!("{:?}", application.node);
+            let native_tree = format!("{:?}", application.accepted.node());
             assert!(native_tree.contains(&base_asset));
             assert!(native_tree.contains(&child_asset));
             let windows = serde_json::json!([{"id":"observed"}]);
@@ -3654,12 +3718,12 @@ mod tests {
                 // Denial restores supported hook/presentation state; the base
                 // grant still cannot authorize a replacement's callback.
                 assert!(application.take_runtime_failure().is_none());
-                let node = format!("{:?}", application.node);
+                let node = format!("{:?}", application.accepted.node());
                 assert!(node.contains("derived0"));
                 assert!(!node.contains("derived1"));
                 application.update(application.button_message("replacement").unwrap());
                 assert!(application.take_effects().is_empty());
-                assert!(format!("{:?}", application.node).contains("derived0"));
+                assert!(format!("{:?}", application.accepted.node()).contains("derived0"));
             }
         }
     }
@@ -3697,7 +3761,7 @@ mod tests {
             None,
         )
         .unwrap();
-        let accepted_node = application.node.clone();
+        let accepted_node = application.accepted.node().clone();
         let message = application.button_message("noop").unwrap();
         let PluginMessage::Click(action) = message else {
             panic!("noop must be a button click");
@@ -3707,7 +3771,7 @@ mod tests {
 
         application.update(PluginMessage::Click(action));
 
-        assert_eq!(application.node, accepted_node);
+        assert_eq!(application.accepted.node(), &accepted_node);
         assert!(application.last_error().is_none());
         let shared = application.shared_composition_runtime().unwrap();
         assert!(
@@ -3945,7 +4009,8 @@ mod tests {
                     h(MenuItem, {id: 'show', shortcut: 'Ctrl+D', onClick: () => nickel.request('show-launcher')}, 'Show'),
                     h(MenuItem, {id: 'paste', disabledReason: 'Clipboard is empty'}, 'Paste')))); }"#;
         let application = PluginPanelApplication::new(source).unwrap();
-        let Some(PanelNode::Menu { items, .. }) = application.node.menu("actions") else {
+        let Some(PanelNode::Menu { items, .. }) = application.accepted.node().menu("actions")
+        else {
             panic!("JSX menu must be present");
         };
         let view = items[0].overlay_menu_item().unwrap();
@@ -3997,11 +4062,11 @@ mod tests {
         right
             .sync_data(&serde_json::json!({"label": "right refreshed"}))
             .unwrap();
-        assert!(format!("{:?}", left.node).contains("left:1"));
-        assert!(format!("{:?}", right.node).contains("right refreshed:0"));
+        assert!(format!("{:?}", left.accepted.node()).contains("left:1"));
+        assert!(format!("{:?}", right.accepted.node()).contains("right refreshed:0"));
         left.retire_surface().unwrap();
         right.update(right.button_message("advance").unwrap());
-        assert!(format!("{:?}", right.node).contains("right refreshed:1"));
+        assert!(format!("{:?}", right.accepted.node()).contains("right refreshed:1"));
     }
 
     #[test]
@@ -4127,7 +4192,7 @@ mod tests {
             hue.id,
             nickel_ui::SemanticAction::SetValue(nickel_ui::SemanticValueInput::Number(0.75)),
         );
-        let PanelNode::Surface { children, .. } = &host.application_mut().node else {
+        let PanelNode::Surface { children, .. } = &host.application_mut().accepted.node() else {
             panic!("plugin root is not a Window");
         };
         let PanelNode::Row { children, .. } = &children[0] else {
@@ -4143,7 +4208,7 @@ mod tests {
             intensity.id,
             nickel_ui::SemanticAction::SetValue(nickel_ui::SemanticValueInput::Number(0.35)),
         );
-        let PanelNode::Surface { children, .. } = &host.application_mut().node else {
+        let PanelNode::Surface { children, .. } = &host.application_mut().accepted.node() else {
             panic!("plugin root is not a Window");
         };
         let PanelNode::Row { children, .. } = &children[0] else {
@@ -4167,7 +4232,7 @@ mod tests {
         };
         host.handle_event(nickel_ui::UiEvent::PointerPressed(pointer));
         host.handle_event(nickel_ui::UiEvent::PointerReleased(pointer));
-        let PanelNode::Surface { children, .. } = &host.application_mut().node else {
+        let PanelNode::Surface { children, .. } = &host.application_mut().accepted.node() else {
             panic!("plugin root is not a Window");
         };
         let PanelNode::Row { children, .. } = &children[0] else {
@@ -4211,9 +4276,9 @@ mod tests {
     #[test]
     fn bundled_panel_updates_from_javascript_click() {
         let mut panel = PluginPanelApplication::bundled().expect("bundled plugin loads");
-        assert!(format!("{:?}", panel.node).contains("Count: 0"));
+        assert!(format!("{:?}", panel.accepted.node()).contains("Count: 0"));
         panel.update(PluginMessage::Click(0));
-        assert!(format!("{:?}", panel.node).contains("Count: 1"));
+        assert!(format!("{:?}", panel.accepted.node()).contains("Count: 1"));
         assert!(panel.last_error().is_none());
     }
 
@@ -4233,12 +4298,12 @@ mod tests {
         let invalid = panel.button_message("invalid").unwrap();
         panel.update(invalid);
         assert!(panel.last_error().is_some());
-        assert!(format!("{:?}", panel.node).contains("Count: 0"));
+        assert!(format!("{:?}", panel.accepted.node()).contains("Count: 0"));
 
         let valid = panel.button_message("valid").unwrap();
         panel.update(valid);
         assert!(panel.last_error().is_none());
-        assert!(format!("{:?}", panel.node).contains("Count: 2"));
+        assert!(format!("{:?}", panel.accepted.node()).contains("Count: 2"));
     }
 
     #[test]
@@ -4267,12 +4332,12 @@ mod tests {
                 .contains("handler failed")
         );
         assert!(panel.take_effects().is_empty());
-        assert!(format!("{:?}", panel.node).contains("Count: 0"));
+        assert!(format!("{:?}", panel.accepted.node()).contains("Count: 0"));
 
         let valid = panel.button_message("valid").unwrap();
         panel.update(valid);
         assert!(panel.last_error().is_none());
-        assert!(format!("{:?}", panel.node).contains("Count: 2"));
+        assert!(format!("{:?}", panel.accepted.node()).contains("Count: 2"));
     }
 
     #[test]
@@ -4295,12 +4360,12 @@ mod tests {
         assert!(panel.last_error().unwrap().contains("not granted"));
         assert!(panel.take_runtime_failure().is_none());
         assert!(panel.take_effects().is_empty());
-        assert!(format!("{:?}", panel.node).contains("Count: 0"));
+        assert!(format!("{:?}", panel.accepted.node()).contains("Count: 0"));
 
         let valid = panel.button_message("valid").unwrap();
         panel.update(valid);
         assert!(panel.last_error().is_none());
-        assert!(format!("{:?}", panel.node).contains("Count: 2"));
+        assert!(format!("{:?}", panel.accepted.node()).contains("Count: 2"));
     }
 
     #[test]
@@ -4309,13 +4374,13 @@ mod tests {
         panel.update(PluginMessage::Click(1));
         assert!(panel.pending_transient.is_some());
         assert!(matches!(
-            panel.node.dialog("launcher-dialog"),
+            panel.accepted.node().dialog("launcher-dialog"),
             Some(PanelNode::Dialog { open: true, .. })
         ));
         panel.pending_transient.take();
         panel.update(PluginMessage::Click(3));
         assert!(matches!(
-            panel.node.dialog("launcher-dialog"),
+            panel.accepted.node().dialog("launcher-dialog"),
             Some(PanelNode::Dialog { open: false, .. })
         ));
         assert!(panel.take_effects().is_empty());
@@ -4356,7 +4421,7 @@ mod tests {
             })
             .unwrap();
         assert!(matches!(
-            &host.application().node,
+            &host.application().accepted.node(),
             PanelNode::Surface {
                 width: Length::Percent(1.0),
                 height: Length::Percent(1.0),
@@ -4741,7 +4806,7 @@ mod tests {
         PluginPanelApplication::validate_package(&package).unwrap();
         let app = PluginPanelApplication::from_package(&package).unwrap();
         assert!(matches!(
-            app.node,
+            app.accepted.node(),
             PanelNode::Surface {
                 window_request: Some(_),
                 ..
@@ -5298,13 +5363,43 @@ mod tests {
         )
         .unwrap();
         app.stylesheet = StyleSheet::compile("window.bad { top: 30px; }").unwrap();
+        let generation = app.accepted.generation();
+        let nodes = app.accepted.nodes().clone();
+        let handler_slots = app.accepted.handler_slots().clone();
+        let source = app.accepted.source().clone();
+        let candidate_generation = app.next_generation;
         app.update(app.button_message("toggle").unwrap());
         assert!(app.last_error().unwrap().contains("exceeds its grant"));
         assert!(app.take_effects().is_empty());
+        assert_eq!(app.accepted.generation(), generation);
+        assert_eq!(app.accepted.nodes(), &nodes);
+        assert_eq!(app.accepted.handler_slots(), &handler_slots);
+        assert_eq!(app.accepted.source(), &source);
+        assert_eq!(app.next_generation, candidate_generation + 1);
         assert!(matches!(
-            &app.node,
+            &app.accepted.node(),
             PanelNode::Surface { class_name: Some(class_name), .. } if class_name == "good"
         ));
+    }
+
+    #[test]
+    fn rejected_effect_preserves_the_full_accepted_wrapper() {
+        let source = "function App() { const [count,setCount]=useState(0); return h(Panel, {}, h(Button, {id:'reject',onClick:()=>{setCount(1);nickel.request({type:'not.granted'})}}, String(count))); }";
+        let mut app = PluginPanelApplication::new(source).unwrap();
+        let accepted_generation = app.accepted.generation();
+        let accepted_source = app.accepted.source().clone();
+        let accepted_nodes = app.accepted.nodes().clone();
+        let accepted_slots = app.accepted.handler_slots().clone();
+
+        app.update(app.button_message("reject").unwrap());
+
+        assert!(app.last_error().is_some());
+        assert!(app.take_effects().is_empty());
+        assert_eq!(app.accepted.generation(), accepted_generation);
+        assert_eq!(app.accepted.source(), &accepted_source);
+        assert_eq!(app.accepted.nodes(), &accepted_nodes);
+        assert_eq!(app.accepted.handler_slots(), &accepted_slots);
+        assert!(format!("{:?}", app.accepted.node()).contains("\"0\""));
     }
 
     #[test]
@@ -5332,13 +5427,13 @@ mod tests {
                 .unwrap()
         );
         assert!(app.last_error().unwrap().contains("exceeds its grant"));
-        assert!(format!("{:?}", app.node).contains("Before"));
+        assert!(format!("{:?}", app.accepted.node()).contains("Before"));
         assert!(
             app.sync_data(&serde_json::json!({"invalid": false, "label": "After"}))
                 .unwrap()
         );
         assert!(app.last_error().is_none());
-        assert!(format!("{:?}", app.node).contains("After"));
+        assert!(format!("{:?}", app.accepted.node()).contains("After"));
     }
 
     #[test]
@@ -5372,7 +5467,7 @@ mod tests {
         .unwrap();
         assert!(app.sync_host_data_field("audio", &next).unwrap());
         assert!(!app.sync_host_data_field("audio", &next).unwrap());
-        assert!(format!("{:?}", app.node).contains("65"));
+        assert!(format!("{:?}", app.accepted.node()).contains("65"));
     }
 
     #[test]
@@ -6204,7 +6299,7 @@ mod tests {
                 .sync_host_data_field("applications", &applications)
                 .unwrap()
         );
-        assert!(format!("{:?}", read_only.node).contains("Editor"));
+        assert!(format!("{:?}", read_only.accepted.node()).contains("Editor"));
         read_only.update(read_only.button_message("launch").unwrap());
         assert!(read_only.take_effects().is_empty());
 
@@ -6240,7 +6335,7 @@ mod tests {
                 &serde_json::json!({"unixMilliseconds":47_100_000,"utcOffsetMinutes":0}),
             )
             .unwrap();
-        assert!(format!("{:?}", application.node).contains("1:05 PM"));
+        assert!(format!("{:?}", application.accepted.node()).contains("1:05 PM"));
     }
 
     #[test]
@@ -6326,7 +6421,7 @@ mod tests {
                 .sync_host_data_field("notifications", &projection)
                 .unwrap()
         );
-        assert!(format!("{:?}", read_only.node).contains("New mail"));
+        assert!(format!("{:?}", read_only.accepted.node()).contains("New mail"));
         read_only.update(read_only.button_message("dismiss").unwrap());
         assert!(read_only.take_effects().is_empty());
 
@@ -6362,7 +6457,7 @@ mod tests {
             340,
         );
         assert!(matches!(
-            host.application().node,
+            host.application().accepted.node(),
             PanelNode::Surface {
                 window_request: Some(_),
                 ..
@@ -6570,7 +6665,7 @@ mod tests {
             home.height,
         );
         assert!(matches!(
-            home.application().node,
+            home.application().accepted.node(),
             PanelNode::Surface {
                 window_request: Some(_),
                 ..
@@ -6603,7 +6698,7 @@ mod tests {
             dialog.height,
         );
         assert!(matches!(
-            dialog.application().node,
+            dialog.application().accepted.node(),
             PanelNode::Surface {
                 window_request: Some(_),
                 ..
@@ -6658,7 +6753,7 @@ mod tests {
             home.height,
         );
         assert!(matches!(
-            home.application().node,
+            home.application().accepted.node(),
             PanelNode::Surface {
                 window_request: Some(_),
                 ..
@@ -6691,7 +6786,7 @@ mod tests {
             overlay.height,
         );
         assert!(matches!(
-            overlay.application().node,
+            overlay.application().accepted.node(),
             PanelNode::Surface {
                 window_request: Some(_),
                 ..
@@ -6830,7 +6925,7 @@ mod tests {
             });
             assert!(host.inspect().open_overlay.is_some());
             assert!(matches!(
-                host.application_mut().node.dialog("confirm"),
+                host.application_mut().accepted.node().dialog("confirm"),
                 Some(PanelNode::Dialog { open: true, .. })
             ));
             host.step(nickel_ui::HostBatch {
@@ -6839,7 +6934,7 @@ mod tests {
             });
             assert!(host.inspect().open_overlay.is_none());
             assert!(matches!(
-                host.application_mut().node.dialog("confirm"),
+                host.application_mut().accepted.node().dialog("confirm"),
                 Some(PanelNode::Dialog { open: false, .. })
             ));
             assert!(host.application_mut().last_error().is_none());
@@ -6860,7 +6955,7 @@ mod tests {
         let settings =
             std::collections::BTreeMap::from([("show-count".to_owned(), serde_json::json!(false))]);
         let app = PluginPanelApplication::from_package_with_settings(&package, &settings).unwrap();
-        assert!(format!("{:?}", app.node).contains("Hidden"));
+        assert!(format!("{:?}", app.accepted.node()).contains("Hidden"));
     }
 
     #[test]
@@ -6879,7 +6974,7 @@ mod tests {
         .unwrap();
         let (_, image) = &app.images["nickel-icon"];
         assert!(image.width() > 0 && image.height() > 0);
-        assert!(format!("{:?}", app.node).contains("nickel-icon"));
+        assert!(format!("{:?}", app.accepted.node()).contains("nickel-icon"));
     }
 
     #[test]
@@ -7112,13 +7207,13 @@ mod tests {
         "#;
         let mut panel = PluginPanelApplication::new(source).unwrap();
         panel.update(PluginMessage::Click(2));
-        assert!(format!("{:?}", panel.node).contains("second:1"));
+        assert!(format!("{:?}", panel.accepted.node()).contains("second:1"));
         panel.update(PluginMessage::Click(0));
-        let without_first = format!("{:?}", panel.node);
+        let without_first = format!("{:?}", panel.accepted.node());
         assert!(!without_first.contains("first:0"));
         assert!(without_first.contains("second:1"));
         panel.update(PluginMessage::Click(0));
-        let restored = format!("{:?}", panel.node);
+        let restored = format!("{:?}", panel.accepted.node());
         assert!(restored.contains("first:0"));
         assert!(restored.contains("second:1"));
     }
