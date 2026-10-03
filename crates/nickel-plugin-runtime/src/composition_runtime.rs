@@ -123,6 +123,12 @@ struct ExpansionState {
     next_event: u64,
 }
 
+struct PatchExpansion {
+    retained: Value,
+    dirty: std::collections::BTreeSet<u64>,
+    rendered: BTreeMap<u64, RenderedComponent>,
+}
+
 #[derive(Clone)]
 struct CallbackGrant {
     receiver: u64,
@@ -1090,6 +1096,7 @@ impl ShellCompositionRuntime {
         root: &ComponentMount,
         events: &[(ComponentEventHandle, Value)],
         accepted_events: &BTreeMap<u64, ComponentEventHandle>,
+        accepted_source: &Value,
         validate: impl FnOnce(
             &NativePatchEnvelope,
             &BTreeMap<u64, ComponentEventHandle>,
@@ -1160,19 +1167,14 @@ impl ShellCompositionRuntime {
             if changed.is_empty() {
                 return Ok(ScheduledExpandedBatch::Unchanged);
             }
+            let dirty = changed
+                .iter()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>();
             let mut boundaries = changed
                 .iter()
                 .map(|mount_id| {
                     if *mount_id == root.id {
-                        if self
-                            .nested_mounts
-                            .keys()
-                            .any(|(owner, _)| *owner == root.id)
-                        {
-                            return Err(
-                                "root-local patch overlaps retained package boundaries".into()
-                            );
-                        }
                         return Ok(("root".to_owned(), *mount_id, false));
                     }
                     self.nested_mounts
@@ -1183,25 +1185,36 @@ impl ShellCompositionRuntime {
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             boundaries.sort_by(|left, right| left.0.cmp(&right.0));
-            for pair in boundaries.windows(2) {
-                if pair[1]
-                    .0
-                    .strip_prefix(&pair[0].0)
-                    .is_some_and(|suffix| suffix.starts_with('/'))
-                {
-                    return Err("overlapping dirty composition boundaries are ambiguous".into());
-                }
-            }
+            boundaries = boundaries
+                .clone()
+                .into_iter()
+                .filter(|candidate| {
+                    !boundaries.iter().any(|ancestor| {
+                        ancestor.0 != candidate.0
+                            && candidate
+                                .0
+                                .strip_prefix(&ancestor.0)
+                                .is_some_and(|suffix| suffix.starts_with('/'))
+                    })
+                })
+                .collect();
             let affected_mounts = self
                 .nested_mounts
                 .iter()
                 .filter(|((owner, path), _)| {
                     *owner == root.id
-                        && boundaries.iter().any(|(boundary, _, _)| {
-                            path == boundary
-                                || path
-                                    .strip_prefix(boundary)
-                                    .is_some_and(|suffix| suffix.starts_with('/'))
+                        && changed.iter().any(|dirty_mount| {
+                            *dirty_mount != root.id
+                                && self.nested_mounts.iter().any(
+                                    |((dirty_owner, dirty_path), mount)| {
+                                        *dirty_owner == root.id
+                                            && mount.id == *dirty_mount
+                                            && (path == dirty_path
+                                                || path
+                                                    .strip_prefix(dirty_path)
+                                                    .is_some_and(|suffix| suffix.starts_with('/')))
+                                    },
+                                )
                         })
                 })
                 .map(|(_, mount)| mount.id)
@@ -1223,10 +1236,18 @@ impl ShellCompositionRuntime {
                 handler_slots: std::collections::BTreeSet::new(),
                 next_event,
             };
+            let mut patch_expansion = Some(PatchExpansion {
+                retained: accepted_source.clone(),
+                dirty,
+                rendered: rendered_mounts,
+            });
             let mut operations = Vec::with_capacity(boundaries.len());
             let mut generation = 0;
             for (boundary, mount_id, namespace) in &boundaries {
-                let rendered = rendered_mounts
+                let rendered = patch_expansion
+                    .as_mut()
+                    .unwrap()
+                    .rendered
                     .remove(mount_id)
                     .ok_or("dirty composition mount omitted its scheduled render")?;
                 generation = generation.max(rendered.generation);
@@ -1241,6 +1262,7 @@ impl ShellCompositionRuntime {
                     *mount_id,
                     &mut expansion,
                     0,
+                    &mut patch_expansion,
                 )?;
                 let target = replacement
                     .get("__nativeId")
@@ -1302,6 +1324,7 @@ impl ShellCompositionRuntime {
         &mut self,
         root: &ComponentMount,
         accepted_events: &BTreeMap<u64, ComponentEventHandle>,
+        accepted_source: &Value,
         validate: impl FnOnce(
             &NativePatchEnvelope,
             &BTreeMap<u64, ComponentEventHandle>,
@@ -1312,6 +1335,7 @@ impl ShellCompositionRuntime {
             root,
             &[],
             accepted_events,
+            accepted_source,
             validate,
         )
     }
@@ -1338,6 +1362,7 @@ impl ShellCompositionRuntime {
             root,
             &mut expansion,
             0,
+            &mut None,
         )?;
         bounded_json(&node)?;
         let validated = validate(&node, generation)?;
@@ -1369,6 +1394,7 @@ impl ShellCompositionRuntime {
         source_mount: u64,
         expansion: &mut ExpansionState,
         depth: usize,
+        patch: &mut Option<PatchExpansion>,
     ) -> Result<Value, String> {
         if depth > 64 || expansion.events.len() > MAX_HANDLERS {
             return Err("composition expansion exceeds limits".into());
@@ -1401,6 +1427,7 @@ impl ShellCompositionRuntime {
                 grant.source,
                 expansion,
                 depth + 1,
+                patch,
             );
         }
         if node.get("kind").and_then(Value::as_str) == Some("__packageComponent") {
@@ -1447,11 +1474,37 @@ impl ShellCompositionRuntime {
                 mount
             };
             let props = node.get("props").ok_or("missing public component props")?;
+            let can_reuse = patch.as_ref().is_some_and(|patch| {
+                !patch.dirty.contains(&mount.id)
+                    && !contains_owned_transport(props)
+                    && self.mounts[&mount.id].props == *props
+            });
+            if can_reuse {
+                let prefix = format!("{key}::");
+                let retained =
+                    find_unique_native_prefix(&patch.as_ref().unwrap().retained, &prefix)?
+                        .ok_or("retained ownership boundary subtree disappeared")?
+                        .clone();
+                for (owner, retained_path) in self.nested_mounts.keys() {
+                    if *owner == expansion.root
+                        && (retained_path == &key
+                            || retained_path
+                                .strip_prefix(&key)
+                                .is_some_and(|suffix| suffix.starts_with('/')))
+                    {
+                        expansion.visited.insert(retained_path.clone());
+                    }
+                }
+                return Ok(retained);
+            }
             self.callbacks.retain(|_, grant| grant.receiver != mount.id);
             self.children.retain(|_, grant| grant.receiver != mount.id);
             let props =
                 self.transport_callback_props(props, source_events, &mount, source_mount, depth)?;
             let rendered = self.render(&mount, &props)?;
+            if let Some(patch) = patch {
+                patch.rendered.remove(&mount.id);
+            }
             let mut embedded = rendered.node;
             namespace_native_metadata(&mut embedded, &key, 0)?;
             return self.expand_node(
@@ -1461,6 +1514,7 @@ impl ShellCompositionRuntime {
                 mount.id,
                 expansion,
                 depth + 1,
+                patch,
             );
         }
         if let Value::Object(object) = &mut node {
@@ -1498,6 +1552,7 @@ impl ShellCompositionRuntime {
                         source_mount,
                         expansion,
                         depth + 1,
+                        patch,
                     )?;
                 }
             }
@@ -1525,6 +1580,7 @@ impl ShellCompositionRuntime {
                             source_mount,
                             expansion,
                             depth + 1,
+                            patch,
                         )?;
                     }
                 }
@@ -2139,6 +2195,57 @@ fn owned_child_events(
         .collect()
 }
 
+fn contains_owned_transport(value: &Value) -> bool {
+    match value {
+        Value::Object(object) => {
+            object.contains_key("__callbackAction")
+                || object.contains_key("__ownedChild")
+                || object.values().any(contains_owned_transport)
+        }
+        Value::Array(values) => values.iter().any(contains_owned_transport),
+        _ => false,
+    }
+}
+
+fn find_unique_native_prefix<'a>(
+    value: &'a Value,
+    prefix: &str,
+) -> Result<Option<&'a Value>, String> {
+    fn visit<'a>(
+        value: &'a Value,
+        prefix: &str,
+        found: &mut Option<&'a Value>,
+    ) -> Result<(), String> {
+        if value
+            .get("__nativeId")
+            .and_then(Value::as_str)
+            .is_some_and(|id| id.starts_with(prefix))
+        {
+            if found.replace(value).is_some() {
+                return Err("ambiguous duplicate retained ownership path".into());
+            }
+            return Ok(());
+        }
+        match value {
+            Value::Object(object) => {
+                for value in object.values() {
+                    visit(value, prefix, found)?;
+                }
+            }
+            Value::Array(values) => {
+                for value in values {
+                    visit(value, prefix, found)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+    let mut found = None;
+    visit(value, prefix, &mut found)?;
+    Ok(found)
+}
+
 fn is_action(key: &str) -> bool {
     matches!(
         key,
@@ -2415,7 +2522,7 @@ mod tests {
     fn transactional_cross_owner_host() -> ShellCompositionRuntime {
         let mut base = package(
             "base",
-            "export function Shell(){const [state]=useState({count:0});const ref=useRef({count:0});return h(Column,null,h(Text,null,'base'+state.count+':'+ref.current.count),h(nickel.component('shell.taskbar'),{onChange:()=>{state.count++;ref.current.count++;nickel.windows.activate('base');}}));}\nexport function Taskbar(){}\nexport function QuickSettings(){}\nexport default Shell;",
+            "export function Shell(){const [state]=useState({count:0});const ref=useRef({count:0});return h(Column,null,h(Text,null,'base'+state.count+':'+ref.current.count),h(nickel.component('shell.taskbar'),{onChange:()=>{state.count++;ref.current.count++;nickel.windows.activate('base');}}),h(nickel.component('shell.quickSettings')));}\nexport function Taskbar(){}\nexport function QuickSettings(){return h(Text,null,'clean-owner');}\nexport default Shell;",
             None,
         );
         base.manifest
@@ -2794,6 +2901,7 @@ mod tests {
                 &root,
                 &[(event.clone(), Value::Null)],
                 &initial.events,
+                &initial.node,
                 |_, _, _| Err::<(), _>("native rejected patch".into()),
             )
             .is_err()
@@ -2805,6 +2913,7 @@ mod tests {
                 &root,
                 &[(event, Value::Null)],
                 &initial.events,
+                &initial.node,
                 |patch, events, _| {
                     assert_eq!(patch.operations.len(), 1);
                     let NativePatchOperation::ReplaceSubtree { target, node } =
@@ -2842,6 +2951,7 @@ mod tests {
                 &root,
                 &[(initial.events[&0].clone(), Value::Null)],
                 &initial.events,
+                &initial.node,
                 |patch, _, _| Ok(patch.counters),
             )
             .unwrap();
@@ -2895,6 +3005,7 @@ mod tests {
                 &root,
                 &events,
                 &initial.events,
+                &initial.node,
                 |patch, _, _| Ok(patch.counters),
             )
             .unwrap();
@@ -2947,9 +3058,12 @@ mod tests {
             .render_expanded(&root, &serde_json::json!({}), |_| Ok(()))
             .unwrap();
         let outcome = host
-            .reconcile_expanded_pending_validated(&root, &initial.events, |patch, _, _| {
-                Ok(patch.counters)
-            })
+            .reconcile_expanded_pending_validated(
+                &root,
+                &initial.events,
+                &initial.node,
+                |patch, _, _| Ok(patch.counters),
+            )
             .unwrap();
         let ScheduledExpandedBatch::Patched {
             patch, validated, ..
@@ -2960,6 +3074,76 @@ mod tests {
         assert_eq!(patch.operations.len(), 1);
         assert_eq!(validated.nodes_mutated, 1);
         assert!(format!("{:?}", patch.operations).contains("effect1"));
+        host.finish_transaction(true).unwrap();
+    }
+
+    #[test]
+    fn callback_parent_and_child_collapse_to_one_retained_root_patch() {
+        let mut host = transactional_cross_owner_host();
+        let root = host.mount(&host.component("shell").unwrap()).unwrap();
+        let initial = host
+            .render_expanded(&root, &serde_json::json!({}), |_| Ok(()))
+            .unwrap();
+        let clean_id = initial.node["children"][0]["__nativeId"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let clean_owner_id = initial.node["children"][2]["__nativeId"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let event = initial.events[&0].clone();
+        assert!(
+            host.dispatch_expanded_batch_scheduled_pending_validated(
+                &root,
+                &[(event.clone(), Value::Null)],
+                &initial.events,
+                &initial.node,
+                |_, _, _| Err::<(), _>("reject combined patch".into()),
+            )
+            .is_err()
+        );
+
+        let outcome = host
+            .dispatch_expanded_batch_scheduled_pending_validated(
+                &root,
+                &[(event, Value::Null)],
+                &initial.events,
+                &initial.node,
+                |patch, _, _| Ok(patch.clone()),
+            )
+            .unwrap();
+        let ScheduledExpandedBatch::Patched {
+            patch, validated, ..
+        } = outcome
+        else {
+            panic!("callback fan-out must produce an atomic patch")
+        };
+        assert_eq!(patch.operations.len(), 1);
+        let NativePatchOperation::ReplaceSubtree { target, node } = &patch.operations[0] else {
+            panic!("overlap must collapse to its highest dirty boundary")
+        };
+        assert_eq!(target, initial.node["__nativeId"].as_str().unwrap());
+        assert_eq!(node["children"][0]["__nativeId"], clean_id);
+        assert_eq!(node["children"][2]["__nativeId"], clean_owner_id);
+        assert!(node.to_string().contains("base1:1"));
+        assert!(node.to_string().contains("child1"));
+        assert_eq!(validated, patch);
+
+        let mut oracle = transactional_cross_owner_host();
+        let oracle_root = oracle.mount(&oracle.component("shell").unwrap()).unwrap();
+        let oracle_initial = oracle
+            .render_expanded(&oracle_root, &serde_json::json!({}), |_| Ok(()))
+            .unwrap();
+        let oracle_next = oracle
+            .dispatch_expanded(
+                &oracle_root,
+                &oracle_initial.events[&0],
+                &Value::Null,
+                |_| Ok(()),
+            )
+            .unwrap();
+        assert_eq!(node, &oracle_next.node);
         host.finish_transaction(true).unwrap();
     }
 

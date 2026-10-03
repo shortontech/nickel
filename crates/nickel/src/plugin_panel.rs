@@ -2983,9 +2983,11 @@ impl PluginPanelApplication {
             let rendered = if let Some(state) = &mut self.composition {
                 let mut host = state.host.borrow_mut();
                 let accepted_tree = self.accepted.clone();
+                let accepted_source = accepted_tree.source().clone();
                 let outcome = host.reconcile_expanded_pending_validated(
                     &state.mount,
                     &state.events,
+                    &accepted_source,
                     |patch, _, generation| {
                         let mut candidate = accepted_tree;
                         let transport_bytes = serde_json::to_vec(patch)
@@ -3296,11 +3298,13 @@ impl nickel_ui::Application for PluginPanelApplication {
                     .collect::<Result<Vec<_>, String>>()?;
                 let mut host = state.host.borrow_mut();
                 let accepted_tree = self.accepted.clone();
+                let accepted_source = accepted_tree.source().clone();
 
                 let outcome = host.dispatch_expanded_batch_scheduled_pending_validated(
                     &state.mount,
                     &events,
                     &state.events,
+                    &accepted_source,
                     |patch, _, generation| {
                         let mut candidate = accepted_tree;
                         let transport_bytes = serde_json::to_vec(patch)
