@@ -242,6 +242,9 @@ declare function useReducer<S, A, I>(reducer: (state: S, action: A) => S, initia
 declare function useRef<T>(initial: T): { current: T };
 /** Stable, opaque ID for accessibility relationships within this component's mounted surface. */
 declare function useId(): string;
+interface NickelContext<T> { readonly Provider: NickelComponent<{value:T;children?:NickelChild}>; readonly defaultValue: T }
+declare function createContext<T>(defaultValue: T): NickelContext<T>;
+declare function useContext<T>(context: NickelContext<T>): T;
 declare function useEffect(setup: () => void | (() => void), dependencies?: ReadonlyArray<unknown>): void;
 interface NickelSurfaceSnapshot {
     readonly generation:number;

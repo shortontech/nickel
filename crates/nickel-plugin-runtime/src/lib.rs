@@ -601,6 +601,102 @@ mod tests {
     }
 
     #[test]
+    fn contexts_use_defaults_and_nested_parent_first_provider_scopes() {
+        let source = r#"
+            const Theme = createContext('default');
+            globalThis.seen = [];
+            function Consumer({name}) { const value = useContext(Theme); seen.push(name + ':' + value); return h(Text,null,value); }
+            function App() { return h(Column,null,
+                h(Consumer,{name:'outside'}),
+                h(Theme.Provider,{value:'outer'},
+                    h(Consumer,{name:'outer'}),
+                    h(Theme.Provider,{value:'inner'},h(Consumer,{name:'inner'}))),
+                h(Consumer,{name:'after'})); }
+        "#;
+        let mut runtime = super::JsxRuntime::new(source, None).unwrap();
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        assert_eq!(
+            runtime
+                .eval_json::<Vec<String>>("JSON.stringify(seen)")
+                .unwrap(),
+            [
+                "outside:default",
+                "outer:outer",
+                "inner:inner",
+                "after:default"
+            ]
+        );
+    }
+
+    #[test]
+    fn context_updates_rollback_with_rejected_provider_render() {
+        let source = r#"
+            const Value = createContext('default');
+            globalThis.seen = [];
+            function Consumer() { const value=useContext(Value); seen.push(value); return h(Text,null,value); }
+            function App() { const [value,setValue]=useState('accepted'); return h(Button,{onClick:()=>setValue('rejected')},h(Value.Provider,{value},h(Consumer))); }
+        "#;
+        let mut runtime = super::JsxRuntime::new(source, None).unwrap();
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        runtime
+            .render("__nickelDispatch(0)", |_| Err::<(), _>("reject".into()))
+            .unwrap_err();
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        assert_eq!(
+            runtime
+                .eval_json::<Vec<String>>("JSON.stringify(seen)")
+                .unwrap(),
+            ["accepted", "rejected", "accepted"]
+        );
+    }
+
+    #[test]
+    fn keyed_context_consumers_reparent_and_retire_without_leaking_scope() {
+        let source = r#"
+            const Value = createContext('default');
+            globalThis.seen = [];
+            function Consumer() { const value=useContext(Value); seen.push(value); return h(Text,null,value); }
+            function App() { const [right,setRight]=useState(false); return h(Button,{onClick:()=>setRight(true)},
+                h(Value.Provider,{key:'left',value:'left'},right?null:h(Consumer,{key:'moving'})),
+                h(Value.Provider,{key:'right',value:'right'},right?h(Consumer,{key:'moving'}):null)); }
+        "#;
+        let mut runtime = super::JsxRuntime::new(source, None).unwrap();
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        runtime.render("__nickelDispatch(0)", |_| Ok(())).unwrap();
+        runtime.finish_event(true).unwrap();
+        assert_eq!(
+            runtime
+                .eval_json::<Vec<String>>("JSON.stringify(seen)")
+                .unwrap(),
+            ["left", "right"]
+        );
+        assert!(runtime.eval_json::<bool>("Array.from(__componentHooks.values()).filter(h=>h.some(e=>e?.kind==='context')).length === 1").unwrap());
+    }
+
+    #[test]
+    fn context_state_is_isolated_between_surfaces() {
+        let source = r#"
+            const Value = createContext('default');
+            globalThis.seen ||= [];
+            function Consumer(){const value=useContext(Value);seen.push(nickel.data.surface.id+':'+value);return h(Text,null,value)}
+            function App(){return h(Value.Provider,{value:nickel.data.surface.id},h(Consumer))}
+        "#;
+        let mut runtime = super::JsxRuntime::new(source, None).unwrap();
+        runtime.set_data(r#"{"surface":{"id":"first"}}"#).unwrap();
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        runtime.register_surface_entry("second", source).unwrap();
+        runtime.select_surface("second").unwrap();
+        runtime.set_data(r#"{"surface":{"id":"second"}}"#).unwrap();
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        assert_eq!(
+            runtime
+                .eval_json::<Vec<String>>("JSON.stringify(seen)")
+                .unwrap(),
+            ["first:first", "second:second"]
+        );
+    }
+
+    #[test]
     fn virtual_component_declarations_never_serialize_unresolved() {
         let mut runtime = super::JsxRuntime::new(
             "function Child(){return h(Text,null,'child')} function App(){return h(Child)}",

@@ -88,6 +88,9 @@ let __listKeyErrors = [];
 let __pendingRender = null;
 let __pendingEvent = null;
 let __dirtyComponents = new Set();
+const __contexts = new WeakSet();
+const __contextProviders = new WeakMap();
+const __contextValues = new Map();
 let __surfaceStore = {generation:0, snapshot:Object.freeze({
     generation:0, mountId:null, id:null, kind:null, logicalSize:null,
     output:null, availableSize:null, scaleFactor:null, focused:null, visible:null
@@ -790,6 +793,40 @@ function useId() {
     return hooks[slot].value;
 }
 
+function createContext(defaultValue) {
+    const context = {};
+    function Provider() {
+        throw Error('Context.Provider can only be rendered as a component');
+    }
+    Object.defineProperties(context, {
+        Provider:{value:Provider, enumerable:true},
+        defaultValue:{value:defaultValue}
+    });
+    Object.freeze(context);
+    __contexts.add(context);
+    __contextProviders.set(Provider, context);
+    return context;
+}
+
+function __nickelIsContext(value) {
+    return value !== null && typeof value === 'object' && __contexts.has(value);
+}
+
+function useContext(context) {
+    if (__currentComponent === null) throw Error('useContext requires a component');
+    if (!__nickelIsContext(context)) throw TypeError('useContext requires a Nickel context');
+    const slot = __hookIndex++;
+    const hooks = __componentHooks.get(__currentComponent);
+    let entry = hooks[slot];
+    const values = __contextValues.get(context);
+    const current = values?.length ? values[values.length - 1] : null;
+    if (!entry || (entry.kind === 'context' && entry.provider !== current?.provider))
+        hooks[slot] = entry = {kind:'context', context, provider:current?.provider ?? null, value:context.defaultValue};
+    if (entry.kind !== 'context' || entry.context !== context) throw Error('hook order changed');
+    entry.value = current ? current.value : context.defaultValue;
+    return entry.value;
+}
+
 function __nickelDepsEqual(left, right) {
     return left !== undefined && right !== undefined && left.length === right.length
         && left.every((value, index) => Object.is(value, right[index]));
@@ -889,9 +926,31 @@ function __nickelResolveDeclaration(declaration) {
     __currentComponent = path;
     __hookIndex = 0;
     try {
-        const result = kind({...declaration.props, children:declaration.children});
+        const context = __contextProviders.get(kind);
+        let result;
+        if (context) {
+            const values = __contextValues.get(context) ?? [];
+            if (!__contextValues.has(context)) __contextValues.set(context, values);
+            const value = declaration.props?.value;
+            for (const [owner, hooks] of __componentHooks)
+                for (const entry of hooks)
+                    if (entry?.kind === 'context' && entry.context === context
+                        && entry.provider === path && !Object.is(entry.value, value))
+                        __dirtyComponents.add(owner);
+            values.push({provider:path, value});
+            try {
+                result = declaration.children.length === 1 ? declaration.children[0] : declaration.children;
+                result = __nickelResolveVirtual(result);
+            } finally {
+                values.pop();
+                if (!values.length) __contextValues.delete(context);
+            }
+        } else {
+            result = kind({...declaration.props, children:declaration.children});
+            result = __nickelResolveVirtual(result);
+        }
         if (__hookIndex !== __componentHooks.get(path).length) throw Error('hook order changed');
-        const node = __nickelResolveVirtual(result);
+        const node = result;
         return declaration.key === undefined || node === null || typeof node !== 'object' || Array.isArray(node)
             ? node : {...node, key:declaration.key};
     } finally {

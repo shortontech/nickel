@@ -2389,6 +2389,70 @@ mod tests {
     }
 
     #[test]
+    fn context_providers_stop_at_cross_package_component_boundaries() {
+        let mut base = package(
+            "base",
+            "const Context=createContext('base-default');\nexport function Shell(){return h(Context.Provider,{value:'base-provider'},h(nickel.component('shell.taskbar')));}\nexport function Taskbar(){}\nexport function QuickSettings(){}\nexport default Shell;",
+            None,
+        );
+        base.manifest
+            .composition
+            .as_mut()
+            .unwrap()
+            .exports
+            .insert("shell".into(), "./main.js#Shell".into());
+        let child = package(
+            "child",
+            "const Context=createContext('child-default');\nexport function Taskbar(){return h(Text,null,useContext(Context));}\nexport default Taskbar;",
+            Some("base"),
+        );
+        let mut host = ShellCompositionRuntime::new(
+            &BTreeMap::from([("base".into(), base), ("child".into(), child)]),
+            "child",
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let mount = host.mount(&host.component("shell").unwrap()).unwrap();
+        let tree = host
+            .render_expanded(&mount, &serde_json::json!({}), |_| Ok(()))
+            .unwrap();
+        assert!(tree.node.to_string().contains("child-default"));
+        assert!(!tree.node.to_string().contains("base-provider"));
+    }
+
+    #[test]
+    fn context_objects_cannot_be_transferred_as_cross_package_props() {
+        let mut base = package(
+            "base",
+            "const Context=createContext('base-default');\nexport function Shell(){return h(nickel.component('shell.taskbar'),{context:Context});}\nexport function Taskbar(){}\nexport function QuickSettings(){}\nexport default Shell;",
+            None,
+        );
+        base.manifest
+            .composition
+            .as_mut()
+            .unwrap()
+            .exports
+            .insert("shell".into(), "./main.js#Shell".into());
+        let child = package(
+            "child",
+            "export function Taskbar(){return h(Text,null,'child');}\nexport default Taskbar;",
+            Some("base"),
+        );
+        let mut host = ShellCompositionRuntime::new(
+            &BTreeMap::from([("base".into(), base), ("child".into(), child)]),
+            "child",
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let mount = host.mount(&host.component("shell").unwrap()).unwrap();
+        let error = match host.render_expanded(&mount, &serde_json::json!({}), |_| Ok(())) {
+            Ok(_) => panic!("context transport unexpectedly succeeded"),
+            Err(error) => error,
+        };
+        assert!(error.contains("contexts cannot cross package ownership boundaries"));
+    }
+
+    #[test]
     fn callable_props_route_to_the_original_owner_and_preserve_arguments() {
         let mut base = package(
             "base",
