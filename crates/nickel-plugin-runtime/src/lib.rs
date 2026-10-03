@@ -253,6 +253,18 @@ impl JsxRuntime {
         if let Some(windows) = data.get("windows") {
             self.set_windows_store(windows)?;
         }
+        if let Some(applications) = data.get("applications")
+            && applications.as_array().is_some_and(|applications| {
+                applications.first().is_none_or(|application| {
+                    application.get("name").is_some()
+                        && application.get("icon").is_some()
+                        && application.get("kind").is_some()
+                        && application.get("launchClass").is_some()
+                })
+            })
+        {
+            self.set_applications_store(applications)?;
+        }
         // Effective presentation state is globally readable and deliberately
         // separate from the capability-gated appearance configuration client.
         if let Some(appearance) = data.get("appearance") {
@@ -330,6 +342,30 @@ impl JsxRuntime {
         setter
             .as_callable()
             .ok_or("windows store setter is not callable")?
+            .call(&JsValue::undefined(), &[snapshot], &mut self.context)
+            .map(|changed| changed.to_boolean())
+            .map_err(|error| error.to_string())
+    }
+
+    /// Publish the package owner's already capability-filtered application
+    /// catalog. Launch and activation remain separately revalidated effects.
+    pub fn set_applications_store(&mut self, snapshot: &Value) -> Result<bool, String> {
+        if self.invalidated {
+            return Err("runtime checkpoint was invalidated".into());
+        }
+        let snapshot =
+            JsValue::from_json(snapshot, &mut self.context).map_err(|error| error.to_string())?;
+        let setter = self
+            .context
+            .global_object()
+            .get(
+                js_string!("__nickelSetApplicationsStore"),
+                &mut self.context,
+            )
+            .map_err(|error| error.to_string())?;
+        setter
+            .as_callable()
+            .ok_or("applications store setter is not callable")?
             .call(&JsValue::undefined(), &[snapshot], &mut self.context)
             .map(|changed| changed.to_boolean())
             .map_err(|error| error.to_string())
@@ -973,6 +1009,80 @@ mod tests {
         runtime
             .set_windows_store(&serde_json::json!([{"id":"1","title":"One"}]))
             .unwrap();
+        assert!(
+            !runtime
+                .eval_json::<bool>("JSON.parse(__nickelReconciliationRequest()).requested")
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn applications_store_is_versioned_and_structurally_shares_records() {
+        let mut runtime = super::JsxRuntime::new(
+            "globalThis.seen=[];function App(){const applications=useApplications();seen.push(applications);return h(Text,null,applications.map(value=>value.name).join(','))}",
+            None,
+        ).unwrap();
+        let first = serde_json::json!([{"id":"editor","name":"Editor","icon":"application:1","pinned":true,
+            "pinOrder":0,"recentOrder":1,"kind":"application","launchClass":"graphical"}]);
+        assert!(runtime.set_applications_store(&first).unwrap());
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        assert!(!runtime.set_applications_store(&first).unwrap());
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        assert!(runtime.eval_json::<bool>("seen[0] === seen[1] && seen[0][0] === seen[1][0] && Object.isFrozen(seen[0]) && Object.isFrozen(seen[0][0])").unwrap());
+        assert_eq!(
+            runtime
+                .eval_json::<u64>("__applicationsStore.generation")
+                .unwrap(),
+            1
+        );
+        let second = serde_json::json!([
+            {"id":"editor","name":"Editor","icon":"application:1","pinned":true,"pinOrder":0,
+                "recentOrder":1,"kind":"application","launchClass":"graphical"},
+            {"id":"terminal","name":"Terminal","icon":"application:2","pinned":false,"pinOrder":null,
+                "recentOrder":0,"kind":"application","launchClass":"terminal"}
+        ]);
+        runtime.set_applications_store(&second).unwrap();
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        assert!(
+            runtime
+                .eval_json::<bool>("seen[1] !== seen[2] && seen[1][0] === seen[2][0]")
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn applications_store_dirties_only_changed_application_selections() {
+        let source = r#"
+            globalThis.runs={app:0,applications:0,windows:0,theme:0,sibling:0};
+            function Applications(){runs.applications++;return h(Text,null,useApplications(items=>items[0]?.name ?? 'none'))}
+            function Windows(){runs.windows++;return h(Text,null,String(useWindows().length))}
+            function Theme(){runs.theme++;return h(Text,null,useTheme(value=>value.mode))}
+            function Sibling(){runs.sibling++;return h(Text,null,'stable')}
+            function App(){runs.app++;return h(Window,{},h(Applications),h(Windows),h(Theme),h(Sibling))}
+        "#;
+        let mut runtime = super::JsxRuntime::new(source, None).unwrap();
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        runtime.set_applications_store(&serde_json::json!([{"id":"one","name":"One","icon":"application:1","kind":"application","launchClass":"graphical"}])).unwrap();
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        assert_eq!(
+            runtime
+                .eval_json::<serde_json::Value>("JSON.stringify(runs)")
+                .unwrap(),
+            serde_json::json!({"app":1,"applications":2,"windows":1,"theme":1,"sibling":1})
+        );
+    }
+
+    #[test]
+    fn rejected_application_consumer_does_not_install_a_subscription() {
+        let mut runtime = super::JsxRuntime::new(
+            "function App(){return h(Text,null,String(useApplications().length))}",
+            None,
+        )
+        .unwrap();
+        runtime
+            .render("__nickelRender()", |_| Err::<(), _>("reject".into()))
+            .unwrap_err();
+        runtime.set_applications_store(&serde_json::json!([{"id":"one","name":"One","icon":"application:1","kind":"application","launchClass":"graphical"}])).unwrap();
         assert!(
             !runtime
                 .eval_json::<bool>("JSON.parse(__nickelReconciliationRequest()).requested")

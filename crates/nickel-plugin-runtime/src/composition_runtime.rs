@@ -3052,6 +3052,74 @@ mod tests {
     }
 
     #[test]
+    fn composition_host_publishes_filtered_application_catalog_changes() {
+        let package = package(
+            "applications-shell",
+            "globalThis.applicationObservation=null;\nexport function Taskbar(){const applications=useApplications();applicationObservation={applications,generation:__applicationsStore.generation};return h(Text,null,applications.map(value=>value.name).join(','));}\nexport function QuickSettings(){return h(Text,null,'settings');}\nexport default Taskbar;",
+            None,
+        );
+        let owner = PackageIdentity {
+            id: "applications-shell".into(),
+            version: package
+                .manifest
+                .composition
+                .as_ref()
+                .unwrap()
+                .version
+                .parse()
+                .unwrap(),
+        };
+        let first = serde_json::json!({"applications":[{"id":"editor","name":"Editor","icon":"application:1",
+            "pinned":false,"pinOrder":null,"recentOrder":0,"kind":"application","launchClass":"graphical"}]});
+        let mut host = ShellCompositionRuntime::new(
+            &BTreeMap::from([("applications-shell".into(), package)]),
+            "applications-shell",
+            &BTreeMap::from([(owner.clone(), first.clone())]),
+        )
+        .unwrap();
+        let mount = host
+            .mount(&host.component("shell.taskbar").unwrap())
+            .unwrap();
+        assert!(
+            host.render(&mount, &serde_json::json!({}))
+                .unwrap()
+                .node
+                .to_string()
+                .contains("Editor")
+        );
+        let runtime = host.shared_owner_runtime(&owner).unwrap();
+        assert_eq!(
+            runtime
+                .borrow_mut()
+                .eval_json::<u64>("__applicationsStore.generation")
+                .unwrap(),
+            1
+        );
+        host.update_snapshot(&owner, &first).unwrap();
+        host.render(&mount, &serde_json::json!({})).unwrap();
+        assert_eq!(
+            runtime
+                .borrow_mut()
+                .eval_json::<u64>("__applicationsStore.generation")
+                .unwrap(),
+            1
+        );
+        host.update_snapshot(&owner, &serde_json::json!({"applications":[
+            {"id":"editor","name":"Editor","icon":"application:1","pinned":false,"pinOrder":null,"recentOrder":0,"kind":"application","launchClass":"graphical"},
+            {"id":"terminal","name":"Terminal","icon":"application:2","pinned":false,"pinOrder":null,"recentOrder":1,"kind":"application","launchClass":"running","canLaunch":false,"canPin":false}
+        ]})).unwrap();
+        let rendered = host.render(&mount, &serde_json::json!({})).unwrap();
+        assert!(rendered.node.to_string().contains("Editor,Terminal"));
+        assert_eq!(
+            runtime
+                .borrow_mut()
+                .eval_json::<u64>("__applicationsStore.generation")
+                .unwrap(),
+            2
+        );
+    }
+
+    #[test]
     fn composition_host_publishes_effective_theme_independently_of_other_stores() {
         let package = package(
             "theme-shell",

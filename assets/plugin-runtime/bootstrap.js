@@ -102,6 +102,7 @@ let __surfaceStore = {generation:0, snapshot:Object.freeze({
     output:null, availableSize:null, scaleFactor:null, focused:null, visible:null
 })};
 let __windowsStore = {generation:0, snapshot:Object.freeze([])};
+let __applicationsStore = {generation:0, snapshot:Object.freeze([])};
 let __themeStore = {generation:0, snapshot:Object.freeze({
     generation:0, mode:'unknown', accent:null, accentHue:null, accentIntensity:null,
     reducedMotion:null, reducedTransparency:null, palette:null
@@ -691,6 +692,71 @@ function useWindows(selector) {
 
 const __nickelSelectActiveWindow = windows => windows.find(window => window.active) ?? null;
 function useActiveWindow() { return useWindows(__nickelSelectActiveWindow); }
+
+function __nickelApplicationEqual(left, right) {
+    return ['id','name','icon','pinned','pinOrder','recentOrder','kind','launchClass','canLaunch','canPin']
+        .every(field => Object.is(left[field], right[field]));
+}
+function __nickelApplicationSnapshot(value) {
+    if (!Array.isArray(value) || value.length > 256) throw Error('invalid bounded applications snapshot');
+    const previous = new Map(__applicationsStore.snapshot.map(application => [application.id, application]));
+    const seen = new Set();
+    return Object.freeze(value.map(application => {
+        if (!application || typeof application !== 'object' || Array.isArray(application)
+            || typeof application.id !== 'string' || !application.id.length || application.id.length > 256
+            || typeof application.name !== 'string' || application.name.length > 480
+            || typeof application.icon !== 'string' || application.icon.length > 512
+            || (application.kind !== 'place' && application.kind !== 'application')
+            || !['graphical','terminal','running'].includes(application.launchClass)
+            || seen.has(application.id)) throw Error('invalid public application snapshot');
+        const nullableOrder = field => application[field] === undefined || application[field] === null ? null
+            : Number.isInteger(application[field]) && application[field] >= 0 && application[field] < 256
+            ? application[field] : (() => { throw Error(`invalid application ${field}`); })();
+        seen.add(application.id);
+        const copy = Object.freeze({id:application.id, name:application.name, icon:application.icon,
+            pinned:application.pinned === true, pinOrder:nullableOrder('pinOrder'),
+            recentOrder:nullableOrder('recentOrder'), kind:application.kind, launchClass:application.launchClass,
+            canLaunch:application.canLaunch !== false, canPin:application.canPin !== false});
+        const retained = previous.get(copy.id);
+        return retained && __nickelApplicationEqual(retained, copy) ? retained : copy;
+    }));
+}
+function __nickelSetApplicationsStore(value) {
+    const applications = __nickelApplicationSnapshot(value);
+    const previous = __applicationsStore.snapshot;
+    if (previous.length === applications.length
+        && previous.every((application, index) => application === applications[index])) return false;
+    if (__pendingRender !== null || __pendingEvent !== null)
+        throw Error('cannot publish changed applications store during a render or event');
+    const generation = __applicationsStore.generation + 1;
+    __applicationsStore = {generation, snapshot:applications};
+    __nickelForEachSurfaceHooks((hooks, dirty) => {
+        for (const [owner, slots] of hooks) for (const entry of slots) {
+            if (entry?.kind !== 'applications-store') continue;
+            try {
+                const selected = entry.selector ? entry.selector(applications) : applications;
+                entry.storeError = undefined;
+                if (!Object.is(selected, entry.value)) dirty.add(owner);
+            } catch (error) { entry.storeError = error; dirty.add(owner); }
+        }
+    });
+    return true;
+}
+function useApplications(selector) {
+    if (__currentComponent === null) throw Error('useApplications requires a component');
+    if (selector !== undefined && typeof selector !== 'function') throw TypeError('useApplications selector must be a function');
+    const slot = __hookIndex++;
+    const hooks = __componentHooks.get(__currentComponent);
+    const normalized = selector ?? null;
+    let entry = hooks[slot];
+    if (!entry || (entry.kind === 'applications-store' && entry.selector !== normalized))
+        hooks[slot] = entry = {kind:'applications-store', selector:normalized, value:undefined, generation:0};
+    if (entry.kind !== 'applications-store') throw Error('hook order changed');
+    entry.storeError = undefined;
+    entry.value = normalized ? normalized(__applicationsStore.snapshot) : __applicationsStore.snapshot;
+    entry.generation = __applicationsStore.generation;
+    return entry.value;
+}
 
 const __nickelThemePaletteFields = ['background','panel','surface','surfaceHover','text','muted',
     'accent','accentSoft','complement'];

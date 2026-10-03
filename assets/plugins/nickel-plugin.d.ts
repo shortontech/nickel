@@ -248,6 +248,8 @@ declare function useContext<T>(context: NickelContext<T>): T;
 declare function useWindows(): ReadonlyArray<Readonly<NickelNativeWindow>>;
 declare function useWindows<T>(selector: (windows: ReadonlyArray<Readonly<NickelNativeWindow>>) => T): T;
 declare function useActiveWindow(): Readonly<NickelNativeWindow> | null;
+declare function useApplications(): ReadonlyArray<Readonly<NickelApplication>>;
+declare function useApplications<T>(selector: (applications: ReadonlyArray<Readonly<NickelApplication>>) => T): T;
 interface NickelThemePalette {
     readonly background:NickelColor; readonly panel:NickelColor; readonly surface:NickelColor;
     readonly surfaceHover:NickelColor; readonly text:NickelColor; readonly muted:NickelColor;
