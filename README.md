@@ -6,7 +6,7 @@ system controls, controller navigation, and apps.
 
 **Powered by JavaScript, best-in-class DX, and cross-platform.** The production
 shell is composed from capability-constrained JSX components and rendered by
-Nickel—not a browser. On Linux, Nickel can also run as a Smithay compositor.
+Nickel—not a browser. On Linux, Nickel can also run as a Wayland compositor.
 
 [![Nickel Default Shell with the launcher open](assets/screenshots/nickel-default-shell-thumbnail.png)](assets/screenshots/nickel-default-shell.png)
 
@@ -73,7 +73,7 @@ development.
 - Shell-owned Settings, Quick Settings, notifications, window menus, Run, the
   volume OSD, and the on-screen keyboard, backed by native capabilities.
 - Nickel File, a Markdown viewer, a terminal, and a Codex chat application.
-- A shared shell experience on Windows and Linux, including a Smithay
+- A shared shell experience on Windows and Linux, including a Wayland
   compositor on Linux.
 
 ## Shells and themes
