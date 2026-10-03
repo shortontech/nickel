@@ -1285,6 +1285,9 @@ impl ShellCompositionRuntime {
             });
             let mut operations = Vec::with_capacity(boundaries.len());
             let mut patch_nodes_visited = 0;
+            let mut local_materializations = 0u64;
+            let mut expansion_nodes = 0u64;
+            let mut tree_bytes = 0u64;
             let mut generation = 0;
             for (boundary, mount_id, namespace) in &boundaries {
                 if let Some(local_patch) = patched_mounts.remove(mount_id) {
@@ -1307,12 +1310,18 @@ impl ShellCompositionRuntime {
                     )?;
                     continue;
                 }
+                local_materializations = local_materializations.saturating_add(1);
                 let rendered = patch_expansion
                     .as_mut()
                     .unwrap()
                     .rendered
                     .remove(mount_id)
                     .ok_or("dirty composition mount omitted its scheduled render")?;
+                tree_bytes = tree_bytes.saturating_add(
+                    serde_json::to_vec(&rendered.node)
+                        .map_err(|error| error.to_string())?
+                        .len() as u64,
+                );
                 generation = generation.max(rendered.generation);
                 let mut replacement = rendered.node;
                 if *namespace {
@@ -1340,6 +1349,7 @@ impl ShellCompositionRuntime {
                     &mut operations,
                     &mut patch_nodes_visited,
                 )?;
+                expansion_nodes = patch_nodes_visited;
             }
             // Expanded handler tokens are stable host authority. Both direct
             // patches and complete callback renders update their handle table;
@@ -1354,6 +1364,9 @@ impl ShellCompositionRuntime {
                 counters: NativePatchCounters {
                     nodes_visited: patch_nodes_visited,
                     nodes_mutated,
+                    local_materializations,
+                    expansion_nodes,
+                    tree_bytes,
                 },
             };
             let validated = validate(&patch, &expansion.events, generation)?;
@@ -3544,6 +3557,9 @@ mod tests {
             panic!("dirty nested mount must emit a patch")
         };
         assert_eq!(patch.counters.nodes_mutated, 1);
+        assert_eq!(patch.counters.local_materializations, 0);
+        assert_eq!(patch.counters.expansion_nodes, 0);
+        assert_eq!(patch.counters.tree_bytes, 0);
         assert_eq!(events.len(), 1);
         host.finish_transaction(true).unwrap();
     }
@@ -3578,6 +3594,9 @@ mod tests {
             NativePatchOperation::SetPrimitive { .. }
         ));
         assert_eq!(validated.nodes_mutated, 1);
+        assert_eq!(validated.local_materializations, 0);
+        assert_eq!(validated.expansion_nodes, 0);
+        assert_eq!(validated.tree_bytes, 0);
         host.finish_transaction(true).unwrap();
     }
 

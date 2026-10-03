@@ -4974,6 +4974,7 @@ mod class_lookup_tests {
             counters: NativePatchCounters {
                 nodes_visited: 4,
                 nodes_mutated: 2,
+                ..Default::default()
             },
         };
         let counters = retained
@@ -5062,6 +5063,7 @@ mod class_lookup_tests {
             counters: NativePatchCounters {
                 nodes_visited: 3,
                 nodes_mutated: 3,
+                ..Default::default()
             },
         };
         let counters = retained

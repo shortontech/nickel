@@ -242,6 +242,15 @@ pub enum NativePatchOperation {
 pub struct NativePatchCounters {
     pub nodes_visited: u64,
     pub nodes_mutated: u64,
+    /// Complete package-local trees materialized for compatibility/cold paths.
+    #[serde(default)]
+    pub local_materializations: u64,
+    /// Nodes traversed by cross-package composition expansion.
+    #[serde(default)]
+    pub expansion_nodes: u64,
+    /// Encoded complete-tree bytes crossing the package boundary.
+    #[serde(default)]
+    pub tree_bytes: u64,
 }
 
 #[derive(Debug, PartialEq)]
