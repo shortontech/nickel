@@ -84,7 +84,7 @@ fn publish_native_controller_batch(
     match sender.try_send(batch) {
         Ok(()) => NativeControllerPublish::Sent,
         Err(TrySendError::Full(_)) => {
-            let _ = ingress_generation.fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+            let _ = ingress_generation.try_update(Ordering::AcqRel, Ordering::Acquire, |value| {
                 value.checked_add(1)
             });
             NativeControllerPublish::Overflow

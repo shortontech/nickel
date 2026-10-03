@@ -63,7 +63,7 @@ impl Slot {
         if valid_association(&peer, &root) {
             static NEXT: AtomicU64 = AtomicU64::new(1);
             let Ok(generation) =
-                NEXT.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
+                NEXT.try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
             else {
                 return;
             };

@@ -11463,7 +11463,7 @@ impl NickelSession {
                     .wl_surface()
                     .is_some_and(|surface| surface.id() == *surface_id)
             };
-            if self.launcher_window.as_ref().is_some_and(&matches_surface) {
+            if self.launcher_window.as_ref().is_some_and(matches_surface) {
                 self.launcher_window = None;
                 self.launcher_visibility.set(false);
             }
@@ -11476,11 +11476,11 @@ impl NickelSession {
             if self
                 .context_menu_window
                 .as_ref()
-                .is_some_and(&matches_surface)
+                .is_some_and(matches_surface)
             {
                 self.context_menu_window = None;
             }
-            if self.preview_window.as_ref().is_some_and(&matches_surface) {
+            if self.preview_window.as_ref().is_some_and(matches_surface) {
                 self.preview_window = None;
                 self.clear_overlay_preview_interest();
             }
@@ -11566,7 +11566,7 @@ impl NickelSession {
                 .wl_surface()
                 .is_some_and(|surface| surface.id() == *surface_id)
         };
-        if self.launcher_window.as_ref().is_some_and(&matches_surface) {
+        if self.launcher_window.as_ref().is_some_and(matches_surface) {
             self.launcher_window = None;
             self.launcher_visibility.set(false);
         }
@@ -11579,11 +11579,11 @@ impl NickelSession {
         if self
             .context_menu_window
             .as_ref()
-            .is_some_and(&matches_surface)
+            .is_some_and(matches_surface)
         {
             self.context_menu_window = None;
         }
-        if self.preview_window.as_ref().is_some_and(&matches_surface) {
+        if self.preview_window.as_ref().is_some_and(matches_surface) {
             self.preview_window = None;
             self.clear_overlay_preview_interest();
         }

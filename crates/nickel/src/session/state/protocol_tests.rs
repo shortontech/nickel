@@ -3676,7 +3676,9 @@ fn admitted_internal_window_produces_real_switcher_preview_pixels() {
     assert!(
         frame
             .rgba
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .any(|pixel| pixel[3] != 0 && pixel[..3] != [0, 0, 0]),
         "the preview must contain the hosted application's rendered pixels"
     );

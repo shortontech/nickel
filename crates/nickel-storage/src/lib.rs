@@ -54,7 +54,7 @@ fn stage_write_inner(path: &Path, contents: &[u8], durable: bool) -> io::Result<
     fs::create_dir_all(parent)?;
     for _ in 0..16 {
         let id = NEXT_STAGING_ID
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
             .map_err(|_| io::Error::other("staging identity exhausted"))?;
         let temporary = path.with_extension(format!("tmp-{}-{id}", std::process::id()));
         let mut options = fs::OpenOptions::new();

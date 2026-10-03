@@ -21,7 +21,7 @@ impl WindowsEmergencyChord {
     pub(crate) fn set_enabled(&self, enabled: bool) -> bool {
         let result = self
             .0
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |state| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |state| {
                 if (state & ENABLED != 0) == enabled {
                     return Some(state);
                 }
@@ -58,7 +58,7 @@ impl WindowsEmergencyChord {
         let pressed = event.edge == KeyEdge::Pressed;
         let result = self
             .0
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |state| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |state| {
                 if state & GENERATION != generation || state & ENABLED == 0 {
                     return None;
                 }

@@ -4446,8 +4446,10 @@ mod tests {
         assert!(
             raster
                 .rgba
-                .chunks_exact(4)
-                .any(|pixel| pixel != [0, 0, 0, 0])
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .any(|pixel| *pixel != [0, 0, 0, 0])
         );
         assert!(scenario.host().inspect().resources.paint_primitive_count > 0);
     }
@@ -4934,8 +4936,8 @@ mod tests {
         let raster = session.render(1.0);
         let background = [0x10, 0x17, 0x22, 0xff];
         let mut occupied = None::<(u32, u32, u32, u32)>;
-        for (index, pixel) in raster.rgba.chunks_exact(4).enumerate() {
-            if pixel == background || pixel[3] == 0 {
+        for (index, pixel) in raster.rgba.as_chunks::<4>().0.iter().enumerate() {
+            if *pixel == background || pixel[3] == 0 {
                 continue;
             }
             let x = index as u32 % raster.width;
@@ -5077,7 +5079,9 @@ mod tests {
         assert_eq!(first, second);
         let colors = first
             .rgba
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|pixel| [pixel[0], pixel[1], pixel[2], pixel[3]])
             .collect::<std::collections::BTreeSet<_>>();
         assert!(
@@ -5107,11 +5111,7 @@ mod tests {
             let outcome = host.handle_controller_action(nickel_ui::ControllerAction::Down);
             assert!(outcome.semantic_failures.is_empty());
             after = render_host(&host, width, height, 1.0);
-            if after
-                .rgba
-                .chunks_exact(4)
-                .any(|pixel| pixel == focused_pixel)
-            {
+            if after.rgba.as_chunks::<4>().0.contains(&focused_pixel) {
                 break;
             }
         }
@@ -5121,10 +5121,7 @@ mod tests {
             "controller focus must change the rendered frame"
         );
         assert!(
-            after
-                .rgba
-                .chunks_exact(4)
-                .any(|pixel| pixel == focused_pixel),
+            after.rgba.as_chunks::<4>().0.contains(&focused_pixel),
             "controller focus must visibly hue-shift the focused child surface"
         );
     }
@@ -5177,12 +5174,7 @@ mod tests {
 
         let raster = render_host(&host, 900, 534, 1.0);
         assert_eq!((raster.width, raster.height), (900, 534));
-        assert!(
-            raster
-                .rgba
-                .chunks_exact(4)
-                .any(|pixel| pixel == [36, 57, 87, 255])
-        );
+        assert!(raster.rgba.as_chunks::<4>().0.contains(&[36, 57, 87, 255]));
 
         let mut route_scrolled = WorkbenchApp::new().expect("workbench app");
         route_scrolled.update(WorkbenchMessage::MainScroll(420.0));
@@ -5200,7 +5192,9 @@ mod tests {
         assert!(
             route_raster
                 .rgba
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .skip(895)
                 .step_by(900)
                 .all(|pixel| !(pixel[1] > 120 && pixel[1] > pixel[0] + 20)),

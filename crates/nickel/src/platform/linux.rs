@@ -827,7 +827,9 @@ impl NotificationService {
 
 fn notification_actions(values: Vec<String>) -> Vec<NotificationAction> {
     values
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .filter_map(|pair| {
             let key = pair[0].trim();
             let label = pair[1].trim();
@@ -1125,7 +1127,7 @@ fn pixmap_to_rgba((width, height, bytes): (i32, i32, Vec<u8>)) -> Option<image::
         return None;
     }
     let mut rgba = Vec::with_capacity(bytes.len());
-    for pixel in bytes.chunks_exact(4) {
+    for pixel in bytes.as_chunks::<4>().0.iter() {
         rgba.extend_from_slice(&[pixel[1], pixel[2], pixel[3], pixel[0]]);
     }
     image::RgbaImage::from_raw(width, height, rgba)

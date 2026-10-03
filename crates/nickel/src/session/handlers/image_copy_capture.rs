@@ -272,7 +272,12 @@ fn convert_rgba_row(
     swap_red_blue: bool,
     preserve_alpha: bool,
 ) {
-    for (pixel, target) in source.chunks_exact(4).zip(converted.chunks_exact_mut(4)) {
+    for (pixel, target) in source
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(converted.as_chunks_mut::<4>().0.iter_mut())
+    {
         if swap_red_blue {
             target[..3].copy_from_slice(&[pixel[2], pixel[1], pixel[0]]);
         } else {

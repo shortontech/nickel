@@ -28,7 +28,7 @@ impl Default for TransferGate {
 impl TransferGate {
     pub(super) fn acquire(&self, maximum: usize) -> Option<TransferPermit> {
         self.0
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |active| {
                 (active < maximum).then_some(active + 1)
             })
             .ok()?;

@@ -156,7 +156,9 @@ pub(crate) mod native {
             return Err("Invalid Windows virtual desktop inventory".into());
         }
         Ok(bytes
-            .chunks_exact(16)
+            .as_chunks::<16>()
+            .0
+            .iter()
             .map(|bytes| {
                 // Registry desktop IDs use the in-memory GUID layout, whose
                 // first fields are little-endian rather than RFC byte order.

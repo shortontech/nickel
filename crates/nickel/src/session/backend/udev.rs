@@ -94,7 +94,9 @@ fn output_model(connector_name: &str) -> String {
         .and_then(|edid| {
             edid.get(54..126)
                 .unwrap_or_default()
-                .chunks_exact(18)
+                .as_chunks::<18>()
+                .0
+                .iter()
                 .find_map(|descriptor| {
                     if descriptor[..5] != [0, 0, 0, 0xfc, 0] {
                         return None;

@@ -125,7 +125,7 @@ mod tests {
         assert_eq!(events.len(), 128);
         assert_eq!(evicted, 72);
         assert_eq!(events[0].generation, 73);
-        for pair in events.chunks_exact(2) {
+        for pair in events.as_chunks::<2>().0 {
             assert_eq!(pair[0].trace_id, pair[1].trace_id);
             assert_eq!(pair[0].client_id, 7);
             assert_eq!(pair[1].lease_id, 11);

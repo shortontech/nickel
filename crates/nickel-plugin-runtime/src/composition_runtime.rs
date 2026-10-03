@@ -982,7 +982,7 @@ impl ShellCompositionRuntime {
         // Shared provider contexts can serve several native composition hosts;
         // surface IDs must remain unique across them to keep hooks isolated.
         let id = NEXT_SHARED_MOUNT
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
                 next.checked_add(1)
             })
             .map_err(|_| "component mount identity exhausted")?;
@@ -2115,7 +2115,7 @@ impl ShellCompositionRuntime {
             })
             .cloned()
             .collect::<Vec<_>>();
-        removed.sort_by(|left, right| right.1.len().cmp(&left.1.len()));
+        removed.sort_by_key(|entry| std::cmp::Reverse(entry.1.len()));
         for key in removed {
             if let Some(child) = self.nested_mounts.remove(&key) {
                 self.unmount(&child)?;

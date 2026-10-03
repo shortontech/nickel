@@ -889,7 +889,7 @@ impl LinuxAssociations {
                 });
             }
         }
-        handlers.sort_by(|left, right| left.name.to_lowercase().cmp(&right.name.to_lowercase()));
+        handlers.sort_by_key(|handler| handler.name.to_lowercase());
         handlers
     }
 

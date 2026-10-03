@@ -450,7 +450,7 @@ mod tests {
     const MAX_FRAME: usize = Limits::ACCESSIBILITY.frame_bytes;
     #[test]
     fn frame_cap_checks_both_endians_and_padding_before_body_allocation() {
-        for endian in [b'l', b'B'] {
+        for endian in *b"lB" {
             let mut header = [0u8; 16];
             header[0] = endian;
             header[3] = 1;

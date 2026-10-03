@@ -350,7 +350,13 @@ pub fn copy_image_to_clipboard(image: image::RgbaImage) -> Result<(), String> {
         )
         .map_err(|error| format!("could not allocate clipboard image: {error}"))?;
         let bgra = std::slice::from_raw_parts_mut(pixels.cast::<u8>(), image.as_raw().len());
-        for (source, target) in image.as_raw().chunks_exact(4).zip(bgra.chunks_exact_mut(4)) {
+        for (source, target) in image
+            .as_raw()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(bgra.as_chunks_mut::<4>().0.iter_mut())
+        {
             target.copy_from_slice(&[source[2], source[1], source[0], 255]);
         }
         if let Err(error) = OpenClipboard(None) {
@@ -429,7 +435,12 @@ fn capture_rect_rgba(bounds: RECT) -> Result<image::RgbaImage, String> {
         let mut rgba = vec![0; width as usize * height as usize * 4];
         if copied.is_ok() {
             let bgra = std::slice::from_raw_parts(pixels.cast::<u8>(), rgba.len());
-            for (source, target) in bgra.chunks_exact(4).zip(rgba.chunks_exact_mut(4)) {
+            for (source, target) in bgra
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .zip(rgba.as_chunks_mut::<4>().0.iter_mut())
+            {
                 target.copy_from_slice(&[source[2], source[1], source[0], 255]);
             }
         }
@@ -517,7 +528,12 @@ fn save_active_window_to_temp() -> Result<PathBuf, String> {
         let mut rgba = vec![0_u8; width as usize * height as usize * 4];
         if copied.is_ok() && !pixels.is_null() {
             let bgra = std::slice::from_raw_parts(pixels.cast::<u8>(), rgba.len());
-            for (source, target) in bgra.chunks_exact(4).zip(rgba.chunks_exact_mut(4)) {
+            for (source, target) in bgra
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .zip(rgba.as_chunks_mut::<4>().0.iter_mut())
+            {
                 target.copy_from_slice(&[source[2], source[1], source[0], 255]);
             }
         }
@@ -6646,7 +6662,12 @@ fn render_icon_sized(icon: HICON, width: u32, height: u32) -> Option<image::Rgba
         let mut rgba = vec![0_u8; (width * height * 4) as usize];
         if drawn && !pixels.is_null() {
             let bgra = std::slice::from_raw_parts(pixels.cast::<u8>(), rgba.len());
-            for (source, target) in bgra.chunks_exact(4).zip(rgba.chunks_exact_mut(4)) {
+            for (source, target) in bgra
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .zip(rgba.as_chunks_mut::<4>().0.iter_mut())
+            {
                 target.copy_from_slice(&[source[2], source[1], source[0], source[3]]);
             }
             restore_legacy_icon_alpha(&mut rgba);
@@ -6662,8 +6683,8 @@ fn render_icon_sized(icon: HICON, width: u32, height: u32) -> Option<image::Rgba
 }
 
 fn restore_legacy_icon_alpha(rgba: &mut [u8]) {
-    if rgba.chunks_exact(4).all(|pixel| pixel[3] == 0) {
-        for pixel in rgba.chunks_exact_mut(4) {
+    if rgba.as_chunks::<4>().0.iter().all(|pixel| pixel[3] == 0) {
+        for pixel in rgba.as_chunks_mut::<4>().0.iter_mut() {
             if pixel[..3].iter().any(|channel| *channel != 0) {
                 pixel[3] = 255;
             }

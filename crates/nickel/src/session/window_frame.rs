@@ -1124,8 +1124,10 @@ mod tests {
                 render_titlebar_pixels(420, title, background, foreground, border).unwrap();
             assert_eq!(rendered_width, width);
             let changed = pixels
-                .chunks_exact(4)
-                .zip(blank.chunks_exact(4))
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .zip(blank.as_chunks::<4>().0.iter())
                 .enumerate()
                 .filter_map(|(index, (pixel, empty))| (pixel != empty).then_some(index as u32))
                 .collect::<Vec<_>>();
@@ -1377,7 +1379,13 @@ mod tests {
     fn task_switcher_title_is_rasterized_onto_its_opaque_card_background() {
         let pixels = render_task_switcher_label(88, 24, "gyp", 0x002b3852, 0x00e8edf4)
             .expect("task switcher label should rasterize");
-        assert!(pixels.chunks_exact(4).all(|pixel| pixel[3] == 255));
+        assert!(
+            pixels
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|pixel| pixel[3] == 255)
+        );
     }
 
     #[test]

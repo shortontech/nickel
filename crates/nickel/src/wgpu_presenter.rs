@@ -1170,7 +1170,7 @@ impl Frame {
                         cached
                     } else {
                         let mut bytes = selected.as_raw().clone();
-                        for pixel in bytes.chunks_exact_mut(4) {
+                        for pixel in bytes.as_chunks_mut::<4>().0.iter_mut() {
                             let alpha = pixel[3] as u16;
                             for channel in &mut pixel[..3] {
                                 *channel = ((*channel as u16 * alpha + 127) / 255) as u8;

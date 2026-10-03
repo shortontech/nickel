@@ -139,7 +139,10 @@ fn parse_fingerprint(value: &str) -> Result<[u8; 32]> {
         return Err("host fingerprint must be exactly 64 hexadecimal characters".into());
     }
     let mut fingerprint = [0; 32];
-    for (output, pair) in fingerprint.iter_mut().zip(value.as_bytes().chunks_exact(2)) {
+    for (output, pair) in fingerprint
+        .iter_mut()
+        .zip(value.as_bytes().as_chunks::<2>().0.iter())
+    {
         let pair = std::str::from_utf8(pair)?;
         *output = u8::from_str_radix(pair, 16)?;
     }

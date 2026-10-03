@@ -430,7 +430,7 @@ impl DesktopPermit {
     ) -> Self {
         static NEXT_OPERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         let operation_id = NEXT_OPERATION
-            .fetch_update(
+            .try_update(
                 std::sync::atomic::Ordering::Relaxed,
                 std::sync::atomic::Ordering::Relaxed,
                 |id| id.checked_add(1),
@@ -1901,7 +1901,7 @@ fn decode_hex<const N: usize>(value: &str) -> Option<[u8; N]> {
         return None;
     }
     let mut output = [0; N];
-    for (index, chunk) in value.as_bytes().chunks_exact(2).enumerate() {
+    for (index, chunk) in value.as_bytes().as_chunks::<2>().0.iter().enumerate() {
         output[index] = (hex_digit(chunk[0])? << 4) | hex_digit(chunk[1])?;
     }
     Some(output)

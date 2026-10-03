@@ -26,7 +26,7 @@ impl EmergencyStopHandle {
     pub(crate) fn latch(&self) -> u64 {
         let previous = self
             .0
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |epoch| {
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |epoch| {
                 Some(epoch.saturating_add(2) | 1)
             })
             .unwrap();

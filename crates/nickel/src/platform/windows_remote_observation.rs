@@ -124,7 +124,12 @@ pub(crate) fn capture_window_client(
         let mut rgba = vec![0; pixels * 4];
         if copied.is_ok() && !data.is_null() {
             let bgra = std::slice::from_raw_parts(data.cast::<u8>(), rgba.len());
-            for (source, target) in bgra.chunks_exact(4).zip(rgba.chunks_exact_mut(4)) {
+            for (source, target) in bgra
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .zip(rgba.as_chunks_mut::<4>().0.iter_mut())
+            {
                 target.copy_from_slice(&[source[2], source[1], source[0], 255]);
             }
         }
@@ -233,8 +238,10 @@ pub(crate) fn capture_output_pixels(
             {
                 check()?;
                 for (source, target) in source_row
-                    .chunks_exact(4)
-                    .zip(target_row.chunks_exact_mut(4))
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .zip(target_row.as_chunks_mut::<4>().0.iter_mut())
                 {
                     target.copy_from_slice(&[source[2], source[1], source[0], 255]);
                 }
@@ -345,7 +352,7 @@ unsafe extern "system" fn lifecycle_event(
     if let Some(state) = LIFECYCLE.get()
         && (state
             .serial
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |value| {
                 value.checked_add(1)
             })
             .is_err()
@@ -1029,7 +1036,7 @@ pub(crate) struct Admission;
 impl Admission {
     pub(crate) fn acquire() -> Result<Self, String> {
         PREPARATIONS
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |count| {
                 (count < 2).then_some(count + 1)
             })
             .map_err(|_| "Windows observation workers are busy".to_owned())?;

@@ -394,7 +394,7 @@ mod tests {
     fn host_raster_is_visible_and_has_exact_size() {
         let pixels = RecoveryUi::new().render_pixels();
         assert_eq!(pixels.len(), WIDTH as usize * HEIGHT as usize * 4);
-        assert!(pixels.chunks_exact(4).any(|pixel| pixel[3] != 0));
+        assert!(pixels.as_chunks::<4>().0.iter().any(|pixel| pixel[3] != 0));
     }
 
     #[test]

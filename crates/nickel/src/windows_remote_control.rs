@@ -128,7 +128,7 @@ pub(crate) fn observe_physical_pointer(event: nickel_input::windows::NativePoint
 fn advance_local_input_epoch() {
     use std::sync::atomic::Ordering;
     if LOCAL_INPUT_EPOCH
-        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |epoch| {
+        .try_update(Ordering::AcqRel, Ordering::Acquire, |epoch| {
             epoch.checked_add(1)
         })
         .is_err()
@@ -3408,7 +3408,7 @@ impl DesktopAuthority for WindowsDesktopAuthority {
         self.validate_window_capture(permit.clone(), id, generation)?;
         let capture_generation = self
             .capture_generation
-            .fetch_update(
+            .try_update(
                 std::sync::atomic::Ordering::AcqRel,
                 std::sync::atomic::Ordering::Acquire,
                 |value| value.checked_add(1),
@@ -6316,7 +6316,7 @@ impl WindowsRemoteControl {
         let capture_generation = self
             .authority
             .capture_generation
-            .fetch_update(
+            .try_update(
                 std::sync::atomic::Ordering::AcqRel,
                 std::sync::atomic::Ordering::Acquire,
                 |value| value.checked_add(1),

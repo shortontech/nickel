@@ -8,7 +8,7 @@ pub(crate) fn identify_badge(number: usize) -> MemoryRenderBuffer {
     const SIZE: usize = 180;
     const THICKNESS: usize = 18;
     let mut rgba = vec![0_u8; SIZE * SIZE * 4];
-    for pixel in rgba.chunks_exact_mut(4) {
+    for pixel in rgba.as_chunks_mut::<4>().0.iter_mut() {
         pixel.copy_from_slice(&[38, 45, 59, 238]);
     }
     let segments = match number {

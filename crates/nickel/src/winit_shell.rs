@@ -970,7 +970,8 @@ impl WinitShell {
 
         self.create_surface(SurfaceRole::ControlCenter, 0, primary, primary_name)?;
         self.create_surface(SurfaceRole::Notification, 0, primary, primary_name)?;
-        for role in [SurfaceRole::WindowPreview] {
+        {
+            let role = SurfaceRole::WindowPreview;
             if fixed_plugin_surface_key(role, &self.active_fixed_plugins)
                 .is_some_and(|key| self.active_fixed_plugins.contains(&key))
             {

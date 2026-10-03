@@ -1240,7 +1240,9 @@ impl SmithayFrameRenderer {
                         let start = y as usize * width as usize + region.loc.x as usize;
                         let end = start + region.size.w as usize;
                         for (target, pixel) in bytes[start * 4..end * 4]
-                            .chunks_exact_mut(4)
+                            .as_chunks_mut::<4>()
+                            .0
+                            .iter_mut()
                             .zip(&software.pixels()[start..end])
                         {
                             target.copy_from_slice(&[pixel.r, pixel.g, pixel.b, pixel.a]);
@@ -1487,7 +1489,12 @@ fn premultiplied_memory_buffer(bytes: &[u8], width: u32, height: u32) -> MemoryR
     buffer
         .render()
         .draw(|target| {
-            for (target, source) in target.chunks_exact_mut(4).zip(bytes.chunks_exact(4)) {
+            for (target, source) in target
+                .as_chunks_mut::<4>()
+                .0
+                .iter_mut()
+                .zip(bytes.as_chunks::<4>().0.iter())
+            {
                 target.copy_from_slice(&premultiplied_pixel([
                     source[0], source[1], source[2], source[3],
                 ]));
@@ -4681,7 +4688,7 @@ mod tests {
                 panic!("expected uploaded glyph pixels")
             };
             let mut antialiased = 0;
-            for pixel in bytes.chunks_exact(4) {
+            for pixel in bytes.as_chunks::<4>().0.iter() {
                 if pixel[3] > 0 && pixel[3] < 255 {
                     antialiased += 1;
                     // White glyphs in premultiplied storage have RGB equal to
@@ -5226,7 +5233,13 @@ mod tests {
             buffer
                 .render()
                 .draw(|bytes| {
-                    assert!(bytes.chunks_exact(4).all(|actual| actual == pixel));
+                    assert!(
+                        bytes
+                            .as_chunks::<4>()
+                            .0
+                            .iter()
+                            .all(|actual| *actual == pixel)
+                    );
                     Ok::<_, std::convert::Infallible>(Vec::new())
                 })
                 .unwrap();

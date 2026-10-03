@@ -197,7 +197,7 @@ pub fn load_svg_bytes(data: &[u8], raster_size: u32) -> Option<RgbaImage> {
     // distinct matters when an icon is tinted and later premultiplied for a
     // Smithay texture upload.
     let mut pixels = pixmap.data().to_vec();
-    for pixel in pixels.chunks_exact_mut(4) {
+    for pixel in pixels.as_chunks_mut::<4>().0.iter_mut() {
         let alpha = u16::from(pixel[3]);
         if alpha == 0 {
             pixel[..3].fill(0);

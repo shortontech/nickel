@@ -4708,7 +4708,14 @@ mod tests {
         let first = render_host(first.host(), 320, 160, 1.0);
         let second = render_host(second.host(), 320, 160, 1.0);
         assert_eq!(first, second);
-        assert!(first.rgba.chunks_exact(4).any(|pixel| pixel[3] != 0));
+        assert!(
+            first
+                .rgba
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .any(|pixel| pixel[3] != 0)
+        );
     }
 
     #[test]

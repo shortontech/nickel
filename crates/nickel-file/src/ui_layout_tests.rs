@@ -1036,10 +1036,12 @@ fn file_views_contain_non_square_provider_artwork_without_stretching() {
         let raster = nickel_ui_testkit::render_host(&host, 960, 640, 1.0);
         let mut points = raster
             .rgba
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .enumerate()
             .filter_map(|(index, pixel)| {
-                (pixel == [20, 80, 160, 255]).then_some((index % 960, index / 960))
+                (*pixel == [20, 80, 160, 255]).then_some((index % 960, index / 960))
             });
         let (first_x, first_y) = points.next().expect("provider artwork is rasterized");
         let (mut min_x, mut max_x, mut min_y, mut max_y) = (first_x, first_x, first_y, first_y);
@@ -1826,7 +1828,12 @@ fn every_file_fixture_passes_geometry_accessibility_and_selection_contrast_gates
             (variant.viewport.width, variant.viewport.height)
         );
         assert!(
-            raster.rgba.chunks_exact(4).any(|pixel| pixel[3] != 0),
+            raster
+                .rgba
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .any(|pixel| pixel[3] != 0),
             "{} rendered no visible pixels",
             variant.id,
         );

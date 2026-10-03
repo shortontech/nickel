@@ -163,7 +163,7 @@ mod platform {
             )));
         }
         let mut rgb = Vec::with_capacity(width as usize * height as usize * 3);
-        for group in bytes[..expected].chunks_exact(4) {
+        for group in bytes[..expected].as_chunks::<4>().0.iter() {
             let u = i32::from(group[0]) - 128;
             let y0 = i32::from(group[1]);
             let v = i32::from(group[2]) - 128;

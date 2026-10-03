@@ -509,7 +509,7 @@ impl RemoteWriter {
         };
         if self
             .retained
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |retained| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |retained| {
                 retained
                     .checked_add(bytes)
                     .filter(|total| *total <= MAX_OUTBOUND_BYTES)

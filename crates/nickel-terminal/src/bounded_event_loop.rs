@@ -88,7 +88,7 @@ impl BoundedEventLoopSender {
         let len = bytes.len();
         let reserved =
             self.pending_bytes
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |pending| {
+                .try_update(Ordering::AcqRel, Ordering::Acquire, |pending| {
                     pending
                         .checked_add(len)
                         .filter(|next| *next <= self.maximum_pending_bytes)

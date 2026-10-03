@@ -487,7 +487,7 @@ fn render_bitmap(bitmap: windows::Win32::Graphics::Gdi::HBITMAP) -> Option<RgbaI
     if rows != height as i32 {
         return None;
     }
-    for pixel in bgra.chunks_exact_mut(4) {
+    for pixel in bgra.as_chunks_mut::<4>().0.iter_mut() {
         pixel.swap(0, 2);
     }
     RgbaImage::from_raw(width, height, bgra)
@@ -543,7 +543,12 @@ fn render_icon(icon: HICON, physical_size: u32) -> Option<RgbaImage> {
         let mut rgba = vec![0_u8; (size * size * 4) as usize];
         if drawn && !pixels.is_null() {
             let bgra = std::slice::from_raw_parts(pixels.cast::<u8>(), rgba.len());
-            for (source, target) in bgra.chunks_exact(4).zip(rgba.chunks_exact_mut(4)) {
+            for (source, target) in bgra
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .zip(rgba.as_chunks_mut::<4>().0.iter_mut())
+            {
                 target.copy_from_slice(&[source[2], source[1], source[0], source[3]]);
             }
         }

@@ -651,7 +651,7 @@ mod native_runtime {
         };
         let injected = native.flags.0 & 0x10 != 0;
         let extended = native.flags.0 & 1 != 0;
-        let _ = PHYSICAL_SUPER_SIDES.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+        let _ = PHYSICAL_SUPER_SIDES.try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
             Some(super::observed_super_sides(
                 current,
                 native.vkCode,
@@ -659,7 +659,7 @@ mod native_runtime {
                 injected,
             ))
         });
-        let _ = PHYSICAL_ALT_SIDES.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+        let _ = PHYSICAL_ALT_SIDES.try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
             Some(super::observed_alt_sides(
                 current,
                 native.vkCode,
