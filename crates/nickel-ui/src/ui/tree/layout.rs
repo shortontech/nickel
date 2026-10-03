@@ -1041,7 +1041,7 @@ fn apply_transient_state_with_parent<Message>(
                         }
                 });
                 if !element.style.css_paint {
-                    element.style.height = Length::Px(height.unwrap_or_else(|| {
+                    element.style.height = Length::Px(height.unwrap_or({
                         if *overlay {
                             30.0
                         } else if *expanded {

@@ -2467,34 +2467,6 @@ pub use start_menu_components::*;
 mod tree;
 pub use tree::*;
 
-#[cfg(test)]
-mod background_policy_tests {
-    use super::*;
-
-    #[test]
-    #[should_panic(expected = "prohibited pure-black/white UI background in root/dialog")]
-    fn runtime_policy_attributes_extreme_fills_to_the_component_root() {
-        assert_background_color_policy(
-            "root/dialog",
-            &[PaintCommand::Fill {
-                rect: Rect::new(0.0, 0.0, 10.0, 10.0),
-                color: 0x000000,
-            }],
-        );
-    }
-
-    #[test]
-    fn terminal_viewport_has_the_only_runtime_background_exception() {
-        assert_background_color_policy(
-            "root/terminal-viewport",
-            &[PaintCommand::Fill {
-                rect: Rect::new(0.0, 0.0, 10.0, 10.0),
-                color: 0xffffff,
-            }],
-        );
-    }
-}
-
 /// Tessellate an inside rounded border without painting its transparent center.
 /// All presenters consume the same bounded logical strips.
 pub fn rounded_border_spans(rect: Rect, width: f32, radius: f32) -> impl Iterator<Item = Rect> {
@@ -2516,7 +2488,7 @@ pub fn rounded_border_spans(rect: Rect, width: f32, radius: f32) -> impl Iterato
             r - (r * r - (r - edge).powi(2)).max(0.0).sqrt()
         }
     };
-    (0..rect.size.height.ceil().max(0.0).min(16384.0) as u32).flat_map(move |row| {
+    (0..rect.size.height.ceil().clamp(0.0, 16384.0) as u32).flat_map(move |row| {
         let y = row as f32;
         let h = (rect.size.height - y).min(1.0);
         let middle = y + h / 2.0;
@@ -2693,4 +2665,32 @@ pub fn rounded_coverage_spans(
         span.size.height /= scale;
     }
     spans
+}
+
+#[cfg(test)]
+mod background_policy_tests {
+    use super::*;
+
+    #[test]
+    #[should_panic(expected = "prohibited pure-black/white UI background in root/dialog")]
+    fn runtime_policy_attributes_extreme_fills_to_the_component_root() {
+        assert_background_color_policy(
+            "root/dialog",
+            &[PaintCommand::Fill {
+                rect: Rect::new(0.0, 0.0, 10.0, 10.0),
+                color: 0x000000,
+            }],
+        );
+    }
+
+    #[test]
+    fn terminal_viewport_has_the_only_runtime_background_exception() {
+        assert_background_color_policy(
+            "root/terminal-viewport",
+            &[PaintCommand::Fill {
+                rect: Rect::new(0.0, 0.0, 10.0, 10.0),
+                color: 0xffffff,
+            }],
+        );
+    }
 }

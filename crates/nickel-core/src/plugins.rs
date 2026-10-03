@@ -561,7 +561,7 @@ impl PluginActivationSettings {
         }
         let path = path.as_ref();
         let _lock = nickel_storage::TransactionLock::try_acquire(path)?;
-        let mut settings = match Self::load(&path) {
+        let mut settings = match Self::load(path) {
             Ok(settings) => settings,
             Err(error) if error.kind() == io::ErrorKind::NotFound => Self::default(),
             Err(error) => return Err(error),
@@ -574,7 +574,7 @@ impl PluginActivationSettings {
                 "plugin activation settings exceed limit",
             ));
         }
-        nickel_storage::stage_write(&path, bytes)?.commit(|| Ok(()))
+        nickel_storage::stage_write(path, bytes)?.commit(|| Ok(()))
     }
 
     pub fn desired_enabled(&self, id: &str, bundled_default: bool) -> bool {

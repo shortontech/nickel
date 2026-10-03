@@ -1820,19 +1820,11 @@ impl<Message: Clone> UiFrame<Message> {
         let mut emitted_commands = 0usize;
         let mut damage = Vec::new();
         for id in changed {
-            let Some((element, inherited_foreground)) =
-                find_declared_element(&root, &root_id, &id, None)
-            else {
-                return None;
-            };
-            let Some(node_index) = self.resolved.nodes.iter().position(|node| node.id == id) else {
-                return None;
-            };
-            let Some((commands, fragments)) =
-                self.emit_retained_subtree(&element, node_index, inherited_foreground)
-            else {
-                return None;
-            };
+            let (element, inherited_foreground) =
+                find_declared_element(&root, &root_id, &id, None)?;
+            let node_index = self.resolved.nodes.iter().position(|node| node.id == id)?;
+            let (commands, fragments) =
+                self.emit_retained_subtree(&element, node_index, inherited_foreground)?;
             rebuilt_fragments = rebuilt_fragments.saturating_add(fragments.len());
             emitted_commands = emitted_commands.saturating_add(commands.len());
             let (old_bounds, new_bounds) = self.splice_paint_fragment(&id, commands, fragments)?;
@@ -1898,14 +1890,11 @@ impl<Message: Clone> UiFrame<Message> {
         commands: Vec<PaintCommand>,
         mut replacements: Vec<PaintFragment>,
     ) -> Option<(Rect, Rect)> {
-        let Some(old) = self
+        let old = self
             .paint_fragments
             .iter()
             .find(|fragment| &fragment.id == id)
-            .cloned()
-        else {
-            return None;
-        };
+            .cloned()?;
         let replacement_index = replacements
             .iter()
             .position(|fragment| &fragment.id == id)?;
