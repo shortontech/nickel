@@ -4114,6 +4114,111 @@ impl RetainedPanelTree {
                         },
                     )?;
                 }
+                NativePatchOperation::InsertChild {
+                    parent,
+                    key,
+                    child_id,
+                    index,
+                    node: child,
+                } => {
+                    validate_keyed_child(child, key, child_id)?;
+                    if index_native_source(&source)?
+                        .0
+                        .contains_key(&NativeNodeId(child_id.clone()))
+                    {
+                        return Err(format!("inserted native child {child_id:?} already exists"));
+                    }
+                    let typed_child = PanelNode::parse(child)?;
+                    mutate_target(
+                        &mut source,
+                        &mut node,
+                        parent,
+                        &mut visited,
+                        &mut |source, typed| {
+                            let children = source
+                                .get_mut("children")
+                                .and_then(Value::as_array_mut)
+                                .ok_or("insert parent has no source children")?;
+                            let typed_children = typed_children_mut(typed)?;
+                            if children.len() != typed_children.len() || *index > children.len() {
+                                return Err(
+                                    "insert child index or typed alignment is invalid".into()
+                                );
+                            }
+                            children.insert(*index, child.clone());
+                            typed_children.insert(*index, typed_child.clone());
+                            Ok(())
+                        },
+                    )?;
+                }
+                NativePatchOperation::RemoveChild {
+                    parent,
+                    key,
+                    child_id,
+                    index,
+                } => {
+                    mutate_target(
+                        &mut source,
+                        &mut node,
+                        parent,
+                        &mut visited,
+                        &mut |source, typed| {
+                            let children = source
+                                .get_mut("children")
+                                .and_then(Value::as_array_mut)
+                                .ok_or("remove parent has no source children")?;
+                            let typed_children = typed_children_mut(typed)?;
+                            if children.len() != typed_children.len()
+                                || *index >= children.len()
+                                || keyed_identity(&children[*index])
+                                    != Some((key.as_str(), child_id.as_str()))
+                            {
+                                return Err(
+                                    "remove child parent, index, key, or identity is stale".into(),
+                                );
+                            }
+                            children.remove(*index);
+                            typed_children.remove(*index);
+                            Ok(())
+                        },
+                    )?;
+                }
+                NativePatchOperation::MoveChild {
+                    parent,
+                    key,
+                    child_id,
+                    from,
+                    to,
+                } => {
+                    mutate_target(
+                        &mut source,
+                        &mut node,
+                        parent,
+                        &mut visited,
+                        &mut |source, typed| {
+                            let children = source
+                                .get_mut("children")
+                                .and_then(Value::as_array_mut)
+                                .ok_or("move parent has no source children")?;
+                            let typed_children = typed_children_mut(typed)?;
+                            if children.len() != typed_children.len()
+                                || *from >= children.len()
+                                || *to >= children.len()
+                                || keyed_identity(&children[*from])
+                                    != Some((key.as_str(), child_id.as_str()))
+                            {
+                                return Err(
+                                    "move child parent, index, key, or identity is stale".into()
+                                );
+                            }
+                            let child = children.remove(*from);
+                            children.insert(*to, child);
+                            let child = typed_children.remove(*from);
+                            typed_children.insert(*to, child);
+                            Ok(())
+                        },
+                    )?;
+                }
                 NativePatchOperation::ReplaceSubtree {
                     target,
                     node: replacement,
@@ -4165,6 +4270,20 @@ impl RetainedPanelTree {
             nodes_mutated: patch.operations.len() as u64,
         })
     }
+}
+
+fn keyed_identity(value: &Value) -> Option<(&str, &str)> {
+    Some((
+        value.get("key")?.as_str()?,
+        value.get("__nativeId")?.as_str()?,
+    ))
+}
+
+fn validate_keyed_child(value: &Value, key: &str, child_id: &str) -> Result<(), String> {
+    if keyed_identity(value) != Some((key, child_id)) {
+        return Err("inserted child key or native identity differs from its operation".into());
+    }
+    Ok(())
 }
 
 fn is_primitive_patch_value(value: &Value, property: &str) -> bool {
@@ -4892,6 +5011,108 @@ mod class_lookup_tests {
         assert_eq!(retained.node(), accepted.node());
         assert_eq!(retained.source(), accepted.source());
         assert_eq!(retained.generation(), 2);
+    }
+
+    #[test]
+    fn keyed_child_sequence_matches_cold_tree_and_rejects_stale_coordinates() {
+        let item = |key: &str| json!({"kind":"text","key":key,"__nativeId":format!("root/@{key}"),"children":[key]});
+        let source =
+            json!({"kind":"column","__nativeId":"root","children":[item("a"),item("b"),item("c")]});
+        let manifest = nickel_core::plugins::PluginManifest {
+            composition: None,
+            api_version: 1,
+            id: "test".into(),
+            name: "Test".into(),
+            author: None,
+            version: None,
+            entry: "index.js".into(),
+            stylesheet: None,
+            images: Vec::new(),
+            surfaces: Vec::new(),
+            validation_data: Default::default(),
+            capabilities: Vec::new(),
+            settings: Vec::new(),
+        };
+        let stylesheet = super::StyleSheet::compile("").unwrap();
+        let mut retained = RetainedPanelTree::admit(&source, &manifest, None, 1).unwrap();
+        let patch = NativePatchEnvelope {
+            version: 1,
+            operations: vec![
+                NativePatchOperation::RemoveChild {
+                    parent: "root".into(),
+                    key: "a".into(),
+                    child_id: "root/@a".into(),
+                    index: 0,
+                },
+                NativePatchOperation::MoveChild {
+                    parent: "root".into(),
+                    key: "c".into(),
+                    child_id: "root/@c".into(),
+                    from: 1,
+                    to: 0,
+                },
+                NativePatchOperation::InsertChild {
+                    parent: "root".into(),
+                    key: "d".into(),
+                    child_id: "root/@d".into(),
+                    index: 2,
+                    node: item("d"),
+                },
+            ],
+            counters: NativePatchCounters {
+                nodes_visited: 3,
+                nodes_mutated: 3,
+            },
+        };
+        let counters = retained
+            .apply_patch(&patch, &manifest, None, &stylesheet, 2, 120)
+            .unwrap();
+        let expected =
+            json!({"kind":"column","__nativeId":"root","children":[item("c"),item("b"),item("d")]});
+        assert_eq!(
+            retained.node(),
+            &super::parse_panel_for_manifest(&expected, &manifest, None).unwrap()
+        );
+        assert_eq!(retained.source(), &expected);
+        assert_eq!(counters.nodes_mutated, 3);
+
+        let bad_operations = [
+            NativePatchOperation::RemoveChild {
+                parent: "root".into(),
+                key: "b".into(),
+                child_id: "root/@b".into(),
+                index: 0,
+            },
+            NativePatchOperation::MoveChild {
+                parent: "root/missing".into(),
+                key: "c".into(),
+                child_id: "root/@c".into(),
+                from: 0,
+                to: 1,
+            },
+            NativePatchOperation::InsertChild {
+                parent: "root".into(),
+                key: "b".into(),
+                child_id: "root/@b".into(),
+                index: 0,
+                node: item("b"),
+            },
+        ];
+        for operation in bad_operations {
+            let accepted = retained.clone();
+            let invalid = NativePatchEnvelope {
+                version: 1,
+                operations: vec![operation],
+                counters: NativePatchCounters::default(),
+            };
+            assert!(
+                retained
+                    .apply_patch(&invalid, &manifest, None, &stylesheet, 3, 1)
+                    .is_err()
+            );
+            assert_eq!(retained.source(), accepted.source());
+            assert_eq!(retained.node(), accepted.node());
+        }
     }
 
     #[test]

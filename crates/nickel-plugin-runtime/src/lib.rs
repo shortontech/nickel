@@ -61,6 +61,26 @@ pub enum NativePatchOperation {
         slot: String,
         action: usize,
     },
+    InsertChild {
+        parent: String,
+        key: String,
+        child_id: String,
+        index: usize,
+        node: Value,
+    },
+    RemoveChild {
+        parent: String,
+        key: String,
+        child_id: String,
+        index: usize,
+    },
+    MoveChild {
+        parent: String,
+        key: String,
+        child_id: String,
+        from: usize,
+        to: usize,
+    },
     ReplaceSubtree {
         target: String,
         node: Value,
@@ -383,6 +403,47 @@ impl JsxRuntime {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn keyed_insertion_keeps_trailing_sibling_out_of_transport() {
+        let source = r#"
+            function Item({name}) { return h(Text,{key:name},name); }
+            function App() {
+                const [extra,setExtra]=useState(false);
+                return h(Window,{},h(Button,{key:'toggle',onClick:()=>setExtra(true)},'toggle'),
+                    ...(extra?[h(Item,{key:'left',name:'left'})]:[]),
+                    h(Item,{key:'right',name:'right'}));
+            }
+        "#;
+        let mut runtime = super::JsxRuntime::new(source, None).unwrap();
+        let initial = runtime
+            .render("__nickelRender()", |node| Ok(node.clone()))
+            .unwrap();
+        let right_id = initial["children"][1]["__nativeId"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let outcome = runtime
+            .dispatch_patched("__nickelDispatchBatchPatched([[0,null]])")
+            .unwrap();
+        let super::ScheduledPatch::Patched { patch, .. } = outcome else {
+            panic!()
+        };
+        assert!(patch.operations.iter().any(|op| matches!(
+            op,
+            super::NativePatchOperation::InsertChild { index: 1, .. }
+        )));
+        assert!(!patch.operations.iter().any(|op| matches!(op,
+            super::NativePatchOperation::ReplaceSubtree { target, .. } if target == &right_id)));
+        assert_eq!(
+            patch.operations.len(),
+            1,
+            "unchanged trailing child needs no operation"
+        );
+        assert_eq!(patch.counters.nodes_mutated, 1);
+        runtime.finish_patch_render(true).unwrap();
+        runtime.finish_event(true).unwrap();
+    }
+
     #[test]
     fn patched_dispatch_transports_only_the_changed_leaf() {
         let source = r#"

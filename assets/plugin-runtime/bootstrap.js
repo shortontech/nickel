@@ -1287,6 +1287,52 @@ function __nickelNativePatch(previous, next) {
         }
         return true;
     }
+    function keyed(children) {
+        if (!children.length) return true;
+        const keys = new Set(), ids = new Set();
+        for (const child of children) {
+            if (!child || typeof child !== 'object' || Array.isArray(child)
+                || child.key === undefined || !child.__nativeId) return false;
+            const key = String(child.key);
+            if (keys.has(key) || ids.has(child.__nativeId)) return false;
+            keys.add(key); ids.add(child.__nativeId);
+        }
+        return true;
+    }
+    function emitKeyedChildren(parent, before, after) {
+        if (!keyed(before) || !keyed(after)) return false;
+        const desired = new Map(after.map(child => [child.__nativeId, child]));
+        const working = before.slice();
+        for (let index = working.length - 1; index >= 0; index--) {
+            const child = working[index];
+            if (!desired.has(child.__nativeId)) {
+                operations.push({op:'removeChild', parent:parent.__nativeId,
+                    key:String(child.key), child_id:child.__nativeId, index});
+                working.splice(index, 1);
+            }
+        }
+        for (let index = 0; index < after.length; index++) {
+            const wanted = after[index];
+            if (working[index]?.__nativeId === wanted.__nativeId) continue;
+            const from = working.findIndex(child => child.__nativeId === wanted.__nativeId);
+            if (from < 0) {
+                operations.push({op:'insertChild', parent:parent.__nativeId,
+                    key:String(wanted.key), child_id:wanted.__nativeId, index, node:wanted});
+                working.splice(index, 0, wanted);
+            } else {
+                operations.push({op:'moveChild', parent:parent.__nativeId,
+                    key:String(wanted.key), child_id:wanted.__nativeId, from, to:index});
+                working.splice(index, 0, working.splice(from, 1)[0]);
+            }
+        }
+        const oldById = new Map(before.map(child => [child.__nativeId, child]));
+        for (const child of after) {
+            const old = oldById.get(child.__nativeId);
+            if (old && JSON.stringify(old) !== JSON.stringify(child)) walk(old, child);
+            else if (old) visited++;
+        }
+        return true;
+    }
     function walk(left, right) {
         visited++;
         if (!left || !right || typeof left !== 'object' || typeof right !== 'object'
@@ -1303,7 +1349,7 @@ function __nickelNativePatch(previous, next) {
         }
         const before = left.children ?? [];
         const after = right.children ?? [];
-        if (!Array.isArray(before) || !Array.isArray(after) || before.length !== after.length) {
+        if (!Array.isArray(before) || !Array.isArray(after)) {
             operations.length = operationStart;
             operations.push({op:'replaceSubtree', target:right.__nativeId, node:right});
             return;
@@ -1311,6 +1357,14 @@ function __nickelNativePatch(previous, next) {
         if (before.every(primitive) && after.every(primitive)) {
             if (JSON.stringify(before) !== JSON.stringify(after))
                 operations.push({op:'setPrimitive', target:right.__nativeId, property:'children', value:after});
+            return;
+        }
+        if ((before.length !== after.length
+            || before.some((child, index) => child?.__nativeId !== after[index]?.__nativeId))
+            && emitKeyedChildren(right, before, after)) return;
+        if (before.length !== after.length) {
+            operations.length = operationStart;
+            operations.push({op:'replaceSubtree', target:right.__nativeId, node:right});
             return;
         }
         for (let index = 0; index < after.length; index++) {
