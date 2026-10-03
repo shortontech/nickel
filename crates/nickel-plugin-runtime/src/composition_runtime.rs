@@ -927,6 +927,15 @@ impl ShellCompositionRuntime {
         props: &Value,
         validate: impl FnOnce(&Value) -> Result<T, String>,
     ) -> Result<(RenderedComponent, T), String> {
+        self.render_expanded_validated_with_generation(mount, props, |value, _| validate(value))
+    }
+
+    pub fn render_expanded_validated_with_generation<T>(
+        &mut self,
+        mount: &ComponentMount,
+        props: &Value,
+        validate: impl FnOnce(&Value, u64) -> Result<T, String>,
+    ) -> Result<(RenderedComponent, T), String> {
         self.transactional(|host| {
             host.validate_mount(mount)?;
             if let Some(surface) = host.mounts[&mount.id].surface.clone() {
@@ -1102,7 +1111,7 @@ impl ShellCompositionRuntime {
         &mut self,
         root: u64,
         rendered: RenderedComponent,
-        validate: impl FnOnce(&Value) -> Result<T, String>,
+        validate: impl FnOnce(&Value, u64) -> Result<T, String>,
     ) -> Result<(RenderedComponent, T), String> {
         let generation = rendered.generation;
         let mut expansion = ExpansionState {
@@ -1119,7 +1128,7 @@ impl ShellCompositionRuntime {
             0,
         )?;
         bounded_json(&node)?;
-        let validated = validate(&node)?;
+        let validated = validate(&node, generation)?;
         let removed = self
             .nested_mounts
             .keys()
@@ -2768,9 +2777,14 @@ mod tests {
 
         let shell = host.component("shell.taskbar").unwrap();
         let shell_mount = host.mount(&shell).unwrap();
-        let rendered = host
-            .render_expanded(&shell_mount, &serde_json::json!({}), |_| Ok(()))
+        let (rendered, admitted_generation) = host
+            .render_expanded_validated_with_generation(
+                &shell_mount,
+                &serde_json::json!({}),
+                |_, generation| Ok(generation),
+            )
             .unwrap();
+        assert_eq!(rendered.generation(), admitted_generation);
         assert!(rendered.node.to_string().contains("child"));
     }
 
