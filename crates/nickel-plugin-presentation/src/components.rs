@@ -4065,6 +4065,15 @@ impl RetainedPanelTree {
                     if !is_primitive_patch_value(value, property) {
                         return Err("setPrimitive contains a non-primitive value".into());
                     }
+                    if mutate_flattened_target(&mut source, &mut node, target, &mut |source| {
+                        source
+                            .as_object_mut()
+                            .ok_or("native patch target is not an object")?
+                            .insert(property.clone(), value.clone());
+                        Ok(())
+                    })? {
+                        continue;
+                    }
                     mutate_target(
                         &mut source,
                         &mut node,
@@ -4584,6 +4593,41 @@ fn mutate_target(
     Err(format!("native patch target {target:?} disappeared"))
 }
 
+fn mutate_flattened_target(
+    source: &mut Value,
+    typed: &mut PanelNode,
+    target: &str,
+    operation: &mut impl FnMut(&mut Value) -> Result<(), String>,
+) -> Result<bool, String> {
+    if typed_children_mut(typed).is_ok() || !source_contains_id(source, target) {
+        return Ok(false);
+    }
+    fn mutate(
+        source: &mut Value,
+        target: &str,
+        operation: &mut impl FnMut(&mut Value) -> Result<(), String>,
+    ) -> Result<(), String> {
+        if source.get("__nativeId").and_then(Value::as_str) == Some(target) {
+            return operation(source);
+        }
+        let children = source
+            .get_mut("children")
+            .and_then(Value::as_array_mut)
+            .ok_or_else(|| format!("native patch target {target:?} disappeared"))?;
+        for child in children {
+            if child.get("__nativeId").and_then(Value::as_str) == Some(target)
+                || source_contains_id(child, target)
+            {
+                return mutate(child, target, operation);
+            }
+        }
+        Err(format!("native patch target {target:?} disappeared"))
+    }
+    mutate(source, target, operation)?;
+    *typed = PanelNode::parse(source)?;
+    Ok(true)
+}
+
 fn typed_children_mut(node: &mut PanelNode) -> Result<&mut Vec<PanelNode>, String> {
     match node {
         PanelNode::Box { children, .. }
@@ -5036,6 +5080,70 @@ mod class_lookup_tests {
         assert!(RetainedPanelTree::admit(&invalid, &manifest, None, 8).is_err());
         assert_eq!(retained.generation(), 7);
         assert_eq!(retained.source(), &source);
+    }
+
+    #[test]
+    fn nested_indexed_target_below_typed_leaf_reparses_that_leaf() {
+        let source = json!({
+            "kind":"select", "__nativeId":"root", "id":"projects", "label":"Projects",
+            "value":"project", "open":true, "action":0, "accessibilityLabel":"Projects",
+            "__handlerSlots":{"action":"root:action"}, "children":[
+                {"kind":"option", "id":"project", "__nativeId":"root/#0/@project",
+                 "action":1, "children":["old"]}
+            ]
+        });
+        let manifest = nickel_core::plugins::PluginManifest {
+            composition: None,
+            api_version: 1,
+            id: "test".into(),
+            name: "Test".into(),
+            author: None,
+            version: None,
+            entry: "index.js".into(),
+            stylesheet: None,
+            images: Vec::new(),
+            surfaces: Vec::new(),
+            validation_data: Default::default(),
+            capabilities: Vec::new(),
+            settings: Vec::new(),
+        };
+        let stylesheet = super::StyleSheet::compile("").unwrap();
+        let mut retained = RetainedPanelTree::admit(&source, &manifest, None, 1).unwrap();
+        assert!(
+            retained
+                .nodes()
+                .keys()
+                .any(|id| id.as_str() == "root/#0/@project")
+        );
+        let patch = NativePatchEnvelope {
+            version: 1,
+            operations: vec![NativePatchOperation::SetPrimitive {
+                target: "root/#0/@project".into(),
+                property: "children".into(),
+                value: json!(["new"]),
+            }],
+            counters: NativePatchCounters {
+                nodes_visited: 1,
+                nodes_mutated: 1,
+                ..Default::default()
+            },
+        };
+        retained
+            .apply_patch(&patch, &manifest, None, &stylesheet, 2, 32)
+            .unwrap();
+        let expected = json!({
+            "kind":"select", "__nativeId":"root", "id":"projects", "label":"Projects",
+            "value":"project", "open":true, "action":0, "accessibilityLabel":"Projects",
+            "__handlerSlots":{"action":"root:action"}, "children":[
+                {"kind":"option", "id":"project", "__nativeId":"root/#0/@project",
+                 "action":1, "children":["new"]}
+            ]
+        });
+        assert_eq!(
+            retained.node(),
+            &super::parse_panel_for_manifest(&expected, &manifest, None).unwrap()
+        );
+        assert_eq!(retained.source(), &expected);
     }
 
     #[test]
