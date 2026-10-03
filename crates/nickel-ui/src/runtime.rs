@@ -5236,9 +5236,9 @@ mod tests {
     use crate::{
         ActionKind, Button, Container, ControllerAction, ControllerExecutionAuthority,
         ControllerExecutionBinding, ControllerExecutionDisposition, ControllerExecutionEvidence,
-        InputModality, Invalidation, NavigationEntry, NavigationScope, OverlayId, SemanticAction,
-        SemanticActionError, SemanticRole, SemanticValueInput, Slider, TextField, UiEvent, UiId,
-        UiStateStore,
+        InputModality, Invalidation, NavigationEntry, NavigationScope, OverlayId,
+        ProximityMagnification, SemanticAction, SemanticActionError, SemanticRole,
+        SemanticValueInput, Slider, TextField, UiEvent, UiId, UiStateStore,
     };
 
     #[cfg(any(unix, windows))]
@@ -6431,39 +6431,81 @@ mod tests {
         assert_eq!(host.inspect().resources.retained_build_scratch_bytes, 0);
     }
 
-    #[test]
-    fn paint_only_hover_reuses_declaration_layout_and_matches_cold_resolution() {
-        struct CountedApplication {
-            views: Cell<usize>,
-        }
+    struct RetainedPaintFixture {
+        views: Cell<usize>,
+        nodes: usize,
+        pointer_geometry: bool,
+    }
 
-        impl Application for CountedApplication {
-            type Message = ();
-
-            fn update(&mut self, (): Self::Message) {}
-
-            fn view(&self, _context: ViewContext) -> impl crate::View<Self::Message> {
-                self.views.set(self.views.get() + 1);
-                Button::new((), "Retained").id("retained")
+    impl RetainedPaintFixture {
+        fn new(nodes: usize) -> Self {
+            Self {
+                views: Cell::new(0),
+                nodes,
+                pointer_geometry: false,
             }
         }
 
-        let app = || CountedApplication {
-            views: Cell::new(0),
-        };
-        let mut retained = UiHost::new(app(), 180, 60);
-        assert!(retained.adopt_input_modality(crate::InputModality::Pointer));
-        retained.application().views.set(0);
-        let target = retained
+        fn with_pointer_geometry(mut self) -> Self {
+            self.pointer_geometry = true;
+            self
+        }
+    }
+
+    impl Application for RetainedPaintFixture {
+        type Message = ();
+
+        fn update(&mut self, (): Self::Message) {}
+
+        fn view(&self, _context: ViewContext) -> impl crate::View<Self::Message> {
+            self.views.set(self.views.get() + 1);
+            let children = (0..self.nodes)
+                .map(|index| Button::new((), format!("Item {index}")).id(format!("item-{index}")))
+                .collect::<Vec<_>>();
+            let root = Container::new().children(children);
+            if self.pointer_geometry {
+                root.proximity_magnification(ProximityMagnification {
+                    maximum_scale: 1.2,
+                    radius: 2,
+                })
+            } else {
+                root
+            }
+        }
+    }
+
+    fn semantic_center(host: &UiHost<RetainedPaintFixture>, name: &str) -> crate::Point {
+        let bounds = host
             .semantic_nodes()
             .into_iter()
-            .find(|node| node.name.as_deref() == Some("Retained"))
-            .expect("button semantics")
+            .find(|node| node.name.as_deref() == Some(name))
+            .unwrap_or_else(|| panic!("missing semantic target {name}"))
             .bounds;
-        let point = crate::Point {
-            x: target.origin.x + target.size.width / 2.0,
-            y: target.origin.y + target.size.height / 2.0,
-        };
+        crate::Point {
+            x: bounds.origin.x + bounds.size.width / 2.0,
+            y: bounds.origin.y + bounds.size.height / 2.0,
+        }
+    }
+
+    fn assert_cold_equivalent(
+        retained: &UiHost<RetainedPaintFixture>,
+        cold: &UiHost<RetainedPaintFixture>,
+    ) {
+        assert_eq!(retained.layout_snapshot(), cold.layout_snapshot());
+        assert_eq!(retained.commands(), cold.commands());
+        assert_eq!(retained.semantic_nodes(), cold.semantic_nodes());
+        assert_eq!(
+            retained.inspect().pointer_hover,
+            cold.inspect().pointer_hover
+        );
+    }
+
+    #[test]
+    fn paint_only_hover_reuses_declaration_layout_and_matches_cold_resolution() {
+        let mut retained = UiHost::new(RetainedPaintFixture::new(1), 180, 60);
+        assert!(retained.adopt_input_modality(crate::InputModality::Pointer));
+        retained.application().views.set(0);
+        let point = semantic_center(&retained, "Item 0");
 
         let outcome = retained.handle_event(UiEvent::PointerMoved(point));
         assert_eq!(retained.application().views.get(), 0);
@@ -6473,11 +6515,175 @@ mod tests {
         assert_eq!(outcome.telemetry.retained_paint_refreshes, 1);
         assert!(!outcome.telemetry.rebuilt);
 
-        let mut cold = UiHost::new(app(), 180, 60);
-        cold.state.set_hovered(Some(UiId::from("root/retained")));
+        let mut cold = UiHost::new(RetainedPaintFixture::new(1), 180, 60);
+        assert!(cold.adopt_input_modality(crate::InputModality::Pointer));
+        cold.state.set_hovered(Some(UiId::from("root/item-0")));
         cold.rebuild();
-        assert_eq!(retained.commands(), cold.commands());
-        assert_eq!(retained.semantic_nodes(), cold.semantic_nodes());
+        assert_cold_equivalent(&retained, &cold);
+    }
+
+    #[test]
+    fn retained_paint_transitions_match_cold_rebuilds_with_bounded_work() {
+        let mut retained = UiHost::new(RetainedPaintFixture::new(3), 360, 180);
+        let mut cold = UiHost::new(RetainedPaintFixture::new(3), 360, 180);
+        assert!(retained.adopt_input_modality(InputModality::Pointer));
+        assert!(cold.adopt_input_modality(InputModality::Pointer));
+
+        let first = semantic_center(&retained, "Item 0");
+        let second = semantic_center(&retained, "Item 1");
+        let outside = crate::Point { x: 359.0, y: 179.0 };
+        let first_id = UiId::from("root/item-0");
+        retained.request_focus(first_id.clone());
+        cold.request_focus(first_id);
+        retained.application().views.set(0);
+        cold.application().views.set(0);
+
+        let transitions = [
+            UiEvent::PointerMoved(first),
+            UiEvent::PointerMoved(second),
+            UiEvent::PointerMoved(outside),
+            UiEvent::PointerMoved(first),
+            UiEvent::PointerPressed(first),
+            UiEvent::PointerCancelled,
+            UiEvent::PointerMoved(second),
+            UiEvent::PointerMoved(outside),
+        ];
+        let transition_count = transitions.len();
+        let resource_bound = retained.inspect().resources;
+        let mut emitted = 0usize;
+        let mut semantics = 0usize;
+
+        for event in transitions {
+            let retained_outcome = retained.handle_event(event.clone());
+            cold.handle_event(event);
+            cold.rebuild();
+
+            assert_eq!(retained_outcome.telemetry.view_calls, 0);
+            assert_eq!(retained_outcome.telemetry.nodes_measured, 0);
+            assert_eq!(retained_outcome.telemetry.nodes_placed, 0);
+            assert_eq!(retained_outcome.telemetry.retained_paint_refreshes, 1);
+            assert!(!retained_outcome.telemetry.rebuilt);
+            assert!(
+                retained_outcome.telemetry.paint_commands_emitted
+                    <= resource_bound.paint_primitive_count
+            );
+            assert!(
+                retained_outcome.telemetry.semantic_nodes_rebuilt
+                    <= resource_bound.accessibility_node_count
+            );
+            emitted = emitted.saturating_add(retained_outcome.telemetry.paint_commands_emitted);
+            semantics = semantics.saturating_add(retained_outcome.telemetry.semantic_nodes_rebuilt);
+            assert_cold_equivalent(&retained, &cold);
+        }
+
+        assert_eq!(retained.application().views.get(), 0);
+        assert!(emitted <= transition_count * resource_bound.paint_primitive_count);
+        assert!(semantics <= transition_count * resource_bound.accessibility_node_count);
+    }
+
+    #[test]
+    fn pointer_dependent_geometry_conservatively_falls_back_to_full_rebuild() {
+        let mut host = UiHost::new(
+            RetainedPaintFixture::new(3).with_pointer_geometry(),
+            360,
+            180,
+        );
+        assert!(host.adopt_input_modality(InputModality::Pointer));
+        host.application().views.set(0);
+
+        let outcome = host.handle_event(UiEvent::PointerMoved(semantic_center(&host, "Item 1")));
+
+        assert!(outcome.telemetry.rebuilt);
+        assert_eq!(outcome.telemetry.retained_paint_refreshes, 0);
+        assert_eq!(outcome.telemetry.view_calls, 1);
+        assert!(outcome.telemetry.nodes_measured > 0);
+        assert!(outcome.telemetry.nodes_placed > 0);
+        assert_eq!(host.application().views.get(), 1);
+    }
+
+    #[test]
+    fn view_context_change_conservatively_falls_back_to_full_rebuild() {
+        let mut host = UiHost::new(RetainedPaintFixture::new(1), 180, 60);
+        assert!(host.adopt_input_modality(InputModality::Pointer));
+        host.application().views.set(0);
+
+        let outcome = host.handle_event(UiEvent::PointerPressed(semantic_center(&host, "Item 0")));
+
+        assert!(outcome.telemetry.rebuilt);
+        assert_eq!(outcome.telemetry.retained_paint_refreshes, 0);
+        assert_eq!(outcome.telemetry.view_calls, 1);
+        assert!(outcome.telemetry.nodes_measured > 0);
+        assert_eq!(host.application().views.get(), 1);
+        assert!(host.inspect().keyboard_focus.is_some());
+    }
+
+    #[cfg(not(debug_assertions))]
+    #[test]
+    #[ignore = "release-profile retained-paint admission benchmark"]
+    fn retained_paint_release_admission_avoids_cold_work_and_is_materially_faster() {
+        const NODES: usize = 800;
+        const ITERATIONS: usize = 32;
+        const SAMPLES: usize = 5;
+
+        fn median(mut samples: Vec<Duration>) -> Duration {
+            samples.sort_unstable();
+            samples[samples.len() / 2]
+        }
+
+        let mut retained = UiHost::new(RetainedPaintFixture::new(NODES), 900, 800);
+        let mut cold = UiHost::new(RetainedPaintFixture::new(NODES), 900, 800);
+        assert!(retained.adopt_input_modality(InputModality::Pointer));
+        assert!(cold.adopt_input_modality(InputModality::Pointer));
+        let inside = semantic_center(&retained, "Item 0");
+        let outside = crate::Point { x: -1.0, y: -1.0 };
+
+        for index in 0..8 {
+            let point = if index % 2 == 0 { inside } else { outside };
+            let outcome = retained.handle_event(UiEvent::PointerMoved(point));
+            assert_eq!(outcome.telemetry.view_calls, 0);
+            assert_eq!(outcome.telemetry.nodes_measured, 0);
+            assert_eq!(outcome.telemetry.nodes_placed, 0);
+            assert_eq!(outcome.telemetry.retained_paint_refreshes, 1);
+        }
+
+        let mut retained_samples = Vec::with_capacity(SAMPLES);
+        let mut cold_samples = Vec::with_capacity(SAMPLES);
+        for _ in 0..SAMPLES {
+            let retained_started = Instant::now();
+            for index in 0..ITERATIONS {
+                let point = if index % 2 == 0 { inside } else { outside };
+                let outcome = retained.handle_event(UiEvent::PointerMoved(point));
+                assert_eq!(outcome.telemetry.view_calls, 0);
+                assert_eq!(outcome.telemetry.nodes_measured, 0);
+                assert_eq!(outcome.telemetry.nodes_placed, 0);
+                assert_eq!(outcome.telemetry.retained_paint_refreshes, 1);
+                std::hint::black_box(retained.commands());
+            }
+            retained_samples.push(retained_started.elapsed());
+
+            let cold_started = Instant::now();
+            for index in 0..ITERATIONS {
+                let hovered = (index % 2 == 0).then(|| UiId::from("root/item-0"));
+                cold.state.set_hovered(hovered);
+                let (_, _, outcome) = cold.rebuild_timed();
+                assert_eq!(outcome.telemetry.view_calls, 1);
+                assert!(outcome.telemetry.nodes_measured >= NODES);
+                assert!(outcome.telemetry.nodes_placed >= NODES);
+                std::hint::black_box(cold.commands());
+            }
+            cold_samples.push(cold_started.elapsed());
+        }
+
+        let retained_median = median(retained_samples);
+        let cold_median = median(cold_samples);
+        eprintln!(
+            "retained-paint admission: nodes={NODES} iterations={ITERATIONS} retained-median={retained_median:?} cold-median={cold_median:?}"
+        );
+        assert!(
+            retained_median.as_nanos().saturating_mul(5)
+                <= cold_median.as_nanos().saturating_mul(4),
+            "retained paint must be at least 20% faster: retained={retained_median:?}, cold={cold_median:?}"
+        );
     }
 
     #[test]
