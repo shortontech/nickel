@@ -173,6 +173,8 @@ impl cosmic_text::Renderer for SampleDecorations<'_> {
 /// shared font system are opaque and are not estimated from source text bytes.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SoftwareRasterDiagnostics {
+    pub framebuffer_live_bytes: usize,
+    pub framebuffer_peak_bytes: usize,
     pub damage_hints_accepted: u64,
     pub damage_hints_fell_back: u64,
     pub full_repaints: u64,
@@ -291,7 +293,12 @@ impl SoftwareRenderer {
             swash_cache: Some(SwashCache::new()),
             glyph_bytes: 0,
             glyph_generation_misses: 0,
-            raster_stats: SoftwareRasterDiagnostics::default(),
+            raster_stats: SoftwareRasterDiagnostics {
+                framebuffer_peak_bytes: (width as usize)
+                    .saturating_mul(height as usize)
+                    .saturating_mul(std::mem::size_of::<Pixel>()),
+                ..SoftwareRasterDiagnostics::default()
+            },
         }
     }
 
@@ -321,6 +328,10 @@ impl SoftwareRenderer {
             self.previous_commands.clear();
             self.presented_generation = None;
             self.framebuffer_valid = false;
+            self.raster_stats.framebuffer_peak_bytes = self
+                .raster_stats
+                .framebuffer_peak_bytes
+                .max(self.pixel_capacity_bytes());
         }
     }
 
@@ -339,7 +350,10 @@ impl SoftwareRenderer {
     }
 
     pub fn software_raster_diagnostics(&self) -> SoftwareRasterDiagnostics {
-        self.raster_stats
+        SoftwareRasterDiagnostics {
+            framebuffer_live_bytes: self.pixel_capacity_bytes(),
+            ..self.raster_stats
+        }
     }
 
     /// Reports bounded derived data retained by the software rasterizer. The
@@ -2015,6 +2029,45 @@ mod tests {
         }]);
         assert!(!damage.is_empty());
         assert_eq!(renderer.pixels().len(), 64 * 32);
+    }
+
+    #[test]
+    fn idle_and_lifecycle_churn_reach_a_bounded_resource_plateau() {
+        const MAX_WIDTH: u32 = 256;
+        const MAX_HEIGHT: u32 = 128;
+        const MAX_FRAME_BYTES: usize = MAX_WIDTH as usize * MAX_HEIGHT as usize * 4;
+        // Vec growth may reserve the next geometric capacity, but repeated
+        // churn must not grow beyond that one bounded allocation step.
+        const MAX_CAPACITY_BYTES: usize = MAX_FRAME_BYTES * 2;
+        let command = |width, height| PaintCommand::Fill {
+            rect: Rect::new(0.0, 0.0, width as f32, height as f32),
+            color: 0x102030,
+        };
+
+        for mount in 0..16 {
+            let mut renderer = SoftwareRenderer::new_pixel_buffer(1, 1, 1.0);
+            for resize in 0..32 {
+                let width = 64 + ((mount + resize) % 4) * 64;
+                let height = 32 + ((mount + resize) % 4) * 32;
+                renderer.resize(width, height, 1.0 + (resize % 2) as f32);
+                let commands = [command(width, height)];
+                assert!(!renderer.render(&commands).is_empty());
+                for _ in 0..8 {
+                    assert!(renderer.render(&commands).is_empty());
+                }
+                let diagnostics = renderer.software_raster_diagnostics();
+                assert!(diagnostics.framebuffer_live_bytes <= MAX_CAPACITY_BYTES);
+                assert!(diagnostics.framebuffer_peak_bytes <= MAX_CAPACITY_BYTES);
+                assert_eq!(renderer.cache_diagnostics().live_bytes, 0);
+            }
+            let clean_before = renderer.software_raster_diagnostics().clean_frames;
+            assert!(clean_before >= 32 * 8);
+            renderer.suspend();
+            let diagnostics = renderer.software_raster_diagnostics();
+            assert_eq!(diagnostics.framebuffer_live_bytes, 4);
+            assert!(diagnostics.framebuffer_peak_bytes <= MAX_CAPACITY_BYTES);
+            assert_eq!(renderer.cache_diagnostics().live_bytes, 0);
+        }
     }
 
     #[test]

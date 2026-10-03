@@ -6531,6 +6531,44 @@ mod tests {
         }
     }
 
+    #[test]
+    fn unchanged_frames_do_no_component_or_semantic_work_and_render_cleanly() {
+        let mut host = UiHost::new(RetainedPaintFixture::new(24), 640, 480);
+        host.application().views.set(0);
+        let initial = host.inspect();
+        let mut renderer = crate::SoftwareRenderer::new(640, 480, 1.0);
+        assert!(!host.render_software(&mut renderer).is_empty());
+
+        for _ in 0..256 {
+            let outcome = host.step(HostBatch::default());
+            assert!(!outcome.changed);
+            assert_eq!(outcome.telemetry.events_processed, 0);
+            assert_eq!(outcome.telemetry.completions_processed, 0);
+            assert_eq!(outcome.telemetry.scheduled_wakeups, 0);
+            assert!(!outcome.telemetry.rebuilt);
+            assert_eq!(outcome.telemetry.view_calls, 0);
+            assert_eq!(outcome.telemetry.nodes_measured, 0);
+            assert_eq!(outcome.telemetry.nodes_placed, 0);
+            assert_eq!(outcome.telemetry.paint_commands_emitted, 0);
+            assert_eq!(outcome.telemetry.paint_fragments_rebuilt, 0);
+            assert_eq!(outcome.telemetry.paint_fragments_reused, 0);
+            assert_eq!(outcome.telemetry.paint_damage_rects, 0);
+            assert_eq!(outcome.telemetry.semantic_nodes_rebuilt, 0);
+            assert_eq!(outcome.telemetry.semantic_nodes_reused, 0);
+            assert_eq!(outcome.telemetry.retained_paint_refreshes, 0);
+            assert!(host.render_software(&mut renderer).is_empty());
+            let inspection = host.inspect();
+            assert_eq!(inspection.frame_generation, initial.frame_generation);
+            assert_eq!(inspection.resources, initial.resources);
+        }
+
+        assert_eq!(host.application().views.get(), 0);
+        let diagnostics = renderer.software_raster_diagnostics();
+        assert_eq!(diagnostics.full_repaints, 1);
+        assert_eq!(diagnostics.partial_repaints, 0);
+        assert_eq!(diagnostics.clean_frames, 256);
+    }
+
     fn assert_cold_equivalent(
         retained: &UiHost<RetainedPaintFixture>,
         cold: &UiHost<RetainedPaintFixture>,
