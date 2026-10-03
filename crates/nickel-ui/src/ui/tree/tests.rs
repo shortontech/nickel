@@ -4257,6 +4257,46 @@ fn structured_diagnostics_are_bounded_deduplicated_and_attributed() {
 }
 
 #[test]
+fn diagnostic_only_text_measurement_is_skipped_without_changing_frame_output() {
+    let view = || {
+        Column::new().child(
+            Text::<TestMessage>::new("cannot fit")
+                .id("text")
+                .wrap(false)
+                .width(1.0)
+                .height(1.0),
+        )
+    };
+    let bounds = Rect::new(0.0, 0.0, 100.0, 40.0);
+    let ordinary = UiFrame::layout(view(), bounds);
+    let diagnostic = UiFrame::layout_with_diagnostics(view(), bounds);
+
+    assert_eq!(
+        ordinary.resource_diagnostics().diagnostic_text_measurements,
+        0
+    );
+    assert_eq!(
+        diagnostic
+            .resource_diagnostics()
+            .diagnostic_text_measurements,
+        1
+    );
+    assert!(
+        diagnostic
+            .diagnostics()
+            .iter()
+            .any(|item| item.kind == DiagnosticKind::UnsatisfiedContent)
+    );
+    assert_eq!(ordinary.resolved_layout(), diagnostic.resolved_layout());
+    assert_eq!(ordinary.commands(), diagnostic.commands());
+    assert_eq!(ordinary.semantic_nodes(), diagnostic.semantic_nodes());
+    assert_eq!(
+        ordinary.accessibility_nodes(),
+        diagnostic.accessibility_nodes()
+    );
+}
+
+#[test]
 fn invalid_indefinite_and_unbalanced_layout_conditions_are_reported() {
     let tree = UiFrame::layout_with_diagnostics(
         Text::<TestMessage>::new("percent").width_length(Length::percent(0.5)),

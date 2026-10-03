@@ -191,53 +191,62 @@ pub(super) fn layout_element<Message: Clone>(
             format!("interactive rectangle {rect:?} is clipped by {inherited_clip:?}"),
         );
     }
-    let unconstrained_content = match &element.kind {
-        Kind::Text {
-            value,
-            scale,
-            bold,
-            wrap,
-            line_height,
-            max_lines,
-            ..
-        } => Some(measure_text(
-            value,
-            *scale,
-            *bold,
-            *wrap,
-            *line_height,
-            *max_lines,
-            if *wrap {
-                rect.size.width.max(0.0)
-            } else {
-                f32::INFINITY
-            },
-        )),
-        // Images deliberately map intrinsic pixels through their presentation
-        // policy, so a different allocated size is not unsatisfied content.
-        Kind::Image { .. } => None,
-        _ => None,
-    };
-    if unconstrained_content.is_some_and(|content| {
-        content.width > rect.size.width + 0.01 || content.height > rect.size.height + 0.01
-    }) {
-        tree.diagnostic(
-            DiagnosticKind::UnsatisfiedContent,
-            id,
-            format!(
-                "intrinsic {:?} exceeds allocated {:?}",
-                unconstrained_content.unwrap_or_default(),
-                rect.size
-            ),
-        );
-    }
-    if matches!(&element.kind, Kind::Image { image, .. } if image.width() == 0 || image.height() == 0)
-    {
-        tree.diagnostic(
-            DiagnosticKind::MissingAsset,
-            id,
-            "image has no pixels; using a bounded 16x16 fallback measurement",
-        );
+    // Content-overflow and missing-asset checks are diagnostic observations,
+    // not layout inputs. Avoid a second shaping pass for every text node on
+    // ordinary production frames where diagnostics were not requested.
+    if tree.diagnostics_enabled {
+        let unconstrained_content = match &element.kind {
+            Kind::Text {
+                value,
+                scale,
+                bold,
+                wrap,
+                line_height,
+                max_lines,
+                ..
+            } => {
+                tree.diagnostic_text_measurements =
+                    tree.diagnostic_text_measurements.saturating_add(1);
+                Some(measure_text(
+                    value,
+                    *scale,
+                    *bold,
+                    *wrap,
+                    *line_height,
+                    *max_lines,
+                    if *wrap {
+                        rect.size.width.max(0.0)
+                    } else {
+                        f32::INFINITY
+                    },
+                ))
+            }
+            // Images deliberately map intrinsic pixels through their presentation
+            // policy, so a different allocated size is not unsatisfied content.
+            Kind::Image { .. } => None,
+            _ => None,
+        };
+        if unconstrained_content.is_some_and(|content| {
+            content.width > rect.size.width + 0.01 || content.height > rect.size.height + 0.01
+        }) {
+            tree.diagnostic(
+                DiagnosticKind::UnsatisfiedContent,
+                id,
+                format!(
+                    "intrinsic {:?} exceeds allocated {:?}",
+                    unconstrained_content.unwrap_or_default(),
+                    rect.size
+                ),
+            );
+        }
+        if matches!(&element.kind, Kind::Image { image, .. } if image.width() == 0 || image.height() == 0)
+        {
+            tree.diagnostic(
+                DiagnosticKind::MissingAsset,
+                id,
+                "image has no pixels; using a bounded 16x16 fallback measurement",
+            );
+        }
     }
     let mut child_indices = Vec::new();
     let foreground = element.style.foreground.or(inherited_foreground);

@@ -174,6 +174,10 @@ fn complete_frame_reconstruction_stays_within_the_frame_work_budget() {
         .metadata("samples", SAMPLES)
         .work("nodes_measured", work.nodes_measured)
         .work("nodes_placed", work.nodes_placed)
+        .work(
+            "diagnostic_text_measurements",
+            work.diagnostic_text_measurements,
+        )
         .work("paint_nodes_executed", work.paint_nodes_executed)
         .work(
             "interaction_nodes_executed",

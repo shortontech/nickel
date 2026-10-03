@@ -405,6 +405,8 @@ pub struct FrameResourceDiagnostics {
     pub retained_nodes_replaced: usize,
     /// Resolver nodes whose intrinsic measurement actually executed for this frame.
     pub nodes_measured: usize,
+    /// Extra text measurements performed solely for requested layout diagnostics.
+    pub diagnostic_text_measurements: usize,
     /// Resolver nodes whose placement actually executed for this frame.
     pub nodes_placed: usize,
     pub paint_nodes_executed: usize,
@@ -522,6 +524,7 @@ pub struct UiFrame<Message = String> {
     retained_nodes: super::retained::RetainedNodeArena,
     retained_layout: HashMap<UiId, ResolvedNode>,
     nodes_measured: usize,
+    diagnostic_text_measurements: usize,
     nodes_placed: usize,
     paint_nodes_executed: usize,
     paint_nodes_reused: usize,
@@ -572,6 +575,7 @@ impl<Message> Default for UiFrame<Message> {
             retained_nodes: super::retained::RetainedNodeArena::default(),
             retained_layout: HashMap::new(),
             nodes_measured: 0,
+            diagnostic_text_measurements: 0,
             nodes_placed: 0,
             paint_nodes_executed: 0,
             paint_nodes_reused: 0,
@@ -3170,6 +3174,7 @@ impl<Message: Clone> UiFrame<Message> {
             retained_nodes_moved: retained.moved,
             retained_nodes_replaced: retained.replaced,
             nodes_measured: self.nodes_measured,
+            diagnostic_text_measurements: self.diagnostic_text_measurements,
             nodes_placed: self.nodes_placed,
             paint_nodes_executed: self.paint_nodes_executed,
             paint_nodes_reused: self.paint_nodes_reused,
