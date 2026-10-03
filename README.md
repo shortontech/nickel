@@ -1,8 +1,16 @@
 # Nickel
 
-**One Rust desktop for Windows and Linux.** Nickel brings its own desktop,
-taskbar, launcher, task switching, system controls, controller navigation, and
-apps. On Linux, the same executable also runs a Smithay compositor.
+**One desktop for Windows and Linux, with a shell you can change while you use
+it.** Nickel brings its own desktop, taskbar or dock, launcher, task switching,
+system controls, controller navigation, and apps.
+
+**Powered by JavaScript, best-in-class DX, and cross-platform.** The production
+shell is composed from capability-constrained JSX components and rendered by
+Nickel—not a browser. On Linux, Nickel can also run as a Smithay compositor.
+
+[![Nickel Default Shell with the launcher open](assets/screenshots/nickel-default-shell-thumbnail.png)](assets/screenshots/nickel-default-shell.png)
+
+*That's Nickel. It looks like that on Windows. It looks like that on Linux.*
 
 **Windows without Explorer, including UWP apps.** Nickel is the first
 independent Windows shell to run UWP apps without keeping Explorer alive. It
@@ -10,12 +18,12 @@ does this through the
 [Universal Windows Usher](crates/nickel-uwu/README.md)—UwU for short—which
 recreates the Windows shell services those applications expect.
 
-Nickel is the desktop, Plating is the settings app, and File is called File
-because even we have limits.
+Nickel is the desktop, its Settings are part of the active shell, and File is
+called File because even we have limits.
 
 ## Try it
 
-Nickel uses stable Rust. Run commands from the repository root.
+Build Nickel with stable Rust. Run commands from the repository root.
 
 ### Windows
 
@@ -35,16 +43,6 @@ feature is disabled by default; selecting it starts Nickel instead of Explorer a
 Removing the feature or uninstalling Nickel restores the normal Windows shell fallback. See the
 [Windows installer notes](packaging/windows/README.md) for packaging and native acceptance details.
 
-#### Known issues in v0.1.1
-
-- On Windows with display scaling above 100%, Nickel Bar and the launcher can be positioned off
-  screen. Setting display scaling to 100% is a temporary workaround. Fixed in v0.1.2
-  ([#13](https://github.com/shortontech/nickel/issues/13)).
-- Newly installed applications do not appear in launcher search until its application index is
-  refreshed. Fixed in v0.1.2 ([#11](https://github.com/shortontech/nickel/issues/11)).
-- The installer does not clearly explain how to enable Nickel as the Windows shell or that a new
-  sign-in is required after setup ([#12](https://github.com/shortontech/nickel/issues/12)).
-
 ### Linux nested session
 
 Run Nickel inside an existing Linux desktop, like a desktop-shaped ship in a
@@ -54,8 +52,9 @@ desktop-shaped bottle:
 cargo run -p nickel --no-default-features --features backend-winit --bin nickel-nested
 ```
 
-The [development plugin panel](assets/plugins/hello-panel/README.md) shows the
-experimental JSX component path in a nested session.
+The nested session runs the same JSX-driven shell as a real session. To work on
+an isolated package with live reload, use the
+[`nickel-plugin` development workflow](assets/plugins/README.md).
 
 For a direct DRM/udev session or an SDDM login session, see
 [Linux sessions](docs/linux-sessions.md). The direct session is still under
@@ -63,23 +62,52 @@ development.
 
 ## Features
 
-- A GPU-rendered desktop and taskbar with application grouping, native icons,
-  previews, and task switching.
+- A GPU-rendered desktop with a selectable JSX shell, native icons, previews,
+  application grouping, and task switching.
 - An application launcher with fuzzy search, pinned apps, and launch history.
+- Two bundled shells: the default Nickel taskbar and a derived Cupertino-style
+  floating dock.
 - Controller navigation with PlayStation, Xbox, Switch, and generic gamepads.
   Confirm and cancel follow the controller family, because muscle memory is a
   user interface contract.
-- Nickel Plating for display, network, audio, and other system controls.
+- Shell-owned Settings, Quick Settings, notifications, window menus, Run, the
+  volume OSD, and the on-screen keyboard, backed by native capabilities.
 - Nickel File, a Markdown viewer, a terminal, and a Codex chat application.
 - A shared shell experience on Windows and Linux, including a Smithay
   compositor on Linux.
 
+## Shells and themes
+
+Nickel ships two production shell packages:
+
+- **Nickel Default Shell** supplies the taskbar, launcher, Settings, Quick
+  Settings, notifications, window controls, previews, and companion surfaces.
+- **Nickel Cupertino Dock** inherits the default shell and replaces its taskbar
+  with a centered floating dock, while retaining the rest of the default
+  experience.
+
+Choose the active shell from the Plugins page in Settings. Shells are ordinary,
+versioned packages: they can export and replace components, declare their native
+surfaces, and request only the capabilities they need. The bundled shells live
+in [`assets/plugins`](assets/plugins/), alongside examples and package tooling.
+
+The visible shell is powered by JavaScript, but it is not Electron or a web
+view. Nickel executes generated JavaScript in a bounded package runtime and
+translates its component tree into native layout and drawing. The native host
+keeps input, hit testing, effects, protected data, and platform access under its
+control.
+
 ## Architecture
 
-Portable shell state, search, ranking, navigation, and UI live in focused Rust
-crates. Narrow platform adapters connect that shared behavior to Windows APIs or
-to Nickel's Linux compositor. This keeps interaction policy deterministic and
-testable while each platform retains its native windowing and system services.
+Rust crates own portable application state, search, ranking, navigation,
+rendering, package validation, and capability enforcement. The selected JSX
+shell owns presentation and composes those native facilities into the visible
+desktop. Narrow adapters connect the shared behavior to Windows APIs or to
+Nickel's Linux compositor.
+
+This division keeps policy deterministic and testable, lets shells change
+without duplicating platform integrations, and ensures package code cannot
+bypass native authority checks.
 
 See the [Cargo workspace guide](docs/cargo-workspace.md) for the crate map and
 responsibilities.
@@ -116,11 +144,14 @@ owner to pretend the letters are in Xbox places.
 
 ## Project status
 
-Nickel is experimental and under active development. The core desktop,
-launcher, task switching, controller navigation, and bundled applications are
-usable today. Work remains on notifications, hardware controls, Wi-Fi connection
-management, accessibility, touch-keyboard support, multiple-monitor coverage,
-and the direct Linux session.
+Nickel is under active development, but the JSX shell path is production—not an
+experiment or a preview architecture. The default shell and derived Cupertino
+dock run through the same package, composition, rendering, and capability paths
+available to shell developers.
+
+The desktop, launcher, Settings, task switching, controller navigation, and
+bundled applications are usable today. Work remains across platform coverage,
+accessibility, hardware integration, and the direct Linux session.
 
 ## Further reading
 
@@ -130,6 +161,12 @@ and the direct Linux session.
   experiments, and diagnostics.
 - [Codex backend diagnostics](docs/codex-backend-diagnostics.md) — offline
   replay and backend tests.
+- [Plugin and shell packages](assets/plugins/README.md) — package validation,
+  development, composition, and examples.
+- [Default shell package](assets/plugins/nickel-default/README.md) — the stock
+  JSX shell and its public component contracts.
+- [Cupertino Dock](assets/plugins/nickel-cupertino-dock/README.md) — the bundled
+  derived shell and live-preview workflow.
 - [Active specifications](specs/) and [completed specifications](specs/done/).
 
 ## Contributing

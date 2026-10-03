@@ -2,29 +2,36 @@
 
 ## Project Structure & Module Organization
 
-Nickel is an all-Rust, cross-platform desktop shell targeting Windows and Linux. Organize it as a Cargo workspace with small crates under `crates/`:
+Nickel is a cross-platform desktop shell targeting Windows and Linux. Its native host is a Cargo workspace, while its production shell presentation is supplied by capability-constrained JSX/CSS packages under `assets/plugins/`:
 
+- `crates/nickel/`: application binaries, session orchestration, and platform entry points.
 - `crates/nickel-core/`: platform-neutral application state and domain logic.
-- `crates/nickel-search/`: indexing, fuzzy matching, and result ranking.
-- `crates/nickel-ui/`: `winit` event handling, `wgpu` rendering, and widgets.
+- `crates/nickel-ui/`: native rendering, layout, input, and widgets.
 - `crates/nickel-platform/`: narrow Windows and Linux adapters.
-- `assets/`: fonts, shaders, icons, and test fixtures with compatible licenses.
-- `tests/`: workspace-level integration and platform contract tests.
+- `crates/nickel-plugin-runtime/`: validated JavaScript package execution, hooks, and capability-gated host APIs.
+- `crates/nickel-plugin-presentation/`: package composition and translation of JSX trees into native presentation.
+- `crates/nickel-session-protocol/`: typed communication between shell processes and trusted local clients.
+- `assets/plugins/nickel-default/`: the production default shell, authored in JSX/CSS with checked-in generated JavaScript.
+- `assets/plugins/nickel-cupertino-dock/`: a bundled derived shell that inherits the default shell and replaces its shell/taskbar contracts.
+- `assets/`: shell packages, fonts, shaders, icons, and test fixtures with compatible licenses.
 - `specs/`: active design specifications; move completed specifications to `specs/done/`.
 
-Keep search, ranking, navigation, and task-switcher policy independent of native window APIs so they remain deterministic and portable.
+Keep search, ranking, navigation, task-switcher policy, package validation, and capability enforcement independent of native window APIs so they remain deterministic and portable. Rust owns trusted state, policy, rendering, validation, effects, and platform integration. JSX owns shell composition and presentation through bounded native APIs; it must not become an authority bypass.
 
 ## Build, Test, and Development Commands
 
 Use standard Cargo commands from the workspace root:
 
-- `cargo run`: launch the development shell.
+- `cargo run -p nickel`: launch Nickel with the default platform configuration.
+- `cargo run -p nickel --no-default-features --features backend-winit --bin nickel-nested`: launch a nested Linux development session.
+- `cargo run -p nickel --bin nickel-plugin -- validate assets/plugins/nickel-default`: validate the default shell package.
+- `cargo run -p nickel --bin nickel-plugin -- validate assets/plugins/nickel-cupertino-dock`: validate the derived Cupertino shell package.
 - `cargo build --workspace`: compile every crate.
 - `cargo test --workspace`: run unit and integration tests.
 - `cargo fmt --all --check`: verify formatting.
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings`: reject lint regressions.
 
-Add platform-specific commands here when packaging and test harnesses are introduced.
+Use `nickel-plugin dev` for an isolated live package preview. When developing a derived shell, pass its base package first, for example `target/debug/nickel-plugin dev assets/plugins/nickel-default assets/plugins/nickel-cupertino-dock`.
 
 On Windows development hosts, prefer installed Unix-style tools such as `rg`, `cat`, and `ps`
 for routine searching, reading, and process inspection. Use PowerShell-specific commands only when
@@ -32,13 +39,21 @@ the task genuinely requires Windows APIs or no suitable Unix-style tool is avail
 
 ## Coding Style & Naming Conventions
 
-Use stable Rust and standard `rustfmt` formatting. Name modules, functions, and files in `snake_case`; types and traits in `UpperCamelCase`; constants in `SCREAMING_SNAKE_CASE`. Prefer explicit platform boundaries using `cfg(target_os = "...")`. Keep unsafe code localized, documented with a `SAFETY:` justification, and covered by focused tests.
+Use stable Rust and standard `rustfmt` formatting. Name Rust modules, functions, and files in `snake_case`; types and traits in `UpperCamelCase`; constants in `SCREAMING_SNAKE_CASE`. Prefer explicit platform boundaries using `cfg(target_os = "...")`. Keep unsafe code localized, documented with a `SAFETY:` justification, and covered by focused tests.
 
-Nickel application code and shipped tooling must remain Rust: do not introduce JavaScript, TypeScript, Lua, Go, C, or C++ application components.
+Native application code, security boundaries, platform adapters, and shipped tooling must remain Rust. Production shell packages are the intentional exception: author their presentation in JSX and CSS, then check in the emitted JavaScript consumed by Nickel. Nickel does not load React, Node, or a browser at runtime. Do not move trusted policy, capability checks, native resource ownership, or platform operations from Rust into package code. Do not introduce TypeScript runtime dependencies, JavaScript build steps at application startup, or application components in Lua, Go, C, or C++.
+
+For shell-package changes:
+
+- Treat `plugin.json` as a validated authority declaration. Request only the capabilities and surfaces the package needs.
+- Use composition exports and replacements for reusable or derived shell components instead of copying the default shell wholesale.
+- Keep authorable `.jsx` and checked-in generated `.js` synchronized. Follow the package README's compiler command; building or running Nickel must not require npm or a JSX compiler.
+- Use the host-provided component and hook vocabulary declared in `assets/plugins/nickel-plugin.d.ts`. Do not assume browser DOM APIs.
+- Put visual styling in the package CSS where supported and preserve native ownership of input, layout, hit testing, effects, and protected data.
 
 ## Testing Guidelines
 
-Place unit tests beside their modules and cross-crate tests in `tests/`. Name behavior tests descriptively, for example `recent_window_ranks_above_unused_match`. Test core logic with synthetic windows, notifications, clocks, and controller events. Gate platform adapter tests by target OS and record manual coverage for focus, DPI, multiple monitors, and permissions.
+Place unit tests beside their modules and integration tests in the relevant crate's `tests/` directory. Name behavior tests descriptively, for example `recent_window_ranks_above_unused_match`. Test core logic with synthetic windows, notifications, clocks, and controller events. Gate platform adapter tests by target OS and record manual coverage for focus, DPI, multiple monitors, and permissions.
 
 For new shell interaction behavior and regressions—especially launcher, focus, task switching, input,
 surface identity, effect ordering, and multi-output behavior—prefer the semantic scenario harness in
@@ -47,6 +62,8 @@ semantic input through production reducers and hit testing, and assert productio
 recorded effects. This is a default for new interaction tests, not a requirement to rewrite suitable
 existing tests or to force pure unit, rendering, adapter-contract, and live platform tests into the
 scenario harness.
+
+For JSX shell behavior, add focused runtime or presentation tests for package loading, composition, capabilities, callbacks, layout, and effect dispatch. Validate every changed package, regenerate its checked-in JavaScript, and use a nested live session for interaction or visual changes that package validation cannot exercise. Keep native policy assertions in Rust tests; do not rely solely on snapshots of generated JSX trees. Record manual Windows or direct-session coverage when behavior depends on native shell ownership, compositor integration, thumbnails, focus, or platform permissions.
 
 ## Commit & Pull Request Guidelines
 
