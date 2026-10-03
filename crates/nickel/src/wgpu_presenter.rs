@@ -40,6 +40,23 @@ struct VertexOut {
 }
 "#;
 const MAX_TEXTURE_CACHE_BYTES: usize = 64 * 1024 * 1024;
+const MAX_RETAINED_FRAMEBUFFER_BYTES: usize = 128 * 1024 * 1024;
+
+fn retained_framebuffer_bytes(width: u32, height: u32) -> Option<usize> {
+    (width as usize)
+        .checked_mul(height as usize)?
+        .checked_mul(4)
+        .filter(|bytes| *bytes <= MAX_RETAINED_FRAMEBUFFER_BYTES)
+}
+
+fn retained_framebuffer_configuration(
+    width: u32,
+    height: u32,
+    scale: f32,
+    format: wgpu::TextureFormat,
+) -> (u32, u32, u32, wgpu::TextureFormat) {
+    (width, height, scale.to_bits(), format)
+}
 
 #[derive(Default)]
 struct TextureCache {
@@ -347,6 +364,12 @@ impl SoftbufferPresenter {
         self.software
             .present(geometry, &graphics.software, commands)
     }
+
+    pub fn retained_framebuffer_diagnostics(&self) -> Option<RetainedFramebufferDiagnostics> {
+        self.gpu
+            .as_ref()
+            .map(|presenter| presenter.retained_diagnostics)
+    }
 }
 
 struct GpuPresenter {
@@ -354,8 +377,29 @@ struct GpuPresenter {
     config: wgpu::SurfaceConfiguration,
     configured: bool,
     pipeline: wgpu::RenderPipeline,
+    retained: Option<RetainedFramebuffer>,
+    retained_diagnostics: RetainedFramebufferDiagnostics,
     vertex_buffer: Option<wgpu::Buffer>,
     vertex_capacity: usize,
+}
+
+struct RetainedFramebuffer {
+    view: wgpu::TextureView,
+    texture: Arc<wgpu::BindGroup>,
+    configuration: (u32, u32, u32, wgpu::TextureFormat),
+    valid: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RetainedFramebufferDiagnostics {
+    pub live_bytes: usize,
+    pub peak_bytes: usize,
+    pub creations: u64,
+    pub releases: u64,
+    pub budget_fallbacks: u64,
+    pub composited_frames: u64,
+    pub direct_full_frames: u64,
+    pub full_initializations: u64,
 }
 
 impl GpuPresenter {
@@ -430,9 +474,87 @@ impl GpuPresenter {
             config,
             configured: false,
             pipeline,
+            retained: None,
+            retained_diagnostics: RetainedFramebufferDiagnostics::default(),
             vertex_buffer: None,
             vertex_capacity: 0,
         })
+    }
+
+    fn ensure_retained_framebuffer(
+        &mut self,
+        graphics: &GpuGraphics,
+        width: u32,
+        height: u32,
+        scale: f32,
+    ) -> bool {
+        let Some(bytes) = retained_framebuffer_bytes(width, height) else {
+            self.release_retained_framebuffer();
+            self.retained_diagnostics.budget_fallbacks =
+                self.retained_diagnostics.budget_fallbacks.saturating_add(1);
+            return false;
+        };
+        let configuration =
+            retained_framebuffer_configuration(width, height, scale, self.config.format);
+        if self
+            .retained
+            .as_ref()
+            .is_some_and(|target| target.configuration == configuration)
+        {
+            return true;
+        }
+        self.release_retained_framebuffer();
+        let texture = graphics.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Nickel retained shell framebuffer"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: self.config.format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let sampled = Arc::new(
+            graphics
+                .device
+                .create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("Nickel retained shell framebuffer"),
+                    layout: &graphics.texture_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(&view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::Sampler(&graphics.sampler),
+                        },
+                    ],
+                }),
+        );
+        self.retained = Some(RetainedFramebuffer {
+            view,
+            texture: sampled,
+            configuration,
+            valid: false,
+        });
+        self.retained_diagnostics.live_bytes = bytes;
+        self.retained_diagnostics.peak_bytes = self.retained_diagnostics.peak_bytes.max(bytes);
+        self.retained_diagnostics.creations = self.retained_diagnostics.creations.saturating_add(1);
+        true
+    }
+
+    fn release_retained_framebuffer(&mut self) {
+        if self.retained.take().is_some() {
+            self.retained_diagnostics.releases =
+                self.retained_diagnostics.releases.saturating_add(1);
+        }
+        self.retained_diagnostics.live_bytes = 0;
     }
 
     fn present(
@@ -441,6 +563,11 @@ impl GpuPresenter {
         graphics: &GpuGraphics,
         commands: &[PaintCommand],
     ) -> Result<DamageRegion, String> {
+        if geometry.pixel_width == 0 || geometry.pixel_height == 0 {
+            self.release_retained_framebuffer();
+            self.configured = false;
+            return Ok(DamageRegion::default());
+        }
         let width = geometry.pixel_width.max(1);
         let height = geometry.pixel_height.max(1);
         let changed = self.config.width != width || self.config.height != height;
@@ -451,8 +578,13 @@ impl GpuPresenter {
             self.configured = true;
         }
         let scale = width as f32 / geometry.logical_width.max(1) as f32;
+        let retained = self.ensure_retained_framebuffer(graphics, width, height, scale);
         let mut frame = Frame::new(width, height, scale, graphics.white.clone());
         frame.prepare(commands, graphics);
+        let composite_start = frame.vertices.len() as u32;
+        if retained {
+            frame.vertices.extend_from_slice(&fullscreen_vertices());
+        }
         let output = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(output) => output,
             wgpu::CurrentSurfaceTexture::Suboptimal(output) => {
@@ -500,10 +632,15 @@ impl GpuPresenter {
                 label: Some("Nickel shell frame"),
             });
         {
+            let target = self
+                .retained
+                .as_ref()
+                .filter(|_| retained)
+                .map_or(&view, |retained| &retained.view);
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Nickel shell surface"),
+                label: Some("Nickel retained shell frame"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
+                    view: target,
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
@@ -529,7 +666,48 @@ impl GpuPresenter {
                 pass.draw(draw.start..draw.end, 0..1);
             }
         }
+        if let Some(retained) = self.retained.as_ref().filter(|_| retained) {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Nickel shell surface composite"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.pipeline);
+            pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+            pass.set_scissor_rect(0, 0, width, height);
+            pass.set_bind_group(0, retained.texture.as_ref(), &[]);
+            pass.draw(composite_start..composite_start + 6, 0..1);
+            self.retained_diagnostics.composited_frames = self
+                .retained_diagnostics
+                .composited_frames
+                .saturating_add(1);
+        } else {
+            self.retained_diagnostics.direct_full_frames = self
+                .retained_diagnostics
+                .direct_full_frames
+                .saturating_add(1);
+        }
         graphics.queue.submit(Some(encoder.finish()));
+        if let Some(retained) = self.retained.as_mut().filter(|_| retained)
+            && !retained.valid
+        {
+            retained.valid = true;
+            self.retained_diagnostics.full_initializations = self
+                .retained_diagnostics
+                .full_initializations
+                .saturating_add(1);
+        }
         graphics.queue.present(output);
         Ok(DamageRegion {
             rects: vec![Rect::new(0.0, 0.0, width as f32, height as f32)].into(),
@@ -552,6 +730,37 @@ struct Frame {
     vertices: Vec<Vertex>,
     draws: Vec<Draw>,
     clips: Vec<Rect>,
+}
+
+fn fullscreen_vertices() -> [Vertex; 6] {
+    let top_left = Vertex {
+        position: [-1.0, 1.0],
+        uv: [0.0, 0.0],
+        color: [1.0; 4],
+    };
+    let top_right = Vertex {
+        position: [1.0, 1.0],
+        uv: [1.0, 0.0],
+        color: [1.0; 4],
+    };
+    let bottom_left = Vertex {
+        position: [-1.0, -1.0],
+        uv: [0.0, 1.0],
+        color: [1.0; 4],
+    };
+    let bottom_right = Vertex {
+        position: [1.0, -1.0],
+        uv: [1.0, 1.0],
+        color: [1.0; 4],
+    };
+    [
+        top_left,
+        bottom_left,
+        top_right,
+        top_right,
+        bottom_left,
+        bottom_right,
+    ]
 }
 
 impl Frame {
@@ -856,4 +1065,52 @@ fn mix(start: u32, end: u32, at: f32) -> u32 {
         (a as f32 + (b as f32 - a as f32) * at).round() as u32
     };
     channel(24) << 24 | channel(16) << 16 | channel(8) << 8 | channel(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        MAX_RETAINED_FRAMEBUFFER_BYTES, fullscreen_vertices, retained_framebuffer_bytes,
+        retained_framebuffer_configuration,
+    };
+
+    #[test]
+    fn retained_framebuffer_admission_is_bounded_and_overflow_safe() {
+        assert_eq!(retained_framebuffer_bytes(1920, 1080), Some(8_294_400));
+        assert_eq!(retained_framebuffer_bytes(0, 1080), Some(0));
+        assert_eq!(retained_framebuffer_bytes(u32::MAX, u32::MAX), None);
+        let square = ((MAX_RETAINED_FRAMEBUFFER_BYTES / 4) as f64).sqrt().floor() as u32;
+        assert!(retained_framebuffer_bytes(square, square).is_some());
+        assert!(retained_framebuffer_bytes(square + 1, square + 1).is_none());
+    }
+
+    #[test]
+    fn retained_framebuffer_composite_covers_the_cold_frame_exactly() {
+        let vertices = fullscreen_vertices();
+        assert_eq!(vertices.len(), 6);
+        let positions = vertices.map(|vertex| vertex.position);
+        assert!(positions.contains(&[-1.0, 1.0]));
+        assert!(positions.contains(&[1.0, 1.0]));
+        assert!(positions.contains(&[-1.0, -1.0]));
+        assert!(positions.contains(&[1.0, -1.0]));
+        assert!(vertices.iter().all(|vertex| vertex.color == [1.0; 4]));
+    }
+
+    #[test]
+    fn retained_framebuffer_identity_changes_on_resize_scale_and_format() {
+        let original =
+            retained_framebuffer_configuration(800, 600, 1.0, wgpu::TextureFormat::Bgra8Unorm);
+        assert_ne!(
+            original,
+            retained_framebuffer_configuration(801, 600, 1.0, wgpu::TextureFormat::Bgra8Unorm)
+        );
+        assert_ne!(
+            original,
+            retained_framebuffer_configuration(800, 600, 2.0, wgpu::TextureFormat::Bgra8Unorm)
+        );
+        assert_ne!(
+            original,
+            retained_framebuffer_configuration(800, 600, 1.0, wgpu::TextureFormat::Rgba8Unorm)
+        );
+    }
 }
