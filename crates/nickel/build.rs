@@ -52,7 +52,12 @@ fn embed_package_catalog() {
             }
         }
     }
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/plugins");
+    // Build-script binaries may be reused by a shared compiler cache across
+    // worktrees. Read Cargo's invocation environment at runtime instead of
+    // embedding the checkout that happened to compile this executable.
+    let manifest_directory = std::env::var_os("CARGO_MANIFEST_DIR")
+        .expect("Cargo supplies the package manifest directory to build scripts");
+    let root = Path::new(&manifest_directory).join("../../assets/plugins");
     println!("cargo:rerun-if-changed={}", root.display());
     let mut packages = fs::read_dir(&root)
         .unwrap()
