@@ -18,6 +18,8 @@ use nickel_plugin_presentation::components::{
     PanelNode, RetainedPanelTree, render_retained_panel, render_retained_panel_validated,
 };
 pub use nickel_plugin_presentation::components::{PluginImages, PluginMessage};
+#[cfg(test)]
+use nickel_plugin_runtime::NativePatchCounters;
 use nickel_plugin_runtime::composition_runtime::{
     ComponentEventHandle, ComponentMount, ScheduledExpandedBatch, ShellCompositionRuntime,
 };
@@ -157,6 +159,12 @@ pub struct PluginPanelApplication {
     surface_snapshot: Value,
     diagnostic_mount: u64,
     pending_frame_correlation: Option<nickel_ui::NativeFrameCorrelation>,
+    #[cfg(test)]
+    diagnostic_patch_operations: u64,
+    #[cfg(test)]
+    diagnostic_patch_transport_bytes: u64,
+    #[cfg(test)]
+    diagnostic_patch_counters: NativePatchCounters,
 }
 
 pub(crate) fn package_images(package: &PluginPackage) -> Result<PluginImages, String> {
@@ -901,6 +909,12 @@ impl PluginPanelApplication {
             surface_snapshot,
             diagnostic_mount: NEXT_DIAGNOSTIC_MOUNT.fetch_add(1, Ordering::Relaxed),
             pending_frame_correlation: None,
+            #[cfg(test)]
+            diagnostic_patch_operations: 0,
+            #[cfg(test)]
+            diagnostic_patch_transport_bytes: 0,
+            #[cfg(test)]
+            diagnostic_patch_counters: NativePatchCounters::default(),
         };
         application.reconcile_passive_effects()?;
         Ok(application)
@@ -1381,6 +1395,12 @@ impl PluginPanelApplication {
             surface_snapshot,
             diagnostic_mount: NEXT_DIAGNOSTIC_MOUNT.fetch_add(1, Ordering::Relaxed),
             pending_frame_correlation: None,
+            #[cfg(test)]
+            diagnostic_patch_operations: 0,
+            #[cfg(test)]
+            diagnostic_patch_transport_bytes: 0,
+            #[cfg(test)]
+            diagnostic_patch_counters: NativePatchCounters::default(),
         };
         application.reconcile_passive_effects()?;
         Ok(application)
@@ -3193,6 +3213,12 @@ impl PluginPanelApplication {
             surface_snapshot: serde_json::json!({}),
             diagnostic_mount: NEXT_DIAGNOSTIC_MOUNT.fetch_add(1, Ordering::Relaxed),
             pending_frame_correlation: None,
+            #[cfg(test)]
+            diagnostic_patch_operations: 0,
+            #[cfg(test)]
+            diagnostic_patch_transport_bytes: 0,
+            #[cfg(test)]
+            diagnostic_patch_counters: NativePatchCounters::default(),
         };
         scope.apply_rendered_effects(
             Ok(Some(accepted)),
@@ -3353,6 +3379,8 @@ impl nickel_ui::Application for PluginPanelApplication {
         });
         let mut validation_rejected = false;
         let mut native_failure = None;
+        #[cfg(test)]
+        let composition_patch = std::cell::Cell::new(None);
         let (rendered, effects) = if let Some(state) = &mut self.composition {
             let result = (|| {
                 let events = events
@@ -3379,6 +3407,12 @@ impl nickel_ui::Application for PluginPanelApplication {
                         let transport_bytes = serde_json::to_vec(patch)
                             .map_err(|error| error.to_string())?
                             .len();
+                        #[cfg(test)]
+                        composition_patch.set(Some((
+                            patch.operations.len() as u64,
+                            transport_bytes as u64,
+                            patch.counters,
+                        )));
                         candidate.apply_patch(
                             patch,
                             &self.manifest,
@@ -3492,6 +3526,34 @@ impl nickel_ui::Application for PluginPanelApplication {
                 )
             }
         };
+        #[cfg(test)]
+        if let Some((operations, transport_bytes, counters)) = composition_patch.get() {
+            self.diagnostic_patch_operations =
+                self.diagnostic_patch_operations.saturating_add(operations);
+            self.diagnostic_patch_transport_bytes = self
+                .diagnostic_patch_transport_bytes
+                .saturating_add(transport_bytes);
+            self.diagnostic_patch_counters.nodes_visited = self
+                .diagnostic_patch_counters
+                .nodes_visited
+                .saturating_add(counters.nodes_visited);
+            self.diagnostic_patch_counters.nodes_mutated = self
+                .diagnostic_patch_counters
+                .nodes_mutated
+                .saturating_add(counters.nodes_mutated);
+            self.diagnostic_patch_counters.local_materializations = self
+                .diagnostic_patch_counters
+                .local_materializations
+                .saturating_add(counters.local_materializations);
+            self.diagnostic_patch_counters.expansion_nodes = self
+                .diagnostic_patch_counters
+                .expansion_nodes
+                .saturating_add(counters.expansion_nodes);
+            self.diagnostic_patch_counters.tree_bytes = self
+                .diagnostic_patch_counters
+                .tree_bytes
+                .saturating_add(counters.tree_bytes);
+        }
         self.apply_rendered_effects(rendered, effects, validation_rejected);
         let candidate_accepted = self.accepted.clone();
         let candidate_effects = self.effects.split_off(previous_effects_len);
@@ -7820,5 +7882,370 @@ mod tests {
                 .last_error()
                 .is_some_and(|error| error.contains("passive effect reconciliation exceeded"))
         );
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct SettingsAdmissionWork {
+        cold_tree_bytes: u64,
+        patch_bytes: u64,
+        patch_operations: u64,
+        patch_nodes_visited: u64,
+        patch_nodes_mutated: u64,
+        patch_local_materializations: u64,
+        patch_expansion_nodes: u64,
+        patch_complete_tree_bytes: u64,
+        component_executions: u64,
+        typed_apply_attempts: u64,
+        typed_apply_rejections: u64,
+        mounts_open: usize,
+        mounts_closed: usize,
+    }
+
+    #[derive(Default)]
+    struct SettingsAdmissionSamples {
+        open: Vec<std::time::Duration>,
+        page_switch: Vec<std::time::Duration>,
+        control_edit: Vec<std::time::Duration>,
+        close: Vec<std::time::Duration>,
+        total: Vec<std::time::Duration>,
+        exact: Option<SettingsAdmissionWork>,
+    }
+
+    fn settings_admission_distribution(samples: &[std::time::Duration]) -> Value {
+        let mut samples = samples.to_vec();
+        samples.sort_unstable();
+        let at = |percentile: usize| {
+            let rank = samples.len().saturating_mul(percentile).div_ceil(100);
+            samples[rank.saturating_sub(1).min(samples.len() - 1)].as_nanos() as u64
+        };
+        serde_json::json!({
+            "p50_ns": at(50), "p95_ns": at(95), "p99_ns": at(99),
+            "max_ns": samples.last().unwrap().as_nanos() as u64,
+        })
+    }
+
+    fn canonicalize_settings_actions(value: &mut Value) {
+        match value {
+            Value::Array(values) => values.iter_mut().for_each(canonicalize_settings_actions),
+            Value::Object(object) => {
+                let slots = object
+                    .get("__handlerSlots")
+                    .and_then(Value::as_object)
+                    .map(|slots| {
+                        slots
+                            .iter()
+                            .filter_map(|(property, slot)| {
+                                slot.as_str()
+                                    .map(|slot| (property.clone(), slot.to_owned()))
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                for (property, slot) in slots {
+                    object.insert(property, Value::String(slot));
+                }
+                object.values_mut().for_each(canonicalize_settings_actions);
+            }
+            _ => {}
+        }
+    }
+
+    fn find_settings_source<'a>(value: &'a Value, id: &str) -> Option<&'a Value> {
+        if value.get("id").and_then(Value::as_str) == Some(id) {
+            return Some(value);
+        }
+        match value {
+            Value::Array(values) => values
+                .iter()
+                .find_map(|value| find_settings_source(value, id)),
+            Value::Object(object) => object
+                .values()
+                .find_map(|value| find_settings_source(value, id)),
+            _ => None,
+        }
+    }
+
+    fn settings_admission_application(
+        destination: &str,
+    ) -> Result<
+        (
+            PluginPanelApplication,
+            std::rc::Rc<std::cell::RefCell<ShellCompositionRuntime>>,
+        ),
+        String,
+    > {
+        let package = crate::bundled_plugin_assets::load_package("nickel-default")?;
+        let surface = package
+            .manifest
+            .surfaces
+            .iter()
+            .find(|surface| surface.id == "settings")
+            .ok_or("default Settings surface is missing")?
+            .clone();
+        let catalog = std::collections::BTreeMap::from([(package.manifest.id.clone(), package)]);
+        let host = std::rc::Rc::new(std::cell::RefCell::new(ShellCompositionRuntime::new(
+            &catalog,
+            "nickel-default",
+            &Default::default(),
+        )?));
+        let owners = host
+            .borrow()
+            .participating_owners()
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut registry = nickel_core::settings_registry::SettingsRegistry::default();
+        for owner in &owners {
+            host.borrow()
+                .shared_owner_runtime(owner)?
+                .borrow_mut()
+                .publish_settings(&mut registry, &owner.id)?;
+        }
+        for owner in &owners {
+            host.borrow()
+                .shared_owner_runtime(owner)?
+                .borrow_mut()
+                .set_settings_registry(&registry)?;
+        }
+        let snapshots = owners
+            .iter()
+            .map(|owner| {
+                let package = &catalog[&owner.id];
+                let settings = package
+                    .manifest
+                    .settings
+                    .iter()
+                    .map(|setting| (setting.id.clone(), setting.kind.default_value()))
+                    .collect::<std::collections::BTreeMap<_, _>>();
+                let mut data = serde_json::json!({
+                    "settings": settings,
+                    "windows": [],
+                    "applications": [],
+                    "notifications": initial_notifications_data(&package.manifest),
+                    "surface": {"id":"settings","kind":"window","width":1100,"height":800},
+                    "navigation": {"revision":"admission-1","destination":destination},
+                    "appearance": {"available":true,"writable":true,"generation":1,
+                        "configured":{"theme":"system","accent_hue":null,"accent_intensity":null,
+                            "reduce_transparency":false,"animations":"normal"},
+                        "resolved":{"theme":"dark","hue":200,"intensity":65,"accent":[55,145,255]}},
+                    "wallpaper": {"available":true,"writable":true,"generation":1,
+                        "configured":{"custom_image_configured":false,"position":"fill"},
+                        "images":[],"chooser":{"available":true,"pending":false,"result":null}},
+                });
+                if let Some(projection) = validation_surface_projection(package, &surface) {
+                    data.as_object_mut()
+                        .unwrap()
+                        .extend(projection.as_object().unwrap().clone());
+                }
+                (owner.clone(), data)
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let application = PluginPanelApplication::from_composed_surface(
+            &catalog,
+            "nickel-default",
+            &snapshots,
+            &surface,
+            Some(host.clone()),
+        )?;
+        Ok((application, host))
+    }
+
+    fn settings_profile_totals(diagnostics: &Value) -> [u64; 7] {
+        diagnostics["profiles"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .fold([0; 7], |mut totals, profile| {
+                for (index, field) in [
+                    "coldTreeTransportBytes",
+                    "patchEnvelopeTransportBytes",
+                    "patchOperations",
+                    "patchNodesVisited",
+                    "componentExecutions",
+                    "typedPatchApplyAttempts",
+                    "typedPatchApplyRejections",
+                ]
+                .iter()
+                .enumerate()
+                {
+                    totals[index] += profile[*field].as_u64().unwrap_or(0);
+                }
+                totals
+            })
+    }
+
+    fn exercise_production_settings_admission() -> (SettingsAdmissionWork, [std::time::Duration; 5])
+    {
+        let total_started = std::time::Instant::now();
+        let open_started = std::time::Instant::now();
+        let (application, composition) =
+            settings_admission_application("nickel-default/plugins").unwrap();
+        let mut host = nickel_ui::UiHost::new(application, 1100, 800);
+        let open = open_started.elapsed();
+        let mount_count = composition.borrow().mount_count();
+        assert!(mount_count > 0);
+        assert!(!host.commands().is_empty());
+        let runtime = host.application_mut().shared_runtime();
+        let before = settings_profile_totals(&runtime.borrow_mut().runtime_diagnostics().unwrap());
+        let navigation = find_settings_source(
+            host.application_mut().accepted.source(),
+            "settings-navigation/destination/nickel-default/appearance",
+        )
+        .unwrap();
+        let navigation_native = navigation["__nativeId"].clone();
+        let navigation_handler = navigation["__handlerSlots"]["action"].clone();
+
+        let page_started = std::time::Instant::now();
+        let appearance = host
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: SemanticRole::Button,
+                name: "Appearance".into(),
+            })
+            .unwrap();
+        host.perform_semantic_action(
+            appearance.id,
+            nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
+        );
+        let page_switch = page_started.elapsed();
+        assert!(host.application_mut().last_error().is_none());
+        let navigation = find_settings_source(
+            host.application_mut().accepted.source(),
+            "settings-navigation/destination/nickel-default/appearance",
+        )
+        .unwrap();
+        assert_eq!(navigation["__nativeId"], navigation_native);
+        assert_eq!(navigation["__handlerSlots"]["action"], navigation_handler);
+
+        let control = host
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: SemanticRole::Slider,
+                name: "Interface hue".into(),
+            })
+            .unwrap();
+        let control_source =
+            find_settings_source(host.application_mut().accepted.source(), "appearance-hue")
+                .unwrap();
+        let control_native = control_source["__nativeId"].clone();
+        let control_handler = control_source["__handlerSlots"]["action"].clone();
+        let edit_started = std::time::Instant::now();
+        host.perform_semantic_action(
+            control.id,
+            nickel_ui::SemanticAction::SetValue(nickel_ui::SemanticValueInput::Number(210.0)),
+        );
+        let control_edit = edit_started.elapsed();
+        assert!(host.application_mut().last_error().is_none());
+        let control_source =
+            find_settings_source(host.application_mut().accepted.source(), "appearance-hue")
+                .unwrap();
+        assert_eq!(control_source["__nativeId"], control_native);
+        assert_eq!(control_source["__handlerSlots"]["action"], control_handler);
+        assert!(matches!(
+            host.application_mut().take_effects().as_slice(),
+            [PluginEffect::Appearance { .. }]
+        ));
+
+        let mut accepted = host.application_mut().accepted.source().clone();
+        let (oracle, oracle_composition) =
+            settings_admission_application("nickel-default/appearance").unwrap();
+        let mut oracle = oracle.accepted.source().clone();
+        canonicalize_settings_actions(&mut accepted);
+        canonicalize_settings_actions(&mut oracle);
+        assert_eq!(
+            accepted, oracle,
+            "incremental Settings diverged from cold admission"
+        );
+        drop(oracle_composition);
+
+        let after = settings_profile_totals(&runtime.borrow_mut().runtime_diagnostics().unwrap());
+        let patch_operations = host.application_mut().diagnostic_patch_operations;
+        let patch_transport_bytes = host.application_mut().diagnostic_patch_transport_bytes;
+        let patch_counters = host.application_mut().diagnostic_patch_counters;
+        let close_started = std::time::Instant::now();
+        host.application_mut().retire_surface().unwrap();
+        let close = close_started.elapsed();
+        assert_eq!(composition.borrow().mount_count(), 0);
+        let work = SettingsAdmissionWork {
+            cold_tree_bytes: before[0],
+            patch_bytes: patch_transport_bytes,
+            patch_operations,
+            patch_nodes_visited: patch_counters.nodes_visited,
+            patch_nodes_mutated: patch_counters.nodes_mutated,
+            patch_local_materializations: patch_counters.local_materializations,
+            patch_expansion_nodes: patch_counters.expansion_nodes,
+            patch_complete_tree_bytes: patch_counters.tree_bytes,
+            component_executions: after[4] - before[4],
+            typed_apply_attempts: after[5] - before[5],
+            typed_apply_rejections: after[6] - before[6],
+            mounts_open: mount_count,
+            mounts_closed: composition.borrow().mount_count(),
+        };
+        let total = total_started.elapsed();
+        (work, [open, page_switch, control_edit, close, total])
+    }
+
+    #[test]
+    #[ignore = "production-sized release-profile Settings admission workload"]
+    fn production_settings_lifecycle_emits_release_distribution() {
+        std::thread::Builder::new()
+            .stack_size(32 * 1024 * 1024)
+            .spawn(|| {
+                let warmup = std::env::var("NICKEL_SETTINGS_ADMISSION_WARMUP")
+                    .ok()
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or(3);
+                let iterations = std::env::var("NICKEL_SETTINGS_ADMISSION_ITERATIONS")
+                    .ok()
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or(20);
+                assert!(iterations > 0);
+                for _ in 0..warmup {
+                    exercise_production_settings_admission();
+                }
+                let mut samples = SettingsAdmissionSamples::default();
+                for _ in 0..iterations {
+                    let (work, timings) = exercise_production_settings_admission();
+                    if let Some(expected) = samples.exact {
+                        assert_eq!(work, expected, "deterministic Settings work changed");
+                    } else {
+                        samples.exact = Some(work);
+                    }
+                    samples.open.push(timings[0]);
+                    samples.page_switch.push(timings[1]);
+                    samples.control_edit.push(timings[2]);
+                    samples.close.push(timings[3]);
+                    samples.total.push(timings[4]);
+                }
+                let work = samples.exact.unwrap();
+                let report = serde_json::json!({
+                    "schema": 1,
+                    "suite": "jsx_incremental",
+                    "workload": "production_settings_lifecycle",
+                    "metadata": {"iterations":iterations,"warmupIterations":warmup,"surface":"nickel-default/settings","page":"nickel-default/appearance"},
+                    "work": {
+                        "coldTreeTransportBytesPerIteration":work.cold_tree_bytes,
+                        "patchEnvelopeTransportBytesPerIteration":work.patch_bytes,
+                        "patchOperationsPerIteration":work.patch_operations,
+                        "patchNodesVisitedPerIteration":work.patch_nodes_visited,
+                        "patchNodesMutatedPerIteration":work.patch_nodes_mutated,
+                        "patchLocalMaterializationsPerIteration":work.patch_local_materializations,
+                        "patchExpansionNodesPerIteration":work.patch_expansion_nodes,
+                        "patchCompleteTreeBytesPerIteration":work.patch_complete_tree_bytes,
+                        "componentExecutionsPerIteration":work.component_executions,
+                        "typedPatchApplyAttemptsPerIteration":work.typed_apply_attempts,
+                        "typedPatchApplyRejectionsPerIteration":work.typed_apply_rejections,
+                        "mountsWhileOpen":work.mounts_open,"mountsAfterClose":work.mounts_closed,
+                    },
+                    "timings": {
+                        "open":settings_admission_distribution(&samples.open),
+                        "pageSwitch":settings_admission_distribution(&samples.page_switch),
+                        "controlEdit":settings_admission_distribution(&samples.control_edit),
+                        "close":settings_admission_distribution(&samples.close),
+                        "total":settings_admission_distribution(&samples.total),
+                    }
+                });
+                eprintln!("nickel_release_admission={report}");
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 }
