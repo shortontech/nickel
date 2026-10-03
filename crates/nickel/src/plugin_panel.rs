@@ -11,8 +11,7 @@ use nickel_core::plugins::{
     PluginCapability, PluginManifest, PluginPackage, PluginSurface, PluginSurfaceKind,
 };
 use nickel_plugin_presentation::components::{
-    PanelNode, RetainedPanelTree, parse_panel_for_manifest, render_retained_panel,
-    render_retained_panel_validated,
+    PanelNode, RetainedPanelTree, render_retained_panel, render_retained_panel_validated,
 };
 pub use nickel_plugin_presentation::components::{PluginImages, PluginMessage};
 use nickel_plugin_runtime::composition_runtime::{
@@ -2983,23 +2982,26 @@ impl PluginPanelApplication {
             }
             let rendered = if let Some(state) = &mut self.composition {
                 let mut host = state.host.borrow_mut();
-                let outcome = host.reconcile_expanded_pending_validated(&state.mount, |value| {
-                    let node = parse_panel_for_manifest(
-                        value,
-                        &self.manifest,
-                        self.expected_surface_id.as_deref(),
-                    )?;
-                    if let Some(id) = &self.expected_surface_id {
-                        let surface = self
-                            .manifest
-                            .surfaces
-                            .iter()
-                            .find(|surface| &surface.id == id)
-                            .ok_or("composed surface grant is missing")?;
-                        node.requested_surface(surface, &self.stylesheet)?;
-                    }
-                    Ok(())
-                })?;
+                let accepted_tree = self.accepted.clone();
+                let outcome = host.reconcile_expanded_pending_validated(
+                    &state.mount,
+                    &state.events,
+                    |patch, _, generation| {
+                        let mut candidate = accepted_tree;
+                        let transport_bytes = serde_json::to_vec(patch)
+                            .map_err(|error| error.to_string())?
+                            .len();
+                        candidate.apply_patch(
+                            patch,
+                            &self.manifest,
+                            self.expected_surface_id.as_deref(),
+                            &self.stylesheet,
+                            generation,
+                            transport_bytes,
+                        )?;
+                        Ok(candidate)
+                    },
+                )?;
                 match outcome {
                     ScheduledExpandedBatch::Unchanged => {
                         host.finish_transaction(true)?;
@@ -3027,11 +3029,14 @@ impl PluginPanelApplication {
                             }
                         }
                     }
-                    ScheduledExpandedBatch::Patched { .. } => {
-                        host.finish_transaction(false)?;
-                        return Err(
-                            "passive composition reconciliation returned an event patch".into()
-                        );
+                    ScheduledExpandedBatch::Patched {
+                        events, validated, ..
+                    } => {
+                        host.finish_transaction(true)?;
+                        state.events = events;
+                        self.accepted = validated;
+                        changed = true;
+                        None
                     }
                 }
             } else {

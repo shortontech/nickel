@@ -173,6 +173,7 @@ struct CompositionCheckpoint {
     callbacks: BTreeMap<u64, CallbackGrant>,
     children: BTreeMap<u64, OwnedChildGrant>,
     data: BTreeMap<PackageIdentity, Value>,
+    scheduled_renders: BTreeMap<u64, RenderedComponent>,
 }
 
 /// One generic composition host, one context/module cache per package.
@@ -191,6 +192,7 @@ pub struct ShellCompositionRuntime {
     children: BTreeMap<u64, OwnedChildGrant>,
     next_callback: u64,
     callback_depth: usize,
+    scheduled_renders: BTreeMap<u64, RenderedComponent>,
     checkpoint: Option<CompositionCheckpoint>,
 }
 
@@ -292,6 +294,7 @@ impl ShellCompositionRuntime {
             children: BTreeMap::new(),
             next_callback: 0,
             callback_depth: 0,
+            scheduled_renders: BTreeMap::new(),
             checkpoint: None,
         };
         let contribution_catalog = host
@@ -777,6 +780,7 @@ impl ShellCompositionRuntime {
                 .iter()
                 .map(|(owner, package)| (owner.clone(), package.data.clone()))
                 .collect(),
+            scheduled_renders: self.scheduled_renders.clone(),
         });
         Ok(())
     }
@@ -807,6 +811,7 @@ impl ShellCompositionRuntime {
                     package.data = data;
                 }
             }
+            self.scheduled_renders = checkpoint.scheduled_renders;
         }
         if let Some(error) = failure {
             self.effects.clear();
@@ -1115,6 +1120,17 @@ impl ShellCompositionRuntime {
                 .collect::<BTreeMap<_, _>>();
             let mut rendered_mounts = BTreeMap::new();
             let mut reconciliation_requested = false;
+            if events.is_empty() {
+                let mount_ids = self.mounts.keys().copied().collect::<Vec<_>>();
+                for mount in mount_ids {
+                    let outcome = self.render_mount_scheduled(mount, Value::Array(Vec::new()))?;
+                    if let Some(rendered) = outcome.rendered {
+                        rendered_mounts.insert(mount, rendered);
+                    }
+                    rendered_mounts.append(&mut self.scheduled_renders);
+                    reconciliation_requested |= outcome.reconciliation_requested;
+                }
+            }
             let mut offset = 0;
             while offset < events.len() {
                 let mount = events[offset].0.mount;
@@ -1127,15 +1143,10 @@ impl ShellCompositionRuntime {
                     .map(|(handle, value)| serde_json::json!([handle.action, value]))
                     .collect::<Vec<_>>();
                 let outcome = self.render_mount_scheduled(mount, Value::Array(batch))?;
-                if outcome.requires_expansion {
-                    return Err(
-                        "cross-boundary callback updates require a future multi-boundary patch"
-                            .into(),
-                    );
-                }
                 if let Some(rendered) = outcome.rendered {
                     rendered_mounts.insert(mount, rendered);
                 }
+                rendered_mounts.append(&mut self.scheduled_renders);
                 reconciliation_requested |= outcome.reconciliation_requested;
                 offset = end;
             }
@@ -1149,34 +1160,52 @@ impl ShellCompositionRuntime {
             if changed.is_empty() {
                 return Ok(ScheduledExpandedBatch::Unchanged);
             }
-            if changed.len() != 1 {
-                return Err(
-                    "one dispatch changed multiple composition ownership boundaries".into(),
-                );
-            }
-            let mount_id = changed[0];
-            if mount_id == root.id {
-                return Err(
-                    "root-local composition patches require direct native patch transport".into(),
-                );
-            }
-            let (boundary, _) = self
-                .nested_mounts
+            let mut boundaries = changed
                 .iter()
-                .find(|((owner, _), mount)| *owner == root.id && mount.id == mount_id)
-                .map(|((_, path), mount)| (path.clone(), mount.clone()))
-                .ok_or("dirty composition mount has no ownership boundary")?;
+                .map(|mount_id| {
+                    if *mount_id == root.id {
+                        if self
+                            .nested_mounts
+                            .keys()
+                            .any(|(owner, _)| *owner == root.id)
+                        {
+                            return Err(
+                                "root-local patch overlaps retained package boundaries".into()
+                            );
+                        }
+                        return Ok(("root".to_owned(), *mount_id, false));
+                    }
+                    self.nested_mounts
+                        .iter()
+                        .find(|((owner, _), mount)| *owner == root.id && mount.id == *mount_id)
+                        .map(|((_, path), _)| (path.clone(), *mount_id, true))
+                        .ok_or("dirty composition mount has no ownership boundary")
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            boundaries.sort_by(|left, right| left.0.cmp(&right.0));
+            for pair in boundaries.windows(2) {
+                if pair[1]
+                    .0
+                    .strip_prefix(&pair[0].0)
+                    .is_some_and(|suffix| suffix.starts_with('/'))
+                {
+                    return Err("overlapping dirty composition boundaries are ambiguous".into());
+                }
+            }
             let affected_mounts = self
                 .nested_mounts
                 .iter()
                 .filter(|((owner, path), _)| {
                     *owner == root.id
-                        && (path == &boundary
-                            || path
-                                .strip_prefix(&boundary)
-                                .is_some_and(|suffix| suffix.starts_with('/')))
+                        && boundaries.iter().any(|(boundary, _, _)| {
+                            path == boundary
+                                || path
+                                    .strip_prefix(boundary)
+                                    .is_some_and(|suffix| suffix.starts_with('/'))
+                        })
                 })
                 .map(|(_, mount)| mount.id)
+                .chain(changed.iter().copied())
                 .collect::<std::collections::BTreeSet<_>>();
             let mut retained_events = accepted_events
                 .iter()
@@ -1186,10 +1215,6 @@ impl ShellCompositionRuntime {
             let next_event = retained_events
                 .last_key_value()
                 .map_or(0, |(token, _)| token.saturating_add(1));
-            let rendered = rendered_mounts
-                .remove(&mount_id)
-                .ok_or("dirty composition mount omitted its scheduled render")?;
-            let generation = rendered.generation;
             let mut expansion = ExpansionState {
                 root: root.id,
                 events: std::mem::take(&mut retained_events),
@@ -1198,30 +1223,41 @@ impl ShellCompositionRuntime {
                 handler_slots: std::collections::BTreeSet::new(),
                 next_event,
             };
-            let mut replacement = rendered.node;
-            namespace_native_metadata(&mut replacement, &boundary, 0)?;
-            replacement = self.expand_node(
-                &boundary,
-                replacement,
-                &rendered.events,
-                mount_id,
-                &mut expansion,
-                0,
-            )?;
-            let target = replacement
-                .get("__nativeId")
-                .and_then(Value::as_str)
-                .ok_or("composition ownership boundary has no native identity")?
-                .to_owned();
-            let patch = NativePatchEnvelope {
-                version: 1,
-                operations: vec![NativePatchOperation::ReplaceSubtree {
+            let mut operations = Vec::with_capacity(boundaries.len());
+            let mut generation = 0;
+            for (boundary, mount_id, namespace) in &boundaries {
+                let rendered = rendered_mounts
+                    .remove(mount_id)
+                    .ok_or("dirty composition mount omitted its scheduled render")?;
+                generation = generation.max(rendered.generation);
+                let mut replacement = rendered.node;
+                if *namespace {
+                    namespace_native_metadata(&mut replacement, boundary, 0)?;
+                }
+                replacement = self.expand_node(
+                    boundary,
+                    replacement,
+                    &rendered.events,
+                    *mount_id,
+                    &mut expansion,
+                    0,
+                )?;
+                let target = replacement
+                    .get("__nativeId")
+                    .and_then(Value::as_str)
+                    .ok_or("composition ownership boundary has no native identity")?
+                    .to_owned();
+                operations.push(NativePatchOperation::ReplaceSubtree {
                     target,
                     node: replacement,
-                }],
+                });
+            }
+            let patch = NativePatchEnvelope {
+                version: 1,
+                operations,
                 counters: NativePatchCounters {
-                    nodes_visited: 1,
-                    nodes_mutated: 1,
+                    nodes_visited: boundaries.len() as u64,
+                    nodes_mutated: boundaries.len() as u64,
                 },
             };
             let validated = validate(&patch, &expansion.events, generation)?;
@@ -1230,10 +1266,12 @@ impl ShellCompositionRuntime {
                 .keys()
                 .filter(|(owner, path)| {
                     *owner == root.id
-                        && path != &boundary
-                        && path
-                            .strip_prefix(&boundary)
-                            .is_some_and(|suffix| suffix.starts_with('/'))
+                        && boundaries.iter().any(|(boundary, _, _)| {
+                            path != boundary
+                                && path
+                                    .strip_prefix(boundary)
+                                    .is_some_and(|suffix| suffix.starts_with('/'))
+                        })
                         && !expansion.visited.contains(path)
                 })
                 .cloned()
@@ -1263,31 +1301,19 @@ impl ShellCompositionRuntime {
     pub fn reconcile_expanded_pending_validated<T>(
         &mut self,
         root: &ComponentMount,
-        validate: impl FnOnce(&Value) -> Result<T, String>,
+        accepted_events: &BTreeMap<u64, ComponentEventHandle>,
+        validate: impl FnOnce(
+            &NativePatchEnvelope,
+            &BTreeMap<u64, ComponentEventHandle>,
+            u64,
+        ) -> Result<T, String>,
     ) -> Result<ScheduledExpandedBatch<T>, String> {
-        self.begin_transaction()?;
-        let result = (|| {
-            self.validate_mount(root)?;
-            let outcome = self.render_mount_scheduled(root.id, Value::Array(Vec::new()))?;
-            if outcome.rendered.is_none() && !outcome.requires_expansion {
-                return Ok(ScheduledExpandedBatch::Unchanged);
-            }
-            let (rendered, validated) = if let Some(rendered) = outcome.rendered {
-                self.expand_rendered(root.id, rendered, |value, _| validate(value))?
-            } else {
-                let props = self.mounts[&root.id].props.clone();
-                self.render_expanded_validated(root, &props, validate)?
-            };
-            Ok(ScheduledExpandedBatch::Rendered {
-                rendered,
-                validated,
-                reconciliation_requested: outcome.reconciliation_requested,
-            })
-        })();
-        if result.is_err() {
-            self.finish_transaction(false)?;
-        }
-        result
+        self.dispatch_expanded_batch_scheduled_pending_validated(
+            root,
+            &[],
+            accepted_events,
+            validate,
+        )
     }
 
     fn expand_rendered<T>(
@@ -2014,7 +2040,8 @@ impl ShellCompositionRuntime {
                 }
                 let count = events.len();
                 let start = self.effects.len();
-                self.render_mount(mount, Some(Value::Array(events)), |_| Ok(()))?;
+                let rendered = self.render_mount(mount, Some(Value::Array(events)), |_| Ok(()))?;
+                self.scheduled_renders.insert(mount, rendered);
                 let generated = self.effects.split_off(start);
                 let mut groups = Vec::new();
                 let mut current = Vec::new();
@@ -2798,6 +2825,141 @@ mod tests {
         };
         assert_eq!(patch.counters.nodes_mutated, 1);
         assert_eq!(events.len(), 1);
+        host.finish_transaction(true).unwrap();
+    }
+
+    #[test]
+    fn scheduled_root_local_update_uses_a_typed_patch_without_a_cold_render() {
+        let mut host = make_host();
+        let root = host
+            .mount(&host.component("shell.taskbar").unwrap())
+            .unwrap();
+        let initial = host
+            .render_expanded(&root, &serde_json::json!({}), |_| Ok(()))
+            .unwrap();
+        let outcome = host
+            .dispatch_expanded_batch_scheduled_pending_validated(
+                &root,
+                &[(initial.events[&0].clone(), Value::Null)],
+                &initial.events,
+                |patch, _, _| Ok(patch.counters),
+            )
+            .unwrap();
+        let ScheduledExpandedBatch::Patched {
+            patch, validated, ..
+        } = outcome
+        else {
+            panic!("root-local change must use typed patch transport")
+        };
+        assert_eq!(patch.operations.len(), 1);
+        assert_eq!(validated.nodes_mutated, 1);
+        host.finish_transaction(true).unwrap();
+    }
+
+    #[test]
+    fn two_dirty_sibling_packages_emit_one_ordered_atomic_patch_envelope() {
+        let mut base = package(
+            "base",
+            "export function Shell(){return h(Column,null,h(nickel.component('shell.taskbar'),{key:'a'}),h(nickel.component('shell.taskbar'),{key:'b'}));}\nexport function Taskbar(){}\nexport function QuickSettings(){}\nexport default Shell;",
+            None,
+        );
+        base.manifest
+            .composition
+            .as_mut()
+            .unwrap()
+            .exports
+            .insert("shell".into(), "./main.js#Shell".into());
+        let child = package(
+            "child",
+            "export function Taskbar(){const [count,setCount]=useState(0);return h(Button,{onClick:()=>setCount(count+1)},String(count));}\nexport default Taskbar;",
+            Some("base"),
+        );
+        let mut host = ShellCompositionRuntime::new(
+            &BTreeMap::from([("base".into(), base), ("child".into(), child)]),
+            "child",
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let root = host.mount(&host.component("shell").unwrap()).unwrap();
+        let initial = host
+            .render_expanded(&root, &serde_json::json!({}), |_| Ok(()))
+            .unwrap();
+        let events = initial
+            .events
+            .values()
+            .cloned()
+            .map(|event| (event, Value::Null))
+            .collect::<Vec<_>>();
+        let outcome = host
+            .dispatch_expanded_batch_scheduled_pending_validated(
+                &root,
+                &events,
+                &initial.events,
+                |patch, _, _| Ok(patch.counters),
+            )
+            .unwrap();
+        let ScheduledExpandedBatch::Patched {
+            patch, validated, ..
+        } = outcome
+        else {
+            panic!("two dirty siblings must emit patches")
+        };
+        assert_eq!(patch.operations.len(), 2);
+        assert_eq!(validated.nodes_mutated, 2);
+        let targets = patch
+            .operations
+            .iter()
+            .map(|operation| match operation {
+                NativePatchOperation::ReplaceSubtree { target, .. } => target,
+                _ => unreachable!(),
+            })
+            .collect::<Vec<_>>();
+        assert!(targets[0] < targets[1]);
+        host.finish_transaction(true).unwrap();
+    }
+
+    #[test]
+    fn passive_child_effect_reconciles_as_a_typed_boundary_patch() {
+        let mut base = package(
+            "base",
+            "export function Shell(){return h(Column,null,h(Text,null,'clean'),h(nickel.component('shell.taskbar')));}\nexport function Taskbar(){}\nexport function QuickSettings(){}\nexport default Shell;",
+            None,
+        );
+        base.manifest
+            .composition
+            .as_mut()
+            .unwrap()
+            .exports
+            .insert("shell".into(), "./main.js#Shell".into());
+        let child = package(
+            "child",
+            "export function Taskbar(){const [count,setCount]=useState(0);useEffect(()=>setCount(1),[]);return h(Text,null,'effect'+count);}\nexport default Taskbar;",
+            Some("base"),
+        );
+        let mut host = ShellCompositionRuntime::new(
+            &BTreeMap::from([("base".into(), base), ("child".into(), child)]),
+            "child",
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let root = host.mount(&host.component("shell").unwrap()).unwrap();
+        let initial = host
+            .render_expanded(&root, &serde_json::json!({}), |_| Ok(()))
+            .unwrap();
+        let outcome = host
+            .reconcile_expanded_pending_validated(&root, &initial.events, |patch, _, _| {
+                Ok(patch.counters)
+            })
+            .unwrap();
+        let ScheduledExpandedBatch::Patched {
+            patch, validated, ..
+        } = outcome
+        else {
+            panic!("passive child effect must patch its boundary")
+        };
+        assert_eq!(patch.operations.len(), 1);
+        assert_eq!(validated.nodes_mutated, 1);
+        assert!(format!("{:?}", patch.operations).contains("effect1"));
         host.finish_transaction(true).unwrap();
     }
 
