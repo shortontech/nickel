@@ -359,6 +359,16 @@ fn exercise(workload: Workload) -> (Duration, NativePatchEnvelope, usize) {
     assert_eq!(patch.counters.local_materializations, 0);
     assert_eq!(patch.counters.expansion_nodes, 0);
     assert_eq!(patch.counters.tree_bytes, 0);
+    assert_eq!(patch.operations.len(), 1, "one update needs one mutation");
+    assert_eq!(
+        patch.counters.nodes_visited,
+        if matches!(workload, Workload::LeafHookReducer) {
+            1
+        } else {
+            2
+        },
+        "unchanged keyed siblings must stay outside the native diff walk"
+    );
     match workload {
         Workload::Insert => assert!(
             patch

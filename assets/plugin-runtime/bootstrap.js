@@ -121,6 +121,10 @@ let __componentHooks = new Map();
 let __componentRecords = new Map();
 let __visitedComponents = new Set();
 let __componentChildren = new Map();
+// Render-local adjacency for the previously admitted component tree. Reusing
+// a leaf must not scan every retained record merely to prove that the leaf's
+// (possibly empty) descendant set is still live.
+let __retainedComponentChildren = new Map();
 let __currentComponent = null;
 let __componentExecutionStack = [];
 let __hookIndex = 0;
@@ -145,6 +149,7 @@ const __mountProfiles = new Map();
 let __runtimeCounters = {renders:0,executed:0,reused:0,nativeNodesMaterialized:0,
     effectsScheduled:0,effectsRun:0,cleanups:0,failures:0,storeChanges:0,nativeMutations:0};
 let __incrementalRender = false;
+let __patchOnlyRender = false;
 let __effects = [];
 let __listKeyErrors = [];
 let __pendingRender = null;
@@ -1785,8 +1790,28 @@ function __nickelDirtyAtOrBelow(path) {
 }
 
 function __nickelMarkRetainedVisited(path) {
-    for (const retained of __componentRecords.keys())
-        if (retained === path || retained.startsWith(`${path}/`)) __visitedComponents.add(retained);
+    const pending = [path];
+    while (pending.length) {
+        const retained = pending.pop();
+        __visitedComponents.add(retained);
+        const children = __retainedComponentChildren.get(retained);
+        if (children) pending.push(...children);
+    }
+}
+
+function __nickelIndexRetainedComponentChildren(records) {
+    const children = new Map();
+    for (const path of records.keys()) {
+        const identity = path.lastIndexOf('/');
+        const component = identity < 0 ? -1 : path.lastIndexOf('/', identity - 1);
+        if (component < 0) continue;
+        const parent = path.slice(0, component);
+        if (parent === 'root') continue;
+        const siblings = children.get(parent);
+        if (siblings) siblings.push(path);
+        else children.set(parent, [path]);
+    }
+    return children;
 }
 
 function __nickelResolveDeclaration(declaration) {
@@ -1999,6 +2024,13 @@ function __nickelMaterializeVirtual(value, path = 'root') {
     if (Array.isArray(value)) return value.map((item, index) =>
         __nickelMaterializeVirtual(item, `${path}/#${index}`));
     if (value && typeof value === 'object') {
+        // A retained virtual native node already has an admitted immutable
+        // native representation. Key-derived paths stay stable across list
+        // insertion, removal, and reorder, so reuse it without walking or
+        // allocating its native subtree again.
+        const admitted = __patchOnlyRender && __virtualNativeNodes.has(value)
+            ? __nativeMaterializations.get(value) : undefined;
+        if (admitted?.path === path) return admitted.node;
         const materialized = {};
         const native = __virtualNativeNodes.has(value);
         const slots = {};
@@ -2206,12 +2238,14 @@ function __nickelRender(component = __nickelActiveEntry(), patchOnly = false) {
         passiveEffects: [], removedEffects: [], reducerEntries: []};
     __componentRecords = new Map(__componentRecords);
     __incrementalRender = __dirtyComponents.size > 0;
+    __patchOnlyRender = patchOnly;
     __handlers = patchOnly ? previousHandlers.slice() : [];
     __previousHandlers = previousHandlers;
     if (!patchOnly) __handlerSlots = new Map();
     __listKeyErrors = [];
     __visitedComponents = new Set();
     __componentChildren = new Map();
+    __retainedComponentChildren = __nickelIndexRetainedComponentChildren(previousRecords);
     __currentComponent = null;
     __hookIndex = 0;
     try {
@@ -2237,6 +2271,7 @@ function __nickelRender(component = __nickelActiveEntry(), patchOnly = false) {
         __nickelRollbackRender();
         throw error;
     } finally {
+        __patchOnlyRender = false;
         profile.reconciliationMillis+=Math.max(0,Date.now()-reconciliationStarted);
     }
 }
@@ -2352,7 +2387,6 @@ function __nickelNativePatch(previous, next) {
         for (const child of after) {
             const old = oldById.get(child.__nativeId);
             if (old && !__nickelNativeEqual(old,child)) walk(old, child);
-            else if (old) visited++;
         }
         return true;
     }
@@ -2392,7 +2426,7 @@ function __nickelNativePatch(previous, next) {
         }
         for (let index = 0; index < after.length; index++) {
             const a = before[index], b = after[index];
-            if (__nickelNativeEqual(a,b)) { visited++; continue; }
+            if (__nickelNativeEqual(a,b)) continue;
             if (a?.__nativeId && b?.__nativeId && a.__nativeId === b.__nativeId) walk(a, b);
             else {
                 operations.length = operationStart;

@@ -2273,6 +2273,65 @@ mod tests {
     }
 
     #[test]
+    fn large_keyed_insert_reuses_admitted_siblings_without_quadratic_visits() {
+        let source = r#"
+            globalThis.itemRuns=0;
+            function Item({item}) { itemRuns++; return h(Text,{key:'native-'+item},String(item)); }
+            function App() {
+                const [items,setItems]=useState(Array.from({length:200},(_,index)=>index));
+                return h(Window,{},
+                    h(Button,{key:'insert',onClick:()=>setItems(current=>[
+                        ...current.slice(0,100),200,...current.slice(100)
+                    ])},'insert'),
+                    h(Column,{key:'items'},...items.map(item=>h(Item,{key:'component-'+item,item}))));
+            }
+        "#;
+        let mut runtime = super::JsxRuntime::new(source, None).unwrap();
+        let initial = runtime
+            .render("__nickelRender()", |node| Ok(node.clone()))
+            .unwrap();
+        let materialized_before =
+            runtime.runtime_diagnostics().unwrap()["counters"]["nativeNodesMaterialized"]
+                .as_u64()
+                .unwrap();
+        let action = initial["children"][0]["action"].as_u64().unwrap();
+        let outcome = runtime
+            .dispatch_patched(&format!("__nickelDispatchBatchPatched([[{action},null]])"))
+            .unwrap();
+        let super::ScheduledPatch::Patched { patch, .. } = outcome else {
+            panic!("keyed insertion must patch");
+        };
+        assert_eq!(patch.operations.len(), 1);
+        assert!(matches!(
+            patch.operations[0],
+            super::NativePatchOperation::InsertChild { index: 100, .. }
+        ));
+        assert_eq!(patch.counters.nodes_visited, 2);
+        assert_eq!(patch.counters.nodes_mutated, 1);
+        assert_eq!(patch.counters.local_materializations, 0);
+        assert_eq!(patch.counters.expansion_nodes, 0);
+        assert_eq!(patch.counters.tree_bytes, 0);
+        assert_eq!(
+            runtime
+                .eval_json::<u64>("JSON.stringify(globalThis.itemRuns)")
+                .unwrap(),
+            201,
+            "only the inserted component executes during reconciliation"
+        );
+        let diagnostics = runtime.runtime_diagnostics().unwrap();
+        assert_eq!(
+            diagnostics["counters"]["nativeNodesMaterialized"]
+                .as_u64()
+                .unwrap()
+                - materialized_before,
+            4,
+            "only the new root wrappers and inserted leaf are materialized"
+        );
+        runtime.finish_patch_render(true).unwrap();
+        runtime.finish_event(true).unwrap();
+    }
+
+    #[test]
     fn patched_dispatch_transports_only_the_changed_leaf() {
         let source = r#"
             globalThis.runs={leaf:0,sibling:0};
