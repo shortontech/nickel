@@ -2072,6 +2072,16 @@ function __nickelAttachNativeRecords(boundaries = null) {
     }
 }
 
+const __nickelNativeProps = new Set([
+    'id','title','className','open','anchor','placement','output','edge','reserveWorkArea','bottomOffset',
+    'x','y','width','height','grow','background','padding','radius','color','label','disabledReason',
+    'shortcut','separatorBefore','selected','hovered','dragging','outline','hoverBackground',
+    'selectedBackground','accent','complement','item','count','hue','custom','asset','fit',
+    'accessibilityLabel','role','aria-label','aria-checked','aria-selected','state','disabled','icon',
+    'description','showLabel','iconSize','iconPlacement','value','placeholder','secure','autoFocus',
+    'wrap','maxLines','percent'
+]);
+
 function h(kind, props, ...children) {
     if (typeof kind === 'function') return __nickelComponentDeclaration(kind, props, children);
     for (const child of children) {
@@ -2114,32 +2124,15 @@ function h(kind, props, ...children) {
         ? __nickelHandlerBinding(props.onEscape) : null;
     const submitAction = typeof props?.onSubmit === 'function'
         ? __nickelHandlerBinding(props.onSubmit) : null;
-    return __nickelVirtualNativeNode({kind, key: props?.key, action, id: props?.id, title: props?.title, className: props?.className, open: props?.open, anchor: props?.anchor,
-        placement: props?.placement, output: props?.output, edge: props?.edge,
-        reserveWorkArea: props?.reserveWorkArea, bottomOffset: props?.bottomOffset,
-        x: props?.x, y: props?.y, width: props?.width, height: props?.height, grow: props?.grow,
-        background: props?.background, padding: props?.padding, radius: props?.radius, color: props?.color,
-        label: props?.label, disabledReason: props?.disabledReason,
-        shortcut: props?.shortcut, separatorBefore: props?.separatorBefore,
-        selected: props?.selected, hovered: props?.hovered,
-        dragging: props?.dragging, outline: props?.outline,
-        hoverBackground: props?.hoverBackground,
-        selectedBackground: props?.selectedBackground, accent: props?.accent,
-        complement: props?.complement,
-        item: props?.item, count: props?.count, hue: props?.hue, custom: props?.custom,
-        asset: props?.asset, fit: props?.fit,
-        accessibilityLabel: props?.accessibilityLabel, role: props?.role,
-        'aria-label': props?.['aria-label'], 'aria-checked': props?.['aria-checked'],
-        'aria-selected': props?.['aria-selected'],
-        state: props?.state, disabled: props?.disabled, icon: props?.icon,
-        description: props?.description, showLabel: props?.showLabel, iconSize: props?.iconSize, iconPlacement: props?.iconPlacement, contextAction, dragAction, dropAction, focusAction, blurAction,
-        selectAction, moveAction, fileAction, closeAction,
-        escapeAction, submitAction,
-        value: props?.value, placeholder: props?.placeholder, secure: props?.secure, autoFocus: props?.autoFocus,
-        wrap: props?.wrap,
-        maxLines: props?.maxLines,
-        percent: props?.percent,
-        children: children.flat(Infinity).filter(child => child !== null && child !== false)});
+    const node = {kind};
+    if (props?.key !== undefined) node.key = props.key;
+    for (const [name, value] of Object.entries(props || {}))
+        if (value !== undefined && __nickelNativeProps.has(name)) node[name] = value;
+    for (const [name, value] of Object.entries({action,contextAction,dragAction,dropAction,focusAction,blurAction,
+        selectAction,moveAction,fileAction,closeAction,escapeAction,submitAction}))
+        if (value !== null) node[name] = value;
+    node.children = children.flat(Infinity).filter(child => child !== null && child !== false);
+    return __nickelVirtualNativeNode(node);
 }
 
 function __nickelRollbackRender() {

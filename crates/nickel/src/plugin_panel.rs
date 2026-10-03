@@ -7965,11 +7965,10 @@ mod tests {
         }
     }
 
-    fn settings_admission_application(
-        destination: &str,
-    ) -> Result<
+    fn settings_admission_runtime() -> Result<
         (
-            PluginPanelApplication,
+            std::collections::BTreeMap<String, PluginPackage>,
+            PluginSurface,
             std::rc::Rc<std::cell::RefCell<ShellCompositionRuntime>>,
         ),
         String,
@@ -8006,6 +8005,20 @@ mod tests {
                 .borrow_mut()
                 .set_settings_registry(&registry)?;
         }
+        Ok((catalog, surface, host))
+    }
+
+    fn settings_admission_application_with_runtime(
+        destination: &str,
+        catalog: &std::collections::BTreeMap<String, PluginPackage>,
+        surface: &PluginSurface,
+        host: std::rc::Rc<std::cell::RefCell<ShellCompositionRuntime>>,
+    ) -> Result<PluginPanelApplication, String> {
+        let owners = host
+            .borrow()
+            .participating_owners()
+            .cloned()
+            .collect::<Vec<_>>();
         let snapshots = owners
             .iter()
             .map(|owner| {
@@ -8040,11 +8053,30 @@ mod tests {
             })
             .collect::<std::collections::BTreeMap<_, _>>();
         let application = PluginPanelApplication::from_composed_surface(
-            &catalog,
+            catalog,
             "nickel-default",
             &snapshots,
             &surface,
             Some(host.clone()),
+        )?;
+        Ok(application)
+    }
+
+    fn settings_admission_application(
+        destination: &str,
+    ) -> Result<
+        (
+            PluginPanelApplication,
+            std::rc::Rc<std::cell::RefCell<ShellCompositionRuntime>>,
+        ),
+        String,
+    > {
+        let (catalog, surface, host) = settings_admission_runtime()?;
+        let application = settings_admission_application_with_runtime(
+            destination,
+            &catalog,
+            &surface,
+            host.clone(),
         )?;
         Ok((application, host))
     }
@@ -8076,9 +8108,17 @@ mod tests {
     fn exercise_production_settings_admission() -> (SettingsAdmissionWork, [std::time::Duration; 5])
     {
         let total_started = std::time::Instant::now();
+        // The production shell retains one composition runtime for all of its
+        // surfaces. Opening Settings mounts into that already-live authority.
+        let (catalog, surface, composition) = settings_admission_runtime().unwrap();
         let open_started = std::time::Instant::now();
-        let (application, composition) =
-            settings_admission_application("nickel-default/plugins").unwrap();
+        let application = settings_admission_application_with_runtime(
+            "nickel-default/plugins",
+            &catalog,
+            &surface,
+            composition.clone(),
+        )
+        .unwrap();
         let mut host = nickel_ui::UiHost::new(application, 1100, 800);
         let open = open_started.elapsed();
         let mount_count = composition.borrow().mount_count();
