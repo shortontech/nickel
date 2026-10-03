@@ -659,7 +659,7 @@ fn pointer_position_affects_geometry<Message>(element: &Element<Message>) -> boo
 fn independent_output_reuse_safe<Message>(element: &Element<Message>) -> bool {
     !matches!(
         element.kind,
-        Kind::Grid { .. } | Kind::VerticalScroll { .. } | Kind::Dropdown { .. }
+        Kind::VerticalScroll { .. } | Kind::Dropdown { .. }
     ) && !matches!(element.style.overflow_x, Overflow::Scroll | Overflow::Auto)
         && !matches!(element.style.overflow_y, Overflow::Scroll | Overflow::Auto)
         && element.style.proximity_magnification.is_none()

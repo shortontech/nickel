@@ -271,6 +271,15 @@ pub(super) fn layout_element<Message: Clone>(
             x: bounds.origin.x - previous.allocated.origin.x,
             y: bounds.origin.y - previous.allocated.origin.y,
         };
+        if matches!(element.kind, Kind::Grid { .. }) {
+            tree.resolved.nodes[node_index]
+                .grid_tracks
+                .clone_from(&previous.grid_tracks);
+            tree.grids.push(ResolvedGrid {
+                rect: rect.inset(element.style.padding),
+                columns: previous.grid_tracks.len().max(1),
+            });
+        }
         for (index, child) in element.children.iter().enumerate() {
             let child_id = resolved_child_id(id, child, index);
             let Some(allocated) = tree
@@ -754,10 +763,8 @@ pub(super) fn layout_element<Message: Clone>(
 }
 
 fn geometry_reuse_safe<Message>(element: &Element<Message>) -> bool {
-    let owns_auxiliary_layout_records = matches!(
-        element.kind,
-        Kind::Grid { .. } | Kind::VerticalScroll { .. }
-    ) || matches!(element.kind, Kind::Dropdown { .. })
+    let owns_auxiliary_layout_records = matches!(element.kind, Kind::VerticalScroll { .. })
+        || matches!(element.kind, Kind::Dropdown { .. })
         || matches!(element.style.overflow_x, Overflow::Scroll | Overflow::Auto)
         || matches!(element.style.overflow_y, Overflow::Scroll | Overflow::Auto);
     !owns_auxiliary_layout_records && element.children.iter().all(geometry_reuse_safe)

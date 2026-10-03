@@ -778,11 +778,11 @@ impl RetainedNodeArena {
 mod tests {
     use super::*;
     use crate::{
-        Column, Component, ComponentBuilderExt, CustomPaint, FrameRequest, Rect, Row, StyledText,
-        StyledTextSpan, Text, TextUnderlineStyle, UiFrame, UiStateStore,
+        Column, Component, ComponentBuilderExt, CustomPaint, FrameRequest, Grid, Rect, Row,
+        StyledText, StyledTextSpan, Text, TextUnderlineStyle, Track, UiFrame, UiStateStore,
     };
     #[cfg(not(debug_assertions))]
-    use crate::{Container, Grid, SoftwareRenderer, Track};
+    use crate::{Container, SoftwareRenderer};
     use proptest::prelude::*;
 
     fn keyed_text(id: &str, value: &str) -> Element<()> {
@@ -1109,6 +1109,40 @@ mod tests {
         assert_eq!(next.resolved_layout(), cold.resolved_layout());
         assert_eq!(next.commands(), cold.commands());
         assert_eq!(next.semantic_nodes(), cold.semantic_nodes());
+    }
+
+    #[test]
+    fn unchanged_grid_reuses_geometry_tracks_and_emission() {
+        let bounds = Rect::new(0.0, 0.0, 520.0, 160.0);
+        let view = || {
+            Grid::auto_fit(Track::minmax(Track::px(120.0), Track::fr(1.0)))
+                .id("grid")
+                .width(520.0)
+                .height(160.0)
+                .gap(8.0)
+                .children((0..6).map(|index| {
+                    Text::<()>::new(format!("Item {index}"))
+                        .id(format!("item-{index}"))
+                        .content_revision(index)
+                }))
+                .into_element()
+        };
+        let mut state = UiStateStore::default();
+        let first = UiFrame::resolve(view(), FrameRequest::new(bounds, &mut state));
+        let next = UiFrame::resolve_against(view(), FrameRequest::new(bounds, &mut state), &first);
+        let work = next.resource_diagnostics();
+        assert_eq!(work.nodes_measured, 0);
+        assert_eq!(work.nodes_placed, 0);
+        assert_eq!(work.paint_nodes_executed, 0);
+        assert_eq!(work.interaction_nodes_executed, 0);
+        assert_eq!(next.resolved_grids(), first.resolved_grids());
+        assert_eq!(next.resolved_layout(), first.resolved_layout());
+        assert_eq!(next.commands(), first.commands());
+        assert_eq!(next.semantic_nodes(), first.semantic_nodes());
+        assert_eq!(
+            next.interaction_record_counts(),
+            first.interaction_record_counts()
+        );
     }
 
     #[test]
@@ -1489,7 +1523,11 @@ mod tests {
                                     Row::new()
                                         .id("heading")
                                         .gap(4.0)
-                                        .child(Text::new(format!("Card {index:02}")).id("title"))
+                                        .child(
+                                            Text::new(format!("Card {index:02}"))
+                                                .id("title")
+                                                .content_revision(index as u64),
+                                        )
                                         .child(
                                             Text::new(badge.to_string())
                                                 .id("badge")
@@ -1502,12 +1540,25 @@ mod tests {
                                     Grid::fixed(2)
                                         .id("facts")
                                         .gap(4.0)
-                                        .child(Text::new("Status").id("status-label"))
-                                        .child(Text::new("Ready").id("status-value"))
-                                        .child(Text::new("Owner").id("owner-label"))
+                                        .child(
+                                            Text::new("Status")
+                                                .id("status-label")
+                                                .content_revision(1),
+                                        )
+                                        .child(
+                                            Text::new("Ready")
+                                                .id("status-value")
+                                                .content_revision(1),
+                                        )
+                                        .child(
+                                            Text::new("Owner")
+                                                .id("owner-label")
+                                                .content_revision(1),
+                                        )
                                         .child(
                                             Text::new(format!("Team {}", index % 4))
-                                                .id("owner-value"),
+                                                .id("owner-value")
+                                                .content_revision((index % 4) as u64),
                                         ),
                                 )
                                 .child(
@@ -1683,14 +1734,14 @@ mod tests {
                     created: 0,
                     removed: 0,
                     moved: 0,
-                    measured: 218,
-                    placed: 218,
-                    paint_executed: 218,
-                    paint_reused: 48,
-                    interaction_executed: 98,
-                    interaction_reused: 168,
-                    semantic_executed: 218,
-                    semantic_reused: 48,
+                    measured: 0,
+                    placed: 0,
+                    paint_executed: 0,
+                    paint_reused: 266,
+                    interaction_executed: 0,
+                    interaction_reused: 266,
+                    semantic_executed: 0,
+                    semantic_reused: 266,
                 }
             );
             assert_eq!(
@@ -1701,14 +1752,14 @@ mod tests {
                     created: 0,
                     removed: 0,
                     moved: 0,
-                    measured: 218,
-                    placed: 218,
-                    paint_executed: 219,
-                    paint_reused: 47,
-                    interaction_executed: 98,
-                    interaction_reused: 168,
-                    semantic_executed: 219,
-                    semantic_reused: 47,
+                    measured: 0,
+                    placed: 0,
+                    paint_executed: 6,
+                    paint_reused: 260,
+                    interaction_executed: 0,
+                    interaction_reused: 266,
+                    semantic_executed: 1,
+                    semantic_reused: 265,
                 }
             );
             assert_eq!(
@@ -1719,14 +1770,14 @@ mod tests {
                     created: 0,
                     removed: 0,
                     moved: 0,
-                    measured: 219,
-                    placed: 219,
-                    paint_executed: 219,
-                    paint_reused: 47,
-                    interaction_executed: 99,
-                    interaction_reused: 167,
-                    semantic_executed: 235,
-                    semantic_reused: 31,
+                    measured: 8,
+                    placed: 8,
+                    paint_executed: 8,
+                    paint_reused: 258,
+                    interaction_executed: 8,
+                    interaction_reused: 258,
+                    semantic_executed: 96,
+                    semantic_reused: 170,
                 }
             );
             assert_eq!(
@@ -1737,14 +1788,14 @@ mod tests {
                     created: 0,
                     removed: 0,
                     moved: 0,
-                    measured: 242,
-                    placed: 242,
-                    paint_executed: 242,
-                    paint_reused: 24,
+                    measured: 218,
+                    placed: 218,
+                    paint_executed: 218,
+                    paint_reused: 48,
                     interaction_executed: 218,
                     interaction_reused: 48,
-                    semantic_executed: 265,
-                    semantic_reused: 1,
+                    semantic_executed: 264,
+                    semantic_reused: 2,
                 }
             );
 
