@@ -20,6 +20,58 @@ const BOOTSTRAP: &str = include_str!("../../../assets/plugin-runtime/bootstrap.j
 // Boa enforces this per JavaScript call frame. It bounds accidental infinite
 // loops in plugin code without retaining an event or frame history.
 const MAX_JS_LOOP_ITERATIONS: u64 = 100_000;
+const PLUGIN_CAPABILITY_NAMES: &[&str] = &[
+    "launcher-show",
+    "control-center-show",
+    "on-screen-keyboard-show",
+    "on-screen-keyboard-read",
+    "on-screen-keyboard-input",
+    "applications-read",
+    "applications-launch",
+    "applications-pin",
+    "associations-read",
+    "associations-control",
+    "plugins-read",
+    "plugins-control",
+    "features-read",
+    "features-control",
+    "shortcuts-read",
+    "preferences-read",
+    "preferences-control",
+    "windows-read",
+    "windows-focus",
+    "windows-context",
+    "desktop-read",
+    "desktop-arrange",
+    "desktop-files-open",
+    "desktop-files-manage",
+    "tray-read",
+    "tray-activate",
+    "tray-context",
+    "appearance-read",
+    "appearance-control",
+    "wallpaper-read",
+    "wallpaper-control",
+    "audio-read",
+    "audio-control",
+    "network-read",
+    "network-control",
+    "bluetooth-read",
+    "bluetooth-control",
+    "desktop-control",
+    "display-control",
+    "session-control",
+    "workspaces-read",
+    "workspaces-switch",
+    "notifications-read",
+    "notifications-act",
+    "settings-read",
+    "settings-write",
+    "settings-show",
+    "projects-menu-show",
+    "session-logout-request",
+    "run-command",
+];
 
 pub struct JsxRuntime {
     context: Context,
@@ -142,6 +194,7 @@ impl JsxRuntime {
             .runtime_limits_mut()
             .set_loop_iteration_limit(MAX_JS_LOOP_ITERATIONS);
         runtime.eval(BOOTSTRAP)?;
+        runtime.set_capability_store(&[], &serde_json::json!({}))?;
         if let Some(data) = data {
             runtime.set_data(data)?;
         }
@@ -299,6 +352,88 @@ impl JsxRuntime {
             .as_callable()
             .ok_or("theme store setter is not callable")?
             .call(&JsValue::undefined(), &[snapshot], &mut self.context)
+            .map(|changed| changed.to_boolean())
+            .map_err(|error| error.to_string())
+    }
+
+    /// Publish the current owner's declared grants and bounded runtime
+    /// availability. This observation never participates in action authority.
+    pub fn set_capability_store(
+        &mut self,
+        declared: &[nickel_core::plugins::PluginCapability],
+        data: &Value,
+    ) -> Result<bool, String> {
+        if self.invalidated {
+            return Err("runtime checkpoint was invalidated".into());
+        }
+        let resource = |name: &str| -> Option<&Value> {
+            let field = match name {
+                "on-screen-keyboard-read" | "on-screen-keyboard-input" => "keyboard",
+                "applications-read" | "applications-launch" | "applications-pin" => "applications",
+                "associations-read" | "associations-control" => "associations",
+                "plugins-read" | "plugins-control" => "plugins",
+                "features-read" | "features-control" => "features",
+                "shortcuts-read" => "shortcuts",
+                "preferences-read" | "preferences-control" => "preferences",
+                "windows-read" | "windows-focus" | "windows-context" => "windows",
+                "desktop-read"
+                | "desktop-arrange"
+                | "desktop-files-open"
+                | "desktop-files-manage"
+                | "desktop-control" => "desktop",
+                "tray-read" | "tray-activate" | "tray-context" => "tray",
+                "appearance-read" | "appearance-control" => "appearance",
+                "wallpaper-read" | "wallpaper-control" => "wallpaper",
+                "audio-read" | "audio-control" => "audio",
+                "network-read" | "network-control" => "wifi",
+                "bluetooth-read" | "bluetooth-control" => "bluetooth",
+                "display-control" => "displays",
+                "session-control" | "session-logout-request" => "session",
+                "workspaces-read" | "workspaces-switch" => "workspaces",
+                "notifications-read" | "notifications-act" => "notifications",
+                "settings-read" | "settings-write" | "settings-show" => "navigation",
+                "run-command" => "run",
+                _ => return None,
+            };
+            data.get(field)
+        };
+        let mut entries = serde_json::Map::new();
+        for &name in PLUGIN_CAPABILITY_NAMES {
+            let declared = declared
+                .iter()
+                .any(|capability| capability.as_str() == name);
+            let (available, reason) = if !declared {
+                (Some(false), None)
+            } else if let Some(snapshot) = resource(name) {
+                let available = snapshot
+                    .get("available")
+                    .and_then(Value::as_bool)
+                    .or(Some(true));
+                let reason = snapshot
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .map(|reason| reason.chars().take(480).collect::<String>());
+                (available, reason)
+            } else {
+                (None, None)
+            };
+            entries.insert(
+                name.into(),
+                serde_json::json!({"declared":declared,"available":available,"reason":reason}),
+            );
+        }
+        let value = serde_json::json!({"known":PLUGIN_CAPABILITY_NAMES,"entries":entries});
+        let value =
+            JsValue::from_json(&value, &mut self.context).map_err(|error| error.to_string())?;
+        let setter = self
+            .context
+            .global_object()
+            .get(js_string!("__nickelSetCapabilityStore"), &mut self.context)
+            .map_err(|error| error.to_string())?;
+        setter
+            .as_callable()
+            .ok_or("capability store setter is not callable")?
+            .call(&JsValue::undefined(), &[value], &mut self.context)
             .map(|changed| changed.to_boolean())
             .map_err(|error| error.to_string())
     }
@@ -934,6 +1069,90 @@ mod tests {
                 .unwrap(),
             serde_json::json!([{"generation":1,"mode":"light","accent":4278256131u64,"accentHue":210,
                 "accentIntensity":55,"reducedMotion":true,"reducedTransparency":true,"palette":null},true])
+        );
+    }
+
+    #[test]
+    fn capability_names_are_checked_against_the_rust_wire_enum() {
+        for &name in super::PLUGIN_CAPABILITY_NAMES {
+            let capability: nickel_core::plugins::PluginCapability =
+                serde_json::from_value(serde_json::Value::String(name.into())).unwrap();
+            assert_eq!(capability.as_str(), name);
+        }
+    }
+
+    #[test]
+    fn capability_store_is_owner_scoped_versioned_and_rejects_unknown_names() {
+        use nickel_core::plugins::PluginCapability;
+        let source = r#"
+            globalThis.seen=[];globalThis.runs={app:0,windows:0,audio:0};
+            function Windows(){runs.windows++;const value=useCapability('windows-read');seen.push(value);return h(Text,null,String(value.available))}
+            function Audio(){runs.audio++;return h(Text,null,String(useCapability('audio-read').declared))}
+            function App(){runs.app++;return h(Window,{},h(Windows),h(Audio))}
+        "#;
+        let mut runtime = super::JsxRuntime::new(source, None).unwrap();
+        let grants = [PluginCapability::WindowsRead];
+        assert!(
+            runtime
+                .set_capability_store(&grants, &serde_json::json!({"windows":[]}))
+                .unwrap()
+        );
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        assert_eq!(
+            runtime
+                .eval_json::<serde_json::Value>("JSON.stringify(seen[0])")
+                .unwrap(),
+            serde_json::json!({"declared":true,"available":true,"reason":null})
+        );
+        assert!(runtime.eval_json::<bool>("Object.isFrozen(__capabilityStore.snapshot) && Object.isFrozen(seen[0]) && __capabilityStore.generation === 2").unwrap());
+        assert!(
+            !runtime
+                .set_capability_store(&grants, &serde_json::json!({"windows":[]}))
+                .unwrap()
+        );
+        runtime
+            .set_capability_store(
+                &grants,
+                &serde_json::json!({"windows":{"available":false,"reason":"backend absent"}}),
+            )
+            .unwrap();
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        assert_eq!(
+            runtime
+                .eval_json::<serde_json::Value>("JSON.stringify(runs)")
+                .unwrap(),
+            serde_json::json!({"app":1,"windows":2,"audio":1})
+        );
+        assert!(runtime.eval("function Unknown(){useCapability('future-root')} __nickelSetApp(Unknown); __nickelRender()").is_err());
+    }
+
+    #[test]
+    fn rejected_capability_consumer_does_not_install_a_subscription() {
+        use nickel_core::plugins::PluginCapability;
+        let mut runtime = super::JsxRuntime::new(
+            "function App(){return h(Text,null,String(useCapability('audio-read').available))}",
+            None,
+        )
+        .unwrap();
+        runtime
+            .set_capability_store(
+                &[PluginCapability::AudioRead],
+                &serde_json::json!({"audio":{"available":true}}),
+            )
+            .unwrap();
+        runtime
+            .render("__nickelRender()", |_| Err::<(), _>("reject".into()))
+            .unwrap_err();
+        runtime
+            .set_capability_store(
+                &[PluginCapability::AudioRead],
+                &serde_json::json!({"audio":{"available":false}}),
+            )
+            .unwrap();
+        assert!(
+            !runtime
+                .eval_json::<bool>("JSON.parse(__nickelReconciliationRequest()).requested")
+                .unwrap()
         );
     }
 

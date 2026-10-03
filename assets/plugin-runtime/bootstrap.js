@@ -106,6 +106,7 @@ let __themeStore = {generation:0, snapshot:Object.freeze({
     generation:0, mode:'unknown', accent:null, accentHue:null, accentIntensity:null,
     reducedMotion:null, reducedTransparency:null, palette:null
 })};
+let __capabilityStore = {generation:0, known:Object.freeze([]), snapshot:Object.freeze({})};
 let __nickelData = Object.freeze({query: '', results: []});
 let __activeSurface = 'default';
 const __surfaceStates = new Map();
@@ -776,6 +777,65 @@ function useTheme(selector) {
 }
 const __nickelSelectReducedMotion = theme => theme.reducedMotion;
 function useReducedMotion() { return useTheme(__nickelSelectReducedMotion); }
+
+function __nickelSetCapabilityStore(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)
+        || !Array.isArray(value.known) || !value.entries || typeof value.entries !== 'object'
+        || Array.isArray(value.entries) || value.known.length > 128)
+        throw Error('invalid capability store snapshot');
+    const known = Object.freeze(value.known.map(name => {
+        if (typeof name !== 'string' || !name.length || name.length > 64) throw Error('invalid capability name');
+        return name;
+    }));
+    if (new Set(known).size !== known.length) throw Error('duplicate capability name');
+    const entries = {};
+    for (const name of known) {
+        const source = value.entries[name] ?? {};
+        const available = source.available === undefined || source.available === null ? null
+            : typeof source.available === 'boolean' ? source.available
+            : (() => { throw Error('invalid capability availability'); })();
+        const reason = source.reason === undefined || source.reason === null ? null
+            : typeof source.reason === 'string' && source.reason.length <= 480 ? source.reason
+            : (() => { throw Error('invalid capability reason'); })();
+        entries[name] = Object.freeze({declared:source.declared === true, available, reason});
+    }
+    const previous = __capabilityStore;
+    const unchanged = previous.known.length === known.length
+        && previous.known.every((name, index) => name === known[index])
+        && known.every(name => {
+            const left = previous.snapshot[name], right = entries[name];
+            return left && left.declared === right.declared && left.available === right.available && left.reason === right.reason;
+        });
+    if (unchanged) return false;
+    if (__pendingRender !== null || __pendingEvent !== null)
+        throw Error('cannot publish changed capability store during a render or event');
+    for (const name of known) {
+        const prior = previous.snapshot[name], next = entries[name];
+        if (prior && prior.declared === next.declared && prior.available === next.available && prior.reason === next.reason)
+            entries[name] = prior;
+    }
+    const generation = previous.generation + 1;
+    __capabilityStore = {generation, known, snapshot:Object.freeze(entries)};
+    __nickelForEachSurfaceHooks((hooks, dirty) => {
+        for (const [owner, slots] of hooks) for (const entry of slots)
+            if (entry?.kind === 'capability-store' && !Object.is(entries[entry.capability], entry.value)) dirty.add(owner);
+    });
+    return true;
+}
+function useCapability(capability) {
+    if (__currentComponent === null) throw Error('useCapability requires a component');
+    if (typeof capability !== 'string' || !__capabilityStore.known.includes(capability))
+        throw TypeError('unknown Nickel capability');
+    const slot = __hookIndex++;
+    const hooks = __componentHooks.get(__currentComponent);
+    let entry = hooks[slot];
+    if (!entry || (entry.kind === 'capability-store' && entry.capability !== capability))
+        hooks[slot] = entry = {kind:'capability-store', capability, value:undefined, generation:0};
+    if (entry.kind !== 'capability-store') throw Error('hook order changed');
+    entry.value = __capabilityStore.snapshot[capability];
+    entry.generation = __capabilityStore.generation;
+    return entry.value;
+}
 
 function __nickelSurfaceSelection(name, snapshot) {
     if (name === 'surface') return snapshot;

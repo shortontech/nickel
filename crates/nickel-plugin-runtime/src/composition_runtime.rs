@@ -403,10 +403,9 @@ impl ShellCompositionRuntime {
             if !data.is_object() {
                 return Err("package snapshot must be an object".into());
             }
-            let runtime = std::rc::Rc::new(std::cell::RefCell::new(JsxRuntime::new_modules(
-                &graph,
-                Some(&data.to_string()),
-            )?));
+            let mut runtime = JsxRuntime::new_modules(&graph, Some(&data.to_string()))?;
+            runtime.set_capability_store(&package.manifest.capabilities, &data)?;
+            let runtime = std::rc::Rc::new(std::cell::RefCell::new(runtime));
             let assets = package
                 .images
                 .keys()
@@ -1465,10 +1464,15 @@ impl ShellCompositionRuntime {
         if !data.is_object() {
             return Err("package snapshot must be an object".into());
         }
-        self.packages
+        let package = self
+            .packages
             .get_mut(owner)
-            .ok_or("retired snapshot owner")?
-            .data = data.clone();
+            .ok_or("retired snapshot owner")?;
+        package
+            .runtime
+            .borrow_mut()
+            .set_capability_store(&package.manifest.capabilities, data)?;
+        package.data = data.clone();
         Ok(())
     }
 
@@ -3104,5 +3108,56 @@ mod tests {
         .unwrap();
         let rendered = host.render(&mount, &serde_json::json!({})).unwrap();
         assert!(rendered.node.to_string().contains("dark:true"));
+    }
+
+    #[test]
+    fn composition_capability_store_exposes_only_owner_grants_and_availability() {
+        let mut package = package(
+            "capability-shell",
+            "globalThis.capabilityObservation=null;\nexport function Taskbar(){const audio=useCapability('audio-read');const windows=useCapability('windows-read');capabilityObservation={audio,windows};return h(Text,null,String(audio.available)+':'+String(windows.declared));}\nexport function QuickSettings(){return h(Text,null,'settings');}\nexport default Taskbar;",
+            None,
+        );
+        package.manifest.capabilities = vec![PluginCapability::AudioRead];
+        let owner = PackageIdentity {
+            id: "capability-shell".into(),
+            version: package
+                .manifest
+                .composition
+                .as_ref()
+                .unwrap()
+                .version
+                .parse()
+                .unwrap(),
+        };
+        let mut host = ShellCompositionRuntime::new(
+            &BTreeMap::from([("capability-shell".into(), package)]),
+            "capability-shell",
+            &BTreeMap::from([(
+                owner.clone(),
+                serde_json::json!({"audio":{"available":true}}),
+            )]),
+        )
+        .unwrap();
+        let mount = host
+            .mount(&host.component("shell.taskbar").unwrap())
+            .unwrap();
+        let rendered = host.render(&mount, &serde_json::json!({})).unwrap();
+        assert!(rendered.node.to_string().contains("true:false"));
+        let runtime = host.shared_owner_runtime(&owner).unwrap();
+        assert_eq!(
+            runtime
+                .borrow_mut()
+                .eval_json::<serde_json::Value>("JSON.stringify(capabilityObservation)")
+                .unwrap(),
+            serde_json::json!({"audio":{"declared":true,"available":true,"reason":null},
+                "windows":{"declared":false,"available":false,"reason":null}})
+        );
+        host.update_snapshot(
+            &owner,
+            &serde_json::json!({"audio":{"available":false,"reason":"backend unavailable"}}),
+        )
+        .unwrap();
+        let rendered = host.render(&mount, &serde_json::json!({})).unwrap();
+        assert!(rendered.node.to_string().contains("false:false"));
     }
 }

@@ -268,6 +268,30 @@ interface NickelThemeSnapshot {
 declare function useTheme(): Readonly<NickelThemeSnapshot>;
 declare function useTheme<T>(selector: (theme: Readonly<NickelThemeSnapshot>) => T): T;
 declare function useReducedMotion(): boolean|null;
+type NickelCapability =
+    | "launcher-show" | "control-center-show" | "on-screen-keyboard-show"
+    | "on-screen-keyboard-read" | "on-screen-keyboard-input"
+    | "applications-read" | "applications-launch" | "applications-pin"
+    | "associations-read" | "associations-control" | "plugins-read" | "plugins-control"
+    | "features-read" | "features-control" | "shortcuts-read"
+    | "preferences-read" | "preferences-control"
+    | "windows-read" | "windows-focus" | "windows-context"
+    | "desktop-read" | "desktop-arrange" | "desktop-files-open" | "desktop-files-manage"
+    | "tray-read" | "tray-activate" | "tray-context"
+    | "appearance-read" | "appearance-control" | "wallpaper-read" | "wallpaper-control"
+    | "audio-read" | "audio-control" | "network-read" | "network-control"
+    | "bluetooth-read" | "bluetooth-control" | "desktop-control" | "display-control"
+    | "session-control" | "workspaces-read" | "workspaces-switch"
+    | "notifications-read" | "notifications-act"
+    | "settings-read" | "settings-write" | "settings-show" | "projects-menu-show"
+    | "session-logout-request" | "run-command";
+interface NickelCapabilitySnapshot {
+    readonly declared:boolean;
+    /** null means runtime availability has no authoritative observation. */
+    readonly available:boolean|null;
+    readonly reason:string|null;
+}
+declare function useCapability(capability: NickelCapability): Readonly<NickelCapabilitySnapshot>;
 declare function useEffect(setup: () => void | (() => void), dependencies?: ReadonlyArray<unknown>): void;
 interface NickelSurfaceSnapshot {
     readonly generation:number;
