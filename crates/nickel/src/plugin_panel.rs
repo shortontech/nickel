@@ -14,7 +14,7 @@ use nickel_plugin_presentation::components::parse_panel_for_manifest;
 use nickel_plugin_presentation::components::{PanelNode, render_panel, render_panel_validated};
 pub use nickel_plugin_presentation::components::{PluginImages, PluginMessage};
 use nickel_plugin_runtime::composition_runtime::{
-    ComponentEventHandle, ComponentMount, ShellCompositionRuntime,
+    ComponentEventHandle, ComponentMount, ScheduledExpandedBatch, ShellCompositionRuntime,
 };
 use nickel_plugin_runtime::{JsxModuleGraph, JsxRuntime, ModuleSource};
 
@@ -1470,7 +1470,7 @@ impl PluginPanelApplication {
 
     fn apply_rendered_effects(
         &mut self,
-        rendered: Result<PanelNode, String>,
+        rendered: Result<Option<PanelNode>, String>,
         effects: Result<Vec<(PluginManifest, Value)>, String>,
         validation_rejected: bool,
     ) {
@@ -1478,6 +1478,7 @@ impl PluginPanelApplication {
             (Ok(node), Ok(effects)) => {
                 let mut approved = Vec::new();
                 let mut requested_dialog = None;
+                let effective_node = node.as_ref().unwrap_or(&self.node);
                 for (effect_manifest, effect) in effects {
                     match effect.as_str() {
                         _ if effect.get("type").and_then(Value::as_str)
@@ -2577,7 +2578,7 @@ impl PluginPanelApplication {
                         }
                         Some(effect) if effect.starts_with("open-dialog:") => {
                             let id = &effect["open-dialog:".len()..];
-                            match node.dialog(id) {
+                            match effective_node.dialog(id) {
                                 Some(PanelNode::Dialog {
                                     id: declared,
                                     anchor,
@@ -2598,7 +2599,7 @@ impl PluginPanelApplication {
                         }
                         Some(effect) if effect.starts_with("open-menu:") => {
                             let id = &effect["open-menu:".len()..];
-                            match node.menu(id) {
+                            match effective_node.menu(id) {
                                 Some(PanelNode::Menu {
                                     id: declared,
                                     anchor,
@@ -2783,7 +2784,9 @@ impl PluginPanelApplication {
                 }
                 self.effects.extend(approved);
                 self.pending_transient = requested_dialog;
-                self.node = node;
+                if let Some(node) = node {
+                    self.node = node;
+                }
                 self.last_error = None;
             }
             (Err(error), _) | (_, Err(error)) => {
@@ -2827,7 +2830,7 @@ impl PluginPanelApplication {
             composition: None,
         };
         scope.apply_rendered_effects(
-            Ok(node),
+            Ok(Some(node)),
             Ok(effects
                 .into_iter()
                 .map(|value| (manifest.clone(), value))
@@ -2984,7 +2987,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                     .collect::<Result<Vec<_>, String>>()?;
                 let mut host = state.host.borrow_mut();
 
-                let (rendered, node) = host.dispatch_expanded_batch_pending_validated(
+                let outcome = host.dispatch_expanded_batch_scheduled_pending_validated(
                     &state.mount,
                     &events,
                     |value| {
@@ -3005,7 +3008,17 @@ impl nickel_ui::Application for PluginPanelApplication {
                         Ok(node)
                     },
                 )?;
-                state.events = rendered.events;
+                let node = match outcome {
+                    ScheduledExpandedBatch::Unchanged => None,
+                    ScheduledExpandedBatch::Rendered {
+                        rendered,
+                        validated,
+                        ..
+                    } => {
+                        state.events = rendered.events;
+                        Some(validated)
+                    }
+                };
                 let effects = host
                     .take_effects()
                     .into_iter()
@@ -3051,7 +3064,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                 );
                 let effects = runtime.take_effects();
                 (
-                    rendered,
+                    rendered.map(Some),
                     effects.map(|effects| {
                         effects
                             .into_iter()
@@ -3633,6 +3646,73 @@ mod tests {
                 assert!(format!("{:?}", application.node).contains("derived0"));
             }
         }
+    }
+
+    #[test]
+    fn composed_production_noop_retains_node_events_and_mount_generation() {
+        let mut manifest = super::manifest().clone();
+        manifest.id = "scheduled-shell".into();
+        manifest.composition = Some(
+            serde_json::from_value(serde_json::json!({
+                "api_version": 1,
+                "id": "scheduled-shell",
+                "version": "0.1.0",
+                "exports": {
+                    "shell": "./main.js#Shell",
+                    "shell.taskbar": "./main.js#Taskbar"
+                }
+            }))
+            .unwrap(),
+        );
+        let package = PluginPackage {
+            manifest: manifest.clone(),
+            source: "globalThis.renders=0;\nexport function Shell(){renders++;const [value,setValue]=useState(0);return h(Window,{id:'main',placement:'fixed',width:440,height:220,edge:'bottom',bottomOffset:24,output:'all'},h(Button,{id:'noop',onClick:()=>setValue(current=>current)},String(value)));}\nexport function Taskbar(){return h(Text,null,'taskbar');}\nexport default Shell;".into(),
+            stylesheet: String::new(),
+            modules: Vec::new(),
+            images: std::collections::BTreeMap::new(),
+        };
+        let surface = manifest.surfaces[0].clone();
+        let catalog = std::collections::BTreeMap::from([("scheduled-shell".into(), package)]);
+        let mut application = PluginPanelApplication::from_composed_surface(
+            &catalog,
+            "scheduled-shell",
+            &std::collections::BTreeMap::new(),
+            &surface,
+            None,
+        )
+        .unwrap();
+        let accepted_node = application.node.clone();
+        let message = application.button_message("noop").unwrap();
+        let PluginMessage::Click(action) = message else {
+            panic!("noop must be a button click");
+        };
+        let accepted_event =
+            application.composition.as_ref().unwrap().events[&(action as u64)].clone();
+
+        application.update(PluginMessage::Click(action));
+
+        assert_eq!(application.node, accepted_node);
+        assert!(application.last_error().is_none());
+        let shared = application.shared_composition_runtime().unwrap();
+        assert!(
+            shared
+                .borrow_mut()
+                .dispatch_scheduled(&accepted_event, &Value::Null)
+                .unwrap()
+                .rendered
+                .is_none(),
+            "the accepted event generation must remain live after a no-op"
+        );
+        let owner = shared.borrow().resolution().active.clone();
+        let runtime = shared.borrow().shared_owner_runtime(&owner).unwrap();
+        assert_eq!(
+            runtime
+                .borrow_mut()
+                .eval_json::<u64>("JSON.stringify(renders)")
+                .unwrap(),
+            1,
+            "the production composed path must not call the root component"
+        );
     }
 
     #[test]

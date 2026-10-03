@@ -82,6 +82,18 @@ pub struct RenderedComponent {
 pub struct ScheduledComponentDispatch {
     pub rendered: Option<RenderedComponent>,
     pub reconciliation_requested: bool,
+    /// Composition callbacks may update another mount while draining effects.
+    /// The expanded root must be rebuilt even when this mount itself was clean.
+    pub requires_expansion: bool,
+}
+
+pub enum ScheduledExpandedBatch<T> {
+    Unchanged,
+    Rendered {
+        rendered: RenderedComponent,
+        validated: T,
+        reconciliation_requested: bool,
+    },
 }
 
 struct ExpansionState {
@@ -1017,6 +1029,68 @@ impl ShellCompositionRuntime {
         result
     }
 
+    /// Scheduled production bridge. A batch whose handlers do not change any
+    /// hook value retains the caller's accepted expanded tree and event table.
+    /// Changed batches use the full expansion compatibility path for now.
+    pub fn dispatch_expanded_batch_scheduled_pending_validated<T>(
+        &mut self,
+        root: &ComponentMount,
+        events: &[(ComponentEventHandle, Value)],
+        validate: impl FnOnce(&Value) -> Result<T, String>,
+    ) -> Result<ScheduledExpandedBatch<T>, String> {
+        self.begin_transaction()?;
+        let result = (|| {
+            self.validate_mount(root)?;
+            for (handle, value) in events {
+                bounded_json(value)?;
+                let mount = self
+                    .mounts
+                    .get(&handle.mount)
+                    .ok_or("retired component event")?;
+                if handle.runtime != self.id
+                    || mount.generation != handle.generation
+                    || mount.reference.owner != handle.owner
+                {
+                    return Err("foreign or stale component event".into());
+                }
+            }
+
+            let mut changed = false;
+            let mut reconciliation_requested = false;
+            let mut offset = 0;
+            while offset < events.len() {
+                let mount = events[offset].0.mount;
+                let mut end = offset + 1;
+                while end < events.len() && events[end].0.mount == mount {
+                    end += 1;
+                }
+                let batch = events[offset..end]
+                    .iter()
+                    .map(|(handle, value)| serde_json::json!([handle.action, value]))
+                    .collect::<Vec<_>>();
+                let outcome = self.render_mount_scheduled(mount, Value::Array(batch))?;
+                changed |= outcome.rendered.is_some() || outcome.requires_expansion;
+                reconciliation_requested |= outcome.reconciliation_requested;
+                offset = end;
+            }
+
+            if !changed {
+                return Ok(ScheduledExpandedBatch::Unchanged);
+            }
+            let props = self.mounts[&root.id].props.clone();
+            let (rendered, validated) = self.render_expanded_validated(root, &props, validate)?;
+            Ok(ScheduledExpandedBatch::Rendered {
+                rendered,
+                validated,
+                reconciliation_requested,
+            })
+        })();
+        if result.is_err() {
+            self.finish_transaction(false)?;
+        }
+        result
+    }
+
     fn expand_rendered<T>(
         &mut self,
         root: u64,
@@ -1593,10 +1667,12 @@ impl ShellCompositionRuntime {
                 (Some(value), reconciliation_requested)
             }
         };
+        let generation_before_effects = self.next_generation;
         self.drain_effects(&owner, id, previous_generation, true)?;
         Ok(ScheduledComponentDispatch {
             rendered,
             reconciliation_requested,
+            requires_expansion: self.next_generation != generation_before_effects,
         })
     }
 
