@@ -1385,9 +1385,10 @@ impl ShellCompositionRuntime {
 
     /// Scheduled production bridge. A batch whose handlers do not change any
     /// hook value retains the caller's accepted expanded tree and event table.
-    /// Admitted mounts use component-owned typed patches; only a newly
-    /// discovered boundary without patch authority is materialized for its
-    /// first admission or a cold-oracle path.
+    /// Every mount in an admitted expanded tree must retain component-owned
+    /// typed patch authority. Initial and newly discovered boundary admission
+    /// happens through `render_expanded`; losing authority afterwards is a
+    /// contained error rather than permission to fall back to a complete tree.
     pub fn dispatch_expanded_batch_scheduled_pending_validated<T>(
         &mut self,
         root: &ComponentMount,
@@ -1429,6 +1430,14 @@ impl ShellCompositionRuntime {
                         .map(|(_, mount)| mount.id),
                 )
                 .collect::<std::collections::BTreeSet<_>>();
+            if let Some(mount) = owned_mounts
+                .iter()
+                .find(|mount| !self.patch_authority.contains_key(mount))
+            {
+                return Err(format!(
+                    "admitted composition mount {mount} lost native patch authority"
+                ));
+            }
             for (handle, value) in events {
                 bounded_json(value)?;
                 let mount = self
@@ -1457,19 +1466,10 @@ impl ShellCompositionRuntime {
             if events.is_empty() {
                 let mount_ids = owned_mounts.iter().copied().collect::<Vec<_>>();
                 for mount in mount_ids {
-                    if self.patch_authority.contains_key(&mount) {
-                        let outcome = self.render_mount_patched(mount, Value::Array(Vec::new()))?;
-                        dirty_components.insert(mount, outcome.dirty_components);
-                        if let Some(patch) = outcome.patch {
-                            patched_mounts.insert(mount, patch);
-                        }
-                        rendered_mounts.append(&mut self.scheduled_renders);
-                        reconciliation_requested |= outcome.reconciliation_requested;
-                        continue;
-                    }
-                    let outcome = self.render_mount_scheduled(mount, Value::Array(Vec::new()))?;
-                    if let Some(rendered) = outcome.rendered {
-                        rendered_mounts.insert(mount, rendered);
+                    let outcome = self.render_mount_patched(mount, Value::Array(Vec::new()))?;
+                    dirty_components.insert(mount, outcome.dirty_components);
+                    if let Some(patch) = outcome.patch {
+                        patched_mounts.insert(mount, patch);
                     }
                     rendered_mounts.append(&mut self.scheduled_renders);
                     reconciliation_requested |= outcome.reconciliation_requested;
@@ -1486,20 +1486,10 @@ impl ShellCompositionRuntime {
                     .iter()
                     .map(|(handle, value)| serde_json::json!([handle.action, value]))
                     .collect::<Vec<_>>();
-                if self.patch_authority.contains_key(&mount) {
-                    let outcome = self.render_mount_patched(mount, Value::Array(batch))?;
-                    dirty_components.insert(mount, outcome.dirty_components);
-                    if let Some(patch) = outcome.patch {
-                        patched_mounts.insert(mount, patch);
-                    }
-                    rendered_mounts.append(&mut self.scheduled_renders);
-                    reconciliation_requested |= outcome.reconciliation_requested;
-                    offset = end;
-                    continue;
-                }
-                let outcome = self.render_mount_scheduled(mount, Value::Array(batch))?;
-                if let Some(rendered) = outcome.rendered {
-                    rendered_mounts.insert(mount, rendered);
+                let outcome = self.render_mount_patched(mount, Value::Array(batch))?;
+                dirty_components.insert(mount, outcome.dirty_components);
+                if let Some(patch) = outcome.patch {
+                    patched_mounts.insert(mount, patch);
                 }
                 rendered_mounts.append(&mut self.scheduled_renders);
                 reconciliation_requested |= outcome.reconciliation_requested;
@@ -4071,6 +4061,149 @@ mod tests {
             .unwrap();
         assert!(taskbar_after.node.to_string().contains("taskbar1"));
         assert!(!taskbar_after.node.to_string().contains("settings fallback"));
+    }
+
+    #[test]
+    fn admitted_mount_without_patch_authority_fails_before_running_its_event() {
+        let base = package(
+            "base",
+            "globalThis.renders=0;\nexport function Taskbar(){renders++;const [count,setCount]=useState(0);return h(Button,{onClick:()=>setCount(count+1)},String(count));}\nexport function QuickSettings(){}\nexport default Taskbar;",
+            None,
+        );
+        let mut host = ShellCompositionRuntime::new(
+            &BTreeMap::from([("base".into(), base)]),
+            "base",
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let root = host
+            .mount(&host.component("shell.taskbar").unwrap())
+            .unwrap();
+        let initial = host
+            .render_expanded(&root, &serde_json::json!({}), |_| Ok(()))
+            .unwrap();
+        let authority = host.patch_authority.remove(&root.id).unwrap();
+
+        let result = host.dispatch_expanded_batch_scheduled_pending_validated(
+            &root,
+            &[(initial.events[&0].clone(), Value::Null)],
+            &initial.events,
+            &initial.node,
+            |_, _, _| Ok(()),
+        );
+        let Err(error) = result else {
+            panic!("missing admitted authority must fail")
+        };
+        assert!(error.contains("lost native patch authority"));
+        assert!(
+            host.checkpoint.is_none(),
+            "authority failure must roll back"
+        );
+        let runtime = host
+            .shared_owner_runtime(&host.resolution().active)
+            .unwrap();
+        assert_eq!(
+            runtime
+                .borrow_mut()
+                .eval_json::<u64>("JSON.stringify(renders)")
+                .unwrap(),
+            1,
+            "authority loss must not silently run a complete-tree render"
+        );
+
+        host.patch_authority.insert(root.id, authority);
+        let outcome = host
+            .dispatch_expanded_batch_scheduled_pending_validated(
+                &root,
+                &[(initial.events[&0].clone(), Value::Null)],
+                &initial.events,
+                &initial.node,
+                |patch, _, _| Ok(patch.counters),
+            )
+            .unwrap();
+        let ScheduledExpandedBatch::Patched { validated, .. } = outcome else {
+            panic!("restored authority must admit a typed patch")
+        };
+        assert_eq!(validated.local_materializations, 0);
+        assert_eq!(validated.tree_bytes, 0);
+        host.finish_transaction(true).unwrap();
+    }
+
+    #[test]
+    fn missing_nested_patch_authority_isolated_before_any_package_runs() {
+        let mut base = package(
+            "base",
+            "globalThis.renders=0;\nexport function Shell(){renders++;return h(Column,null,h(Text,null,'clean'),h(nickel.component('shell.taskbar')));}\nexport function Taskbar(){}\nexport function QuickSettings(){}\nexport default Shell;",
+            None,
+        );
+        base.manifest
+            .composition
+            .as_mut()
+            .unwrap()
+            .exports
+            .insert("shell".into(), "./main.js#Shell".into());
+        let child = package(
+            "child",
+            "globalThis.renders=0;\nexport function Taskbar(){renders++;const [count,setCount]=useState(0);return h(Button,{onClick:()=>setCount(count+1)},String(count));}\nexport default Taskbar;",
+            Some("base"),
+        );
+        let mut host = ShellCompositionRuntime::new(
+            &BTreeMap::from([("base".into(), base), ("child".into(), child)]),
+            "child",
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let root = host.mount(&host.component("shell").unwrap()).unwrap();
+        let initial = host
+            .render_expanded(&root, &serde_json::json!({}), |_| Ok(()))
+            .unwrap();
+        let event = initial.events[&0].clone();
+        assert_ne!(event.mount, root.id);
+        let authority = host.patch_authority.remove(&event.mount).unwrap();
+
+        let result = host.dispatch_expanded_batch_scheduled_pending_validated(
+            &root,
+            &[(event.clone(), Value::Null)],
+            &initial.events,
+            &initial.node,
+            |_, _, _| Ok(()),
+        );
+        let Err(error) = result else {
+            panic!("missing nested authority must fail")
+        };
+        assert!(error.contains("lost native patch authority"));
+        assert!(
+            host.checkpoint.is_none(),
+            "authority failure must roll back"
+        );
+        for (owner, package) in &host.packages {
+            assert_eq!(
+                package
+                    .runtime
+                    .borrow_mut()
+                    .eval_json::<u64>("JSON.stringify(renders)")
+                    .unwrap(),
+                1,
+                "authority loss ran package {owner:?}"
+            );
+        }
+
+        host.patch_authority.insert(event.mount, authority);
+        let outcome = host
+            .dispatch_expanded_batch_scheduled_pending_validated(
+                &root,
+                &[(event, Value::Null)],
+                &initial.events,
+                &initial.node,
+                |patch, _, _| Ok(patch.counters),
+            )
+            .unwrap();
+        let ScheduledExpandedBatch::Patched { validated, .. } = outcome else {
+            panic!("restored nested authority must admit a typed patch")
+        };
+        assert_eq!(validated.local_materializations, 0);
+        assert_eq!(validated.tree_bytes, 0);
+        host.finish_transaction(true).unwrap();
     }
 
     #[test]
