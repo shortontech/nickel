@@ -1265,12 +1265,27 @@ function __nickelRender(component = __nickelActiveEntry()) {
 function __nickelNativePatch(previous, next) {
     const operations = [];
     let visited = 0;
-    function differentOutsideChildren(left, right) {
+    function primitive(value) {
+        return value === null || ['string','number','boolean','undefined'].includes(typeof value);
+    }
+    function emitProperties(left, right) {
         const keys = new Set([...Object.keys(left), ...Object.keys(right)]);
         keys.delete('children');
-        for (const key of keys)
-            if (JSON.stringify(left[key]) !== JSON.stringify(right[key])) return true;
-        return false;
+        keys.delete('__nativeId');
+        keys.delete('__handlerSlots');
+        keys.delete('kind');
+        keys.delete('key');
+        for (const key of keys) {
+            if (JSON.stringify(left[key]) === JSON.stringify(right[key])) continue;
+            const slot = right.__handlerSlots?.[key] ?? left.__handlerSlots?.[key];
+            if (slot && Number.isSafeInteger(right[key]) && right[key] >= 0) {
+                operations.push({op:'replaceHandlerSlot', slot, action:right[key]});
+            } else if (primitive(left[key]) && primitive(right[key])) {
+                operations.push({op:'setPrimitive', target:right.__nativeId, property:key,
+                    value:right[key] === undefined ? null : right[key]});
+            } else return false;
+        }
+        return true;
     }
     function walk(left, right) {
         visited++;
@@ -1280,14 +1295,22 @@ function __nickelNativePatch(previous, next) {
             if (right?.__nativeId) operations.push({op:'replaceSubtree', target:right.__nativeId, node:right});
             return;
         }
-        if (differentOutsideChildren(left, right)) {
+        const operationStart = operations.length;
+        if (!emitProperties(left, right)) {
+            operations.length = operationStart;
             operations.push({op:'replaceSubtree', target:right.__nativeId, node:right});
             return;
         }
         const before = left.children ?? [];
         const after = right.children ?? [];
         if (!Array.isArray(before) || !Array.isArray(after) || before.length !== after.length) {
+            operations.length = operationStart;
             operations.push({op:'replaceSubtree', target:right.__nativeId, node:right});
+            return;
+        }
+        if (before.every(primitive) && after.every(primitive)) {
+            if (JSON.stringify(before) !== JSON.stringify(after))
+                operations.push({op:'setPrimitive', target:right.__nativeId, property:'children', value:after});
             return;
         }
         for (let index = 0; index < after.length; index++) {
@@ -1295,6 +1318,7 @@ function __nickelNativePatch(previous, next) {
             if (JSON.stringify(a) === JSON.stringify(b)) { visited++; continue; }
             if (a?.__nativeId && b?.__nativeId && a.__nativeId === b.__nativeId) walk(a, b);
             else {
+                operations.length = operationStart;
                 operations.push({op:'replaceSubtree', target:right.__nativeId, node:right});
                 return;
             }

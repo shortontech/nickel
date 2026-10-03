@@ -4057,6 +4057,63 @@ impl RetainedPanelTree {
         let mut visited = 0_u64;
         for operation in &patch.operations {
             match operation {
+                NativePatchOperation::SetPrimitive {
+                    target,
+                    property,
+                    value,
+                } => {
+                    if !is_primitive_patch_value(value, property) {
+                        return Err("setPrimitive contains a non-primitive value".into());
+                    }
+                    mutate_target(
+                        &mut source,
+                        &mut node,
+                        target,
+                        &mut visited,
+                        &mut |source, typed| {
+                            let object = source
+                                .as_object_mut()
+                                .ok_or("native patch target is not an object")?;
+                            object.insert(property.clone(), value.clone());
+                            if property == "className" && typed.container_children().is_some() {
+                                set_container_class_name(typed, value)?;
+                            } else {
+                                if typed.container_children().is_some() {
+                                    return Err(format!(
+                                        "setPrimitive property {property:?} requires subtree replacement"
+                                    ));
+                                }
+                                *typed = PanelNode::parse(source)?;
+                            }
+                            Ok(())
+                        },
+                    )?;
+                }
+                NativePatchOperation::ReplaceHandlerSlot { slot, action } => {
+                    let expected = self
+                        .handler_slots
+                        .get(&HandlerSlotId(slot.clone()))
+                        .ok_or_else(|| {
+                            format!("native patch targets unknown handler slot {slot:?}")
+                        })?;
+                    let _ = expected;
+                    let (target, event) = find_handler_slot(&source, slot)
+                        .ok_or_else(|| format!("native handler slot {slot:?} disappeared"))?;
+                    mutate_target(
+                        &mut source,
+                        &mut node,
+                        &target,
+                        &mut visited,
+                        &mut |source, typed| {
+                            let implicit_id = source.get("id").is_none();
+                            source
+                                .as_object_mut()
+                                .ok_or("native handler owner is not an object")?
+                                .insert(event.clone(), Value::from(*action as u64));
+                            set_typed_handler(typed, &event, *action, implicit_id)
+                        },
+                    )?;
+                }
                 NativePatchOperation::ReplaceSubtree {
                     target,
                     node: replacement,
@@ -4107,6 +4164,257 @@ impl RetainedPanelTree {
             nodes_visited: visited,
             nodes_mutated: patch.operations.len() as u64,
         })
+    }
+}
+
+fn is_primitive_patch_value(value: &Value, property: &str) -> bool {
+    value.is_null()
+        || value.is_boolean()
+        || value.is_number()
+        || value.is_string()
+        || (property == "children"
+            && value.as_array().is_some_and(|values| {
+                values
+                    .iter()
+                    .all(|v| v.is_null() || v.is_string() || v.is_number())
+            }))
+}
+
+fn set_container_class_name(node: &mut PanelNode, value: &Value) -> Result<(), String> {
+    let class = match value {
+        Value::Null => None,
+        Value::String(value)
+            if value.len() <= 256
+                && value.split_ascii_whitespace().all(|name| {
+                    !name.is_empty()
+                        && name.len() <= 64
+                        && name
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+                }) =>
+        {
+            Some(value.clone())
+        }
+        _ => return Err("className must contain bounded class identifiers".into()),
+    };
+    match node {
+        PanelNode::Box { class_name, .. }
+        | PanelNode::Layer { class_name, .. }
+        | PanelNode::Div { class_name, .. }
+        | PanelNode::Surface { class_name, .. }
+        | PanelNode::Row { class_name, .. }
+        | PanelNode::Column { class_name, .. }
+        | PanelNode::ScrollView { class_name, .. }
+        | PanelNode::Menu { class_name, .. }
+        | PanelNode::MenuItem { class_name, .. } => {
+            *class_name = class;
+            Ok(())
+        }
+        _ => Err("className target is not a container".into()),
+    }
+}
+
+fn set_typed_handler(
+    node: &mut PanelNode,
+    event: &str,
+    action: usize,
+    implicit_id: bool,
+) -> Result<(), String> {
+    let optional = Some(action);
+    match (&mut *node, event) {
+        (PanelNode::Div { action: field, .. }, "action")
+        | (PanelNode::Image { action: field, .. }, "action")
+        | (PanelNode::Switch { action: field, .. }, "action")
+        | (PanelNode::Checkbox { action: field, .. }, "action")
+        | (PanelNode::MenuItem { action: field, .. }, "action") => *field = optional,
+        (
+            PanelNode::Div {
+                drop_action: field, ..
+            },
+            "dropAction",
+        )
+        | (
+            PanelNode::Button {
+                drop_action: field, ..
+            },
+            "dropAction",
+        ) => *field = optional,
+        (
+            PanelNode::Surface {
+                escape_action: field,
+                ..
+            },
+            "escapeAction",
+        ) => *field = optional,
+        (
+            PanelNode::Surface {
+                submit_action: field,
+                ..
+            },
+            "submitAction",
+        ) => *field = optional,
+        (
+            PanelNode::Surface {
+                focus_action: field,
+                ..
+            },
+            "focusAction",
+        )
+        | (
+            PanelNode::TextField {
+                focus_action: field,
+                ..
+            },
+            "focusAction",
+        )
+        | (
+            PanelNode::Button {
+                focus_action: field,
+                ..
+            },
+            "focusAction",
+        ) => *field = optional,
+        (
+            PanelNode::Surface {
+                blur_action: field, ..
+            },
+            "blurAction",
+        )
+        | (
+            PanelNode::TextField {
+                blur_action: field, ..
+            },
+            "blurAction",
+        )
+        | (
+            PanelNode::Button {
+                blur_action: field, ..
+            },
+            "blurAction",
+        ) => *field = optional,
+        (
+            PanelNode::Image {
+                context_action: field,
+                ..
+            },
+            "contextAction",
+        )
+        | (
+            PanelNode::Button {
+                context_action: field,
+                ..
+            },
+            "contextAction",
+        ) => *field = optional,
+        (
+            PanelNode::Button {
+                drag_action: field, ..
+            },
+            "dragAction",
+        ) => *field = optional,
+        (
+            PanelNode::Dialog {
+                close_action: field,
+                ..
+            },
+            "closeAction",
+        ) => *field = optional,
+        (PanelNode::Slider { action: field, .. }, "action")
+        | (PanelNode::ColorSwatch { action: field, .. }, "action")
+        | (PanelNode::Select { action: field, .. }, "action")
+        | (PanelNode::TextField { action: field, .. }, "action")
+        | (PanelNode::Button { action: field, .. }, "action") => *field = action,
+        _ => {
+            return Err(format!(
+                "handler event {event:?} is invalid for its typed node"
+            ));
+        }
+    }
+    if implicit_id
+        && event == "action"
+        && let PanelNode::Button { id, .. } = node
+    {
+        *id = format!("plugin-button-{action}");
+    }
+    Ok(())
+}
+
+fn find_handler_slot(value: &Value, requested: &str) -> Option<(String, String)> {
+    if let Some(object) = value.as_object() {
+        if let (Some(id), Some(slots)) = (
+            object.get("__nativeId").and_then(Value::as_str),
+            object.get("__handlerSlots").and_then(Value::as_object),
+        ) {
+            if let Some((event, _)) = slots
+                .iter()
+                .find(|(_, slot)| slot.as_str() == Some(requested))
+            {
+                return Some((id.to_owned(), event.clone()));
+            }
+        }
+        if let Some(found) = object
+            .get("children")
+            .and_then(Value::as_array)
+            .and_then(|children| {
+                children
+                    .iter()
+                    .find_map(|child| find_handler_slot(child, requested))
+            })
+        {
+            return Some(found);
+        }
+    }
+    value.as_array().and_then(|values| {
+        values
+            .iter()
+            .find_map(|child| find_handler_slot(child, requested))
+    })
+}
+
+fn mutate_target(
+    source: &mut Value,
+    typed: &mut PanelNode,
+    target: &str,
+    visited: &mut u64,
+    operation: &mut impl FnMut(&mut Value, &mut PanelNode) -> Result<(), String>,
+) -> Result<(), String> {
+    *visited = visited.saturating_add(1);
+    if source.get("__nativeId").and_then(Value::as_str) == Some(target) {
+        return operation(source, typed);
+    }
+    let children = source
+        .get_mut("children")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| format!("native patch target {target:?} is not below a container"))?;
+    let typed_children = typed_children_mut(typed)?;
+    if children.len() != typed_children.len() || children.iter().any(|child| !child.is_object()) {
+        return Err("incremental target alignment requires native element children".into());
+    }
+    for (source, typed) in children.iter_mut().zip(typed_children) {
+        if source.get("__nativeId").and_then(Value::as_str) == Some(target)
+            || source_contains_id(source, target)
+        {
+            return mutate_target(source, typed, target, visited, operation);
+        }
+    }
+    Err(format!("native patch target {target:?} disappeared"))
+}
+
+fn typed_children_mut(node: &mut PanelNode) -> Result<&mut Vec<PanelNode>, String> {
+    match node {
+        PanelNode::Box { children, .. }
+        | PanelNode::Layer { children, .. }
+        | PanelNode::Div { children, .. }
+        | PanelNode::Surface { children, .. }
+        | PanelNode::Row { children, .. }
+        | PanelNode::Column { children, .. }
+        | PanelNode::ScrollView { children, .. }
+        | PanelNode::Dialog { children, .. }
+        | PanelNode::Menu {
+            items: children, ..
+        }
+        | PanelNode::MenuItem { children, .. } => Ok(children),
+        _ => Err("native patch target is not below a typed container".into()),
     }
 }
 
@@ -4463,6 +4771,7 @@ pub fn render_retained_panel_validated(
 #[cfg(test)]
 mod class_lookup_tests {
     use super::{PanelNode, RetainedPanelTree};
+    use nickel_plugin_runtime::{NativePatchCounters, NativePatchEnvelope, NativePatchOperation};
     use serde_json::json;
 
     #[test]
@@ -4504,6 +4813,85 @@ mod class_lookup_tests {
         assert!(RetainedPanelTree::admit(&invalid, &manifest, None, 8).is_err());
         assert_eq!(retained.generation(), 7);
         assert_eq!(retained.source(), &source);
+    }
+
+    #[test]
+    fn primitive_and_handler_patches_match_cold_admission_and_reject_atomically() {
+        let source = json!({"kind":"column","__nativeId":"root","children":[
+            {"kind":"text","__nativeId":"root/@label","key":"label","children":["old"]},
+            {"kind":"button","__nativeId":"root/@go","key":"go","label":"Go","action":0,
+             "__handlerSlots":{"action":"root/@go:action"},"children":[]}
+        ]});
+        let manifest = nickel_core::plugins::PluginManifest {
+            composition: None,
+            api_version: 1,
+            id: "test".into(),
+            name: "Test".into(),
+            author: None,
+            version: None,
+            entry: "index.js".into(),
+            stylesheet: None,
+            images: Vec::new(),
+            surfaces: Vec::new(),
+            validation_data: Default::default(),
+            capabilities: Vec::new(),
+            settings: Vec::new(),
+        };
+        let stylesheet = super::StyleSheet::compile("").unwrap();
+        let mut retained = RetainedPanelTree::admit(&source, &manifest, None, 1).unwrap();
+        let patch = NativePatchEnvelope {
+            version: 1,
+            operations: vec![
+                NativePatchOperation::SetPrimitive {
+                    target: "root/@label".into(),
+                    property: "children".into(),
+                    value: json!(["new"]),
+                },
+                NativePatchOperation::ReplaceHandlerSlot {
+                    slot: "root/@go:action".into(),
+                    action: 4,
+                },
+            ],
+            counters: NativePatchCounters {
+                nodes_visited: 4,
+                nodes_mutated: 2,
+            },
+        };
+        let counters = retained
+            .apply_patch(&patch, &manifest, None, &stylesheet, 2, 97)
+            .unwrap();
+        let expected = json!({"kind":"column","__nativeId":"root","children":[
+            {"kind":"text","__nativeId":"root/@label","key":"label","children":["new"]},
+            {"kind":"button","__nativeId":"root/@go","key":"go","label":"Go","action":4,
+             "__handlerSlots":{"action":"root/@go:action"},"children":[]}
+        ]});
+        assert_eq!(
+            retained.node(),
+            &super::parse_panel_for_manifest(&expected, &manifest, None).unwrap()
+        );
+        assert_eq!(retained.source(), &expected);
+        assert_eq!(counters.transport_bytes, 97);
+        assert_eq!(counters.nodes_visited, 4);
+        assert_eq!(counters.nodes_mutated, 2);
+
+        let accepted = retained.clone();
+        let invalid = NativePatchEnvelope {
+            version: 1,
+            operations: vec![NativePatchOperation::SetPrimitive {
+                target: "root/@label".into(),
+                property: "children".into(),
+                value: json!([true]),
+            }],
+            counters: NativePatchCounters::default(),
+        };
+        assert!(
+            retained
+                .apply_patch(&invalid, &manifest, None, &stylesheet, 3, 1)
+                .is_err()
+        );
+        assert_eq!(retained.node(), accepted.node());
+        assert_eq!(retained.source(), accepted.source());
+        assert_eq!(retained.generation(), 2);
     }
 
     #[test]

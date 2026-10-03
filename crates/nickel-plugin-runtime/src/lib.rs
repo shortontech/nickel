@@ -52,7 +52,19 @@ pub struct NativePatchEnvelope {
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(tag = "op", rename_all = "camelCase")]
 pub enum NativePatchOperation {
-    ReplaceSubtree { target: String, node: Value },
+    SetPrimitive {
+        target: String,
+        property: String,
+        value: Value,
+    },
+    ReplaceHandlerSlot {
+        slot: String,
+        action: usize,
+    },
+    ReplaceSubtree {
+        target: String,
+        node: Value,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Default, PartialEq, Eq)]
@@ -394,12 +406,20 @@ mod tests {
             panic!("leaf update must patch");
         };
         assert_eq!(patch.operations.len(), 1);
-        let super::NativePatchOperation::ReplaceSubtree { target, node } = &patch.operations[0];
+        let super::NativePatchOperation::SetPrimitive {
+            target,
+            property,
+            value,
+        } = &patch.operations[0]
+        else {
+            panic!("text-only leaf update must use setPrimitive");
+        };
         assert_eq!(
             target,
             initial["children"][1]["__nativeId"].as_str().unwrap()
         );
-        assert_eq!(node["children"][0], "1");
+        assert_eq!(property, "children");
+        assert_eq!(value[0], "1");
         assert!(transport_bytes < serde_json::to_vec(&initial).unwrap().len());
         runtime.finish_patch_render(true).unwrap();
         runtime.finish_event(true).unwrap();
