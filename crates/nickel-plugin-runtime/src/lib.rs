@@ -802,10 +802,11 @@ impl JsxRuntime {
         parsed
     }
 
-    /// Dispatch an event batch through the retained hook scheduler. If no
-    /// state or reducer value changed, no component is executed and no native
-    /// tree needs validation. A rendered result is still a complete tree until
-    /// the typed subtree mutation protocol is implemented.
+    /// Legacy/cold dispatch through the retained hook scheduler. Production
+    /// mounts with admitted patch authority use [`Self::dispatch_patched`];
+    /// this complete-tree result remains for initial admission, cold-oracle
+    /// comparison, and mounts that have not acquired patch authority. A no-op
+    /// executes no component and needs no native validation.
     pub fn dispatch_scheduled<T>(
         &mut self,
         expression: &str,

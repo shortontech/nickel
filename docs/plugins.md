@@ -173,6 +173,10 @@ excluded.
 The runtime provides `h`, `Window`, `FixedWindow`, `Div`, `Row`, `Column`, `Text`, `Button`,
 `Slot`, `Dialog`, `Image`, `ImageButton`, `Slider`, `useState`, `useRef`, and other small native
 components.
+The [JSX runtime guide](../assets/plugin-runtime/README.md) documents retained
+component identity, reducers, memoization, effects and cleanup, contexts,
+versioned store selectors, error boundaries, hot reload, and the intentional
+differences from React.
 `Panel` remains as a compatibility helper for older plugins; it composes a
 `FixedWindow`, `Box`, and `Row` and has no separate native renderer. New plugins should
 use `Window` or `FixedWindow` as their surface root.

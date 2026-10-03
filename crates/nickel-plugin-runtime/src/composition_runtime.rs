@@ -1144,9 +1144,10 @@ impl ShellCompositionRuntime {
         self.dispatch_validated(handle, value, |_| Ok(()))
     }
 
-    /// Dispatch through the hook scheduler without forcing a root render when
-    /// every state/reducer update is referentially unchanged. This is the
-    /// retained bridge prerequisite; rendered outcomes remain complete trees.
+    /// Legacy/cold dispatch for a mount without admitted patch authority.
+    /// Production retained mounts route through `render_mount_patched`; this
+    /// path remains for initial admission, cold-oracle comparison, and newly
+    /// discovered ownership boundaries. Referential no-ops still skip render.
     pub fn dispatch_scheduled(
         &mut self,
         handle: &ComponentEventHandle,
@@ -1375,7 +1376,9 @@ impl ShellCompositionRuntime {
 
     /// Scheduled production bridge. A batch whose handlers do not change any
     /// hook value retains the caller's accepted expanded tree and event table.
-    /// Changed batches use the full expansion compatibility path for now.
+    /// Admitted mounts emit typed patches; only a newly discovered boundary
+    /// without patch authority is materialized for its first admission or a
+    /// cold-oracle path.
     pub fn dispatch_expanded_batch_scheduled_pending_validated<T>(
         &mut self,
         root: &ComponentMount,
