@@ -3120,6 +3120,80 @@ mod tests {
     }
 
     #[test]
+    fn composition_host_publishes_filtered_notification_lifecycle() {
+        let package = package(
+            "notifications-shell",
+            "globalThis.notificationObservation=null;\nexport function Taskbar(){const value=useNotifications();notificationObservation={value,generation:__notificationsStore.generation};return h(Text,null,(value.notification?.summary??'none')+':'+String(value.visible));}\nexport function QuickSettings(){return h(Text,null,'settings');}\nexport default Taskbar;",
+            None,
+        );
+        let owner = PackageIdentity {
+            id: "notifications-shell".into(),
+            version: package
+                .manifest
+                .composition
+                .as_ref()
+                .unwrap()
+                .version
+                .parse()
+                .unwrap(),
+        };
+        let item = serde_json::json!({"id":7,"appName":"Chat","summary":"Hello","body":"Body","actions":[]});
+        let first = serde_json::json!({"notifications":{"notification":item,"history":[item]}});
+        let mut host = ShellCompositionRuntime::new(
+            &BTreeMap::from([("notifications-shell".into(), package)]),
+            "notifications-shell",
+            &BTreeMap::from([(owner.clone(), first.clone())]),
+        )
+        .unwrap();
+        let mount = host
+            .mount(&host.component("shell.taskbar").unwrap())
+            .unwrap();
+        assert!(
+            host.render(&mount, &serde_json::json!({}))
+                .unwrap()
+                .node
+                .to_string()
+                .contains("Hello:true")
+        );
+        let runtime = host.shared_owner_runtime(&owner).unwrap();
+        assert_eq!(
+            runtime
+                .borrow_mut()
+                .eval_json::<u64>("__notificationsStore.generation")
+                .unwrap(),
+            1
+        );
+        host.update_snapshot(&owner, &first).unwrap();
+        host.render(&mount, &serde_json::json!({})).unwrap();
+        assert_eq!(
+            runtime
+                .borrow_mut()
+                .eval_json::<u64>("__notificationsStore.generation")
+                .unwrap(),
+            1
+        );
+        host.update_snapshot(
+            &owner,
+            &serde_json::json!({"notifications":{"notification":null,"history":[]}}),
+        )
+        .unwrap();
+        assert!(
+            host.render(&mount, &serde_json::json!({}))
+                .unwrap()
+                .node
+                .to_string()
+                .contains("none:false")
+        );
+        assert_eq!(
+            runtime
+                .borrow_mut()
+                .eval_json::<u64>("__notificationsStore.generation")
+                .unwrap(),
+            2
+        );
+    }
+
+    #[test]
     fn composition_host_publishes_effective_theme_independently_of_other_stores() {
         let package = package(
             "theme-shell",

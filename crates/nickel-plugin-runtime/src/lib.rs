@@ -265,6 +265,22 @@ impl JsxRuntime {
         {
             self.set_applications_store(applications)?;
         }
+        if let Some(notifications) = data.get("notifications")
+            && notifications
+                .get("history")
+                .and_then(Value::as_array)
+                .is_some()
+            && notifications
+                .get("notification")
+                .is_none_or(|notification| {
+                    notification.is_null()
+                        || (notification.get("appName").is_some()
+                            && notification.get("body").is_some()
+                            && notification.get("actions").is_some())
+                })
+        {
+            self.set_notifications_store(notifications)?;
+        }
         // Effective presentation state is globally readable and deliberately
         // separate from the capability-gated appearance configuration client.
         if let Some(appearance) = data.get("appearance") {
@@ -366,6 +382,30 @@ impl JsxRuntime {
         setter
             .as_callable()
             .ok_or("applications store setter is not callable")?
+            .call(&JsValue::undefined(), &[snapshot], &mut self.context)
+            .map(|changed| changed.to_boolean())
+            .map_err(|error| error.to_string())
+    }
+
+    /// Publish the owner's already filtered public notification feed. Invoke
+    /// and dismiss effects continue through native authority validation.
+    pub fn set_notifications_store(&mut self, snapshot: &Value) -> Result<bool, String> {
+        if self.invalidated {
+            return Err("runtime checkpoint was invalidated".into());
+        }
+        let snapshot =
+            JsValue::from_json(snapshot, &mut self.context).map_err(|error| error.to_string())?;
+        let setter = self
+            .context
+            .global_object()
+            .get(
+                js_string!("__nickelSetNotificationsStore"),
+                &mut self.context,
+            )
+            .map_err(|error| error.to_string())?;
+        setter
+            .as_callable()
+            .ok_or("notifications store setter is not callable")?
             .call(&JsValue::undefined(), &[snapshot], &mut self.context)
             .map(|changed| changed.to_boolean())
             .map_err(|error| error.to_string())
@@ -1085,6 +1125,83 @@ mod tests {
         runtime.set_applications_store(&serde_json::json!([{"id":"one","name":"One","icon":"application:1","kind":"application","launchClass":"graphical"}])).unwrap();
         assert!(
             !runtime
+                .eval_json::<bool>("JSON.parse(__nickelReconciliationRequest()).requested")
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn notifications_store_versions_visibility_and_structurally_shares_history() {
+        let mut runtime = super::JsxRuntime::new(
+            "globalThis.seen=[];function App(){const value=useNotifications();seen.push(value);return h(Text,null,value.notification?.summary??'none')}", None).unwrap();
+        let item = serde_json::json!({"id":1,"appName":"Mail","summary":"Hello","body":"Body","actions":[{"key":"open","label":"Open"}]});
+        let first = serde_json::json!({"notification":item,"history":[item]});
+        assert!(runtime.set_notifications_store(&first).unwrap());
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        assert!(!runtime.set_notifications_store(&first).unwrap());
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        assert!(runtime.eval_json::<bool>("seen[0]===seen[1] && seen[0].notification===seen[0].history[0] && Object.isFrozen(seen[0]) && Object.isFrozen(seen[0].history) && Object.isFrozen(seen[0].notification.actions)").unwrap());
+        let hidden = serde_json::json!({"notification":item,"history":[item],"visible":false});
+        assert!(runtime.set_notifications_store(&hidden).unwrap());
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        assert!(runtime.eval_json::<bool>("seen[1].notification===seen[2].notification && seen[2].visible===false && __notificationsStore.generation===2").unwrap());
+        let replaced = serde_json::json!({"notification":{"id":1,"appName":"Mail","summary":"Updated","body":"Body","actions":[]},"history":[]});
+        runtime.set_notifications_store(&replaced).unwrap();
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        assert_eq!(
+            runtime
+                .eval_json::<String>("JSON.stringify(seen[3].notification.summary)")
+                .unwrap(),
+            "Updated"
+        );
+        runtime
+            .set_notifications_store(&serde_json::json!({"notification":null,"history":[]}))
+            .unwrap();
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        assert_eq!(
+            runtime
+                .eval_json::<u64>("__notificationsStore.generation")
+                .unwrap(),
+            4
+        );
+    }
+
+    #[test]
+    fn notification_updates_are_isolated_and_rejected_subscriptions_roll_back() {
+        let source = r#"
+            globalThis.runs={app:0,notifications:0,applications:0,windows:0,sibling:0};
+            function Notifications(){runs.notifications++;return h(Text,null,useNotifications(value=>value.notification?.summary??'none'))}
+            function Applications(){runs.applications++;return h(Text,null,String(useApplications().length))}
+            function Windows(){runs.windows++;return h(Text,null,String(useWindows().length))}
+            function Sibling(){runs.sibling++;return h(Text,null,'stable')}
+            function App(){runs.app++;return h(Window,{},h(Notifications),h(Applications),h(Windows),h(Sibling))}
+        "#;
+        let mut runtime = super::JsxRuntime::new(source, None).unwrap();
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        runtime.set_notifications_store(&serde_json::json!({"notification":{"id":1,"appName":"App","summary":"One","body":"","actions":[]},"history":[]})).unwrap();
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        assert_eq!(
+            runtime
+                .eval_json::<serde_json::Value>("JSON.stringify(runs)")
+                .unwrap(),
+            serde_json::json!({"app":1,"notifications":2,"applications":1,"windows":1,"sibling":1})
+        );
+
+        let mut rejected = super::JsxRuntime::new(
+            "function App(){return h(Text,null,String(useNotifications().visible))}",
+            None,
+        )
+        .unwrap();
+        rejected
+            .render("__nickelRender()", |_| Err::<(), _>("reject".into()))
+            .unwrap_err();
+        rejected
+            .set_notifications_store(
+                &serde_json::json!({"notification":null,"history":[],"visible":true}),
+            )
+            .unwrap();
+        assert!(
+            !rejected
                 .eval_json::<bool>("JSON.parse(__nickelReconciliationRequest()).requested")
                 .unwrap()
         );

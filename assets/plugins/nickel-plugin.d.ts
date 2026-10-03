@@ -250,6 +250,8 @@ declare function useWindows<T>(selector: (windows: ReadonlyArray<Readonly<Nickel
 declare function useActiveWindow(): Readonly<NickelNativeWindow> | null;
 declare function useApplications(): ReadonlyArray<Readonly<NickelApplication>>;
 declare function useApplications<T>(selector: (applications: ReadonlyArray<Readonly<NickelApplication>>) => T): T;
+declare function useNotifications(): Readonly<NickelNotificationSnapshot>;
+declare function useNotifications<T>(selector: (notifications: Readonly<NickelNotificationSnapshot>) => T): T;
 interface NickelThemePalette {
     readonly background:NickelColor; readonly panel:NickelColor; readonly surface:NickelColor;
     readonly surfaceHover:NickelColor; readonly text:NickelColor; readonly muted:NickelColor;
@@ -446,7 +448,7 @@ interface NickelNativeWindow {
 }
 interface NickelTrayItem {id:string;title:string;icon:boolean}
 interface NickelNotification {id:number;appName:string;summary:string;body:string;actions:ReadonlyArray<Readonly<{key:string;label:string}>>}
-interface NickelNotificationSnapshot {notification:Readonly<NickelNotification>|null;history:ReadonlyArray<Readonly<NickelNotification>>}
+interface NickelNotificationSnapshot {notification:Readonly<NickelNotification>|null;history:ReadonlyArray<Readonly<NickelNotification>>;visible:boolean}
 /** Bounded native audio state; device identities/names are redacted while locked. */
 interface NickelAudioSnapshot extends NickelAvailability {muted:boolean;percent:number;devices:ReadonlyArray<Readonly<{id:string;name:string;isDefault:boolean}>>}
 interface NickelSessionSnapshot {revision:string;account:Readonly<{displayName:string;username:string}>|null;locked:boolean;support:Readonly<{lock:boolean;logout:boolean;suspend:boolean;reboot:boolean;powerOff:boolean;restartShell:boolean}>}

@@ -103,6 +103,7 @@ let __surfaceStore = {generation:0, snapshot:Object.freeze({
 })};
 let __windowsStore = {generation:0, snapshot:Object.freeze([])};
 let __applicationsStore = {generation:0, snapshot:Object.freeze([])};
+let __notificationsStore = {generation:0, snapshot:Object.freeze({notification:null,history:Object.freeze([]),visible:false})};
 let __themeStore = {generation:0, snapshot:Object.freeze({
     generation:0, mode:'unknown', accent:null, accentHue:null, accentIntensity:null,
     reducedMotion:null, reducedTransparency:null, palette:null
@@ -755,6 +756,84 @@ function useApplications(selector) {
     entry.storeError = undefined;
     entry.value = normalized ? normalized(__applicationsStore.snapshot) : __applicationsStore.snapshot;
     entry.generation = __applicationsStore.generation;
+    return entry.value;
+}
+
+function __nickelNotificationEqual(left, right) {
+    return left.id === right.id && left.appName === right.appName && left.summary === right.summary
+        && left.body === right.body && left.actions.length === right.actions.length
+        && left.actions.every((action, index) => action.key === right.actions[index].key
+            && action.label === right.actions[index].label);
+}
+function __nickelNotificationRecord(value, previous) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)
+        || !Number.isSafeInteger(value.id) || value.id < 1 || value.id > 0xffffffff
+        || typeof value.appName !== 'string' || value.appName.length > 480
+        || typeof value.summary !== 'string' || value.summary.length > 1024
+        || typeof value.body !== 'string' || value.body.length > 16384
+        || !Array.isArray(value.actions) || value.actions.length > 3)
+        throw Error('invalid public notification');
+    const actions = Object.freeze(value.actions.map(action => {
+        if (!action || typeof action !== 'object' || Array.isArray(action)
+            || typeof action.key !== 'string' || !action.key.length || action.key.length > 128
+            || typeof action.label !== 'string' || action.label.length > 480)
+            throw Error('invalid public notification action');
+        return Object.freeze({key:action.key,label:action.label});
+    }));
+    const copy = Object.freeze({id:value.id,appName:value.appName,summary:value.summary,body:value.body,actions});
+    return previous && __nickelNotificationEqual(previous, copy) ? previous : copy;
+}
+function __nickelNotificationSnapshot(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)
+        || !Array.isArray(value.history) || value.history.length > 12)
+        throw Error('invalid bounded notifications snapshot');
+    const previousRecords = new Map(__notificationsStore.snapshot.history.map(item => [item.id,item]));
+    if (__notificationsStore.snapshot.notification)
+        previousRecords.set(__notificationsStore.snapshot.notification.id, __notificationsStore.snapshot.notification);
+    const history = Object.freeze(value.history.map(item => {
+        const record = __nickelNotificationRecord(item, previousRecords.get(item?.id));
+        previousRecords.set(record.id, record);
+        return record;
+    }));
+    const notification = value.notification === undefined || value.notification === null ? null
+        : __nickelNotificationRecord(value.notification, previousRecords.get(value.notification.id));
+    const visible = value.visible === undefined ? notification !== null
+        : typeof value.visible === 'boolean' ? value.visible
+        : (() => { throw Error('invalid notification visibility'); })();
+    return Object.freeze({notification,history,visible});
+}
+function __nickelSetNotificationsStore(value) {
+    const snapshot = __nickelNotificationSnapshot(value), previous = __notificationsStore.snapshot;
+    if (previous.notification === snapshot.notification && previous.visible === snapshot.visible
+        && previous.history.length === snapshot.history.length
+        && previous.history.every((item,index) => item === snapshot.history[index])) return false;
+    if (__pendingRender !== null || __pendingEvent !== null)
+        throw Error('cannot publish changed notifications store during a render or event');
+    const generation = __notificationsStore.generation + 1;
+    __notificationsStore = {generation,snapshot};
+    __nickelForEachSurfaceHooks((hooks, dirty) => {
+        for (const [owner, slots] of hooks) for (const entry of slots) {
+            if (entry?.kind !== 'notifications-store') continue;
+            try {
+                const selected = entry.selector ? entry.selector(snapshot) : snapshot;
+                entry.storeError = undefined;
+                if (!Object.is(selected, entry.value)) dirty.add(owner);
+            } catch (error) { entry.storeError = error; dirty.add(owner); }
+        }
+    });
+    return true;
+}
+function useNotifications(selector) {
+    if (__currentComponent === null) throw Error('useNotifications requires a component');
+    if (selector !== undefined && typeof selector !== 'function') throw TypeError('useNotifications selector must be a function');
+    const slot=__hookIndex++, hooks=__componentHooks.get(__currentComponent), normalized=selector??null;
+    let entry=hooks[slot];
+    if (!entry || (entry.kind === 'notifications-store' && entry.selector !== normalized))
+        hooks[slot]=entry={kind:'notifications-store',selector:normalized,value:undefined,generation:0};
+    if (entry.kind !== 'notifications-store') throw Error('hook order changed');
+    entry.storeError=undefined;
+    entry.value=normalized?normalized(__notificationsStore.snapshot):__notificationsStore.snapshot;
+    entry.generation=__notificationsStore.generation;
     return entry.value;
 }
 
