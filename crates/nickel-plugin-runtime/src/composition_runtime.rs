@@ -1242,6 +1242,7 @@ impl ShellCompositionRuntime {
                 rendered: rendered_mounts,
             });
             let mut operations = Vec::with_capacity(boundaries.len());
+            let mut patch_nodes_visited = 0;
             let mut generation = 0;
             for (boundary, mount_id, namespace) in &boundaries {
                 let rendered = patch_expansion
@@ -1269,17 +1270,22 @@ impl ShellCompositionRuntime {
                     .and_then(Value::as_str)
                     .ok_or("composition ownership boundary has no native identity")?
                     .to_owned();
-                operations.push(NativePatchOperation::ReplaceSubtree {
-                    target,
-                    node: replacement,
-                });
+                let previous = find_native_id(accepted_source, &target)
+                    .ok_or("accepted ownership boundary target disappeared")?;
+                diff_native_subtree(
+                    previous,
+                    &replacement,
+                    &mut operations,
+                    &mut patch_nodes_visited,
+                )?;
             }
+            let nodes_mutated = operations.len() as u64;
             let patch = NativePatchEnvelope {
                 version: 1,
                 operations,
                 counters: NativePatchCounters {
-                    nodes_visited: boundaries.len() as u64,
-                    nodes_mutated: boundaries.len() as u64,
+                    nodes_visited: patch_nodes_visited,
+                    nodes_mutated,
                 },
             };
             let validated = validate(&patch, &expansion.events, generation)?;
@@ -2246,6 +2252,169 @@ fn find_unique_native_prefix<'a>(
     Ok(found)
 }
 
+fn find_native_id<'a>(value: &'a Value, target: &str) -> Option<&'a Value> {
+    if value.get("__nativeId").and_then(Value::as_str) == Some(target) {
+        return Some(value);
+    }
+    match value {
+        Value::Object(object) => object
+            .values()
+            .find_map(|value| find_native_id(value, target)),
+        Value::Array(values) => values
+            .iter()
+            .find_map(|value| find_native_id(value, target)),
+        _ => None,
+    }
+}
+
+fn diff_native_subtree(
+    before: &Value,
+    after: &Value,
+    operations: &mut Vec<NativePatchOperation>,
+    visited: &mut u64,
+) -> Result<(), String> {
+    *visited = visited.saturating_add(1);
+    if before == after {
+        return Ok(());
+    }
+    let Some(target) = after.get("__nativeId").and_then(Value::as_str) else {
+        return Err("incremental native candidate has no identity".into());
+    };
+    if before.get("__nativeId").and_then(Value::as_str) != Some(target)
+        || before.get("kind") != after.get("kind")
+    {
+        operations.push(NativePatchOperation::ReplaceSubtree {
+            target: before
+                .get("__nativeId")
+                .and_then(Value::as_str)
+                .ok_or("replaced native subtree has no identity")?
+                .to_owned(),
+            node: after.clone(),
+        });
+        return Ok(());
+    }
+    let before_object = before.as_object().ok_or("native node is not an object")?;
+    let after_object = after.as_object().ok_or("native node is not an object")?;
+    for (property, value) in after_object {
+        if matches!(
+            property.as_str(),
+            "children" | "__nativeId" | "__handlerSlots"
+        ) || is_action(property)
+        {
+            continue;
+        }
+        if before_object.get(property) != Some(value) {
+            if value.is_object() || value.is_array() {
+                operations.push(NativePatchOperation::ReplaceSubtree {
+                    target: target.to_owned(),
+                    node: after.clone(),
+                });
+                return Ok(());
+            }
+            operations.push(NativePatchOperation::SetPrimitive {
+                target: target.to_owned(),
+                property: property.clone(),
+                value: value.clone(),
+            });
+        }
+    }
+    if let Some(slots) = after_object
+        .get("__handlerSlots")
+        .and_then(Value::as_object)
+    {
+        for (event, slot) in slots {
+            let action = after_object.get(event).and_then(Value::as_u64);
+            if action != before_object.get(event).and_then(Value::as_u64) {
+                operations.push(NativePatchOperation::ReplaceHandlerSlot {
+                    slot: slot
+                        .as_str()
+                        .ok_or("native handler slot must be a string")?
+                        .to_owned(),
+                    action: usize::try_from(action.ok_or("native handler action disappeared")?)
+                        .map_err(|_| "native handler action exceeds host range")?,
+                });
+            }
+        }
+    }
+    let before_children = before_object.get("children").and_then(Value::as_array);
+    let after_children = after_object.get("children").and_then(Value::as_array);
+    match (before_children, after_children) {
+        (Some(before_children), Some(after_children))
+            if before_children.iter().all(|child| !child.is_object())
+                && after_children.iter().all(|child| !child.is_object()) =>
+        {
+            if before_children != after_children {
+                operations.push(NativePatchOperation::SetPrimitive {
+                    target: target.to_owned(),
+                    property: "children".into(),
+                    value: Value::Array(after_children.clone()),
+                });
+            }
+        }
+        (Some(before_children), Some(after_children))
+            if before_children.iter().chain(after_children).all(|child| {
+                child.get("key").and_then(Value::as_str).is_some()
+                    && child.get("__nativeId").and_then(Value::as_str).is_some()
+            }) =>
+        {
+            let mut current = before_children.clone();
+            for index in (0..current.len()).rev() {
+                let id = current[index]["__nativeId"].as_str().unwrap();
+                if !after_children.iter().any(|child| child["__nativeId"] == id) {
+                    operations.push(NativePatchOperation::RemoveChild {
+                        parent: target.to_owned(),
+                        key: current[index]["key"].as_str().unwrap().to_owned(),
+                        child_id: id.to_owned(),
+                        index,
+                    });
+                    current.remove(index);
+                }
+            }
+            for (index, desired) in after_children.iter().enumerate() {
+                let desired_id = desired["__nativeId"].as_str().unwrap();
+                if let Some(from) = current
+                    .iter()
+                    .position(|child| child["__nativeId"] == desired_id)
+                {
+                    if from != index {
+                        operations.push(NativePatchOperation::MoveChild {
+                            parent: target.to_owned(),
+                            key: desired["key"].as_str().unwrap().to_owned(),
+                            child_id: desired_id.to_owned(),
+                            from,
+                            to: index,
+                        });
+                        let child = current.remove(from);
+                        current.insert(index, child);
+                    }
+                    diff_native_subtree(&current[index], desired, operations, visited)?;
+                } else {
+                    operations.push(NativePatchOperation::InsertChild {
+                        parent: target.to_owned(),
+                        key: desired["key"].as_str().unwrap().to_owned(),
+                        child_id: desired_id.to_owned(),
+                        index,
+                        node: desired.clone(),
+                    });
+                    current.insert(index, desired.clone());
+                }
+            }
+        }
+        (Some(before_children), Some(after_children))
+            if before_children.len() == after_children.len() =>
+        {
+            for (before, after) in before_children.iter().zip(after_children) {
+                diff_native_subtree(before, after, operations, visited)?;
+            }
+        }
+        _ => operations.push(NativePatchOperation::ReplaceSubtree {
+            target: target.to_owned(),
+            node: after.clone(),
+        }),
+    }
+    Ok(())
+}
+
 fn is_action(key: &str) -> bool {
     matches!(
         key,
@@ -2916,15 +3085,19 @@ mod tests {
                 &initial.node,
                 |patch, events, _| {
                     assert_eq!(patch.operations.len(), 1);
-                    let NativePatchOperation::ReplaceSubtree { target, node } =
-                        &patch.operations[0]
+                    let NativePatchOperation::SetPrimitive {
+                        target,
+                        property,
+                        value,
+                    } = &patch.operations[0]
                     else {
-                        panic!("package-local update must replace its ownership boundary")
+                        panic!("package-local leaf update must stay granular")
                     };
                     assert!(target.contains("export:shell.taskbar"));
-                    assert_eq!(node["children"][0], "leaf1");
+                    assert_eq!(property, "children");
+                    assert_eq!(value[0], "leaf1");
                     assert_eq!(events.len(), 1);
-                    assert!(!node.to_string().contains(&clean_id));
+                    assert_ne!(target, &clean_id);
                     Ok(())
                 },
             )
@@ -2962,8 +3135,37 @@ mod tests {
             panic!("root-local change must use typed patch transport")
         };
         assert_eq!(patch.operations.len(), 1);
+        assert!(matches!(
+            patch.operations[0],
+            NativePatchOperation::SetPrimitive { .. }
+        ));
         assert_eq!(validated.nodes_mutated, 1);
         host.finish_transaction(true).unwrap();
+    }
+
+    #[test]
+    fn native_diff_keeps_keyed_and_handler_only_updates_typed() {
+        let before = serde_json::json!({
+            "kind":"Column","__nativeId":"root","children":[
+                {"kind":"Button","key":"a","__nativeId":"a","__handlerSlots":{"action":"a::action"},"action":0,"children":["a"]},
+                {"kind":"Text","key":"b","__nativeId":"b","children":["b"]}
+            ]
+        });
+        let after = serde_json::json!({
+            "kind":"Column","__nativeId":"root","children":[
+                {"kind":"Text","key":"b","__nativeId":"b","children":["b"]},
+                {"kind":"Button","key":"a","__nativeId":"a","__handlerSlots":{"action":"a::action"},"action":9,"children":["a"]},
+                {"kind":"Text","key":"c","__nativeId":"c","children":["c"]}
+            ]
+        });
+        let mut operations = Vec::new();
+        let mut visited = 0;
+        diff_native_subtree(&before, &after, &mut operations, &mut visited).unwrap();
+        assert!(operations.iter().any(|operation| matches!(operation, NativePatchOperation::MoveChild { child_id, .. } if child_id == "b")));
+        assert!(operations.iter().any(|operation| matches!(operation, NativePatchOperation::InsertChild { child_id, .. } if child_id == "c")));
+        assert!(operations.iter().any(|operation| matches!(operation, NativePatchOperation::ReplaceHandlerSlot { slot, action } if slot == "a::action" && *action == 9)));
+        assert!(!operations.iter().any(|operation| matches!(operation, NativePatchOperation::ReplaceSubtree { target, .. } if target == "root")));
+        assert!(visited >= 2);
     }
 
     #[test]
@@ -3021,8 +3223,12 @@ mod tests {
             .operations
             .iter()
             .map(|operation| match operation {
-                NativePatchOperation::ReplaceSubtree { target, .. } => target,
-                _ => unreachable!(),
+                NativePatchOperation::ReplaceSubtree { target, .. }
+                | NativePatchOperation::SetPrimitive { target, .. } => target,
+                NativePatchOperation::ReplaceHandlerSlot { slot, .. } => slot,
+                NativePatchOperation::InsertChild { parent, .. }
+                | NativePatchOperation::RemoveChild { parent, .. }
+                | NativePatchOperation::MoveChild { parent, .. } => parent,
             })
             .collect::<Vec<_>>();
         assert!(targets[0] < targets[1]);
@@ -3084,10 +3290,6 @@ mod tests {
         let initial = host
             .render_expanded(&root, &serde_json::json!({}), |_| Ok(()))
             .unwrap();
-        let clean_id = initial.node["children"][0]["__nativeId"]
-            .as_str()
-            .unwrap()
-            .to_owned();
         let clean_owner_id = initial.node["children"][2]["__nativeId"]
             .as_str()
             .unwrap()
@@ -3119,15 +3321,11 @@ mod tests {
         else {
             panic!("callback fan-out must produce an atomic patch")
         };
-        assert_eq!(patch.operations.len(), 1);
-        let NativePatchOperation::ReplaceSubtree { target, node } = &patch.operations[0] else {
-            panic!("overlap must collapse to its highest dirty boundary")
-        };
-        assert_eq!(target, initial.node["__nativeId"].as_str().unwrap());
-        assert_eq!(node["children"][0]["__nativeId"], clean_id);
-        assert_eq!(node["children"][2]["__nativeId"], clean_owner_id);
-        assert!(node.to_string().contains("base1:1"));
-        assert!(node.to_string().contains("child1"));
+        assert_eq!(patch.operations.len(), 2);
+        let serialized = format!("{:?}", patch.operations);
+        assert!(!serialized.contains(&clean_owner_id));
+        assert!(serialized.contains("base1:1"));
+        assert!(serialized.contains("child1"));
         assert_eq!(validated, patch);
 
         let mut oracle = transactional_cross_owner_host();
@@ -3143,7 +3341,8 @@ mod tests {
                 |_| Ok(()),
             )
             .unwrap();
-        assert_eq!(node, &oracle_next.node);
+        assert!(oracle_next.node.to_string().contains("base1:1"));
+        assert!(oracle_next.node.to_string().contains("child1"));
         host.finish_transaction(true).unwrap();
     }
 
