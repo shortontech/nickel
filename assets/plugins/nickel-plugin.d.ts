@@ -51,12 +51,6 @@ interface NickelPanelProps extends NickelProps {
     background?: NickelColor;
     height?: number;
 }
-interface NickelSurfaceProps extends NickelProps {
-    id?: string;
-    width: number;
-    height: number;
-    background?: NickelColor;
-}
 interface NickelWindowProps extends NickelProps {
     /** Native window activation, distinct from control focus; duplicate reports are ignored. */
     onFocus?: () => void;
@@ -75,11 +69,6 @@ interface NickelWindowProps extends NickelProps {
     reserveWorkArea?: boolean;
     bottomOffset?: number;
     background?: NickelColor;
-}
-interface NickelViewportProps extends NickelProps {
-    background?: NickelColor;
-    /** Inset from every edge, from 0 to 256 logical pixels. */
-    padding?: number;
 }
 interface NickelBoxProps extends NickelProps {
     x: number;
@@ -203,11 +192,9 @@ declare function Fragment(props:NickelProps):JSX.Element;
 declare function h(kind: unknown, props?: object | null, ...children: NickelChild[]): JSX.Element;
 /** @deprecated Compatibility helper; use Window or FixedWindow for new surfaces. */
 declare function Panel(props: NickelPanelProps): JSX.Element;
-declare function Surface(props: NickelSurfaceProps): JSX.Element;
 declare function Window(props: NickelWindowProps): JSX.Element;
 /** Convenience JSX component that renders Window with fixed placement. */
 declare function FixedWindow(props: Omit<NickelWindowProps, "placement">): JSX.Element;
-declare function Viewport(props: NickelViewportProps): JSX.Element;
 declare function Box(props: NickelBoxProps): JSX.Element;
 /** Positions Box children by their x and y coordinates. Size it with CSS. */
 declare function Layer(props: NickelProps & { id?: string }): JSX.Element;

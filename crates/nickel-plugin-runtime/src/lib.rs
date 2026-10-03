@@ -102,6 +102,43 @@ pub struct JsxTestHarness {
     data: Option<String>,
     accepted: Option<Value>,
     errors: Vec<String>,
+    pending_events: Vec<(usize, Value)>,
+}
+
+/// Native event slots exposed by a materialized JSX node.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JsxTestEvent {
+    Click,
+    ContextMenu,
+    Drag,
+    Drop,
+    Focus,
+    Blur,
+    Select,
+    Move,
+    FileAction,
+    Close,
+    Escape,
+    Submit,
+}
+
+impl JsxTestEvent {
+    fn property(self) -> &'static str {
+        match self {
+            Self::Click => "action",
+            Self::ContextMenu => "contextAction",
+            Self::Drag => "dragAction",
+            Self::Drop => "dropAction",
+            Self::Focus => "focusAction",
+            Self::Blur => "blurAction",
+            Self::Select => "selectAction",
+            Self::Move => "moveAction",
+            Self::FileAction => "fileAction",
+            Self::Close => "closeAction",
+            Self::Escape => "escapeAction",
+            Self::Submit => "submitAction",
+        }
+    }
 }
 
 impl JsxTestHarness {
@@ -112,6 +149,7 @@ impl JsxTestHarness {
             data: data.map(str::to_owned),
             accepted: None,
             errors: Vec::new(),
+            pending_events: Vec::new(),
         })
     }
     pub fn render(&mut self) -> Result<&Value, String> {
@@ -132,6 +170,40 @@ impl JsxTestHarness {
     pub fn rerender(&mut self) -> Result<&Value, String> {
         self.render()
     }
+    /// Return all materialized native nodes whose `id` exactly matches `id`.
+    pub fn query_all_by_id(&self, id: &str) -> Vec<Value> {
+        self.query_nodes(|node| node.get("id").and_then(Value::as_str) == Some(id))
+    }
+    /// Return the unique materialized native node whose `id` matches `id`.
+    pub fn get_by_id(&self, id: &str) -> Result<Value, String> {
+        self.unique_query(format!("id {id:?}"), self.query_all_by_id(id))
+    }
+    /// Return all nodes containing `text` as a direct textual child.
+    pub fn query_all_by_text(&self, text: &str) -> Vec<Value> {
+        self.query_nodes(|node| {
+            node.get("children")
+                .and_then(Value::as_array)
+                .is_some_and(|children| children.iter().any(|child| child.as_str() == Some(text)))
+        })
+    }
+    pub fn get_by_text(&self, text: &str) -> Result<Value, String> {
+        self.unique_query(format!("text {text:?}"), self.query_all_by_text(text))
+    }
+    /// Return all nodes with the explicit accessibility `role`.
+    pub fn query_all_by_role(&self, role: &str) -> Vec<Value> {
+        self.query_nodes(|node| node.get("role").and_then(Value::as_str) == Some(role))
+    }
+    pub fn get_by_role(&self, role: &str) -> Result<Value, String> {
+        self.unique_query(format!("role {role:?}"), self.query_all_by_role(role))
+    }
+    /// Resolve a typed event slot from a node returned by a semantic query.
+    pub fn event_action(node: &Value, event: JsxTestEvent) -> Result<usize, String> {
+        let property = event.property();
+        node.get(property)
+            .and_then(Value::as_u64)
+            .and_then(|action| usize::try_from(action).ok())
+            .ok_or_else(|| format!("node has no {property} event"))
+    }
     pub fn inject_store(&mut self, name: &str, value: &Value) -> Result<(), String> {
         let setter = match name {
             "windows" => "__nickelSetWindowsStore",
@@ -140,12 +212,50 @@ impl JsxTestHarness {
             "workspaces" => "__nickelSetWorkspacesStore",
             "outputs" => "__nickelSetOutputsStore",
             "theme" => "__nickelSetThemeStore",
+            "locale" => "__nickelSetLocaleStore",
             _ => return Err("unknown test store".into()),
         };
         self.runtime.eval(&format!("{setter}({value})"))
     }
+    pub fn inject_locale(&mut self, value: &Value) -> Result<bool, String> {
+        self.runtime.set_locale_store(value)
+    }
+    pub fn inject_surface(&mut self, mount_id: &str, value: &Value) -> Result<bool, String> {
+        self.runtime.set_surface_store(mount_id, value)
+    }
+    pub fn inject_capabilities(
+        &mut self,
+        declared: &[nickel_core::plugins::PluginCapability],
+        native_data: &Value,
+    ) -> Result<bool, String> {
+        self.runtime.set_capability_store(declared, native_data)
+    }
     pub fn event(&mut self, action: usize, value: &Value) -> Result<&Value, String> {
-        let expression = format!("__nickelDispatch({action},{value})");
+        self.dispatch_events(&[(action, value.clone())])
+    }
+    /// Queue an event without rendering. `flush_updates` admits every queued
+    /// event in one runtime event turn and performs exactly one render.
+    pub fn queue_event(&mut self, action: usize, value: Value) {
+        self.pending_events.push((action, value));
+    }
+    pub fn queue_node_event(
+        &mut self,
+        node: &Value,
+        event: JsxTestEvent,
+        value: Value,
+    ) -> Result<(), String> {
+        self.queue_event(Self::event_action(node, event)?, value);
+        Ok(())
+    }
+    pub fn flush_updates(&mut self) -> Result<&Value, String> {
+        let events = std::mem::take(&mut self.pending_events);
+        self.dispatch_events(&events)
+    }
+    pub fn dispatch_events(&mut self, events: &[(usize, Value)]) -> Result<&Value, String> {
+        let expression = format!(
+            "__nickelDispatchBatch({})",
+            serde_json::to_string(events).map_err(|error| error.to_string())?
+        );
         let result = self.runtime.render(&expression, |node| Ok(node.clone()));
         match result {
             Ok(value) => {
@@ -178,6 +288,49 @@ impl JsxTestHarness {
     }
     pub fn runtime_mut(&mut self) -> &mut JsxRuntime {
         &mut self.runtime
+    }
+
+    fn accepted(&self) -> Result<&Value, String> {
+        self.accepted
+            .as_ref()
+            .ok_or_else(|| "test harness has no accepted render".into())
+    }
+
+    fn query_nodes(&self, predicate: impl Fn(&Value) -> bool) -> Vec<Value> {
+        fn visit(value: &Value, predicate: &impl Fn(&Value) -> bool, matches: &mut Vec<Value>) {
+            match value {
+                Value::Object(_) => {
+                    if predicate(value) {
+                        matches.push(value.clone());
+                    }
+                    if let Some(children) = value.get("children").and_then(Value::as_array) {
+                        for child in children {
+                            visit(child, predicate, matches);
+                        }
+                    }
+                }
+                Value::Array(values) => {
+                    for value in values {
+                        visit(value, predicate, matches);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut matches = Vec::new();
+        if let Ok(root) = self.accepted() {
+            visit(root, &predicate, &mut matches);
+        }
+        matches
+    }
+
+    fn unique_query(&self, description: String, matches: Vec<Value>) -> Result<Value, String> {
+        match matches.len() {
+            1 => Ok(matches.into_iter().next().unwrap()),
+            count => Err(format!(
+                "expected one node matching {description}, found {count}"
+            )),
+        }
     }
 }
 
@@ -948,6 +1101,122 @@ impl JsxRuntime {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn jsx_test_harness_queries_events_batches_and_injects_domain_stores() {
+        use super::{JsxTestEvent, JsxTestHarness};
+
+        let source = r#"
+            function App() {
+                const [count,setCount]=useState(0);
+                const locale=useLocale(), surface=useSurface(), capability=useCapability('windows-read');
+                return h(Column,{id:'root'},
+                    h(Button,{id:'increment',role:'button',onClick:()=>setCount(value=>value+1)},'Increment'),
+                    h(Text,{id:'summary'},count+':'+locale.tag+':'+surface.id+':'+capability.available));
+            }
+        "#;
+        let mut harness = JsxTestHarness::new(source, None).unwrap();
+        harness
+            .inject_locale(&serde_json::json!({"known":true,"tag":"fr-FR","direction":"ltr"}))
+            .unwrap();
+        harness
+            .inject_surface(
+                "mount",
+                &serde_json::json!({"id":"settings","kind":"window"}),
+            )
+            .unwrap();
+        harness
+            .inject_capabilities(
+                &[nickel_core::plugins::PluginCapability::WindowsRead],
+                &serde_json::json!({"windows":{"available":true}}),
+            )
+            .unwrap();
+        harness.render().unwrap();
+        let button = harness.get_by_role("button").unwrap();
+        assert_eq!(button["id"], "increment");
+        assert_eq!(harness.get_by_text("Increment").unwrap()["id"], "increment");
+        assert_eq!(
+            harness.get_by_id("summary").unwrap()["children"][0],
+            "0:fr-FR:settings:true"
+        );
+
+        harness
+            .queue_node_event(&button, JsxTestEvent::Click, Value::Null)
+            .unwrap();
+        harness
+            .queue_node_event(&button, JsxTestEvent::Click, Value::Null)
+            .unwrap();
+        harness.flush_updates().unwrap();
+        assert_eq!(
+            harness.get_by_id("summary").unwrap()["children"][0],
+            "2:fr-FR:settings:true"
+        );
+        assert!(harness.flush_effects().unwrap().is_empty());
+
+        harness
+            .inject_locale(&serde_json::json!({"known":true,"tag":"de-DE","direction":"ltr"}))
+            .unwrap();
+        let diagnostics = harness.runtime_mut().runtime_diagnostics().unwrap();
+        let locale_change = diagnostics["storeChanges"]
+            .as_array()
+            .unwrap()
+            .last()
+            .unwrap();
+        assert_eq!(locale_change["store"], "locale");
+        assert_eq!(locale_change["newlyDirty"], 1);
+        harness.rerender().unwrap();
+        assert_eq!(
+            harness.get_by_id("summary").unwrap()["children"][0],
+            "2:de-DE:settings:true"
+        );
+    }
+
+    #[test]
+    fn plugin_declarations_match_runtime_globals_and_capability_vocabulary() {
+        let declarations = include_str!("../../../assets/plugins/nickel-plugin.d.ts");
+        let mut names = std::collections::BTreeSet::new();
+        for line in declarations.lines() {
+            let line = line.trim();
+            for prefix in ["declare function ", "declare const "] {
+                if let Some(rest) = line.strip_prefix(prefix) {
+                    let name = rest
+                        .split(|character: char| {
+                            character == '(' || character == ':' || character == '<'
+                        })
+                        .next()
+                        .unwrap()
+                        .trim();
+                    names.insert(name);
+                }
+            }
+        }
+        let mut runtime =
+            super::JsxRuntime::new("function App(){return h(Text,null,'ok')}", None).unwrap();
+        for name in names {
+            let expression = format!("typeof {name} !== 'undefined'");
+            let present = runtime
+                .eval_json::<bool>(&format!("JSON.stringify({expression})"))
+                .unwrap();
+            assert!(
+                present,
+                "nickel-plugin.d.ts declares missing runtime global {name}"
+            );
+        }
+
+        let declared_capabilities = declarations
+            .split("type NickelCapability =")
+            .nth(1)
+            .unwrap()
+            .split("interface NickelCapabilitySnapshot")
+            .next()
+            .unwrap();
+        for capability in super::PLUGIN_CAPABILITY_NAMES {
+            assert!(
+                declared_capabilities.contains(&format!("\"{capability}\"")),
+                "runtime capability {capability} is absent from nickel-plugin.d.ts"
+            );
+        }
+    }
+
+    #[test]
     fn error_boundary_contains_render_memo_and_reducer_failures() {
         let source = r#"
             globalThis.phase = 'ok';
@@ -1176,6 +1445,39 @@ mod tests {
         let diagnostics = runtime.runtime_diagnostics().unwrap();
         assert!(diagnostics["counters"]["renders"].as_u64().unwrap() >= 41);
         assert_eq!(diagnostics["reasons"].as_array().unwrap().len(), 32);
+        assert!(diagnostics["storeChanges"].as_array().unwrap().len() <= 32);
+        assert!(diagnostics["nativeMutations"].as_array().unwrap().len() <= 32);
+    }
+
+    #[test]
+    fn runtime_store_and_native_mutation_diagnostics_are_content_free_and_bounded() {
+        let source = "function App(){const locale=useLocale();const [count,setCount]=useState(0);return h(Button,{onClick:()=>setCount(value=>value+1)},String(count)+locale.tag)}";
+        let mut runtime = super::JsxRuntime::new(source, None).unwrap();
+        let initial = runtime
+            .render("__nickelRender()", |node| Ok(node.clone()))
+            .unwrap();
+        let action = initial["action"].as_u64().unwrap();
+        for index in 0..40 {
+            let tag = if index % 2 == 0 { "en-US" } else { "de-DE" };
+            runtime
+                .set_locale_store(&serde_json::json!({"known":true,"tag":tag,"direction":"ltr"}))
+                .unwrap();
+            runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+
+            let outcome = runtime
+                .dispatch_patched(&format!("__nickelDispatchBatchPatched([[{action},null]])"))
+                .unwrap();
+            assert!(matches!(outcome, super::ScheduledPatch::Patched { .. }));
+            runtime.finish_patch_render(true).unwrap();
+            runtime.finish_event(true).unwrap();
+        }
+        let diagnostics = runtime.runtime_diagnostics().unwrap();
+        assert_eq!(diagnostics["storeChanges"].as_array().unwrap().len(), 32);
+        assert_eq!(diagnostics["nativeMutations"].as_array().unwrap().len(), 32);
+        assert!(diagnostics["counters"]["storeChanges"].as_u64().unwrap() >= 40);
+        assert_eq!(diagnostics["counters"]["nativeMutations"], 40);
+        assert!(diagnostics["storeChanges"].to_string().len() < 4096);
+        assert!(diagnostics["nativeMutations"].to_string().len() < 8192);
     }
 
     #[test]
@@ -1215,6 +1517,10 @@ mod tests {
             "unchanged trailing child needs no operation"
         );
         assert_eq!(patch.counters.nodes_mutated, 1);
+        let diagnostics = runtime.runtime_diagnostics().unwrap();
+        assert_eq!(diagnostics["counters"]["nativeMutations"], 1);
+        assert_eq!(diagnostics["nativeMutations"][0]["count"], 1);
+        assert_eq!(diagnostics["nativeMutations"][0]["kinds"]["insertChild"], 1);
         runtime.finish_patch_render(true).unwrap();
         runtime.finish_event(true).unwrap();
     }

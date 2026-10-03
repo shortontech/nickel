@@ -121,8 +121,11 @@ const __MAX_BOUNDARY_DIAGNOSTICS = 32;
 let __boundaryDiagnostics = [];
 const __MAX_RUNTIME_REASONS = 32;
 let __runtimeReasons = [];
+const __MAX_RUNTIME_CHANGES = 32;
+let __runtimeStoreChanges = [];
+let __runtimeNativeMutations = [];
 let __runtimeCounters = {renders:0,executed:0,reused:0,nativeNodesMaterialized:0,
-    effectsScheduled:0,effectsRun:0,cleanups:0,failures:0};
+    effectsScheduled:0,effectsRun:0,cleanups:0,failures:0,storeChanges:0,nativeMutations:0};
 let __incrementalRender = false;
 let __effects = [];
 let __listKeyErrors = [];
@@ -183,7 +186,27 @@ function __nickelCaptureFailure(owner, error, phase) {
     return true;
 }
 function __nickelBoundaryDiagnostics() { return JSON.stringify(__boundaryDiagnostics); }
-function __nickelRuntimeDiagnostics() { return JSON.stringify({counters:__runtimeCounters,reasons:__runtimeReasons}); }
+function __nickelBoundedDiagnosticPush(target, value) {
+    if (target.length === __MAX_RUNTIME_CHANGES) target.shift();
+    target.push(value);
+}
+function __nickelDirtyComponentCount() {
+    let count=__dirtyComponents.size;
+    for (const state of __surfaceStates.values()) if (state.dirty!==__dirtyComponents) count+=state.dirty.size;
+    return count;
+}
+function __nickelRecordStoreChange(store,generation,before) {
+    const newlyDirty=Math.max(0,__nickelDirtyComponentCount()-before);
+    __runtimeCounters.storeChanges++;
+    __nickelBoundedDiagnosticPush(__runtimeStoreChanges,{store,generation,newlyDirty});
+}
+function __nickelRecordNativeMutations(operations,nodesVisited) {
+    __runtimeCounters.nativeMutations+=operations.length;
+    const kinds={}; for(const operation of operations) kinds[operation.op]=(kinds[operation.op]??0)+1;
+    __nickelBoundedDiagnosticPush(__runtimeNativeMutations,{count:operations.length,nodesVisited,kinds});
+}
+function __nickelRuntimeDiagnostics() { return JSON.stringify({counters:__runtimeCounters,reasons:__runtimeReasons,
+    storeChanges:__runtimeStoreChanges,nativeMutations:__runtimeNativeMutations}); }
 let __windowsStore = {generation:0, snapshot:Object.freeze([])};
 let __applicationsStore = {generation:0, snapshot:Object.freeze([])};
 let __notificationsStore = {generation:0, snapshot:Object.freeze({notification:null,history:Object.freeze([]),visible:false})};
@@ -792,7 +815,7 @@ function __nickelForEachSurfaceHooks(visit) {
 function __nickelSetWindowsStore(value) {
     if (__pendingRender !== null || __pendingEvent !== null)
         throw Error('cannot publish windows store during a render or event');
-    const windows = __nickelWindowSnapshot(value);
+    const before=__nickelDirtyComponentCount(), windows = __nickelWindowSnapshot(value);
     const previous = __windowsStore.snapshot;
     if (previous.length === windows.length && previous.every((window, index) => window === windows[index]))
         return false;
@@ -814,7 +837,7 @@ function __nickelSetWindowsStore(value) {
             }
         }
     });
-    return true;
+    __nickelRecordStoreChange('windows',generation,before); return true;
 }
 
 function useWindows(selector) {
@@ -865,7 +888,7 @@ function __nickelApplicationSnapshot(value) {
     }));
 }
 function __nickelSetApplicationsStore(value) {
-    const applications = __nickelApplicationSnapshot(value);
+    const before=__nickelDirtyComponentCount(), applications = __nickelApplicationSnapshot(value);
     const previous = __applicationsStore.snapshot;
     if (previous.length === applications.length
         && previous.every((application, index) => application === applications[index])) return false;
@@ -884,7 +907,7 @@ function __nickelSetApplicationsStore(value) {
             } catch (error) { entry.storeError = error; dirty.add(owner); }
         }
     });
-    return true;
+    __nickelRecordStoreChange('applications',generation,before); return true;
 }
 function useApplications(selector) {
     if (__currentComponent === null) throw Error('useApplications requires a component');
@@ -946,7 +969,7 @@ function __nickelNotificationSnapshot(value) {
     return Object.freeze({notification,history,visible});
 }
 function __nickelSetNotificationsStore(value) {
-    const snapshot = __nickelNotificationSnapshot(value), previous = __notificationsStore.snapshot;
+    const before=__nickelDirtyComponentCount(), snapshot = __nickelNotificationSnapshot(value), previous = __notificationsStore.snapshot;
     if (previous.notification === snapshot.notification && previous.visible === snapshot.visible
         && previous.history.length === snapshot.history.length
         && previous.history.every((item,index) => item === snapshot.history[index])) return false;
@@ -965,7 +988,7 @@ function __nickelSetNotificationsStore(value) {
             } catch (error) { entry.storeError = error; dirty.add(owner); }
         }
     });
-    return true;
+    __nickelRecordStoreChange('notifications',generation,before); return true;
 }
 function useNotifications(selector) {
     if (__currentComponent === null) throw Error('useNotifications requires a component');
@@ -1013,7 +1036,7 @@ function __nickelWorkspaceSnapshot(value,generation) {
         revision,workspaces,activeWorkspace,operations});
 }
 function __nickelSetWorkspacesStore(value) {
-    const generation=__workspacesStore.generation+1, snapshot=__nickelWorkspaceSnapshot(value,generation), previous=__workspacesStore.snapshot;
+    const before=__nickelDirtyComponentCount(), generation=__workspacesStore.generation+1, snapshot=__nickelWorkspaceSnapshot(value,generation), previous=__workspacesStore.snapshot;
     const unchanged=previous.available===snapshot.available&&previous.reason===snapshot.reason
         &&previous.writable===snapshot.writable&&previous.revision===snapshot.revision
         &&previous.activeWorkspace===snapshot.activeWorkspace
@@ -1031,7 +1054,7 @@ function __nickelSetWorkspacesStore(value) {
         if(entry?.kind!=='workspaces-store')continue;
         try{const selected=entry.selector?entry.selector(retained):retained;entry.storeError=undefined;if(!Object.is(selected,entry.value))dirty.add(owner);}
         catch(error){entry.storeError=error;dirty.add(owner);}
-    }});return true;
+    }});__nickelRecordStoreChange('workspaces',generation,before);return true;
 }
 function useWorkspaces(selector) {
     if(__currentComponent===null)throw Error('useWorkspaces requires a component');
@@ -1059,6 +1082,7 @@ function __nickelFreezeOutput(value) {
 }
 function __nickelOutputEqual(left,right){return JSON.stringify(left)===JSON.stringify(right);}
 function __nickelSetOutputsStore(value){
+    const before=__nickelDirtyComponentCount();
     if(!value||typeof value!=='object'||Array.isArray(value)||!Array.isArray(value.outputs)||value.outputs.length>32)throw Error('invalid bounded outputs snapshot');
     const previous=__outputsStore.snapshot,byName=new Map(previous.outputs.map(output=>[output.name,output])),seen=new Set();
     const outputs=Object.freeze(value.outputs.map(source=>{const copy=__nickelFreezeOutput(source);if(seen.has(copy.name))throw Error('duplicate output');seen.add(copy.name);
@@ -1069,12 +1093,13 @@ function __nickelSetOutputsStore(value){
     if(__pendingRender!==null||__pendingEvent!==null)throw Error('cannot publish changed outputs store during a render or event');
     const generation=__outputsStore.generation+1,snapshot=Object.freeze({generation,available,reason,revision,outputs});__outputsStore={generation,snapshot};__nickelNotifyExternalStore('outputs');
     __nickelForEachSurfaceHooks((hooks,dirty)=>{for(const [owner,slots] of hooks)for(const entry of slots){if(entry?.kind!=='outputs-store')continue;
-        try{const selected=entry.selector?entry.selector(snapshot):snapshot;entry.storeError=undefined;if(!Object.is(selected,entry.value))dirty.add(owner);}catch(error){entry.storeError=error;dirty.add(owner);}}});return true;
+        try{const selected=entry.selector?entry.selector(snapshot):snapshot;entry.storeError=undefined;if(!Object.is(selected,entry.value))dirty.add(owner);}catch(error){entry.storeError=error;dirty.add(owner);}}});__nickelRecordStoreChange('outputs',generation,before);return true;
 }
 function useOutputs(selector){if(__currentComponent===null)throw Error('useOutputs requires a component');if(selector!==undefined&&typeof selector!=='function')throw TypeError('useOutputs selector must be a function');
     const slot=__hookIndex++,hooks=__componentHooks.get(__currentComponent),normalized=selector??null;let entry=hooks[slot];if(!entry||(entry.kind==='outputs-store'&&entry.selector!==normalized))hooks[slot]=entry={kind:'outputs-store',selector:normalized,value:undefined,generation:0};
     if(entry.kind!=='outputs-store')throw Error('hook order changed');entry.storeError=undefined;entry.value=normalized?normalized(__outputsStore.snapshot):__outputsStore.snapshot;entry.generation=__outputsStore.generation;return entry.value;}
 function __nickelSetLocaleStore(value){
+    const before=__nickelDirtyComponentCount();
     if(!value||typeof value!=='object'||Array.isArray(value))throw Error('invalid locale snapshot');
     const known=value.known===true;
     let tag=known?value.tag:'und';
@@ -1084,7 +1109,7 @@ function __nickelSetLocaleStore(value){
     const previous=__localeStore.snapshot;if(previous.tag===tag&&previous.direction===direction&&previous.known===known)return false;
     if(__pendingRender!==null||__pendingEvent!==null)throw Error('cannot publish changed locale store during a render or event');
     const generation=__localeStore.generation+1,snapshot=Object.freeze({generation,tag,direction,known});__localeStore={generation,snapshot};__nickelNotifyExternalStore('locale');
-    __nickelForEachSurfaceHooks((hooks,dirty)=>{for(const [owner,slots] of hooks)for(const entry of slots)if(entry?.kind==='locale-store'&&!Object.is(snapshot,entry.value))dirty.add(owner);});return true;
+    __nickelForEachSurfaceHooks((hooks,dirty)=>{for(const [owner,slots] of hooks)for(const entry of slots)if(entry?.kind==='locale-store'&&!Object.is(snapshot,entry.value))dirty.add(owner);});__nickelRecordStoreChange('locale',generation,before);return true;
 }
 function useLocale(){if(__currentComponent===null)throw Error('useLocale requires a component');const slot=__hookIndex++,hooks=__componentHooks.get(__currentComponent);let entry=hooks[slot];
     if(!entry)hooks[slot]=entry={kind:'locale-store',value:undefined,generation:0};if(entry.kind!=='locale-store')throw Error('hook order changed');entry.value=__localeStore.snapshot;entry.generation=__localeStore.generation;return entry.value;}
@@ -1151,6 +1176,7 @@ function __nickelThemeEqual(left, right) {
     return __nickelThemePaletteFields.every(field => left.palette[field] === right.palette[field]);
 }
 function __nickelSetThemeStore(value) {
+    const before=__nickelDirtyComponentCount();
     const generation = __themeStore.generation + 1;
     let snapshot = __nickelThemeSnapshot(value, generation);
     if (__nickelThemeEqual(__themeStore.snapshot, snapshot)) return false;
@@ -1174,7 +1200,7 @@ function __nickelSetThemeStore(value) {
             }
         }
     });
-    return true;
+    __nickelRecordStoreChange('theme',generation,before); return true;
 }
 function useTheme(selector) {
     if (__currentComponent === null) throw Error('useTheme requires a component');
@@ -1195,6 +1221,7 @@ const __nickelSelectReducedMotion = theme => theme.reducedMotion;
 function useReducedMotion() { return useTheme(__nickelSelectReducedMotion); }
 
 function __nickelSetCapabilityStore(value) {
+    const before=__nickelDirtyComponentCount();
     if (!value || typeof value !== 'object' || Array.isArray(value)
         || !Array.isArray(value.known) || !value.entries || typeof value.entries !== 'object'
         || Array.isArray(value.entries) || value.known.length > 128)
@@ -1237,7 +1264,7 @@ function __nickelSetCapabilityStore(value) {
         for (const [owner, slots] of hooks) for (const entry of slots)
             if (entry?.kind === 'capability-store' && !Object.is(entries[entry.capability], entry.value)) dirty.add(owner);
     });
-    return true;
+    __nickelRecordStoreChange('capabilities',generation,before); return true;
 }
 function useCapability(capability) {
     if (__currentComponent === null) throw Error('useCapability requires a component');
@@ -1263,6 +1290,7 @@ function __nickelSurfaceSelection(name, snapshot) {
 }
 
 function __nickelSetSurfaceStore(mountId, value) {
+    const before=__nickelDirtyComponentCount();
     if (__pendingRender !== null || __pendingEvent !== null)
         throw Error('cannot publish surface store during a render or event');
     if (typeof mountId !== 'string' || !mountId.length || mountId.length > 128)
@@ -1307,7 +1335,7 @@ function __nickelSetSurfaceStore(mountId, value) {
             if (!Object.is(selected, entry.value)) __dirtyComponents.add(owner);
         }
     }
-    return true;
+    __nickelRecordStoreChange('surface',generation,before); return true;
 }
 
 function __nickelUseSurfaceSelection(selection) {
@@ -2224,6 +2252,7 @@ function __nickelNativePatch(previous, next) {
     }
     if (previous === null) throw Error('native patch has no accepted base');
     walk(previous, next);
+    __nickelRecordNativeMutations(operations,visited);
     return {version:1, operations, counters:{nodesVisited:visited, nodesMutated:operations.length}};
 }
 
