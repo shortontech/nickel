@@ -4022,6 +4022,7 @@ impl LiveShell {
                     } else {
                         false
                     };
+                let surface_changed = host.application_mut().reconcile_surface_authority()?;
                 if resource_changed || dependency_changed || application_images_changed {
                     tracing::warn!(
                         surface = %key.surface_id,
@@ -4033,6 +4034,7 @@ impl LiveShell {
                 }
                 Ok(geometry_changed
                     || focus_changed
+                    || surface_changed
                     || resource_changed
                     || dependency_changed
                     || application_images_changed)
@@ -5934,7 +5936,7 @@ impl LiveShell {
     fn step_generic_plugin_surface(
         &mut self,
         key: &nickel_core::plugins::PluginSurfaceKey,
-        mut batch: HostBatch,
+        batch: HostBatch,
         keyboard_epoch: Option<u64>,
     ) -> bool {
         self.plugin_pointer_paint = None;
@@ -5943,24 +5945,43 @@ impl LiveShell {
             let Some(host) = self.plugin_panel_host_for(key) else {
                 return false;
             };
-            if let Some(focused) = batch.window_focused {
-                match host.application_mut().sync_surface_focus(focused) {
-                    Ok(changed) => batch.application_changed |= changed,
-                    Err(error) => return self.fail_plugin_panel_runtime(&key.plugin_id, error),
+            let restore_focus = batch
+                .window_focused
+                .is_some_and(|focused| focused)
+                .then(|| host.inspect().keyboard_focus)
+                .flatten();
+            let focused = batch.window_focused;
+            step_plugin_host(host, None, batch).and_then(|(mut outcome, _)| {
+                if let Some(focused) = focused {
+                    host.application_mut().sync_surface_focus(focused)?;
+                    outcome.changed |= host.application_mut().reconcile_surface_authority()?;
                 }
-            }
-            step_plugin_host(host, None, batch).map(|(outcome, _)| {
+                if let Some(target) = restore_focus
+                    && host.inspect().keyboard_focus.is_none()
+                {
+                    let target = host
+                        .accessibility_nodes()
+                        .iter()
+                        .find(|node| {
+                            node.id.as_str().rsplit('/').next()
+                                == target.as_str().rsplit('/').next()
+                        })
+                        .map(|node| node.id.clone())
+                        .unwrap_or(target);
+                    host.request_focus(target);
+                    outcome.changed = true;
+                }
                 let paint_only = pointer_only
                     && outcome.messages.is_empty()
                     && matches!(
                         outcome.invalidation,
                         nickel_ui::Invalidation::None | nickel_ui::Invalidation::Paint
                     );
-                (
+                Ok((
                     outcome.changed,
                     paint_only,
                     host.application_mut().take_effects(),
-                )
+                ))
             })
         };
         let (changed, paint_only, effects) = match result {
@@ -6063,6 +6084,26 @@ impl LiveShell {
         width: u32,
         height: u32,
     ) -> bool {
+        if self
+            .plugin_panel_host_ref(key)
+            .is_some_and(|host| host.inspect().window_focused == focused)
+        {
+            let Some(host) = self.plugin_panel_host_for(key) else {
+                return false;
+            };
+            let published =
+                host.application_mut()
+                    .sync_surface_focus(focused)
+                    .and_then(|changed| {
+                        host.application_mut()
+                            .reconcile_surface_authority()
+                            .map(|rendered| changed || rendered)
+                    });
+            return match published {
+                Ok(changed) => changed,
+                Err(error) => self.fail_plugin_panel_runtime(&key.plugin_id, error),
+            };
+        }
         self.step_generic_plugin_surface(
             key,
             HostBatch {
@@ -8663,6 +8704,9 @@ impl LiveShell {
         match role {
             SurfaceRole::ControlCenter if self.shell_selection_preview.is_some() => false,
             SurfaceRole::ControlCenter => {
+                if self.quick_settings_surface_active() {
+                    return self.set_default_shell_surface_visible("quick-settings", false);
+                }
                 self.control_host.application_mut().dismiss();
                 std::mem::replace(&mut self.control_visible, false)
             }

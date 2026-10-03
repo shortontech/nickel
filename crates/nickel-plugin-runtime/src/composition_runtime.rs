@@ -1024,6 +1024,21 @@ impl ShellCompositionRuntime {
         Ok(true)
     }
 
+    /// A host that is about to perform a complete mount render may consume the
+    /// store notification directly instead of carrying it into the incremental
+    /// event patch queue.
+    pub fn consume_mount_reconciliation(&mut self, mount: &ComponentMount) -> Result<(), String> {
+        self.validate_mount(mount)?;
+        let owner = self.mounts[&mount.id].reference.owner.clone();
+        let package = self
+            .packages
+            .get_mut(&owner)
+            .ok_or("retired component owner")?;
+        let mut runtime = package.runtime.borrow_mut();
+        runtime.select_surface(&surface(mount.id))?;
+        runtime.eval("__dirtyComponents.clear()")
+    }
+
     /// Begin a bounded transaction spanning every participating owner context.
     /// IDs remain monotonic so rolled-back mount/callback handles cannot be reused.
     pub fn begin_transaction(&mut self) -> Result<(), String> {

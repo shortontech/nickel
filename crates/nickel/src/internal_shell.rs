@@ -1754,7 +1754,12 @@ mod tests {
             .id;
         assert!(!coordinator.visible(control));
         assert!(
-            host.0.lock().unwrap().is_empty(),
+            !host
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|command| matches!(command, ShellCommand::RestoreApplicationFocus)),
             "focus loss must not issue a restore command"
         );
     }
@@ -1934,20 +1939,13 @@ mod tests {
     #[test]
     fn retired_plugin_slot_cannot_render_or_receive_input_for_new_owner() {
         let mut shell = coordinator();
-        let owner = crate::plugin_panel::manifest().id.clone();
-        if !shell
+        let active = shell
             .shell
-            .plugin_registry()
-            .get(&owner)
-            .unwrap()
-            .desired_enabled
-        {
-            shell.shell.set_plugin_enabled(&owner, true).unwrap();
-        }
-        let active = nickel_core::plugins::PluginSurfaceKey {
-            plugin_id: owner,
-            surface_id: shell.shell.plugin_panel_surface().id.clone(),
-        };
+            .plugin_panels()
+            .into_iter()
+            .next()
+            .expect("active package panel")
+            .0;
         let stale = nickel_core::plugins::PluginSurfaceKey {
             plugin_id: "org.example.retired".into(),
             surface_id: active.surface_id.clone(),

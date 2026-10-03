@@ -647,7 +647,7 @@ impl PluginPanelApplication {
         if next == self.surface_snapshot {
             return Ok(false);
         }
-        if let Some(state) = &self.composition {
+        if let Some(state) = &mut self.composition {
             state
                 .host
                 .borrow_mut()
@@ -661,6 +661,32 @@ impl PluginPanelApplication {
             )?;
         }
         self.surface_snapshot = next;
+        Ok(true)
+    }
+
+    pub(crate) fn reconcile_surface_authority(&mut self) -> Result<bool, String> {
+        let Some(state) = &mut self.composition else {
+            return Ok(false);
+        };
+        let mut host = state.host.borrow_mut();
+        host.consume_mount_reconciliation(&state.mount)?;
+        let (rendered, ()) =
+            host.render_expanded_validated(&state.mount, &serde_json::json!({}), |value| {
+                RetainedPanelTree::admit(
+                    value,
+                    &self.manifest,
+                    self.expected_surface_id.as_deref(),
+                    0,
+                )
+                .map(|_| ())
+            })?;
+        self.accepted = RetainedPanelTree::admit(
+            &rendered.node,
+            &self.manifest,
+            self.expected_surface_id.as_deref(),
+            rendered.generation(),
+        )?;
+        state.events = rendered.events;
         Ok(true)
     }
 
