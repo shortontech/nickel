@@ -781,6 +781,8 @@ mod tests {
         Column, Component, ComponentBuilderExt, CustomPaint, FrameRequest, Rect, Row, StyledText,
         StyledTextSpan, Text, TextUnderlineStyle, UiFrame, UiStateStore,
     };
+    #[cfg(not(debug_assertions))]
+    use crate::{Container, Grid, SoftwareRenderer, Track};
     use proptest::prelude::*;
 
     fn keyed_text(id: &str, value: &str) -> Element<()> {
@@ -1448,5 +1450,382 @@ mod tests {
             retained.as_nanos().saturating_mul(5) <= cold.as_nanos().saturating_mul(4),
             "retained layout p95 must be at least 20% faster: retained={retained:?}, cold={cold:?}"
         );
+    }
+
+    #[cfg(not(debug_assertions))]
+    #[derive(Clone, Copy)]
+    struct FlexGridFixture {
+        badge: char,
+        expanded: bool,
+    }
+
+    #[cfg(not(debug_assertions))]
+    fn nested_flex_grid_view(state: FlexGridFixture) -> impl Component<()> {
+        const CARDS: usize = 24;
+        const CHANGED_CARD: usize = CARDS / 2;
+        Column::new().id("layout-root").padding(12.0).child(
+            Grid::auto_fit(Track::minmax(Track::px(210.0), Track::fr(1.0)))
+                .id("responsive-grid")
+                .gap(10.0)
+                .children((0..CARDS).map(|index| {
+                    let badge = if index == CHANGED_CARD {
+                        state.badge
+                    } else {
+                        'A'
+                    };
+                    let description = if index == CHANGED_CARD && state.expanded {
+                        "A deliberately longer description that wraps across several lines when the responsive grid narrows."
+                    } else {
+                        "Short description."
+                    };
+                    Container::new()
+                        .id(format!("card-{index}"))
+                        .padding(8.0)
+                        .child(
+                            Column::new()
+                                .id("stack")
+                                .gap(6.0)
+                                .child(
+                                    Row::new()
+                                        .id("heading")
+                                        .gap(4.0)
+                                        .child(Text::new(format!("Card {index:02}")).id("title"))
+                                        .child(
+                                            Text::new(badge.to_string())
+                                                .id("badge")
+                                                .width(28.0)
+                                                .height(20.0)
+                                                .content_revision(badge as u64),
+                                        ),
+                                )
+                                .child(
+                                    Grid::fixed(2)
+                                        .id("facts")
+                                        .gap(4.0)
+                                        .child(Text::new("Status").id("status-label"))
+                                        .child(Text::new("Ready").id("status-value"))
+                                        .child(Text::new("Owner").id("owner-label"))
+                                        .child(
+                                            Text::new(format!("Team {}", index % 4))
+                                                .id("owner-value"),
+                                        ),
+                                )
+                                .child(
+                                    Text::new(description)
+                                        .id("description")
+                                        .wrap(true)
+                                        .content_revision(
+                                            (index == CHANGED_CARD && state.expanded) as u64,
+                                        ),
+                                ),
+                        )
+                })),
+        )
+    }
+
+    #[cfg(not(debug_assertions))]
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    struct FlexGridWork {
+        retained: usize,
+        reused: usize,
+        created: usize,
+        removed: usize,
+        moved: usize,
+        measured: usize,
+        placed: usize,
+        paint_executed: usize,
+        paint_reused: usize,
+        interaction_executed: usize,
+        interaction_reused: usize,
+        semantic_executed: usize,
+        semantic_reused: usize,
+    }
+
+    #[cfg(not(debug_assertions))]
+    fn flex_grid_work(frame: &UiFrame<()>) -> FlexGridWork {
+        let work = frame.resource_diagnostics();
+        FlexGridWork {
+            retained: work.retained_node_count,
+            reused: work.retained_nodes_reused,
+            created: work.retained_nodes_created,
+            removed: work.retained_nodes_removed,
+            moved: work.retained_nodes_moved,
+            measured: work.nodes_measured,
+            placed: work.nodes_placed,
+            paint_executed: work.paint_nodes_executed,
+            paint_reused: work.paint_nodes_reused,
+            interaction_executed: work.interaction_nodes_executed,
+            interaction_reused: work.interaction_nodes_reused,
+            semantic_executed: work.semantic_nodes_executed,
+            semantic_reused: work.semantic_nodes_reused,
+        }
+    }
+
+    #[cfg(not(debug_assertions))]
+    fn flex_grid_bounds(width: f32) -> Rect {
+        Rect::new(0.0, 0.0, width, 720.0)
+    }
+
+    #[cfg(not(debug_assertions))]
+    fn assert_flex_grid_cold_equivalence(
+        incremental: &UiFrame<()>,
+        cold: &UiFrame<()>,
+        scale: f32,
+        width: f32,
+        raster: bool,
+    ) {
+        assert_eq!(incremental.resolved_layout(), cold.resolved_layout());
+        assert_eq!(incremental.commands().len(), cold.commands().len());
+        assert_eq!(incremental.semantic_nodes(), cold.semantic_nodes());
+        assert_eq!(
+            incremental.accessibility_nodes(),
+            cold.accessibility_nodes()
+        );
+        assert_eq!(
+            incremental.interaction_record_counts(),
+            cold.interaction_record_counts()
+        );
+        if !raster {
+            return;
+        }
+        let mut incremental_renderer =
+            SoftwareRenderer::new((width * scale).ceil() as u32, (720.0 * scale) as u32, scale);
+        let mut cold_renderer =
+            SoftwareRenderer::new((width * scale).ceil() as u32, (720.0 * scale) as u32, scale);
+        incremental_renderer.render(incremental.commands());
+        cold_renderer.render(cold.commands());
+        assert_eq!(incremental_renderer.pixels(), cold_renderer.pixels());
+    }
+
+    #[cfg(not(debug_assertions))]
+    fn measure_flex_grid_transition(
+        scale: f32,
+        from: FlexGridFixture,
+        from_width: f32,
+        to: FlexGridFixture,
+        to_width: f32,
+    ) -> (Vec<std::time::Duration>, FlexGridWork) {
+        const SAMPLES: usize = 20;
+        let mut samples = Vec::with_capacity(SAMPLES);
+        let mut expected = None;
+        for sample in 0..SAMPLES {
+            let mut state = UiStateStore::default();
+            let retained = UiFrame::resolve(
+                nested_flex_grid_view(from),
+                FrameRequest::new(flex_grid_bounds(from_width), &mut state),
+            );
+            let started = std::time::Instant::now();
+            let next = UiFrame::resolve_against(
+                nested_flex_grid_view(to),
+                FrameRequest::new(flex_grid_bounds(to_width), &mut state),
+                &retained,
+            );
+            samples.push(started.elapsed());
+            expected.get_or_insert_with(|| flex_grid_work(&next));
+            assert_eq!(expected, Some(flex_grid_work(&next)));
+
+            let mut cold_state = UiStateStore::default();
+            let cold = UiFrame::resolve(
+                nested_flex_grid_view(to),
+                FrameRequest::new(flex_grid_bounds(to_width), &mut cold_state),
+            );
+            assert_flex_grid_cold_equivalence(&next, &cold, scale, to_width, sample == 0);
+        }
+        (samples, expected.expect("transition work"))
+    }
+
+    #[cfg(not(debug_assertions))]
+    #[test]
+    #[ignore = "release-profile nested wrapping flex/grid scale admission benchmark"]
+    fn nested_wrapping_flex_grid_release_admission() {
+        use crate::release_admission::AdmissionReport;
+
+        const WIDE: f32 = 960.0;
+        const NARROW: f32 = 700.0;
+        let baseline = FlexGridFixture {
+            badge: 'A',
+            expanded: false,
+        };
+        for scale in [1.0_f32, 1.25, 2.0] {
+            let (unchanged_time, unchanged) =
+                measure_flex_grid_transition(scale, baseline, WIDE, baseline, WIDE);
+            let (same_size_time, same_size) = measure_flex_grid_transition(
+                scale,
+                baseline,
+                WIDE,
+                FlexGridFixture {
+                    badge: 'B',
+                    expanded: false,
+                },
+                WIDE,
+            );
+            let (size_change_time, size_change) = measure_flex_grid_transition(
+                scale,
+                baseline,
+                WIDE,
+                FlexGridFixture {
+                    badge: 'A',
+                    expanded: true,
+                },
+                WIDE,
+            );
+            let (resize_time, resize) =
+                measure_flex_grid_transition(scale, baseline, WIDE, baseline, NARROW);
+
+            assert_eq!(unchanged.retained, same_size.retained);
+            assert_eq!(unchanged.retained, size_change.retained);
+            assert_eq!(unchanged.retained, resize.retained);
+            assert_eq!(
+                unchanged,
+                FlexGridWork {
+                    retained: 266,
+                    reused: 266,
+                    created: 0,
+                    removed: 0,
+                    moved: 0,
+                    measured: 218,
+                    placed: 218,
+                    paint_executed: 218,
+                    paint_reused: 48,
+                    interaction_executed: 98,
+                    interaction_reused: 168,
+                    semantic_executed: 218,
+                    semantic_reused: 48,
+                }
+            );
+            assert_eq!(
+                same_size,
+                FlexGridWork {
+                    retained: 266,
+                    reused: 266,
+                    created: 0,
+                    removed: 0,
+                    moved: 0,
+                    measured: 218,
+                    placed: 218,
+                    paint_executed: 219,
+                    paint_reused: 47,
+                    interaction_executed: 98,
+                    interaction_reused: 168,
+                    semantic_executed: 219,
+                    semantic_reused: 47,
+                }
+            );
+            assert_eq!(
+                size_change,
+                FlexGridWork {
+                    retained: 266,
+                    reused: 266,
+                    created: 0,
+                    removed: 0,
+                    moved: 0,
+                    measured: 219,
+                    placed: 219,
+                    paint_executed: 219,
+                    paint_reused: 47,
+                    interaction_executed: 99,
+                    interaction_reused: 167,
+                    semantic_executed: 235,
+                    semantic_reused: 31,
+                }
+            );
+            assert_eq!(
+                resize,
+                FlexGridWork {
+                    retained: 266,
+                    reused: 266,
+                    created: 0,
+                    removed: 0,
+                    moved: 0,
+                    measured: 242,
+                    placed: 242,
+                    paint_executed: 242,
+                    paint_reused: 24,
+                    interaction_executed: 218,
+                    interaction_reused: 48,
+                    semantic_executed: 265,
+                    semantic_reused: 1,
+                }
+            );
+
+            AdmissionReport::new("retained_layout", "nested_wrapping_flex_grid")
+                .metadata("cards", 24)
+                .metadata("samples", 20)
+                .metadata("scale_milli", (scale * 1_000.0) as usize)
+                .metadata("wide_width", WIDE as usize)
+                .metadata("narrow_width", NARROW as usize)
+                .work("unchanged_retained", unchanged.retained)
+                .work("unchanged_reused", unchanged.reused)
+                .work("unchanged_created", unchanged.created)
+                .work("unchanged_removed", unchanged.removed)
+                .work("unchanged_moved", unchanged.moved)
+                .work("unchanged_measured", unchanged.measured)
+                .work("unchanged_placed", unchanged.placed)
+                .work("unchanged_paint_executed", unchanged.paint_executed)
+                .work("unchanged_paint_reused", unchanged.paint_reused)
+                .work(
+                    "unchanged_interaction_executed",
+                    unchanged.interaction_executed,
+                )
+                .work("unchanged_interaction_reused", unchanged.interaction_reused)
+                .work("unchanged_semantic_executed", unchanged.semantic_executed)
+                .work("unchanged_semantic_reused", unchanged.semantic_reused)
+                .work("same_size_retained", same_size.retained)
+                .work("same_size_reused", same_size.reused)
+                .work("same_size_created", same_size.created)
+                .work("same_size_removed", same_size.removed)
+                .work("same_size_moved", same_size.moved)
+                .work("same_size_measured", same_size.measured)
+                .work("same_size_placed", same_size.placed)
+                .work("same_size_paint_executed", same_size.paint_executed)
+                .work("same_size_paint_reused", same_size.paint_reused)
+                .work(
+                    "same_size_interaction_executed",
+                    same_size.interaction_executed,
+                )
+                .work("same_size_interaction_reused", same_size.interaction_reused)
+                .work("same_size_semantic_executed", same_size.semantic_executed)
+                .work("same_size_semantic_reused", same_size.semantic_reused)
+                .work("size_change_retained", size_change.retained)
+                .work("size_change_reused", size_change.reused)
+                .work("size_change_created", size_change.created)
+                .work("size_change_removed", size_change.removed)
+                .work("size_change_moved", size_change.moved)
+                .work("size_change_measured", size_change.measured)
+                .work("size_change_placed", size_change.placed)
+                .work("size_change_paint_executed", size_change.paint_executed)
+                .work("size_change_paint_reused", size_change.paint_reused)
+                .work(
+                    "size_change_interaction_executed",
+                    size_change.interaction_executed,
+                )
+                .work(
+                    "size_change_interaction_reused",
+                    size_change.interaction_reused,
+                )
+                .work(
+                    "size_change_semantic_executed",
+                    size_change.semantic_executed,
+                )
+                .work("size_change_semantic_reused", size_change.semantic_reused)
+                .work("resize_retained", resize.retained)
+                .work("resize_reused", resize.reused)
+                .work("resize_created", resize.created)
+                .work("resize_removed", resize.removed)
+                .work("resize_moved", resize.moved)
+                .work("resize_measured", resize.measured)
+                .work("resize_placed", resize.placed)
+                .work("resize_paint_executed", resize.paint_executed)
+                .work("resize_paint_reused", resize.paint_reused)
+                .work("resize_interaction_executed", resize.interaction_executed)
+                .work("resize_interaction_reused", resize.interaction_reused)
+                .work("resize_semantic_executed", resize.semantic_executed)
+                .work("resize_semantic_reused", resize.semantic_reused)
+                .timings("unchanged", &unchanged_time)
+                .timings("same_size_leaf", &same_size_time)
+                .timings("size_changing_leaf", &size_change_time)
+                .timings("resize", &resize_time)
+                .emit();
+        }
     }
 }
