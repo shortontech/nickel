@@ -1256,6 +1256,10 @@ impl From<Vec<Track>> for GridColumnSpec {
 pub struct Element<Message = String> {
     id: Option<UiId>,
     source: Option<SourceLocation>,
+    /// Source-owned revision for payloads that cannot be compared through
+    /// bounded structural metadata. Without one, retained reconciliation
+    /// conservatively rebuilds every content-sensitive phase.
+    content_revision: Option<u64>,
     kind: Kind,
     style: Style,
     message: Option<Message>,
@@ -1283,6 +1287,7 @@ impl<Message> Element<Message> {
             kind: Kind::Flex(axis),
             id: None,
             source: None,
+            content_revision: None,
             style: Style::default(),
             message: None,
             context_message: None,
@@ -1329,6 +1334,7 @@ impl<Message> Element<Message> {
             },
             id: None,
             source: None,
+            content_revision: None,
             style: Style::default(),
             message: None,
             context_message: None,
@@ -1351,13 +1357,37 @@ impl<Message> Element<Message> {
     }
 
     pub fn child(mut self, child: impl Component<Message>) -> Self {
-        self.children.push(child.into_element());
+        let mut child = child.into_element();
+        if let Some(revision) = self.content_revision {
+            child.set_inherited_content_revision(revision);
+        }
+        self.children.push(child);
         self
     }
 
     pub fn id(mut self, id: impl Into<UiId>) -> Self {
         self.id = Some(id.into());
         self
+    }
+
+    /// Declare an exact source-owned revision for this component's content.
+    /// The revision must change whenever text, styled spans, custom paint
+    /// commands, option payloads, or accessibility strings change.
+    pub fn content_revision(mut self, revision: u64) -> Self {
+        self.content_revision = Some(revision);
+        for child in &mut self.children {
+            child.set_inherited_content_revision(revision);
+        }
+        self
+    }
+
+    fn set_inherited_content_revision(&mut self, revision: u64) {
+        if self.content_revision.is_none() {
+            self.content_revision = Some(revision);
+        }
+        for child in &mut self.children {
+            child.set_inherited_content_revision(revision);
+        }
     }
 
     #[doc(hidden)]
@@ -1367,8 +1397,13 @@ impl<Message> Element<Message> {
     }
 
     pub fn children(mut self, children: impl IntoIterator<Item = impl Component<Message>>) -> Self {
-        self.children
-            .extend(children.into_iter().map(Component::into_element));
+        self.children.extend(children.into_iter().map(|child| {
+            let mut child = child.into_element();
+            if let Some(revision) = self.content_revision {
+                child.set_inherited_content_revision(revision);
+            }
+            child
+        }));
         self
     }
 
@@ -1704,6 +1739,7 @@ impl<Message> Element<Message> {
             kind: self.kind,
             id: self.id,
             source: self.source,
+            content_revision: self.content_revision,
             style: self.style,
             message: self.message.map(&mut *map),
             context_message: self.context_message.map(&mut *map),
@@ -2188,6 +2224,10 @@ pub trait ComponentBuilderExt<Message>: Component<Message> + Sized {
 
     fn id(self, id: impl Into<UiId>) -> Element<Message> {
         self.into_element().id(id)
+    }
+
+    fn content_revision(self, revision: u64) -> Element<Message> {
+        self.into_element().content_revision(revision)
     }
 
     fn padding(self, padding: impl Into<Insets>) -> Element<Message> {

@@ -210,6 +210,7 @@ impl<Message> VerticalScroll<Message> {
         Self(Element {
             id: None,
             source: None,
+            content_revision: None,
             kind: Kind::VerticalScroll {
                 offset: offset.max(0.0),
                 controlled: false,
@@ -312,6 +313,7 @@ impl<Message> Grid<Message> {
         Self(Element {
             id: None,
             source: None,
+            content_revision: None,
             kind: Kind::Grid {
                 columns: GridColumnSpec::Count(2),
             },
@@ -355,6 +357,7 @@ impl<Message> Grid<Message> {
         Self(Element {
             id: None,
             source: None,
+            content_revision: None,
             kind: Kind::Grid {
                 columns: GridColumnSpec::Tracks(tracks),
             },
@@ -383,6 +386,7 @@ impl<Message> Grid<Message> {
         Self(Element {
             id: None,
             source: None,
+            content_revision: None,
             kind: Kind::Grid {
                 columns: GridColumnSpec::AutoFit(track),
             },
@@ -911,6 +915,7 @@ impl<Message> StyledText<Message> {
             },
             id: None,
             source: None,
+            content_revision: None,
             style: Style {
                 accessibility_label: Some(value),
                 ..Style::default()
@@ -1202,6 +1207,7 @@ impl<Message> CustomPaint<Message> {
         Self(Element {
             id: None,
             source: None,
+            content_revision: None,
             kind: Kind::CustomPaint { paint },
             style: Style::default(),
             message: None,
@@ -1229,6 +1235,7 @@ impl<Message> CustomPaint<Message> {
         Self(Element {
             id: None,
             source: None,
+            content_revision: None,
             kind: Kind::CustomPaintCommands { commands },
             style: Style::default(),
             message: None,
@@ -1336,6 +1343,7 @@ impl<Message> Image<Message> {
         Self(Element {
             id: None,
             source: None,
+            content_revision: None,
             kind: Kind::Image {
                 id,
                 generation,
@@ -3181,6 +3189,7 @@ impl<Message> Slider<Message> {
         let mut element = Element {
             id: None,
             source: None,
+            content_revision: None,
             kind: Kind::Slider {
                 value: value.clamp(0.0, 1.0),
                 track: 0x354158,
@@ -3442,6 +3451,7 @@ impl<Message> Dropdown<Message> {
         let mut element = Element {
             id: None,
             source: None,
+            content_revision: None,
             kind: Kind::Dropdown {
                 selected: selected.into(),
                 options,
@@ -3640,6 +3650,7 @@ impl<Message: Clone> Menu<Message> {
         let mut element = Element {
             id: None,
             source: None,
+            content_revision: None,
             kind: Kind::Dropdown {
                 selected: label.into(),
                 options: items.iter().map(|item| item.label.clone()).collect(),

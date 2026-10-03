@@ -6511,7 +6511,9 @@ mod tests {
             let children = (0..self.nodes)
                 .map(|index| {
                     let item = crate::Component::into_element(
-                        Button::new((), format!("Item {index}")).id(format!("item-{index}")),
+                        Button::new((), format!("Item {index}"))
+                            .content_revision(index as u64)
+                            .id(format!("item-{index}")),
                     );
                     if self.ambiguous_effect {
                         item.backdrop_blur(4.0)

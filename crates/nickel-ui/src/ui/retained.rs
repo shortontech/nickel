@@ -144,6 +144,11 @@ struct PhaseSignatures {
     paint: u64,
     interaction: u64,
     semantics: u64,
+    content_revision: Option<u64>,
+    measure_content_sensitive: bool,
+    paint_content_sensitive: bool,
+    interaction_content_sensitive: bool,
+    semantics_content_sensitive: bool,
 }
 
 #[derive(Default)]
@@ -152,18 +157,6 @@ struct CompactHasher(std::collections::hash_map::DefaultHasher);
 impl CompactHasher {
     fn add<T: Hash>(&mut self, value: &T) {
         value.hash(&mut self.0);
-    }
-
-    fn text(&mut self, value: &str) {
-        // Reconciliation metadata stays bounded for document-scale values. The
-        // cold oracle remains authoritative; these signatures never establish
-        // equality of user content by themselves.
-        self.add(&value.len());
-        let bytes = value.as_bytes();
-        let prefix = &bytes[..bytes.len().min(64)];
-        let suffix = &bytes[bytes.len().saturating_sub(64)..];
-        self.add(&prefix);
-        self.add(&suffix);
     }
 
     fn finish(self) -> u64 {
@@ -245,6 +238,22 @@ fn signatures<Message>(element: &Element<Message>) -> PhaseSignatures {
     let mut content_measure = CompactHasher::default();
     let mut paint = CompactHasher::default();
     let mut semantics = CompactHasher::default();
+    let mut measure_content_sensitive = false;
+    let mut paint_content_sensitive = false;
+    let interaction_content_sensitive = element.message.is_some()
+        || element.context_message.is_some()
+        || element.focus_message.is_some()
+        || element.blur_message.is_some()
+        || element.drag_seed.is_some()
+        || element.drop_message.is_some()
+        || element.text_mapper.is_some()
+        || !element.option_messages.is_empty()
+        || !element.inline_messages.is_empty();
+    let mut semantics_content_sensitive = element.style.accessibility_label.is_some()
+        || element.style.accessibility_description.is_some()
+        || element.style.accessibility_role.is_some()
+        || element.style.accessibility_state.is_some()
+        || element.style.accessibility_controls.is_some();
     std::mem::discriminant(&element.kind).hash(&mut content_measure.0);
     std::mem::discriminant(&element.kind).hash(&mut paint.0);
 
@@ -263,18 +272,20 @@ fn signatures<Message>(element: &Element<Message>) -> PhaseSignatures {
             input_mask,
             ..
         } => {
-            content_measure.text(value);
+            let _ = value;
+            measure_content_sensitive = true;
+            paint_content_sensitive = true;
+            semantics_content_sensitive = true;
             content_measure.add(&bits(*scale));
             content_measure.add(bold);
             content_measure.add(wrap);
             content_measure.add(&line_height.map(bits));
             content_measure.add(max_lines);
-            paint.text(value);
             paint.add(ellipsis);
-            paint.add(&format!(
-                "{outline:?}{input_value:?}{input_placeholder:?}{input_mask:?}"
-            ));
-            semantics.text(value);
+            paint.add(&format!("{outline:?}"));
+            paint.add(&input_value.is_some());
+            paint.add(&input_placeholder.is_some());
+            paint.add(&input_mask);
         }
         Kind::StyledText {
             value,
@@ -283,14 +294,13 @@ fn signatures<Message>(element: &Element<Message>) -> PhaseSignatures {
             wrap,
             line_height,
         } => {
-            content_measure.text(value);
-            content_measure.add(&spans.len());
+            let _ = (value, spans);
+            measure_content_sensitive = true;
+            paint_content_sensitive = true;
+            semantics_content_sensitive = true;
             content_measure.add(&bits(*scale));
             content_measure.add(wrap);
             content_measure.add(&line_height.map(bits));
-            paint.text(value);
-            paint.add(&spans.len());
-            semantics.text(value);
         }
         Kind::Image {
             id,
@@ -310,10 +320,13 @@ fn signatures<Message>(element: &Element<Message>) -> PhaseSignatures {
             paint.add(controlled);
         }
         Kind::Grid { columns } => content_measure.add(&format!("{columns:?}")),
-        Kind::CustomPaint { paint: callback } => paint.add(&(*callback as usize)),
+        Kind::CustomPaint { paint: callback } => {
+            paint.add(&(*callback as usize));
+            paint_content_sensitive = true;
+        }
         Kind::CustomPaintCommands { commands } => {
-            paint.add(&commands.len());
-            paint.add(&format!("{:?}{:?}", commands.first(), commands.last()));
+            let _ = commands;
+            paint_content_sensitive = true;
         }
         Kind::Slider {
             value,
@@ -342,19 +355,16 @@ fn signatures<Message>(element: &Element<Message>) -> PhaseSignatures {
             option_presentations,
             resolved_options,
         } => {
-            content_measure.text(selected);
-            content_measure.add(&options.len());
-            paint.text(selected);
+            let _ = (selected, options, option_presentations, resolved_options);
+            measure_content_sensitive = true;
+            paint_content_sensitive = true;
+            semantics_content_sensitive = true;
             paint.add(expanded);
             paint.add(open_generation);
             paint.add(overlay);
             paint.add(&format!(
                 "{background:?}{option_background:?}{foreground:?}{presentation:?}"
             ));
-            paint.add(&option_presentations.len());
-            paint.add(&resolved_options.len());
-            semantics.text(selected);
-            semantics.add(&options.len());
         }
         Kind::Flex(_) | Kind::Layer => {}
     }
@@ -363,6 +373,7 @@ fn signatures<Message>(element: &Element<Message>) -> PhaseSignatures {
         && matches!(element.style.width, Length::Px(_))
         && matches!(element.style.height, Length::Px(_));
     let measure = if fixed_leaf {
+        measure_content_sensitive = false;
         style_measure
     } else {
         style_measure ^ content_measure.finish()
@@ -400,16 +411,14 @@ fn signatures<Message>(element: &Element<Message>) -> PhaseSignatures {
     interaction.add(&element.option_messages.len());
     interaction.add(&element.inline_messages.len());
 
-    semantics.add(&format!(
-        "{:?}{:?}{:?}{:?}{:?}{:?}{:?}",
-        element.style.accessibility_label,
-        element.style.accessibility_description,
-        element.style.accessibility_role,
-        element.style.accessibility_state,
-        element.style.semantic_role,
-        element.style.accessibility_hidden,
-        element.style.semantic_decorative
-    ));
+    semantics.add(&element.style.accessibility_label.is_some());
+    semantics.add(&element.style.accessibility_description.is_some());
+    semantics.add(&element.style.accessibility_role.is_some());
+    semantics.add(&element.style.accessibility_state.is_some());
+    semantics.add(&element.style.accessibility_controls.is_some());
+    semantics.add(&format!("{:?}", element.style.semantic_role));
+    semantics.add(&element.style.accessibility_hidden);
+    semantics.add(&element.style.semantic_decorative);
 
     PhaseSignatures {
         measure,
@@ -417,7 +426,28 @@ fn signatures<Message>(element: &Element<Message>) -> PhaseSignatures {
         paint: paint.finish(),
         interaction: interaction.finish(),
         semantics: semantics.finish(),
+        content_revision: element.content_revision,
+        measure_content_sensitive,
+        paint_content_sensitive,
+        interaction_content_sensitive,
+        semantics_content_sensitive,
     }
+}
+
+fn phase_matches(
+    current_metadata: u64,
+    previous_metadata: u64,
+    current_sensitive: bool,
+    previous_sensitive: bool,
+    current_revision: Option<u64>,
+    previous_revision: Option<u64>,
+) -> bool {
+    current_metadata == previous_metadata
+        && current_sensitive == previous_sensitive
+        && (!current_sensitive
+            || current_revision
+                .zip(previous_revision)
+                .is_some_and(|(current, previous)| current == previous))
 }
 
 impl RetainedNodeArena {
@@ -474,19 +504,47 @@ impl RetainedNodeArena {
             self.last.reused += 1;
             let current = signatures(element);
             let mut dirty = DirtyPhases::default();
-            if current.measure != old.signatures.measure {
+            if !phase_matches(
+                current.measure,
+                old.signatures.measure,
+                current.measure_content_sensitive,
+                old.signatures.measure_content_sensitive,
+                current.content_revision,
+                old.signatures.content_revision,
+            ) {
                 dirty.insert(DirtyPhases::MEASURE.union(DirtyPhases::PLACE));
             }
             if current.place != old.signatures.place {
                 dirty.insert(DirtyPhases::PLACE);
             }
-            if current.paint != old.signatures.paint {
+            if !phase_matches(
+                current.paint,
+                old.signatures.paint,
+                current.paint_content_sensitive,
+                old.signatures.paint_content_sensitive,
+                current.content_revision,
+                old.signatures.content_revision,
+            ) {
                 dirty.insert(DirtyPhases::PAINT);
             }
-            if current.interaction != old.signatures.interaction {
+            if !phase_matches(
+                current.interaction,
+                old.signatures.interaction,
+                current.interaction_content_sensitive,
+                old.signatures.interaction_content_sensitive,
+                current.content_revision,
+                old.signatures.content_revision,
+            ) {
                 dirty.insert(DirtyPhases::INTERACTION);
             }
-            if current.semantics != old.signatures.semantics {
+            if !phase_matches(
+                current.semantics,
+                old.signatures.semantics,
+                current.semantics_content_sensitive,
+                old.signatures.semantics_content_sensitive,
+                current.content_revision,
+                old.signatures.content_revision,
+            ) {
                 dirty.insert(DirtyPhases::SEMANTICS);
             }
             (old.id, old.phases.clone(), dirty)
@@ -657,14 +715,17 @@ impl RetainedNodeArena {
 mod tests {
     use super::*;
     use crate::{
-        Column, Component, ComponentBuilderExt, FrameRequest, Rect, Row, Text, UiFrame,
-        UiStateStore,
+        Column, Component, ComponentBuilderExt, CustomPaint, FrameRequest, Rect, Row, StyledText,
+        StyledTextSpan, Text, TextUnderlineStyle, UiFrame, UiStateStore,
     };
     use proptest::prelude::*;
 
     fn keyed_text(id: &str, value: &str) -> Element<()> {
+        let mut revision = std::collections::hash_map::DefaultHasher::new();
+        value.hash(&mut revision);
         Text::new(value)
             .id(id)
+            .content_revision(revision.finish())
             .width(80.0)
             .height(20.0)
             .into_element()
@@ -678,6 +739,104 @@ mod tests {
                 ChildIdentity::Root | ChildIdentity::Position(_) => None,
             })
             .collect()
+    }
+
+    fn dirty_for(arena: &RetainedNodeArena, id: &str) -> DirtyPhases {
+        arena
+            .nodes()
+            .find(|node| node.ui_id.as_str().ends_with(id))
+            .expect("retained node")
+            .dirty()
+    }
+
+    #[test]
+    fn equal_length_middle_text_mutation_without_revision_cannot_authorize_measurement_reuse() {
+        let prefix = "p".repeat(96);
+        let suffix = "s".repeat(96);
+        let before = format!("{prefix}iiiiiiii{suffix}");
+        let after = format!("{prefix}ＷＷＷＷＷＷＷＷ{suffix}");
+        assert_eq!(before.chars().count(), after.chars().count());
+
+        let view = |value: &str| {
+            Column::<()>::new()
+                .child(Text::<()>::new(value).id("value"))
+                .into_element()
+        };
+        let bounds = Rect::new(0.0, 0.0, 800.0, 200.0);
+        let mut retained_state = UiStateStore::default();
+        let first = UiFrame::resolve(
+            view(&before),
+            FrameRequest::new(bounds, &mut retained_state),
+        );
+        let next = UiFrame::resolve_against(
+            view(&after),
+            FrameRequest::new(bounds, &mut retained_state),
+            &first,
+        );
+        assert!(next.resource_diagnostics().nodes_measured > 0);
+
+        let mut cold_state = UiStateStore::default();
+        let cold = UiFrame::resolve(view(&after), FrameRequest::new(bounds, &mut cold_state));
+        assert_eq!(next.resolved_layout(), cold.resolved_layout());
+        assert_eq!(next.commands(), cold.commands());
+        assert_eq!(next.semantic_nodes(), cold.semantic_nodes());
+    }
+
+    #[test]
+    fn styled_payload_revision_invalidates_equal_cardinality_span_changes() {
+        let span = |bold| StyledTextSpan {
+            range: 0..8,
+            bold,
+            italic: false,
+            monospace: false,
+            font_family: None,
+            strikethrough: false,
+            underline: TextUnderlineStyle::None,
+            color: None,
+            background: None,
+        };
+        let view = |bold, revision| {
+            StyledText::<()>::new("abcdefgh", vec![span(bold)])
+                .id("styled")
+                .content_revision(revision)
+        };
+        let mut arena = RetainedNodeArena::default();
+        arena.reconcile(&view(false, 1));
+        arena.reconcile(&view(true, 2));
+        let dirty = dirty_for(&arena, "styled");
+        assert!(dirty.contains(DirtyPhases::MEASURE));
+        assert!(dirty.contains(DirtyPhases::PAINT));
+    }
+
+    #[test]
+    fn custom_paint_revision_detects_equal_length_middle_command_mutation() {
+        let commands = |middle| {
+            vec![
+                PaintCommand::Fill {
+                    rect: Rect::new(0.0, 0.0, 2.0, 2.0),
+                    color: 1,
+                },
+                PaintCommand::Fill {
+                    rect: Rect::new(2.0, 0.0, 2.0, 2.0),
+                    color: middle,
+                },
+                PaintCommand::Fill {
+                    rect: Rect::new(4.0, 0.0, 2.0, 2.0),
+                    color: 3,
+                },
+            ]
+        };
+        let view = |middle, revision| {
+            CustomPaint::<()>::commands(commands(middle))
+                .id("paint")
+                .content_revision(revision)
+        };
+        let mut arena = RetainedNodeArena::default();
+        arena.reconcile(&view(2, 10));
+        arena.reconcile(&view(9, 11));
+        let dirty = dirty_for(&arena, "paint");
+        assert!(dirty.contains(DirtyPhases::PAINT));
+        assert!(!dirty.contains(DirtyPhases::MEASURE));
     }
 
     #[test]
@@ -702,12 +861,14 @@ mod tests {
         arena.reconcile(
             &Text::<()>::new("same")
                 .id("leaf")
+                .content_revision(1)
                 .foreground(0xff01_0203)
                 .into_element(),
         );
         arena.reconcile(
             &Text::<()>::new("same")
                 .id("leaf")
+                .content_revision(1)
                 .foreground(0xff03_0201)
                 .into_element(),
         );
