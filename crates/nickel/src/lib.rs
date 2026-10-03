@@ -2858,7 +2858,7 @@ pub fn run() -> Result<(), String> {
                                 &runtime.warm_present_us,
                                 &runtime.input_to_present_us,
                             );
-                        ServerMessage::ShellRuntimeDiagnostics(
+                        ServerMessage::ShellRuntimeDiagnostics(Box::new(
                             nickel_session_protocol::ShellRuntimeDiagnostics {
                                 input_to_message_us,
                                 input_to_frame_us: input_to_frame_us.clone(),
@@ -2891,7 +2891,7 @@ pub fn run() -> Result<(), String> {
                                 executable_prediction_observations: [[0; 2]; 4],
                                 executable_prediction_descendant_windows: 0,
                             },
-                        )
+                        ))
                     }
                     Request::Query(Query::ShellReadiness) => {
                         ServerMessage::ShellReadiness(windows_test_readiness(&shell))

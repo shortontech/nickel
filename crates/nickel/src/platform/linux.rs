@@ -2111,7 +2111,7 @@ pub fn respond_runtime_diagnostics(
     send_semantic_target_response(
         reply_path,
         request_id,
-        ServerMessage::ShellRuntimeDiagnostics(diagnostics),
+        ServerMessage::ShellRuntimeDiagnostics(Box::new(diagnostics)),
     );
 }
 

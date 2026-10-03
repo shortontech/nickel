@@ -698,7 +698,7 @@ pub enum ServerMessage {
     },
     CacheDiagnostics(Box<CacheDiagnostics>),
     MemoryTrimDiagnostics(MemoryTrimDiagnostics),
-    ShellRuntimeDiagnostics(ShellRuntimeDiagnostics),
+    ShellRuntimeDiagnostics(Box<ShellRuntimeDiagnostics>),
     Workspaces(WorkspaceState),
     ShellBehavior(ShellBehaviorSnapshot),
     Plugins(PluginStatusSnapshot),
@@ -3029,7 +3029,7 @@ mod tests {
         assert_eq!(json["executable_prediction_descendant_windows"], 9);
         let response = ServerEnvelope {
             request_id: 14,
-            message: ServerMessage::ShellRuntimeDiagnostics(diagnostics.clone()),
+            message: ServerMessage::ShellRuntimeDiagnostics(Box::new(diagnostics.clone())),
         };
         assert_eq!(
             decode::<ServerEnvelope>(&encode(&response).unwrap()).unwrap(),
