@@ -1242,6 +1242,349 @@ mod tests {
     };
     use nickel_ui::{Rect, backend::PaintCommand};
 
+    #[cfg(target_os = "windows")]
+    use {
+        super::{GpuGraphics, GpuPresenter},
+        crate::softbuffer_presenter::PresentationGeometry,
+        nickel_ui::{
+            SoftwareRenderer,
+            backend::{FrameRenderer, RenderFrame},
+        },
+        raw_window_handle::{HasDisplayHandle, HasWindowHandle},
+        serde_json::json,
+        std::time::{Duration, Instant},
+        winit::{
+            event_loop::EventLoop, platform::windows::EventLoopBuilderExtWindows, window::Window,
+        },
+    };
+
+    #[cfg(target_os = "windows")]
+    fn admission_distribution(samples: &[Duration]) -> serde_json::Value {
+        assert!(!samples.is_empty());
+        let mut sorted = samples.to_vec();
+        sorted.sort_unstable();
+        let at = |percentile: usize| {
+            let rank = sorted.len().saturating_mul(percentile).div_ceil(100);
+            sorted[rank.saturating_sub(1).min(sorted.len() - 1)].as_nanos() as u64
+        };
+        json!({
+            "p50_ns": at(50),
+            "p95_ns": at(95),
+            "p99_ns": at(99),
+            "max_ns": sorted.last().expect("samples are non-empty").as_nanos() as u64,
+        })
+    }
+
+    #[cfg(target_os = "windows")]
+    fn admission_commands(selected: usize) -> Vec<PaintCommand> {
+        const COLUMNS: usize = 8;
+        const ROWS: usize = 6;
+        const CELL: f32 = 16.0;
+        let mut commands = Vec::with_capacity(COLUMNS * ROWS + 1);
+        commands.push(PaintCommand::Fill {
+            rect: Rect::new(0.0, 0.0, COLUMNS as f32 * CELL, ROWS as f32 * CELL),
+            color: 0xff10_1820,
+        });
+        for index in 0..COLUMNS * ROWS {
+            let column = index % COLUMNS;
+            let row = index / COLUMNS;
+            commands.push(PaintCommand::Fill {
+                rect: Rect::new(
+                    column as f32 * CELL + 2.0,
+                    row as f32 * CELL + 2.0,
+                    CELL - 4.0,
+                    CELL - 4.0,
+                ),
+                color: if index == selected {
+                    0xffe0_8240
+                } else {
+                    0xff30_4858
+                },
+            });
+        }
+        commands
+    }
+
+    #[cfg(target_os = "windows")]
+    fn admission_damage(previous: usize, selected: usize) -> [Rect; 2] {
+        let cell = |index: usize| {
+            Rect::new(
+                (index % 8) as f32 * 16.0 + 2.0,
+                (index / 8) as f32 * 16.0 + 2.0,
+                12.0,
+                12.0,
+            )
+        };
+        [cell(previous), cell(selected)]
+    }
+
+    #[cfg(target_os = "windows")]
+    fn emit_wgpu_admission_skip(
+        reason: impl std::fmt::Display,
+        software_work: &serde_json::Value,
+        software_changed: &[Duration],
+        software_unchanged: &[Duration],
+    ) {
+        eprintln!(
+            "nickel_release_admission={}",
+            json!({
+                "schema": 1,
+                "suite": "production_presenters",
+                "workload": "software_vs_wgpu_retained",
+                "status": "skipped",
+                "skip_reason": reason.to_string(),
+                "metadata": {
+                    "software_renderer": "nickel_ui::SoftwareRenderer",
+                    "wgpu_renderer": "production GpuPresenter",
+                },
+                "work": software_work,
+                "timings": {
+                    "software_changed": admission_distribution(software_changed),
+                    "software_unchanged": admission_distribution(software_unchanged),
+                },
+            })
+        );
+    }
+
+    #[test]
+    #[ignore = "release admission requires a visible Windows WGPU surface"]
+    #[cfg(target_os = "windows")]
+    fn production_software_and_wgpu_release_admission() {
+        const WIDTH: u32 = 128;
+        const HEIGHT: u32 = 96;
+        const SAMPLES: usize = 31;
+
+        // Always exercise the real software renderer, even if the native WGPU
+        // adapter or presentation surface is unavailable and this admission is
+        // reported as skipped below.
+        let mut software = SoftwareRenderer::new_pixel_buffer(WIDTH, HEIGHT, 1.0);
+        let initial = admission_commands(0);
+        software
+            .render_frame(RenderFrame {
+                commands: &initial,
+                logical_size: (WIDTH, HEIGHT),
+                scale_factor: 1.0,
+                generation: 0,
+            })
+            .expect("software rendering is infallible");
+        let software_baseline = software.software_raster_diagnostics();
+        let mut software_changed = Vec::with_capacity(SAMPLES);
+        let mut software_unchanged = Vec::with_capacity(SAMPLES);
+        let mut paired_frames = Vec::with_capacity(SAMPLES);
+        let mut previous = 0;
+        for sample in 0..SAMPLES {
+            let selected = (sample + 1) % 48;
+            let commands = admission_commands(selected);
+            let damage = admission_damage(previous, selected);
+            let frame = RenderFrame {
+                commands: &commands,
+                logical_size: (WIDTH, HEIGHT),
+                scale_factor: 1.0,
+                generation: sample as u64 + 1,
+            };
+            let start = Instant::now();
+            let changed_damage = software
+                .render_frame_with_damage(frame, Some(&damage))
+                .expect("software rendering is infallible");
+            software_changed.push(start.elapsed());
+            assert_eq!(changed_damage.rects.as_ref(), damage.as_slice());
+
+            let start = Instant::now();
+            let unchanged_damage = software
+                .render_frame_with_damage(frame, Some(&[]))
+                .expect("software rendering is infallible");
+            software_unchanged.push(start.elapsed());
+            assert!(unchanged_damage.is_empty());
+
+            let mut cold = SoftwareRenderer::new_pixel_buffer(WIDTH, HEIGHT, 1.0);
+            cold.render(&commands);
+            assert_eq!(software.pixels(), cold.pixels());
+            previous = selected;
+            paired_frames.push(commands);
+        }
+        let software_work = software.software_raster_diagnostics();
+        assert_eq!(
+            software_work.partial_repaints - software_baseline.partial_repaints,
+            SAMPLES as u64
+        );
+        assert_eq!(
+            software_work.clean_frames - software_baseline.clean_frames,
+            SAMPLES as u64
+        );
+        assert_eq!(
+            software_work.damage_hints_accepted - software_baseline.damage_hints_accepted,
+            SAMPLES as u64
+        );
+        assert_eq!(
+            software_work.framebuffer_live_bytes,
+            WIDTH as usize * HEIGHT as usize * 4
+        );
+        let software_report = json!({
+            "commands_per_frame": paired_frames[0].len(),
+            "damage_rects_per_changed_frame": 2,
+            "software_partial_repaints": software_work.partial_repaints - software_baseline.partial_repaints,
+            "software_clean_frames": software_work.clean_frames - software_baseline.clean_frames,
+            "software_damage_hints_accepted": software_work.damage_hints_accepted - software_baseline.damage_hints_accepted,
+            "software_framebuffer_bytes": software_work.framebuffer_live_bytes,
+            "software_cold_raster_equivalence_samples": SAMPLES,
+        });
+
+        let mut builder = EventLoop::builder();
+        builder.with_any_thread(true);
+        let events = match builder.build() {
+            Ok(events) => events,
+            Err(error) => {
+                emit_wgpu_admission_skip(
+                    format!("cannot create Windows event loop: {error}"),
+                    &software_report,
+                    &software_changed,
+                    &software_unchanged,
+                );
+                return;
+            }
+        };
+        #[allow(deprecated)]
+        let window = match events.create_window(
+            Window::default_attributes()
+                .with_title("Nickel WGPU release admission")
+                .with_inner_size(winit::dpi::PhysicalSize::new(WIDTH, HEIGHT))
+                .with_resizable(false)
+                .with_visible(true),
+        ) {
+            Ok(window) => window,
+            Err(error) => {
+                emit_wgpu_admission_skip(
+                    format!("cannot create Windows surface: {error}"),
+                    &software_report,
+                    &software_changed,
+                    &software_unchanged,
+                );
+                return;
+            }
+        };
+        let display = window.display_handle().expect("window display handle");
+        let handle = window.window_handle().expect("window handle");
+        // SAFETY: the window remains alive until both GPU values are dropped.
+        let graphics = match unsafe { GpuGraphics::new(display, handle) } {
+            Ok(graphics) => graphics,
+            Err(error) => {
+                emit_wgpu_admission_skip(
+                    format!("production WGPU adapter unavailable: {error}"),
+                    &software_report,
+                    &software_changed,
+                    &software_unchanged,
+                );
+                return;
+            }
+        };
+        let adapter = graphics.adapter.get_info();
+        // SAFETY: the window remains alive until the presenter is dropped.
+        let mut gpu = match unsafe { GpuPresenter::new(handle, &graphics) } {
+            Ok(gpu) => gpu,
+            Err(error) => {
+                emit_wgpu_admission_skip(
+                    format!("production WGPU surface unavailable: {error}"),
+                    &software_report,
+                    &software_changed,
+                    &software_unchanged,
+                );
+                return;
+            }
+        };
+        let geometry = PresentationGeometry {
+            pixel_width: WIDTH,
+            pixel_height: HEIGHT,
+            logical_width: WIDTH,
+            logical_height: HEIGHT,
+        };
+        gpu.present(geometry, &graphics, &admission_commands(0), None)
+            .expect("initial WGPU presentation");
+        let gpu_baseline = gpu.retained_diagnostics;
+        let mut gpu_changed = Vec::with_capacity(SAMPLES);
+        let mut gpu_unchanged = Vec::with_capacity(SAMPLES);
+        previous = 0;
+        for (sample, commands) in paired_frames.iter().enumerate() {
+            let selected = (sample + 1) % 48;
+            let damage = admission_damage(previous, selected);
+            let start = Instant::now();
+            gpu.present(geometry, &graphics, commands, Some(&damage))
+                .expect("changed WGPU presentation");
+            gpu_changed.push(start.elapsed());
+            let start = Instant::now();
+            gpu.present(geometry, &graphics, commands, Some(&[]))
+                .expect("unchanged WGPU presentation");
+            gpu_unchanged.push(start.elapsed());
+            previous = selected;
+        }
+        let gpu_work = gpu.retained_diagnostics;
+        assert_eq!(
+            gpu_work.partial_redraws - gpu_baseline.partial_redraws,
+            SAMPLES as u64
+        );
+        assert_eq!(
+            gpu_work.unchanged_reuses - gpu_baseline.unchanged_reuses,
+            SAMPLES as u64
+        );
+        assert_eq!(gpu_work.full_redraws - gpu_baseline.full_redraws, 0);
+        assert_eq!(
+            gpu_work.composited_frames - gpu_baseline.composited_frames,
+            (SAMPLES * 2) as u64
+        );
+        assert_eq!(gpu_work.live_bytes, WIDTH as usize * HEIGHT as usize * 4);
+        assert_eq!(gpu_work.creations, 1);
+        assert_eq!(gpu_work.releases, 0);
+        assert_eq!(gpu_work.budget_fallbacks, 0);
+        assert_eq!(gpu.vertex_capacity, 16_384);
+        assert_eq!(graphics.textures.borrow().entries.len(), 0);
+
+        eprintln!(
+            "nickel_release_admission={}",
+            json!({
+                "schema": 1,
+                "suite": "production_presenters",
+                "workload": "software_vs_wgpu_retained",
+                "status": "measured",
+                "metadata": {
+                    "samples": SAMPLES,
+                    "width": WIDTH,
+                    "height": HEIGHT,
+                    "adapter_name": adapter.name,
+                    "adapter_backend": format!("{:?}", adapter.backend),
+                    "adapter_device_type": format!("{:?}", adapter.device_type),
+                    "adapter_vendor": adapter.vendor,
+                    "adapter_device": adapter.device,
+                    "driver": adapter.driver,
+                    "driver_info": adapter.driver_info,
+                    "wgpu_renderer": "production GpuPresenter with native surface",
+                    "software_renderer": "nickel_ui::SoftwareRenderer",
+                    "wgpu_surface_readback_available": false,
+                    "software_cold_raster_equivalence_samples": SAMPLES,
+                },
+                "work": {
+                    "commands_per_frame": paired_frames[0].len(),
+                    "damage_rects_per_changed_frame": 2,
+                    "software_partial_repaints": software_work.partial_repaints - software_baseline.partial_repaints,
+                    "software_clean_frames": software_work.clean_frames - software_baseline.clean_frames,
+                    "software_damage_hints_accepted": software_work.damage_hints_accepted - software_baseline.damage_hints_accepted,
+                    "software_framebuffer_bytes": software_work.framebuffer_live_bytes,
+                    "wgpu_partial_redraws": gpu_work.partial_redraws - gpu_baseline.partial_redraws,
+                    "wgpu_unchanged_reuses": gpu_work.unchanged_reuses - gpu_baseline.unchanged_reuses,
+                    "wgpu_full_redraws": gpu_work.full_redraws - gpu_baseline.full_redraws,
+                    "wgpu_composited_frames": gpu_work.composited_frames - gpu_baseline.composited_frames,
+                    "wgpu_retained_framebuffer_bytes": gpu_work.live_bytes,
+                    "wgpu_vertex_buffer_bytes": gpu.vertex_capacity,
+                    "wgpu_cached_textures": graphics.textures.borrow().entries.len(),
+                },
+                "timings": {
+                    "software_changed": admission_distribution(&software_changed),
+                    "software_unchanged": admission_distribution(&software_unchanged),
+                    "wgpu_changed": admission_distribution(&gpu_changed),
+                    "wgpu_unchanged": admission_distribution(&gpu_unchanged),
+                }
+            })
+        );
+    }
+
     #[test]
     fn retained_framebuffer_admission_is_bounded_and_overflow_safe() {
         assert_eq!(retained_framebuffer_bytes(1920, 1080), Some(8_294_400));
