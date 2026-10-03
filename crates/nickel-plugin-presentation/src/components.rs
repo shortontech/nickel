@@ -4083,7 +4083,7 @@ impl RetainedPanelTree {
                                         "setPrimitive property {property:?} requires subtree replacement"
                                     ));
                                 }
-                                *typed = PanelNode::parse(source)?;
+                                *typed = parse_patched_node(source, typed)?;
                             }
                             Ok(())
                         },
@@ -4233,15 +4233,25 @@ impl RetainedPanelTree {
                     if replacement_id != target {
                         return Err("replacement subtree identity differs from its target".into());
                     }
-                    let typed = PanelNode::parse(replacement)?;
-                    replace_source_and_typed(
-                        &mut source,
-                        &mut node,
-                        target,
-                        replacement,
-                        &typed,
-                        &mut visited,
-                    )?;
+                    if target == "root" {
+                        let typed =
+                            parse_panel_for_manifest(replacement, manifest, expected_surface_id)?;
+                        source = replacement.clone();
+                        node = typed;
+                        visited = visited.saturating_add(1);
+                    } else {
+                        let previous = find_typed_node(&source, &node, target)
+                            .ok_or_else(|| format!("native patch target {target:?} disappeared"))?;
+                        let typed = parse_patched_node(replacement, previous)?;
+                        replace_source_and_typed(
+                            &mut source,
+                            &mut node,
+                            target,
+                            replacement,
+                            &typed,
+                            &mut visited,
+                        )?;
+                    }
                 }
             }
         }
@@ -4270,6 +4280,53 @@ impl RetainedPanelTree {
             nodes_mutated: patch.operations.len() as u64,
         })
     }
+}
+
+fn parse_patched_node(source: &Value, previous: &PanelNode) -> Result<PanelNode, String> {
+    let mut source = source.clone();
+    if source.get("id").is_none() {
+        let id = match previous {
+            PanelNode::Slider { id, .. }
+            | PanelNode::Switch { id, .. }
+            | PanelNode::Checkbox { id, .. }
+            | PanelNode::ColorSwatch { id, .. }
+            | PanelNode::Select { id, .. }
+            | PanelNode::Slot { id, .. }
+            | PanelNode::TextField { id, .. }
+            | PanelNode::Button { id, .. }
+            | PanelNode::ScrollView { id, .. }
+            | PanelNode::Menu { id, .. }
+            | PanelNode::MenuItem { id, .. } => Some(id.as_str()),
+            PanelNode::Surface { id, .. } | PanelNode::Image { id, .. } => id.as_deref(),
+            _ => None,
+        };
+        if let Some(id) = id {
+            source
+                .as_object_mut()
+                .ok_or("patched native node is not an object")?
+                .insert("id".into(), Value::String(id.to_owned()));
+        }
+    }
+    PanelNode::parse(&source)
+}
+
+fn find_typed_node<'a>(
+    source: &Value,
+    typed: &'a PanelNode,
+    target: &str,
+) -> Option<&'a PanelNode> {
+    if source.get("__nativeId").and_then(Value::as_str) == Some(target) {
+        return Some(typed);
+    }
+    let source_children = source.get("children")?.as_array()?;
+    let typed_children = typed.container_children()?;
+    if source_children.len() != typed_children.len() {
+        return None;
+    }
+    source_children
+        .iter()
+        .zip(typed_children)
+        .find_map(|(source, typed)| find_typed_node(source, typed, target))
 }
 
 fn keyed_identity(value: &Value) -> Option<(&str, &str)> {

@@ -1681,6 +1681,20 @@ impl ShellCompositionRuntime {
             u64,
         ) -> Result<T, String>,
     ) -> Result<ScheduledExpandedBatch<T>, String> {
+        let mut requested = false;
+        for (mount_id, mount) in &self.mounts {
+            let package = self
+                .packages
+                .get(&mount.reference.owner)
+                .ok_or("retired component owner")?;
+            let mut runtime = package.runtime.borrow_mut();
+            runtime.select_surface(&surface(*mount_id))?;
+            requested |= runtime.reconciliation_requested()?;
+        }
+        if !requested {
+            self.begin_transaction()?;
+            return Ok(ScheduledExpandedBatch::Unchanged);
+        }
         self.dispatch_expanded_batch_scheduled_pending_validated(
             root,
             &[],

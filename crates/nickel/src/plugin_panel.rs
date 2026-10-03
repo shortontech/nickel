@@ -11,7 +11,8 @@ use nickel_core::plugins::{
     PluginCapability, PluginManifest, PluginPackage, PluginSurface, PluginSurfaceKind,
 };
 use nickel_plugin_presentation::components::{
-    PanelNode, RetainedPanelTree, render_retained_panel, render_retained_panel_validated,
+    PanelNode, RetainedPanelTree, parse_panel_for_manifest, render_retained_panel,
+    render_retained_panel_validated,
 };
 pub use nickel_plugin_presentation::components::{PluginImages, PluginMessage};
 use nickel_plugin_runtime::composition_runtime::{
@@ -3297,53 +3298,26 @@ impl nickel_ui::Application for PluginPanelApplication {
                     })
                     .collect::<Result<Vec<_>, String>>()?;
                 let mut host = state.host.borrow_mut();
-                let accepted_tree = self.accepted.clone();
-                let accepted_source = accepted_tree.source().clone();
-
-                let outcome = host.dispatch_expanded_batch_scheduled_pending_validated(
+                let (rendered, ()) = host.dispatch_expanded_batch_pending_validated(
                     &state.mount,
                     &events,
-                    &state.events,
-                    &accepted_source,
-                    |patch, _, generation| {
-                        let mut candidate = accepted_tree;
-                        let transport_bytes = serde_json::to_vec(patch)
-                            .map_err(|error| error.to_string())?
-                            .len();
-                        candidate.apply_patch(
-                            patch,
+                    |value| {
+                        parse_panel_for_manifest(
+                            value,
                             &self.manifest,
                             self.expected_surface_id.as_deref(),
-                            &self.stylesheet,
-                            generation,
-                            transport_bytes,
                         )?;
-                        Ok(candidate)
+                        Ok(())
                     },
                 )?;
-                let accepted = match outcome {
-                    ScheduledExpandedBatch::Unchanged => None,
-                    ScheduledExpandedBatch::Patched {
-                        events, validated, ..
-                    } => {
-                        state.events = events;
-                        Some(validated)
-                    }
-                    ScheduledExpandedBatch::Rendered {
-                        rendered,
-                        validated: _,
-                        ..
-                    } => {
-                        let generation = rendered.generation();
-                        state.events = rendered.events;
-                        Some(RetainedPanelTree::admit(
-                            &rendered.node,
-                            &self.manifest,
-                            self.expected_surface_id.as_deref(),
-                            generation,
-                        )?)
-                    }
-                };
+                let generation = rendered.generation();
+                state.events = rendered.events;
+                let accepted = Some(RetainedPanelTree::admit(
+                    &rendered.node,
+                    &self.manifest,
+                    self.expected_surface_id.as_deref(),
+                    generation,
+                )?);
                 let effects = host
                     .take_effects()
                     .into_iter()
@@ -4724,7 +4698,14 @@ mod tests {
             Some(PanelNode::Dialog { open: true, .. })
         ));
         panel.pending_transient.take();
-        panel.update(PluginMessage::Click(3));
+        let Some(PanelNode::Dialog {
+            close_action: Some(cancel),
+            ..
+        }) = panel.accepted.node().dialog("launcher-dialog")
+        else {
+            panic!("open dialog has no close action");
+        };
+        panel.update(PluginMessage::Click(*cancel));
         assert!(matches!(
             panel.accepted.node().dialog("launcher-dialog"),
             Some(PanelNode::Dialog { open: false, .. })
