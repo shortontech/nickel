@@ -8288,4 +8288,325 @@ mod tests {
             .join()
             .unwrap();
     }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct TwoOutputShellWork {
+        left: [u64; 7],
+        right: [u64; 7],
+        mounts_open: usize,
+        mounts_closed: usize,
+    }
+
+    fn taskbar_admission_setup(
+        active: &str,
+    ) -> Result<
+        (
+            std::collections::BTreeMap<String, PluginPackage>,
+            PluginSurface,
+            std::rc::Rc<std::cell::RefCell<ShellCompositionRuntime>>,
+        ),
+        String,
+    > {
+        let default = crate::bundled_plugin_assets::load_package("nickel-default")?;
+        let mut catalog =
+            std::collections::BTreeMap::from([(default.manifest.id.clone(), default)]);
+        if active == "nickel-cupertino-dock" {
+            let package = crate::bundled_plugin_assets::load_package(active)?;
+            catalog.insert(package.manifest.id.clone(), package);
+        }
+        let surface = catalog[active]
+            .manifest
+            .surfaces
+            .iter()
+            .find(|surface| surface.id == "taskbar")
+            .ok_or("taskbar surface is missing")?
+            .clone();
+        let host = std::rc::Rc::new(std::cell::RefCell::new(ShellCompositionRuntime::new(
+            &catalog,
+            active,
+            &Default::default(),
+        )?));
+        Ok((catalog, surface, host))
+    }
+
+    fn taskbar_admission_application(
+        active: &str,
+        catalog: &std::collections::BTreeMap<String, PluginPackage>,
+        surface: &PluginSurface,
+        host: std::rc::Rc<std::cell::RefCell<ShellCompositionRuntime>>,
+        windows: &Value,
+    ) -> Result<PluginPanelApplication, String> {
+        let owners = host
+            .borrow()
+            .participating_owners()
+            .cloned()
+            .collect::<Vec<_>>();
+        let snapshots = owners
+            .iter()
+            .map(|owner| {
+                let package = &catalog[&owner.id];
+                let settings = package
+                    .manifest
+                    .settings
+                    .iter()
+                    .map(|setting| (setting.id.clone(), setting.kind.default_value()))
+                    .collect::<std::collections::BTreeMap<_, _>>();
+                let mut data = serde_json::json!({
+                    "settings": settings,
+                    "windows": windows,
+                    "applications": [],
+                    "notifications": initial_notifications_data(&package.manifest),
+                    "surface": {"id":"taskbar","kind":surface.kind.as_str(),"width":surface.width,"height":surface.height},
+                });
+                if let Some(projection) = validation_surface_projection(package, surface) {
+                    data.as_object_mut().unwrap().extend(projection.as_object().unwrap().clone());
+                }
+                (owner.clone(), data)
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        PluginPanelApplication::from_composed_surface(
+            catalog,
+            active,
+            &snapshots,
+            surface,
+            Some(host),
+        )
+    }
+
+    fn subtract_profile(after: [u64; 7], before: [u64; 7]) -> [u64; 7] {
+        std::array::from_fn(|index| after[index] - before[index])
+    }
+
+    fn canonicalize_composition_assets(value: &mut Value) {
+        match value {
+            Value::String(asset) if asset.starts_with("composition.asset.") => {
+                *asset = "composition.asset.<generation>".into();
+            }
+            Value::Array(values) => values.iter_mut().for_each(canonicalize_composition_assets),
+            Value::Object(object) => object
+                .values_mut()
+                .for_each(canonicalize_composition_assets),
+            _ => {}
+        }
+    }
+
+    fn composition_profile_totals(
+        composition: &std::rc::Rc<std::cell::RefCell<ShellCompositionRuntime>>,
+    ) -> [u64; 7] {
+        let owners = composition
+            .borrow()
+            .participating_owners()
+            .cloned()
+            .collect::<Vec<_>>();
+        owners.into_iter().fold([0; 7], |mut total, owner| {
+            let runtime = composition.borrow().shared_owner_runtime(&owner).unwrap();
+            let owner_total =
+                settings_profile_totals(&runtime.borrow_mut().runtime_diagnostics().unwrap());
+            for index in 0..7 {
+                total[index] += owner_total[index];
+            }
+            total
+        })
+    }
+
+    fn exercise_two_output_shell_admission(
+        active: &str,
+    ) -> (TwoOutputShellWork, [std::time::Duration; 4]) {
+        let total_started = std::time::Instant::now();
+        let (catalog, surface, composition) = taskbar_admission_setup(active).unwrap();
+        let initial = serde_json::json!([]);
+        let open_started = std::time::Instant::now();
+        let mut left = taskbar_admission_application(
+            active,
+            &catalog,
+            &surface,
+            composition.clone(),
+            &initial,
+        )
+        .unwrap();
+        left.sync_surface_authority(
+            Some("DP-1"),
+            Some((1920.0, 1032.0)),
+            Some(1.0),
+            Some(true),
+            Some(true),
+        )
+        .unwrap();
+        let mut right = taskbar_admission_application(
+            active,
+            &catalog,
+            &surface,
+            composition.clone(),
+            &initial,
+        )
+        .unwrap();
+        right
+            .sync_surface_authority(
+                Some("HDMI-A-1"),
+                Some((2560.0, 1392.0)),
+                Some(1.25),
+                Some(false),
+                Some(true),
+            )
+            .unwrap();
+        let open = open_started.elapsed();
+        let mounts_open = composition.borrow().mount_count();
+        assert_eq!(
+            mounts_open, 4,
+            "each output owns its root and taskbar mounts"
+        );
+
+        let control_id = if active == "nickel-default" {
+            "taskbar-launcher"
+        } else {
+            "cupertino-dock-launcher"
+        };
+        let left_control = find_settings_source(left.accepted.source(), control_id).unwrap();
+        let left_identity = (
+            left_control["__nativeId"].clone(),
+            left_control["__handlerSlots"].clone(),
+        );
+        let right_control = find_settings_source(right.accepted.source(), control_id).unwrap();
+        let right_identity = (
+            right_control["__nativeId"].clone(),
+            right_control["__handlerSlots"].clone(),
+        );
+        // Native ids are mount-local paths and may intentionally be identical;
+        // the two applications and composition mounts provide their namespace.
+
+        let before = composition_profile_totals(&composition);
+        let changed = serde_json::json!([{"id":"admission-window","title":"Admission","applicationId":"admission.app","active":true}]);
+        let update_started = std::time::Instant::now();
+        assert!(
+            left.sync_host_data_fields(&[("windows", &changed)])
+                .unwrap()
+        );
+        let middle = composition_profile_totals(&composition);
+        assert!(right.refresh_composition_snapshots().unwrap());
+        let after = composition_profile_totals(&composition);
+        let update = update_started.elapsed();
+        let left_after = find_settings_source(left.accepted.source(), control_id).unwrap();
+        let right_after = find_settings_source(right.accepted.source(), control_id).unwrap();
+        assert_eq!(
+            (
+                left_after["__nativeId"].clone(),
+                left_after["__handlerSlots"].clone()
+            ),
+            left_identity
+        );
+        assert_eq!(
+            (
+                right_after["__nativeId"].clone(),
+                right_after["__handlerSlots"].clone()
+            ),
+            right_identity
+        );
+
+        let (oracle_catalog, oracle_surface, oracle_runtime) =
+            taskbar_admission_setup(active).unwrap();
+        let mut oracle_left = taskbar_admission_application(
+            active,
+            &oracle_catalog,
+            &oracle_surface,
+            oracle_runtime.clone(),
+            &changed,
+        )
+        .unwrap();
+        oracle_left
+            .sync_surface_authority(
+                Some("DP-1"),
+                Some((1920.0, 1032.0)),
+                Some(1.0),
+                Some(true),
+                Some(true),
+            )
+            .unwrap();
+        let mut oracle_right = taskbar_admission_application(
+            active,
+            &oracle_catalog,
+            &oracle_surface,
+            oracle_runtime.clone(),
+            &changed,
+        )
+        .unwrap();
+        oracle_right
+            .sync_surface_authority(
+                Some("HDMI-A-1"),
+                Some((2560.0, 1392.0)),
+                Some(1.25),
+                Some(false),
+                Some(true),
+            )
+            .unwrap();
+        let mut actual_left = left.accepted.source().clone();
+        let mut actual_right = right.accepted.source().clone();
+        let mut cold_left = oracle_left.accepted.source().clone();
+        let mut cold_right = oracle_right.accepted.source().clone();
+        for value in [
+            &mut actual_left,
+            &mut actual_right,
+            &mut cold_left,
+            &mut cold_right,
+        ] {
+            canonicalize_settings_actions(value);
+            canonicalize_composition_assets(value);
+        }
+        assert_eq!(
+            actual_left, cold_left,
+            "left output diverged from cold composition"
+        );
+        assert_eq!(
+            actual_right, cold_right,
+            "right output diverged from cold composition"
+        );
+        oracle_left.retire_surface().unwrap();
+        oracle_right.retire_surface().unwrap();
+
+        let close_started = std::time::Instant::now();
+        left.retire_surface().unwrap();
+        right.retire_surface().unwrap();
+        let close = close_started.elapsed();
+        let work = TwoOutputShellWork {
+            left: subtract_profile(middle, before),
+            right: subtract_profile(after, middle),
+            mounts_open,
+            mounts_closed: composition.borrow().mount_count(),
+        };
+        assert_eq!(work.mounts_closed, 0);
+        (work, [open, update, close, total_started.elapsed()])
+    }
+
+    #[test]
+    #[ignore = "production-sized two-output default/Cupertino admission workload"]
+    fn production_two_output_shells_emit_release_distribution() {
+        std::thread::Builder::new().stack_size(32 * 1024 * 1024).spawn(|| {
+            let warmup = std::env::var("NICKEL_TWO_OUTPUT_ADMISSION_WARMUP").ok().and_then(|v| v.parse().ok()).unwrap_or(2);
+            let iterations = std::env::var("NICKEL_TWO_OUTPUT_ADMISSION_ITERATIONS").ok().and_then(|v| v.parse().ok()).unwrap_or(10);
+            assert!(iterations > 0);
+            for active in ["nickel-default", "nickel-cupertino-dock"] {
+                for _ in 0..warmup { exercise_two_output_shell_admission(active); }
+                let mut timings: [Vec<std::time::Duration>; 4] = Default::default();
+                let mut exact = None;
+                for _ in 0..iterations {
+                    let (work, measured) = exercise_two_output_shell_admission(active);
+                    if let Some(expected) = exact { assert_eq!(work, expected, "deterministic two-output work changed for {active}"); } else { exact = Some(work); }
+                    for (samples, duration) in timings.iter_mut().zip(measured) { samples.push(duration); }
+                }
+                let work = exact.unwrap();
+                let fields = |values: [u64; 7]| serde_json::json!({
+                    "coldTreeTransportBytes":values[0], "patchEnvelopeTransportBytes":values[1],
+                    "patchOperations":values[2], "patchNodesVisited":values[3],
+                    "componentExecutions":values[4], "typedPatchApplyAttempts":values[5],
+                    "typedPatchApplyRejections":values[6]
+                });
+                let report = serde_json::json!({
+                    "schema":1,"suite":"jsx_incremental","workload":"production_two_output_shell_lifecycle",
+                    "metadata":{"iterations":iterations,"warmupIterations":warmup,"theme":active,"outputs":["DP-1","HDMI-A-1"],"experimental":active == "nickel-cupertino-dock"},
+                    "work":{"DP-1":fields(work.left),"HDMI-A-1":fields(work.right),"mountsWhileOpen":work.mounts_open,"mountsAfterClose":work.mounts_closed},
+                    "timings":{"open":settings_admission_distribution(&timings[0]),"steadyUpdate":settings_admission_distribution(&timings[1]),"close":settings_admission_distribution(&timings[2]),"total":settings_admission_distribution(&timings[3])}
+                });
+                eprintln!("nickel_release_admission={report}");
+            }
+        }).unwrap().join().unwrap();
+    }
 }
