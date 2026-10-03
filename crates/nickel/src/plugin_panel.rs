@@ -7687,6 +7687,7 @@ mod tests {
         panel.update(PluginMessage::Click(2));
         assert!(format!("{:?}", panel.accepted.node()).contains("second:1"));
         panel.update(PluginMessage::Click(0));
+        assert!(panel.last_error().is_none());
         let without_first = format!("{:?}", panel.accepted.node());
         assert!(!without_first.contains("first:0"));
         assert!(without_first.contains("second:1"));

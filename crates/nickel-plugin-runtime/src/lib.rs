@@ -2273,6 +2273,49 @@ mod tests {
     }
 
     #[test]
+    fn leaf_patch_keeps_ancestor_native_boundary_current_for_later_unmount() {
+        let source = r#"
+            function Counter({name}) {
+                const [count,setCount]=useState(0);
+                return h(Button,{key:name,onClick:()=>setCount(count+1)},name+':'+count);
+            }
+            function App() {
+                const [showFirst,setShowFirst]=useState(true);
+                return h(Window,{},
+                    h(Button,{key:'toggle',onClick:()=>setShowFirst(value=>!value)},'toggle'),
+                    ...(showFirst?[h(Counter,{key:'first',name:'first'})]:[]),
+                    h(Counter,{key:'second',name:'second'}));
+            }
+        "#;
+        let mut runtime = super::JsxRuntime::new(source, None).unwrap();
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+
+        let mut patches = Vec::new();
+        for action in [2, 0, 0] {
+            let super::ScheduledPatch::Patched { patch, .. } = runtime
+                .dispatch_patched(&format!("__nickelDispatchBatchPatched([[{action},null]])"))
+                .unwrap()
+            else {
+                panic!("state update must produce a typed patch");
+            };
+            patches.push(serde_json::to_string(&patch).unwrap());
+            runtime.finish_patch_render(true).unwrap();
+            runtime.finish_event(true).unwrap();
+        }
+
+        assert!(!patches[1].contains("first:0"));
+        assert!(patches[2].contains("first:0"));
+        assert_eq!(
+            runtime
+                .eval_json::<String>(
+                    "JSON.stringify(Array.from(__componentRecords.values()).find(record=>record.kind.name==='Counter'&&record.declaration.key==='second').output.children[0])",
+                )
+                .unwrap(),
+            "second:1"
+        );
+    }
+
+    #[test]
     fn large_keyed_insert_reuses_admitted_siblings_without_quadratic_visits() {
         let source = r#"
             globalThis.itemRuns=0;

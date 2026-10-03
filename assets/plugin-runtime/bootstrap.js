@@ -2300,12 +2300,42 @@ function __nickelDirtyNativePatch(previousRecords) {
         const next=__nickelMaterializeVirtual(current.output,previous.nativePath);
         const patch=__nickelNativePatch(previous.native,next);
         operations.push(...patch.operations);nodesVisited+=patch.counters.nodesVisited;
+        __nickelRefreshNativeAncestors(previousRecords,path,previous.nativePath,next);
     }
     __nickelAttachNativeRecords(boundaries);
     const profile=__nickelProfile();profile.patches++;profile.patchOperations+=operations.length;
     profile.patchNodesVisited+=nodesVisited;
     return {version:1,operations,counters:{nodesVisited,nodesMutated:operations.length,
         localMaterializations:0,expansionNodes:0,treeBytes:0}};
+}
+
+// A leaf patch also changes the accepted native snapshot held by every
+// component boundary above it. Refresh those snapshots with path-copying so a
+// later ancestor update still has an exact, rollback-safe comparison base.
+function __nickelRefreshNativeAncestors(previousRecords, boundary, target, replacement) {
+    function replace(value) {
+        if (!value || typeof value !== 'object') return [false,value];
+        if (!Array.isArray(value) && value.__nativeId === target) return [true,replacement];
+        if (!Array.isArray(value) && value.__nativeId
+            && !target.startsWith(`${value.__nativeId}/`)) return [false,value];
+        const children=Array.isArray(value)?value:value.children;
+        if (!Array.isArray(children)) return [false,value];
+        for(let index=0;index<children.length;index++) {
+            const [changed,child]=replace(children[index]);
+            if(!changed)continue;
+            const nextChildren=children.slice();nextChildren[index]=child;
+            return Array.isArray(value)?[true,nextChildren]:[true,{...value,children:nextChildren}];
+        }
+        return [false,value];
+    }
+    for(const [path,record] of __componentRecords) {
+        if(path!==boundary&&!boundary.startsWith(`${path}/`))continue;
+        const previous=previousRecords.get(path);
+        const base=record.native??previous?.native;
+        if(!base)continue;
+        const [changed,native]=replace(base);
+        if(changed)__componentRecords.set(path,{...record,native,nativePath:record.nativePath??previous?.nativePath});
+    }
 }
 
 function __nickelNativeEqual(left,right) {
