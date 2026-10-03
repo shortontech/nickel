@@ -274,6 +274,14 @@ declare const NickelStores:Readonly<{
 /** Only matching functions from a host-branded NickelStores entry are accepted. */
 declare function useSyncExternalStore<T>(subscribe:NickelExternalStore<T>["subscribe"],getSnapshot:NickelExternalStore<T>["getSnapshot"]):T;
 declare function memo<P>(component:NickelComponent<P>,compare?:(previous:Readonly<P & {children?:NickelChild}>,next:Readonly<P & {children?:NickelChild}>)=>boolean):NickelComponent<P>;
+interface NickelComponentFailure { readonly message:string }
+interface NickelErrorBoundaryProps {
+    readonly children?:NickelChild;
+    readonly fallback?:NickelChild | ((error:Readonly<NickelComponentFailure>,reset:()=>void)=>NickelChild);
+    /** A changed member resets a failed boundary before its next render. */
+    readonly resetKeys?:ReadonlyArray<unknown>;
+}
+declare const ErrorBoundary:NickelComponent<NickelErrorBoundaryProps>;
 interface NickelThemePalette {
     readonly background:NickelColor; readonly panel:NickelColor; readonly surface:NickelColor;
     readonly surfaceHover:NickelColor; readonly text:NickelColor; readonly muted:NickelColor;

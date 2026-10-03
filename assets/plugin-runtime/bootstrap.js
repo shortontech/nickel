@@ -88,6 +88,9 @@ const __handlerBindings = new WeakSet();
 const __virtualNativeNodes = new WeakSet();
 const __nonRetainedComponents = new WeakSet();
 const __memoComponents = new WeakMap();
+const __errorBoundaryComponents = new WeakSet();
+const __MAX_BOUNDARY_DIAGNOSTICS = 32;
+let __boundaryDiagnostics = [];
 let __incrementalRender = false;
 let __effects = [];
 let __listKeyErrors = [];
@@ -102,6 +105,42 @@ let __surfaceStore = {generation:0, snapshot:Object.freeze({
     generation:0, mountId:null, id:null, kind:null, logicalSize:null,
     output:null, availableSize:null, scaleFactor:null, focused:null, visible:null
 })};
+
+function ErrorBoundary() { throw Error('ErrorBoundary can only be rendered as a component'); }
+__errorBoundaryComponents.add(ErrorBoundary);
+function __nickelErrorMessage(error) {
+    try { return String(error?.message ?? error).slice(0, 512); }
+    catch (_) { return 'unprintable component failure'; }
+}
+function __nickelRecordBoundaryFailure(boundary, phase, error) {
+    const message = __nickelErrorMessage(error);
+    const previous = __boundaryDiagnostics[__boundaryDiagnostics.length - 1];
+    if (previous && previous.surface === __activeSurface && previous.boundary === boundary
+        && previous.phase === phase && previous.message === message) {
+        previous.occurrences = Math.min(65535, previous.occurrences + 1); return;
+    }
+    if (__boundaryDiagnostics.length === __MAX_BOUNDARY_DIAGNOSTICS) __boundaryDiagnostics.shift();
+    __boundaryDiagnostics.push({surface:__activeSurface,boundary,phase,message,occurrences:1});
+}
+function __nickelNearestBoundary(owner) {
+    if (typeof owner !== 'string') return null;
+    let candidate = null;
+    for (const [path, record] of __componentRecords) {
+        if (!record.boundary || (owner !== path && !owner.startsWith(`${path}/`))) continue;
+        if (candidate === null || path.length > candidate.length) candidate = path;
+    }
+    return candidate;
+}
+function __nickelCaptureFailure(owner, error, phase) {
+    const boundary = __nickelNearestBoundary(owner);
+    if (boundary === null) return false;
+    const record = __componentRecords.get(boundary);
+    __componentRecords.set(boundary, {...record, boundaryError:error});
+    __dirtyComponents.add(boundary);
+    __nickelRecordBoundaryFailure(boundary, phase, error);
+    return true;
+}
+function __nickelBoundaryDiagnostics() { return JSON.stringify(__boundaryDiagnostics); }
 let __windowsStore = {generation:0, snapshot:Object.freeze([])};
 let __applicationsStore = {generation:0, snapshot:Object.freeze([])};
 let __notificationsStore = {generation:0, snapshot:Object.freeze({notification:null,history:Object.freeze([]),visible:false})};
@@ -1319,7 +1358,12 @@ function useReducer(reducer, initialArg, init) {
         const entry = {kind: 'reducer', value: init === undefined ? initialArg : init(initialArg), reducer, dispatch: null};
         entry.dispatch = action => {
             if (__componentHooks.get(owner)?.[slot] !== entry) return;
-            const value = entry.reducer(entry.value, action);
+            let value;
+            try { value = entry.reducer(entry.value, action); }
+            catch (error) {
+                if (__nickelCaptureFailure(owner, error, 'reducer')) return;
+                throw error;
+            }
             if (!Object.is(value, entry.value)) {
                 entry.value = value;
                 __dirtyComponents.add(owner);
@@ -1427,7 +1471,7 @@ function useEffect(setup, deps) {
     const hooks = __componentHooks.get(__currentComponent);
     const nextDeps = __nickelDeps(deps, 'useEffect');
     let entry = hooks[slot];
-    if (!entry) hooks[slot] = entry = {kind: 'effect', deps: undefined, cleanup: undefined};
+    if (!entry) hooks[slot] = entry = {kind: 'effect', owner:__currentComponent, deps: undefined, cleanup: undefined};
     if (entry.kind !== 'effect') throw Error('hook order changed');
     if (!__nickelDepsEqual(entry.deps, nextDeps))
         __pendingRender.passiveEffects.push({entry, setup, deps: nextDeps});
@@ -1437,7 +1481,8 @@ function __nickelRunCleanup(entry) {
     if (typeof entry.cleanup !== 'function') return;
     const cleanup = entry.cleanup;
     entry.cleanup = undefined;
-    try { cleanup(); } catch (_) { /* A passive cleanup cannot invalidate an accepted native commit. */ }
+    try { cleanup(); }
+    catch (error) { __nickelCaptureFailure(entry.owner, error, 'cleanup'); }
 }
 
 function __nickelCleanupHooks(hooks) {
@@ -1545,6 +1590,43 @@ function __nickelResolveDeclaration(declaration) {
     __currentComponent = path;
     __hookIndex = 0;
     try {
+        if (__errorBoundaryComponents.has(kind)) {
+            const resetKeys = declaration.props?.resetKeys;
+            if (resetKeys !== undefined && !Array.isArray(resetKeys))
+                throw TypeError('ErrorBoundary resetKeys must be an array');
+            let boundaryError = retained?.boundaryError;
+            if (boundaryError !== undefined && resetKeys !== undefined
+                && !__nickelDepsEqual(retained?.resetKeys, resetKeys))
+                boundaryError = undefined;
+            const reset = () => {
+                const current = __componentRecords.get(path);
+                if (!current?.boundary) return;
+                __componentRecords.set(path, {...current, boundaryError:undefined});
+                __dirtyComponents.add(path);
+            };
+            const resolveFallback = error => {
+                const fallback = declaration.props?.fallback ?? null;
+                const raw = typeof fallback === 'function' ? fallback(error, reset) : fallback;
+                return {raw, output:__nickelApplyDeclarationKey(declaration, __nickelResolveVirtual(raw))};
+            };
+            if (boundaryError !== undefined) {
+                const failed = resolveFallback(boundaryError);
+                __componentRecords.set(path, {kind,declaration,...failed,boundary:true,boundaryError,resetKeys:resetKeys?.slice()});
+                return failed.output;
+            }
+            __componentRecords.set(path, {kind,declaration,raw:null,output:retained?.output ?? null,boundary:true,boundaryError:undefined,resetKeys:resetKeys?.slice()});
+            try {
+                const raw = declaration.children.length === 1 ? declaration.children[0] : declaration.children;
+                const output = __nickelApplyDeclarationKey(declaration, __nickelResolveVirtual(raw));
+                __componentRecords.set(path, {kind,declaration,raw,output,boundary:true,boundaryError:undefined,resetKeys:resetKeys?.slice()});
+                return output;
+            } catch (error) {
+                __nickelRecordBoundaryFailure(path, 'render', error);
+                const failed = resolveFallback(error);
+                __componentRecords.set(path, {kind,declaration,...failed,boundary:true,boundaryError:error,resetKeys:resetKeys?.slice()});
+                return failed.output;
+            }
+        }
         const context = __contextProviders.get(kind);
         let raw;
         if (context) {
@@ -1612,6 +1694,7 @@ function __nickelHandlerBinding(handler) {
     const binding = Object.create(null);
     Object.defineProperties(binding, {
         handler:{value:handler},
+        owner:{value:__currentComponent},
         toJSON:{value:()=>{ throw Error('unmaterialized event binding cannot be serialized'); }}
     });
     Object.freeze(binding);
@@ -1625,7 +1708,13 @@ function __nickelIsHandlerBinding(value) {
 
 function __nickelMaterializeVirtual(value, path = 'root') {
     if (__nickelIsHandlerBinding(value)) {
-        __handlers.push(value.handler);
+        const handler = value.handler, owner = value.owner;
+        __handlers.push(input => {
+            try { return handler(input); }
+            catch (error) {
+                if (!__nickelCaptureFailure(owner, error, 'event')) throw error;
+            }
+        });
         return __handlers.length - 1;
     }
     if (__nickelIsComponentDeclaration(value))
@@ -1779,7 +1868,7 @@ function __nickelCommitRender() {
             const cleanup = effect.setup();
             if (cleanup !== undefined && typeof cleanup !== 'function') continue;
             effect.entry.cleanup = cleanup;
-        } catch (_) { /* A passive effect cannot invalidate an accepted native commit. */ }
+        } catch (error) { __nickelCaptureFailure(effect.entry.owner, error, 'effect'); }
     }
 }
 

@@ -766,6 +766,12 @@ impl JsxRuntime {
             .requested)
     }
 
+    /// Returns the bounded, coalesced component-failure evidence retained by
+    /// this package context. Reading diagnostics does not clear them.
+    pub fn boundary_diagnostics(&mut self) -> Result<Vec<Value>, String> {
+        self.eval_json("__nickelBoundaryDiagnostics()")
+    }
+
     pub fn finish_event(&mut self, accepted: bool) -> Result<(), String> {
         if accepted {
             self.settings_revision = self.settings_revision.wrapping_add(1);
@@ -781,6 +787,151 @@ impl JsxRuntime {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn error_boundary_contains_render_memo_and_reducer_failures() {
+        let source = r#"
+            globalThis.phase = 'ok';
+            function Leaf({value}) {
+                const [state,dispatch]=useReducer((old,action)=>{if(action==='fail')throw Error('reducer boom');return old+1},0);
+                if (phase === 'render') throw Error('render boom');
+                return h(Button,{onClick:()=>dispatch(phase==='reducer'?'fail':'ok')},value+':'+state);
+            }
+            const MemoLeaf=memo(Leaf,()=>{if(phase==='memo')throw Error('memo boom');return false});
+            function App(){return h(ErrorBoundary,{fallback:(error,reset)=>h(Button,{onClick:()=>{phase='ok';reset()}},'failed:'+error.message)},h(MemoLeaf,{value:phase}))}
+        "#;
+        let mut runtime = super::JsxRuntime::new(source, None).unwrap();
+        let initial = runtime
+            .render("__nickelRender()", |node| Ok(node.clone()))
+            .unwrap();
+        assert_eq!(initial["children"][0], "ok:0");
+
+        runtime.eval("phase='render'").unwrap();
+        let failed = runtime
+            .render("__nickelRender()", |node| Ok(node.clone()))
+            .unwrap();
+        assert_eq!(failed["children"][0], "failed:render boom");
+        runtime.render("__nickelDispatch(0)", |_| Ok(())).unwrap();
+        runtime.finish_event(true).unwrap();
+        let reset = runtime
+            .render("__nickelRender()", |node| Ok(node.clone()))
+            .unwrap();
+        assert_eq!(reset["children"][0], "ok:0");
+
+        runtime.eval("phase='memo'").unwrap();
+        let failed = runtime
+            .render("__nickelRender()", |node| Ok(node.clone()))
+            .unwrap();
+        assert_eq!(failed["children"][0], "failed:memo boom");
+        runtime.eval("phase='ok'").unwrap();
+        runtime.eval("Array.from(__componentRecords.values()).find(record=>record.boundary).boundaryError=undefined; for(const path of __componentRecords.keys())__dirtyComponents.add(path)").unwrap();
+        let healthy = runtime
+            .render("__nickelRender()", |node| Ok(node.clone()))
+            .unwrap();
+        assert_eq!(healthy["children"][0], "ok:0");
+
+        runtime.eval("phase='reducer'").unwrap();
+        let reduced = runtime
+            .render("__nickelDispatch(0)", |node| Ok(node.clone()))
+            .unwrap();
+        runtime.finish_event(true).unwrap();
+        assert_eq!(
+            reduced["children"][0],
+            "failed:reducer boom",
+            "diagnostics: {:?}",
+            runtime.boundary_diagnostics().unwrap()
+        );
+    }
+
+    #[test]
+    fn boundary_effect_failure_is_deferred_and_diagnostics_are_bounded() {
+        let source = r#"
+            function Child(){useEffect(()=>{throw Error('effect boom')},[]);return h(Text,null,'valid')}
+            function App(){return h(ErrorBoundary,{fallback:h(Text,null,'fallback')},h(Child))}
+        "#;
+        let mut runtime = super::JsxRuntime::new(source, None).unwrap();
+        let committed = runtime
+            .render("__nickelRender()", |node| Ok(node.clone()))
+            .unwrap();
+        assert_eq!(committed["children"][0], "valid");
+        let fallback = runtime
+            .render("__nickelRender()", |node| Ok(node.clone()))
+            .unwrap();
+        assert_eq!(fallback["children"][0], "fallback");
+        assert_eq!(
+            runtime.boundary_diagnostics().unwrap()[0]["phase"],
+            "effect"
+        );
+
+        runtime.eval("for(let i=0;i<80;i++)__nickelRecordBoundaryFailure('root/'+i,'render',Error('failure '+i))").unwrap();
+        assert_eq!(runtime.boundary_diagnostics().unwrap().len(), 32);
+    }
+
+    #[test]
+    fn boundary_contains_selector_and_cleanup_failures() {
+        let mut selector = super::JsxRuntime::new(
+            "function Child(){useWindows(()=>{throw Error('selector boom')});return h(Text,null,'bad')} function App(){return h(ErrorBoundary,{fallback:h(Text,null,'selector fallback')},h(Child))}",
+            None,
+        )
+        .unwrap();
+        let tree = selector
+            .render("__nickelRender()", |node| Ok(node.clone()))
+            .unwrap();
+        assert_eq!(tree["children"][0], "selector fallback");
+
+        let source = r#"
+            function Child(){useEffect(()=>()=>{throw Error('cleanup boom')},[]);return h(Text,null,'child')}
+            function App(){const [shown,setShown]=useState(true);return h(ErrorBoundary,{fallback:h(Text,null,'cleanup fallback')},h(Button,{onClick:()=>setShown(false)},shown?h(Child):'gone'))}
+        "#;
+        let mut cleanup = super::JsxRuntime::new(source, None).unwrap();
+        cleanup.render("__nickelRender()", |_| Ok(())).unwrap();
+        cleanup.render("__nickelDispatch(0)", |_| Ok(())).unwrap();
+        cleanup.finish_event(true).unwrap();
+        let tree = cleanup
+            .render("__nickelRender()", |node| Ok(node.clone()))
+            .unwrap();
+        assert_eq!(tree["children"][0], "cleanup fallback");
+        assert!(
+            cleanup
+                .boundary_diagnostics()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["phase"] == "cleanup")
+        );
+    }
+
+    #[test]
+    fn failing_surface_does_not_replace_an_independent_surface_or_its_handlers() {
+        let source = r#"
+            function App(){return h(ErrorBoundary,{fallback:h(Text,null,'settings failed')},
+                nickel.data.fail ? h((()=>{throw Error('settings')})) : h(Button,{onClick:()=>nickel.request('show-launcher')},nickel.data.name))}
+        "#;
+        let mut runtime = super::JsxRuntime::new(source, None).unwrap();
+        runtime
+            .set_data(r#"{"name":"taskbar","fail":false}"#)
+            .unwrap();
+        let taskbar = runtime
+            .render("__nickelRender()", |node| Ok(node.clone()))
+            .unwrap();
+        runtime.register_surface_entry("settings", source).unwrap();
+        runtime.select_surface("settings").unwrap();
+        runtime
+            .set_data(r#"{"name":"settings","fail":true}"#)
+            .unwrap();
+        let settings = runtime
+            .render("__nickelRender()", |node| Ok(node.clone()))
+            .unwrap();
+        assert_eq!(settings["children"][0], "settings failed");
+
+        runtime.select_surface("default").unwrap();
+        let unchanged = runtime
+            .render("__nickelRender()", |node| Ok(node.clone()))
+            .unwrap();
+        assert_eq!(unchanged["__nativeId"], taskbar["__nativeId"]);
+        runtime.render("__nickelDispatch(0)", |_| Ok(())).unwrap();
+        runtime.finish_event(true).unwrap();
+        assert_eq!(runtime.take_effects().unwrap().len(), 1);
+    }
+
     #[test]
     fn keyed_insertion_keeps_trailing_sibling_out_of_transport() {
         let source = r#"
