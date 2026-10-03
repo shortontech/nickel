@@ -169,6 +169,7 @@ function __nickelComponentProxy(selection) {
     if (local) return __nickelPublicComponents.get(local);
     return function HostComponent(props) {
         function encode(value) {
+            if (__nickelIsComponentDeclaration(value)) return encode(__nickelResolveVirtual(value));
             if (typeof value === 'function') return {__callbackAction: __handlers.push(args => { value(...args); __effects.push({type:'__compositionCallbackBoundary'}); }) - 1};
             if (typeof value === 'symbol') throw TypeError('cross-package symbol prop is unsupported');
             if (Array.isArray(value)) return value.map(encode);

@@ -845,36 +845,74 @@ function __nickelCleanupHooks(hooks) {
             if (entry?.kind === 'effect') __nickelRunCleanup(entry);
 }
 
-function h(kind, props, ...children) {
-    if (typeof kind === 'function') {
-        let type = __componentIds.get(kind);
-        if (type === undefined) {
-            type = ++__nextComponentId;
-            __componentIds.set(kind, type);
-        }
-        const parent = __currentComponent ?? 'root';
-        const ordinalKey = `${parent}/${type}`;
-        const ordinal = __componentChildren.get(ordinalKey) ?? 0;
-        __componentChildren.set(ordinalKey, ordinal + 1);
-        const identity = props?.key === undefined ? `#${ordinal}` : `@${encodeURIComponent(String(props.key))}`;
-        const path = `${ordinalKey}/${identity}`;
-        if (__visitedComponents.has(path)) throw Error(`duplicate component key ${identity}`);
-        __visitedComponents.add(path);
-        if (!__componentHooks.has(path)) __componentHooks.set(path, []);
-        const previous = __currentComponent;
-        const previousIndex = __hookIndex;
-        __currentComponent = path;
-        __hookIndex = 0;
-        try {
-            const node = kind({...props, children});
-            if (__hookIndex !== __componentHooks.get(path).length) throw Error('hook order changed');
-            return props?.key === undefined || node === null || typeof node !== 'object' || Array.isArray(node)
-                ? node : {...node, key: props.key};
-        } finally {
-            __currentComponent = previous;
-            __hookIndex = previousIndex;
-        }
+// Function components are declarations until reconciliation. The WeakSet brand
+// is intentionally not serializable and never crosses the native boundary.
+const __componentDeclarations = new WeakSet();
+
+function __nickelComponentDeclaration(component, props, children) {
+    const declaration = {};
+    Object.defineProperties(declaration, {
+        component:{value:component},
+        props:{value:props ?? null},
+        children:{value:children},
+        key:{value:props?.key},
+        toJSON:{value:()=>{ throw Error('unresolved component declaration cannot be serialized'); }}
+    });
+    Object.freeze(declaration);
+    __componentDeclarations.add(declaration);
+    return declaration;
+}
+
+function __nickelIsComponentDeclaration(value) {
+    return value !== null && typeof value === 'object' && __componentDeclarations.has(value);
+}
+
+function __nickelResolveDeclaration(declaration) {
+    const kind = declaration.component;
+    let type = __componentIds.get(kind);
+    if (type === undefined) {
+        type = ++__nextComponentId;
+        __componentIds.set(kind, type);
     }
+    const parent = __currentComponent ?? 'root';
+    const ordinalKey = `${parent}/${type}`;
+    const ordinal = __componentChildren.get(ordinalKey) ?? 0;
+    __componentChildren.set(ordinalKey, ordinal + 1);
+    const identity = declaration.key === undefined ? `#${ordinal}`
+        : `@${encodeURIComponent(String(declaration.key))}`;
+    const path = `${ordinalKey}/${identity}`;
+    if (__visitedComponents.has(path)) throw Error(`duplicate component key ${identity}`);
+    __visitedComponents.add(path);
+    if (!__componentHooks.has(path)) __componentHooks.set(path, []);
+    const previous = __currentComponent;
+    const previousIndex = __hookIndex;
+    __currentComponent = path;
+    __hookIndex = 0;
+    try {
+        const result = kind({...declaration.props, children:declaration.children});
+        if (__hookIndex !== __componentHooks.get(path).length) throw Error('hook order changed');
+        const node = __nickelResolveVirtual(result);
+        return declaration.key === undefined || node === null || typeof node !== 'object' || Array.isArray(node)
+            ? node : {...node, key:declaration.key};
+    } finally {
+        __currentComponent = previous;
+        __hookIndex = previousIndex;
+    }
+}
+
+function __nickelResolveVirtual(value) {
+    if (__nickelIsComponentDeclaration(value)) return __nickelResolveDeclaration(value);
+    if (Array.isArray(value)) return value.map(__nickelResolveVirtual);
+    if (value && typeof value === 'object') {
+        const resolved = {};
+        for (const [key, item] of Object.entries(value)) resolved[key] = __nickelResolveVirtual(item);
+        return resolved;
+    }
+    return value;
+}
+
+function h(kind, props, ...children) {
+    if (typeof kind === 'function') return __nickelComponentDeclaration(kind, props, children);
     for (const child of children) {
         if (!Array.isArray(child) || __fragmentChildren.has(child)) continue;
         const seen = new Set();
@@ -1024,7 +1062,7 @@ function __nickelRender(component = __nickelActiveEntry()) {
     __currentComponent = null;
     __hookIndex = 0;
     try {
-        const node = h(component, {});
+        const node = __nickelResolveVirtual(h(component, {}));
         if (node?.kind === 'window' && __listKeyErrors.length) throw Error(__listKeyErrors[0]);
         for (const path of __componentHooks.keys()) {
             if (!__visitedComponents.has(path)) {

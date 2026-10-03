@@ -571,6 +571,120 @@ mod tests {
     }
 
     #[test]
+    fn virtual_components_execute_parent_first_and_match_cold_native_output() {
+        let source = r#"
+            globalThis.order = [];
+            function Child({label}) { order.push('child'); return h(Text, {className:'value'}, label); }
+            function App() {
+                order.push('parent:start');
+                const child = h(Child, {label:'same'});
+                order.push('parent:end');
+                return h(Column, {className:'root'}, child);
+            }
+        "#;
+        let mut runtime = super::JsxRuntime::new(source, None).unwrap();
+        let component_tree = runtime
+            .render("__nickelRender()", |node| Ok(node.clone()))
+            .unwrap();
+        assert_eq!(
+            runtime
+                .eval_json::<Vec<String>>("JSON.stringify(order)")
+                .unwrap(),
+            ["parent:start", "parent:end", "child"]
+        );
+        let native_tree = runtime
+            .eval_json::<serde_json::Value>(
+                "JSON.stringify(h(Column,{className:'root'},h(Text,{className:'value'},'same')))",
+            )
+            .unwrap();
+        assert_eq!(component_tree, native_tree);
+    }
+
+    #[test]
+    fn virtual_component_declarations_never_serialize_unresolved() {
+        let mut runtime = super::JsxRuntime::new(
+            "function Child(){return h(Text,null,'child')} function App(){return h(Child)}",
+            None,
+        )
+        .unwrap();
+        assert!(runtime.eval("JSON.stringify(h(Child))").is_err());
+        let tree = runtime
+            .render("__nickelRender()", |node| Ok(node.clone()))
+            .unwrap();
+        assert_eq!(tree["kind"], "text");
+    }
+
+    #[test]
+    fn virtual_component_effect_lifecycle_follows_parent_first_reconciliation() {
+        let source = r#"
+            globalThis.log = [];
+            function Child() {
+                log.push('render child');
+                useEffect(()=>{log.push('setup child');return()=>log.push('cleanup child')},[]);
+                return h(Text,null,'child');
+            }
+            function App() {
+                log.push('render parent');
+                const [shown,setShown]=useState(true);
+                useEffect(()=>{log.push('setup parent');return()=>log.push('cleanup parent')},[]);
+                return h(Button,{onClick:()=>setShown(false)},shown?h(Child):'gone');
+            }
+        "#;
+        let mut runtime = super::JsxRuntime::new(source, None).unwrap();
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        assert_eq!(
+            runtime
+                .eval_json::<Vec<String>>("JSON.stringify(log)")
+                .unwrap(),
+            [
+                "render parent",
+                "render child",
+                "setup parent",
+                "setup child"
+            ]
+        );
+        runtime.render("__nickelDispatch(0)", |_| Ok(())).unwrap();
+        runtime.finish_event(true).unwrap();
+        assert_eq!(
+            runtime
+                .eval_json::<Vec<String>>("JSON.stringify(log)")
+                .unwrap(),
+            [
+                "render parent",
+                "render child",
+                "setup parent",
+                "setup child",
+                "render parent",
+                "cleanup child"
+            ]
+        );
+    }
+
+    #[test]
+    fn virtual_component_keys_retain_hook_identity_across_reorder() {
+        let source = r#"
+            function Child({label}) { const [identity]=useState(label); return h(Text,null,identity); }
+            function App() {
+                const [reversed,setReversed]=useState(false);
+                const labels=reversed?['b','a']:['a','b'];
+                return h(Column,null,h(Button,{onClick:()=>setReversed(true)},'reverse'),labels.map(label=>h(Child,{key:label,label})));
+            }
+        "#;
+        let mut runtime = super::JsxRuntime::new(source, None).unwrap();
+        let first = runtime
+            .render("__nickelRender()", |node| Ok(node.clone()))
+            .unwrap();
+        assert_eq!(first["children"][1]["children"][0], "a");
+        assert_eq!(first["children"][2]["children"][0], "b");
+        let second = runtime
+            .render("__nickelDispatch(0)", |node| Ok(node.clone()))
+            .unwrap();
+        runtime.finish_event(true).unwrap();
+        assert_eq!(second["children"][1]["children"][0], "b");
+        assert_eq!(second["children"][2]["children"][0], "a");
+    }
+
+    #[test]
     fn effects_run_after_accepted_commit_and_cleanup_before_rerun_and_unmount() {
         let source = r#"
             globalThis.log = [];
@@ -1311,17 +1425,17 @@ mod tests {
         );
         assert!(
             runtime
-                .eval("h(Slider,{min:1,max:1,value:1,onChange:()=>{}})")
+                .eval("__nickelResolveVirtual(h(Slider,{min:1,max:1,value:1,onChange:()=>{}}))")
                 .is_err()
         );
         assert!(
             runtime
-                .eval("h(Slider,{min:0,max:10,value:11,onChange:()=>{}})")
+                .eval("__nickelResolveVirtual(h(Slider,{min:0,max:10,value:11,onChange:()=>{}}))")
                 .is_err()
         );
         assert!(
             runtime
-                .eval("h(Slider,{value:0.5,step:0,onChange:()=>{}})")
+                .eval("__nickelResolveVirtual(h(Slider,{value:0.5,step:0,onChange:()=>{}}))")
                 .is_err()
         );
     }
