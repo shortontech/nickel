@@ -40,6 +40,8 @@ use nickel_plugin_presentation::css::StyleSheet;
 
 use crate::window_preview::PreviewAction;
 
+const MAX_EFFECT_RECONCILIATIONS: usize = 16;
+
 pub fn manifest() -> &'static PluginManifest {
     static MANIFEST: OnceLock<PluginManifest> = OnceLock::new();
     MANIFEST.get_or_init(|| {
@@ -840,7 +842,7 @@ impl PluginPanelApplication {
             .unwrap_or_else(|| serde_json::json!({}));
         let projection_data =
             Some(serde_json::to_string(&projection_value).map_err(|error| error.to_string())?);
-        Ok(Self {
+        let mut application = Self {
             runtime,
             accepted,
             next_generation: 1,
@@ -865,7 +867,9 @@ impl PluginPanelApplication {
                 snapshots,
             }),
             surface_snapshot,
-        })
+        };
+        application.reconcile_passive_effects()?;
+        Ok(application)
     }
 
     pub(crate) fn retire_composition_owner(&mut self, id: &str) {
@@ -1199,6 +1203,8 @@ impl PluginPanelApplication {
             state.events = rendered.events;
             self.projection_data = Some(serialized);
             self.projection_value = Some(data);
+            drop(host);
+            self.reconcile_passive_effects()?;
             return Ok(true);
         }
         let previous_data = self
@@ -1246,6 +1252,7 @@ impl PluginPanelApplication {
         self.projection_value = serde_json::from_str(&serialized).ok();
         self.projection_data = Some(serialized);
         self.last_error = None;
+        self.reconcile_passive_effects()?;
         Ok(true)
     }
 
@@ -1317,7 +1324,7 @@ impl PluginPanelApplication {
             .and_then(|data| serde_json::from_str::<Value>(data).ok())
             .and_then(|data| data.get("surface").cloned())
             .unwrap_or_else(|| serde_json::json!({}));
-        Ok(Self {
+        let mut application = Self {
             runtime,
             accepted,
             next_generation: 2,
@@ -1338,7 +1345,9 @@ impl PluginPanelApplication {
             stylesheet: StyleSheet::default(),
             composition: None,
             surface_snapshot,
-        })
+        };
+        application.reconcile_passive_effects()?;
+        Ok(application)
     }
 
     pub fn sync_theme_palette(
@@ -2959,6 +2968,127 @@ impl PluginPanelApplication {
         })();
     }
 
+    fn reconcile_passive_effects(&mut self) -> Result<bool, String> {
+        let mut changed = false;
+        for pass in 0..MAX_EFFECT_RECONCILIATIONS {
+            if self.composition.is_none() {
+                let requested = {
+                    let mut runtime = self.runtime.borrow_mut();
+                    runtime.select_surface(&self.runtime_surface_id)?;
+                    runtime.reconciliation_requested()?
+                };
+                if !requested {
+                    return Ok(changed);
+                }
+            }
+            let rendered = if let Some(state) = &mut self.composition {
+                let mut host = state.host.borrow_mut();
+                let outcome = host.reconcile_expanded_pending_validated(&state.mount, |value| {
+                    let node = parse_panel_for_manifest(
+                        value,
+                        &self.manifest,
+                        self.expected_surface_id.as_deref(),
+                    )?;
+                    if let Some(id) = &self.expected_surface_id {
+                        let surface = self
+                            .manifest
+                            .surfaces
+                            .iter()
+                            .find(|surface| &surface.id == id)
+                            .ok_or("composed surface grant is missing")?;
+                        node.requested_surface(surface, &self.stylesheet)?;
+                    }
+                    Ok(())
+                })?;
+                match outcome {
+                    ScheduledExpandedBatch::Unchanged => {
+                        host.finish_transaction(true)?;
+                        return Ok(changed);
+                    }
+                    ScheduledExpandedBatch::Rendered { rendered, .. } => {
+                        let candidate = RetainedPanelTree::admit(
+                            &rendered.node,
+                            &self.manifest,
+                            self.expected_surface_id.as_deref(),
+                            rendered.generation(),
+                        );
+                        match candidate {
+                            Ok(candidate) => {
+                                host.finish_transaction(true)?;
+                                state.events = rendered.events;
+                                self.accepted = candidate;
+                                changed = true;
+                                None
+                            }
+                            Err(error) => {
+                                host.finish_transaction(false)?;
+                                self.last_error = Some(error);
+                                return Ok(changed);
+                            }
+                        }
+                    }
+                }
+            } else {
+                let generation = self.next_generation;
+                let outcome = {
+                    let mut runtime = self.runtime.borrow_mut();
+                    runtime.select_surface(&self.runtime_surface_id)?;
+                    runtime.dispatch_patched("__nickelDispatchBatchPatched([], false)")
+                };
+                match outcome {
+                    Ok(ScheduledPatch::Unchanged) => {
+                        self.runtime.borrow_mut().finish_event(true)?;
+                        return Ok(changed);
+                    }
+                    Ok(ScheduledPatch::Patched {
+                        patch,
+                        transport_bytes,
+                        ..
+                    }) => {
+                        let mut candidate = self.accepted.clone();
+                        let accepted = candidate.apply_patch(
+                            &patch,
+                            &self.manifest,
+                            self.expected_surface_id.as_deref(),
+                            &self.stylesheet,
+                            generation,
+                            transport_bytes,
+                        );
+                        let mut runtime = self.runtime.borrow_mut();
+                        runtime.finish_patch_render(accepted.is_ok())?;
+                        runtime.finish_event(accepted.is_ok())?;
+                        match accepted {
+                            Ok(_) => {
+                                self.next_generation = generation.saturating_add(1);
+                                changed = true;
+                                Some(candidate)
+                            }
+                            Err(error) => {
+                                self.last_error = Some(error);
+                                return Ok(changed);
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        let _ = self.runtime.borrow_mut().finish_event(false);
+                        return Err(error);
+                    }
+                }
+            };
+            if let Some(rendered) = rendered {
+                self.accepted = rendered;
+            }
+            if pass + 1 == MAX_EFFECT_RECONCILIATIONS {
+                let error = format!(
+                    "passive effect reconciliation exceeded {MAX_EFFECT_RECONCILIATIONS} passes"
+                );
+                tracing::warn!(%error, plugin = %self.manifest.id, "plugin effect loop stopped");
+                self.last_error = Some(error);
+            }
+        }
+        Ok(changed)
+    }
+
     /// Validate callback effects without evaluating an entry, creating a surface
     /// or installing a UI host. The runtime is the registry's existing owner.
     pub(crate) fn validate_provider_effects(
@@ -3297,6 +3427,13 @@ impl nickel_ui::Application for PluginPanelApplication {
                 self.effects.extend(candidate_effects);
                 self.pending_transient = candidate_transient;
             }
+            drop(host);
+            if self.last_error.is_none()
+                && let Err(error) = self.reconcile_passive_effects()
+            {
+                self.runtime_failure = Some(error.clone());
+                self.last_error = Some(error);
+            }
             return;
         }
 
@@ -3314,6 +3451,10 @@ impl nickel_ui::Application for PluginPanelApplication {
             self.accepted = candidate_accepted;
             self.effects.extend(candidate_effects);
             self.pending_transient = candidate_transient;
+            if let Err(error) = self.reconcile_passive_effects() {
+                self.runtime_failure = Some(error.clone());
+                self.last_error = Some(error);
+            }
         }
     }
 
@@ -7414,6 +7555,104 @@ mod tests {
             PluginPanelApplication::new(source)
                 .err()
                 .is_some_and(|error| error.contains("duplicate component key"))
+        );
+    }
+
+    #[test]
+    fn passive_effect_state_is_reconciled_after_mount() {
+        let panel = PluginPanelApplication::new(
+            r#"
+                function App() {
+                    const [count, setCount] = useState(0);
+                    useEffect(() => { setCount(1); }, []);
+                    return h(Panel, null, h(Text, null, 'count:' + count));
+                }
+            "#,
+        )
+        .unwrap();
+        assert!(format!("{:?}", panel.accepted.node()).contains("count:1"));
+        assert!(panel.last_error().is_none());
+    }
+
+    #[test]
+    fn passive_effect_updates_are_batched_into_one_generation() {
+        let panel = PluginPanelApplication::new(
+            r#"
+                function App() {
+                    const [left, setLeft] = useState(0);
+                    const [right, setRight] = useState(0);
+                    useEffect(() => { setLeft(1); setRight(2); }, []);
+                    return h(Panel, null, h(Text, null, left + ':' + right));
+                }
+            "#,
+        )
+        .unwrap();
+        assert!(format!("{:?}", panel.accepted.node()).contains("1:2"));
+        assert_eq!(panel.next_generation, 3);
+    }
+
+    #[test]
+    fn passive_effect_cleanup_updates_are_reconciled_after_dependency_change() {
+        let mut panel = PluginPanelApplication::new(
+            r#"
+                function App() {
+                    const [dependency, setDependency] = useState(0);
+                    const [cleaned, setCleaned] = useState('none');
+                    useEffect(() => () => setCleaned('cleanup:' + dependency), [dependency]);
+                    return h(Panel, null,
+                        h(Button, {onClick: () => setDependency(1)}, 'change'),
+                        h(Text, null, cleaned));
+                }
+            "#,
+        )
+        .unwrap();
+        panel.update(PluginMessage::Click(0));
+        assert!(format!("{:?}", panel.accepted.node()).contains("cleanup:0"));
+    }
+
+    #[test]
+    fn rejected_passive_effect_render_preserves_the_accepted_tree() {
+        let panel = PluginPanelApplication::new(
+            r#"
+                function App() {
+                    const [invalid, setInvalid] = useState(false);
+                    useEffect(() => setInvalid(true), []);
+                    return h(Panel, null, invalid ? h('not-a-component') : h(Text, null, 'accepted'));
+                }
+            "#,
+        )
+        .unwrap();
+        assert!(format!("{:?}", panel.accepted.node()).contains("accepted"));
+        assert!(panel.last_error().is_some());
+    }
+
+    #[test]
+    fn clean_mount_does_not_schedule_idle_reconciliation() {
+        let mut panel = PluginPanelApplication::new(
+            "function App() { return h(Panel, null, h(Text, null, 'idle')); }",
+        )
+        .unwrap();
+        let generation = panel.next_generation;
+        assert!(!panel.reconcile_passive_effects().unwrap());
+        assert_eq!(panel.next_generation, generation);
+    }
+
+    #[test]
+    fn passive_effect_loops_are_bounded_and_diagnosed() {
+        let panel = PluginPanelApplication::new(
+            r#"
+                function App() {
+                    const [count, setCount] = useState(0);
+                    useEffect(() => { setCount(count + 1); });
+                    return h(Panel, null, h(Text, null, String(count)));
+                }
+            "#,
+        )
+        .unwrap();
+        assert!(
+            panel
+                .last_error()
+                .is_some_and(|error| error.contains("passive effect reconciliation exceeded"))
         );
     }
 }

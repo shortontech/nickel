@@ -1987,7 +1987,6 @@ function __nickelDispatchBatch(events, previous = false) {
 // Structured scheduler entry point. It deliberately still produces a complete
 // tree when dirty; the native mutation protocol can replace that payload later.
 function __nickelDispatchBatchScheduled(events, previous = false) {
-    if (!events.length) return JSON.stringify({rendered:false, dirty:[]});
     const hooks = new Map(Array.from(__componentHooks, ([path, slots]) => [path, slots.slice()]));
     const values = Array.from(__componentHooks.values(), slots => slots.map(entry =>
         entry.kind === 'ref' ? entry.value.current : entry.value));
@@ -2010,7 +2009,6 @@ function __nickelDispatchBatchScheduled(events, previous = false) {
 }
 
 function __nickelDispatchBatchPatched(events, previous = false) {
-    if (!events.length) return JSON.stringify({rendered:false, dirty:[]});
     const hooks = new Map(Array.from(__componentHooks, ([path, slots]) => [path, slots.slice()]));
     const values = Array.from(__componentHooks.values(), slots => slots.map(entry =>
         entry.kind === 'ref' ? entry.value.current : entry.value));

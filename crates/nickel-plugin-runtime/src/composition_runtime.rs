@@ -1126,6 +1126,40 @@ impl ShellCompositionRuntime {
         result
     }
 
+    /// Reconcile state queued by passive effects after the preceding committed
+    /// render. The empty event batch is intentional: it lets the owning mount's
+    /// scheduler consume all queued hook updates once, then expands the root
+    /// with the same generation and ownership checks as an input dispatch.
+    pub fn reconcile_expanded_pending_validated<T>(
+        &mut self,
+        root: &ComponentMount,
+        validate: impl FnOnce(&Value) -> Result<T, String>,
+    ) -> Result<ScheduledExpandedBatch<T>, String> {
+        self.begin_transaction()?;
+        let result = (|| {
+            self.validate_mount(root)?;
+            let outcome = self.render_mount_scheduled(root.id, Value::Array(Vec::new()))?;
+            if outcome.rendered.is_none() && !outcome.requires_expansion {
+                return Ok(ScheduledExpandedBatch::Unchanged);
+            }
+            let (rendered, validated) = if let Some(rendered) = outcome.rendered {
+                self.expand_rendered(root.id, rendered, |value, _| validate(value))?
+            } else {
+                let props = self.mounts[&root.id].props.clone();
+                self.render_expanded_validated(root, &props, validate)?
+            };
+            Ok(ScheduledExpandedBatch::Rendered {
+                rendered,
+                validated,
+                reconciliation_requested: outcome.reconciliation_requested,
+            })
+        })();
+        if result.is_err() {
+            self.finish_transaction(false)?;
+        }
+        result
+    }
+
     fn expand_rendered<T>(
         &mut self,
         root: u64,

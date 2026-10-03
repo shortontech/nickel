@@ -760,6 +760,12 @@ impl JsxRuntime {
         self.eval_json("__nickelTakeEffects()")
     }
 
+    pub fn reconciliation_requested(&mut self) -> Result<bool, String> {
+        Ok(self
+            .eval_json::<ReconciliationRequest>("__nickelReconciliationRequest()")?
+            .requested)
+    }
+
     pub fn finish_event(&mut self, accepted: bool) -> Result<(), String> {
         if accepted {
             self.settings_revision = self.settings_revision.wrapping_add(1);
