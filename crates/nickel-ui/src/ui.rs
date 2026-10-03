@@ -1764,10 +1764,29 @@ struct StyledTextMeasureKey {
 struct TextMeasurer {
     font_system: ProcessFontSystem,
     cache_enabled: bool,
-    plain: HashMap<TextMeasureKey, Size>,
+    plain: HashMap<TextMeasureKey, Arc<PlainTextLayout>>,
     styled: HashMap<StyledTextMeasureKey, Size>,
     plain_bytes: usize,
     styled_bytes: usize,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct TextClusterPosition {
+    pub(crate) line: usize,
+    pub(crate) start: usize,
+    pub(crate) end: usize,
+    pub(crate) x: f32,
+    pub(crate) y: f32,
+    pub(crate) width: f32,
+    pub(crate) height: f32,
+    pub(crate) rtl: bool,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct PlainTextLayout {
+    pub(crate) size: Size,
+    pub(crate) clusters: Vec<TextClusterPosition>,
+    pub(crate) line_widths: Vec<f32>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -1833,6 +1852,13 @@ fn plain_measure_key_bytes(key: &TextMeasureKey) -> usize {
     std::mem::size_of::<TextMeasureKey>() + key.text.len() + key.locale.len()
 }
 
+fn plain_layout_bytes(key: &TextMeasureKey, layout: &PlainTextLayout) -> usize {
+    plain_measure_key_bytes(key)
+        + std::mem::size_of::<PlainTextLayout>()
+        + layout.clusters.len() * std::mem::size_of::<TextClusterPosition>()
+        + layout.line_widths.len() * std::mem::size_of::<f32>()
+}
+
 fn styled_measure_key_bytes(key: &StyledTextMeasureKey) -> usize {
     std::mem::size_of::<StyledTextMeasureKey>()
         + key.text.len()
@@ -1844,7 +1870,8 @@ thread_local! {
     static TEXT_MEASURER: RefCell<TextMeasurer> = RefCell::new(TextMeasurer::default());
 }
 
-pub(crate) fn measure_text(
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn shape_plain_text(
     text: &str,
     scale: f32,
     bold: bool,
@@ -1852,7 +1879,8 @@ pub(crate) fn measure_text(
     line_height: Option<f32>,
     max_lines: Option<usize>,
     max_width: f32,
-) -> Size {
+    cacheable: bool,
+) -> Arc<PlainTextLayout> {
     let font_size = text_font_size(scale);
     let line_height = line_height.unwrap_or(font_size * 1.3).max(1.0);
     let width = if wrap && max_width.is_finite() {
@@ -1872,10 +1900,11 @@ pub(crate) fn measure_text(
             line_height: line_height.to_bits(),
             max_lines,
         };
-        if measurer.cache_enabled
-            && let Some(size) = measurer.plain.get(&key).copied()
+        if cacheable
+            && measurer.cache_enabled
+            && let Some(layout) = measurer.plain.get(&key)
         {
-            return size;
+            return Arc::clone(layout);
         }
         let mut font_system = measurer.font_system.lock();
         let mut buffer = Buffer::new(&mut font_system, Metrics::new(font_size, line_height));
@@ -1888,26 +1917,82 @@ pub(crate) fn measure_text(
         buffer.set_text(text, &attrs, Shaping::Advanced, None);
         buffer.shape_until_scroll(&mut font_system, false);
         let mut measured = Size::new(0.0, 0.0);
-        for run in buffer.layout_runs().take(max_lines.unwrap_or(usize::MAX)) {
+        let mut clusters = Vec::new();
+        let mut line_widths: Vec<f32> = Vec::new();
+        let mut line_bases = Vec::new();
+        let mut base = 0;
+        for line in text.split_inclusive('\n') {
+            line_bases.push(base);
+            base += line.len();
+        }
+        if line_bases.is_empty() {
+            line_bases.push(0);
+        }
+        for (visual_line, run) in buffer
+            .layout_runs()
+            .take(max_lines.unwrap_or(usize::MAX))
+            .enumerate()
+        {
             measured.width = measured.width.max(run.line_w);
             measured.height += run.line_height;
+            line_widths.push(run.line_w);
+            let line_base = line_bases.get(run.line_i).copied().unwrap_or(0);
+            clusters.extend(run.glyphs.iter().map(|glyph| TextClusterPosition {
+                line: visual_line,
+                start: line_base + glyph.start,
+                end: line_base + glyph.end,
+                x: glyph.x,
+                y: run.line_top,
+                width: glyph.w.max(1.0),
+                height: run.line_height,
+                rtl: glyph.level.is_rtl(),
+            }));
         }
         if measured.height == 0.0 {
             measured.height = line_height;
         }
-        let key_bytes = plain_measure_key_bytes(&key);
-        if measurer.plain.len() >= TEXT_MEASURE_CACHE_CAPACITY
-            || measurer.plain_bytes.saturating_add(key_bytes) > TEXT_MEASURE_CACHE_BYTE_BUDGET
-        {
-            measurer.plain.clear();
-            measurer.plain_bytes = 0;
+        let layout = Arc::new(PlainTextLayout {
+            size: measured,
+            clusters,
+            line_widths,
+        });
+        let key_bytes = plain_layout_bytes(&key, &layout);
+        if cacheable && measurer.cache_enabled {
+            if measurer.plain.len() >= TEXT_MEASURE_CACHE_CAPACITY
+                || measurer.plain_bytes.saturating_add(key_bytes) > TEXT_MEASURE_CACHE_BYTE_BUDGET
+            {
+                measurer.plain.clear();
+                measurer.plain_bytes = 0;
+            }
+            if key_bytes <= TEXT_MEASURE_CACHE_BYTE_BUDGET {
+                measurer.plain_bytes += key_bytes;
+                measurer.plain.insert(key, Arc::clone(&layout));
+            }
         }
-        if measurer.cache_enabled && key_bytes <= TEXT_MEASURE_CACHE_BYTE_BUDGET {
-            measurer.plain_bytes += key_bytes;
-            measurer.plain.insert(key, measured);
-        }
-        measured
+        layout
     })
+}
+
+pub(crate) fn measure_text(
+    text: &str,
+    scale: f32,
+    bold: bool,
+    wrap: bool,
+    line_height: Option<f32>,
+    max_lines: Option<usize>,
+    max_width: f32,
+) -> Size {
+    shape_plain_text(
+        text,
+        scale,
+        bold,
+        wrap,
+        line_height,
+        max_lines,
+        max_width,
+        true,
+    )
+    .size
 }
 
 /// Intrinsic width of a single line using the same font metrics as UI layout.

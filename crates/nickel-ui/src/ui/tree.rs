@@ -180,24 +180,50 @@ fn text_offset_at<Message>(input: &TextInputRegion<Message>, point: Point) -> us
         return line_start;
     }
     let target = (point.x - input.content.origin.x).max(0.0);
-    let mut previous = (0, 0.0);
-    for (index, _) in line.grapheme_indices(true) {
-        let width = measure_text(
-            &line[..index],
-            input.scale,
-            input.bold,
-            false,
-            None,
-            Some(1),
-            f32::INFINITY,
-        )
-        .width;
-        if target < (previous.1 + width) * 0.5 {
-            return line_start + previous.0;
-        }
-        previous = (index, width);
+    // Shape the complete line once. Prefix measurement is both quadratic and
+    // subtly wrong for contextual scripts, ligatures, and bidi runs.
+    let layout = shape_plain_text(
+        line,
+        input.scale,
+        input.bold,
+        false,
+        None,
+        Some(1),
+        f32::INFINITY,
+        !input.secure,
+    );
+    let nearest = layout.clusters.iter().min_by(|left, right| {
+        let distance = |cluster: &TextClusterPosition| {
+            if target < cluster.x {
+                cluster.x - target
+            } else if target > cluster.x + cluster.width {
+                target - (cluster.x + cluster.width)
+            } else {
+                0.0
+            }
+        };
+        distance(left).total_cmp(&distance(right))
+    });
+    if let Some(cluster) = nearest {
+        let before = target < cluster.x + cluster.width * 0.5;
+        let offset = match (cluster.rtl, before) {
+            (false, true) | (true, false) => cluster.start,
+            _ => cluster.end,
+        };
+        return line_start + grapheme_boundary_at_or_before(line, offset);
     }
     line_start + line.len()
+}
+
+fn grapheme_boundary_at_or_before(text: &str, offset: usize) -> usize {
+    if offset >= text.len() {
+        return text.len();
+    }
+    text.grapheme_indices(true)
+        .map(|(index, _)| index)
+        .take_while(|index| *index <= offset)
+        .last()
+        .unwrap_or(0)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -6463,59 +6489,43 @@ fn shape_selection_glyphs(
     max_lines: Option<usize>,
     align: TextAlign,
 ) -> Vec<SelectionGlyph> {
-    let font_size = text_font_size(scale);
-    let line_height = line_height.unwrap_or(font_size * 1.3).max(1.0);
-    let mut line_bases = Vec::new();
-    let mut base = 0;
-    for line in text.split_inclusive('\n') {
-        line_bases.push(base);
-        base += line.len();
-    }
-    if line_bases.is_empty() {
-        line_bases.push(0);
-    }
-    TEXT_MEASURER.with(|measurer| {
-        let measurer = measurer.borrow_mut();
-        let mut font_system = measurer.font_system.lock();
-        let mut buffer = Buffer::new(&mut font_system, Metrics::new(font_size, line_height));
-        buffer.set_wrap(if wrap { Wrap::WordOrGlyph } else { Wrap::None });
-        buffer.set_size(wrap.then_some(rect.size.width.max(1.0)), None);
-        let mut attrs = Attrs::new().family(Family::SansSerif);
-        if bold {
-            attrs = attrs.weight(Weight::BOLD);
-        }
-        buffer.set_text(text, &attrs, Shaping::Advanced, None);
-        buffer.shape_until_scroll(&mut font_system, false);
-        let mut glyphs = Vec::new();
-        for run in buffer.layout_runs().take(max_lines.unwrap_or(usize::MAX)) {
+    let layout = shape_plain_text(
+        text,
+        scale,
+        bold,
+        wrap,
+        line_height,
+        max_lines,
+        if wrap { rect.size.width } else { f32::INFINITY },
+        true,
+    );
+    layout
+        .clusters
+        .iter()
+        .filter_map(|cluster| {
+            let line_width = layout.line_widths.get(cluster.line).copied().unwrap_or(0.0);
             let align_offset = match align {
                 TextAlign::Start => 0.0,
-                TextAlign::Center => (rect.size.width - run.line_w).max(0.0) * 0.5,
-                TextAlign::End => (rect.size.width - run.line_w).max(0.0),
+                TextAlign::Center => (rect.size.width - line_width).max(0.0) * 0.5,
+                TextAlign::End => (rect.size.width - line_width).max(0.0),
             };
-            let line_base = line_bases.get(run.line_i).copied().unwrap_or(0);
-            for glyph in run.glyphs {
-                let glyph_rect = Rect::new(
-                    rect.origin.x + align_offset + glyph.x,
-                    rect.origin.y + run.line_top,
-                    glyph.w.max(1.0),
-                    run.line_height,
-                );
-                let visible = clip
-                    .and_then(|clip| intersection(glyph_rect, clip))
-                    .or_else(|| clip.is_none().then_some(glyph_rect));
-                if let Some(rect) = visible {
-                    glyphs.push(SelectionGlyph {
-                        rect,
-                        start: line_base + glyph.start,
-                        end: line_base + glyph.end,
-                        rtl: glyph.level.is_rtl(),
-                    });
-                }
-            }
-        }
-        glyphs
-    })
+            let glyph_rect = Rect::new(
+                rect.origin.x + align_offset + cluster.x,
+                rect.origin.y + cluster.y,
+                cluster.width,
+                cluster.height,
+            );
+            let visible = clip
+                .and_then(|clip| intersection(glyph_rect, clip))
+                .or_else(|| clip.is_none().then_some(glyph_rect));
+            visible.map(|rect| SelectionGlyph {
+                rect,
+                start: cluster.start,
+                end: cluster.end,
+                rtl: cluster.rtl,
+            })
+        })
+        .collect()
 }
 
 fn derive_accessible_name<Message>(element: &Element<Message>) -> Option<String> {

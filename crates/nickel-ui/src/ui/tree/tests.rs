@@ -2214,6 +2214,121 @@ fn repeated_styled_text_measurement_reuses_a_bounded_cache_entry() {
 }
 
 #[test]
+fn shaped_plain_text_reuses_clusters_and_matches_a_cold_unicode_layout() {
+    let text = "office e\u{301} שלום 🦀";
+    let cached = with_text_measure_cache_mode(TextMeasureCacheMode::Enabled, || {
+        let first = shape_plain_text(text, 1.0, false, false, None, Some(1), f32::INFINITY, true);
+        let second = shape_plain_text(text, 1.0, false, false, None, Some(1), f32::INFINITY, true);
+        assert!(Arc::ptr_eq(&first, &second));
+        first
+    });
+    let cold = with_text_measure_cache_mode(TextMeasureCacheMode::BypassDerived, || {
+        shape_plain_text(text, 1.0, false, false, None, Some(1), f32::INFINITY, true)
+    });
+
+    assert_eq!(cached.size, cold.size);
+    let positions = |layout: &PlainTextLayout| {
+        layout
+            .clusters
+            .iter()
+            .map(|cluster| {
+                (
+                    cluster.line,
+                    cluster.start,
+                    cluster.end,
+                    cluster.x.to_bits(),
+                    cluster.y.to_bits(),
+                    cluster.width.to_bits(),
+                    cluster.height.to_bits(),
+                    cluster.rtl,
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(positions(&cached), positions(&cold));
+    let mut grapheme_boundaries = text
+        .grapheme_indices(true)
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    grapheme_boundaries.push(text.len());
+    assert!(cached.clusters.iter().all(|cluster| {
+        grapheme_boundaries.contains(&cluster.start) && grapheme_boundaries.contains(&cluster.end)
+    }));
+}
+
+#[test]
+fn cached_selection_clusters_match_cold_wrapped_bidi_geometry() {
+    let build = || {
+        UiFrame::<TestMessage>::layout(
+            SelectionRegion::automatic().child(
+                Text::new("Latin e\u{301} — שלום — 🦀 wrapped text")
+                    .selection_run_id("mixed")
+                    .wrap(true)
+                    .width(110.0),
+            ),
+            Rect::new(0.0, 0.0, 160.0, 120.0),
+        )
+    };
+    let geometry = |frame: &UiFrame<TestMessage>| {
+        frame.selection_regions[0].runs[0]
+            .glyphs
+            .iter()
+            .map(|glyph| {
+                (
+                    glyph.start,
+                    glyph.end,
+                    glyph.rect.origin.x.to_bits(),
+                    glyph.rect.origin.y.to_bits(),
+                    glyph.rect.size.width.to_bits(),
+                    glyph.rect.size.height.to_bits(),
+                    glyph.rtl,
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let cached = with_text_measure_cache_mode(TextMeasureCacheMode::Enabled, build);
+    let cold = with_text_measure_cache_mode(TextMeasureCacheMode::BypassDerived, build);
+
+    assert_eq!(geometry(&cached), geometry(&cold));
+    assert_eq!(cached.resolved_layout(), cold.resolved_layout());
+    assert_eq!(cached.commands(), cold.commands());
+}
+
+#[test]
+fn shaped_plain_text_cache_is_bounded_and_can_exclude_protected_text() {
+    with_text_measure_cache_mode(TextMeasureCacheMode::Enabled, || {
+        TEXT_MEASURER.with(|measurer| {
+            let mut measurer = measurer.borrow_mut();
+            measurer.plain.clear();
+            measurer.plain_bytes = 0;
+        });
+        let protected = "correct horse battery staple";
+        let _ = shape_plain_text(
+            protected,
+            1.0,
+            false,
+            false,
+            None,
+            Some(1),
+            f32::INFINITY,
+            false,
+        );
+        TEXT_MEASURER.with(|measurer| assert!(measurer.borrow().plain.is_empty()));
+
+        for index in 0..=TEXT_MEASURE_CACHE_CAPACITY {
+            let text = format!("entry-{index}");
+            let _ = shape_plain_text(&text, 1.0, false, false, None, Some(1), f32::INFINITY, true);
+        }
+        TEXT_MEASURER.with(|measurer| {
+            let measurer = measurer.borrow();
+            assert!(measurer.plain.len() <= TEXT_MEASURE_CACHE_CAPACITY);
+            assert!(measurer.plain_bytes <= TEXT_MEASURE_CACHE_BYTE_BUDGET);
+            assert!(measurer.plain.keys().all(|key| key.text != protected));
+        });
+    });
+}
+
+#[test]
 #[ignore = "release-mode cache admission benchmark"]
 fn text_measure_caches_have_measured_equivalent_benefit() {
     use std::time::Instant;
