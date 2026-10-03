@@ -133,6 +133,17 @@ pub mod backend {
 
     use crate::{DamageRegion, Rect, SoftwareRenderer};
 
+    /// The storage guarantee a presenter provides when consuming retained
+    /// damage. Swapchain images and newly rebuilt compositor elements must use
+    /// [`Self::FullFrameOnly`] unless the presenter owns a preserved backing
+    /// store containing the complete prior frame.
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+    pub enum DamageHintSupport {
+        #[default]
+        FullFrameOnly,
+        PreservedFramebuffer,
+    }
+
     /// Borrowed display list and presentation metadata for one resolved UI frame.
     ///
     /// Presenters may consume this directly (for example by translating fills to
@@ -187,6 +198,10 @@ pub mod backend {
     pub trait FrameRenderer {
         type Error;
 
+        fn damage_hint_support(&self) -> DamageHintSupport {
+            DamageHintSupport::FullFrameOnly
+        }
+
         fn render_frame(&mut self, frame: RenderFrame<'_>) -> Result<DamageRegion, Self::Error>;
 
         /// Present a frame with authoritative logical damage from a retained
@@ -203,6 +218,10 @@ pub mod backend {
 
     impl FrameRenderer for SoftwareRenderer {
         type Error = Infallible;
+
+        fn damage_hint_support(&self) -> DamageHintSupport {
+            DamageHintSupport::PreservedFramebuffer
+        }
 
         fn render_frame(&mut self, frame: RenderFrame<'_>) -> Result<DamageRegion, Self::Error> {
             Ok(self.render(frame.commands))
@@ -235,8 +254,44 @@ pub mod backend {
 
         use image::RgbaImage;
 
-        use super::{FrameRenderer, ImageResourceKey, PaintCommand, RenderFrame};
-        use crate::{Rect, SoftwareRenderer};
+        use super::{
+            DamageHintSupport, FrameRenderer, ImageResourceKey, PaintCommand, RenderFrame,
+        };
+        use crate::{DamageRegion, Rect, SoftwareRenderer};
+
+        struct FullFrameOnlyRenderer;
+
+        impl FrameRenderer for FullFrameOnlyRenderer {
+            type Error = std::convert::Infallible;
+
+            fn render_frame(
+                &mut self,
+                frame: RenderFrame<'_>,
+            ) -> Result<DamageRegion, Self::Error> {
+                Ok(DamageRegion {
+                    rects: [Rect::new(
+                        0.0,
+                        0.0,
+                        frame.logical_size.0 as f32,
+                        frame.logical_size.1 as f32,
+                    )]
+                    .into_iter()
+                    .collect(),
+                })
+            }
+        }
+
+        #[test]
+        fn damage_support_defaults_to_full_frame_and_requires_preserved_storage() {
+            assert_eq!(
+                FullFrameOnlyRenderer.damage_hint_support(),
+                DamageHintSupport::FullFrameOnly
+            );
+            assert_eq!(
+                SoftwareRenderer::new(4, 4, 1.0).damage_hint_support(),
+                DamageHintSupport::PreservedFramebuffer
+            );
+        }
 
         #[test]
         fn frame_exposes_borrowed_image_resources_with_cache_identity() {
@@ -290,6 +345,45 @@ pub mod backend {
 
             assert!(!damage.is_empty());
             assert!(renderer.pixels().iter().any(|pixel| pixel.a != 0));
+        }
+
+        #[test]
+        fn software_damage_telemetry_distinguishes_partial_use_from_full_fallback() {
+            let initial = [PaintCommand::Fill {
+                rect: Rect::new(0.0, 0.0, 2.0, 2.0),
+                color: 0xff0000,
+            }];
+            let changed = [PaintCommand::Fill {
+                rect: Rect::new(0.0, 0.0, 2.0, 2.0),
+                color: 0x00ff00,
+            }];
+            let frame = |commands, generation| RenderFrame {
+                commands,
+                logical_size: (4, 4),
+                scale_factor: 1.0,
+                generation,
+            };
+            let hint = [Rect::new(0.0, 0.0, 2.0, 2.0)];
+            let mut renderer = SoftwareRenderer::new(4, 4, 1.0);
+
+            renderer.render_frame(frame(&initial, 1)).unwrap();
+            renderer
+                .render_frame_with_damage(frame(&changed, 2), Some(&hint))
+                .unwrap();
+            renderer.invalidate();
+            let fallback = renderer
+                .render_frame_with_damage(frame(&initial, 3), Some(&hint))
+                .unwrap();
+
+            let diagnostics = renderer.software_raster_diagnostics();
+            assert_eq!(diagnostics.damage_hints_accepted, 1);
+            assert_eq!(diagnostics.damage_hints_fell_back, 1);
+            assert_eq!(diagnostics.partial_repaints, 1);
+            assert_eq!(diagnostics.full_repaints, 2);
+            assert_eq!(fallback.rects.as_slice(), &[Rect::new(0.0, 0.0, 4.0, 4.0)]);
+            let mut cold = SoftwareRenderer::new(4, 4, 1.0);
+            cold.render(&initial);
+            assert_eq!(renderer.pixels(), cold.pixels());
         }
     }
 }

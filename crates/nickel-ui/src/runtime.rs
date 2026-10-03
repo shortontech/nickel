@@ -6463,6 +6463,7 @@ mod tests {
         views: Cell<usize>,
         nodes: usize,
         pointer_geometry: bool,
+        ambiguous_effect: bool,
     }
 
     impl RetainedPaintFixture {
@@ -6471,11 +6472,17 @@ mod tests {
                 views: Cell::new(0),
                 nodes,
                 pointer_geometry: false,
+                ambiguous_effect: false,
             }
         }
 
         fn with_pointer_geometry(mut self) -> Self {
             self.pointer_geometry = true;
+            self
+        }
+
+        fn with_ambiguous_effect(mut self) -> Self {
+            self.ambiguous_effect = true;
             self
         }
     }
@@ -6488,7 +6495,16 @@ mod tests {
         fn view(&self, _context: ViewContext) -> impl crate::View<Self::Message> {
             self.views.set(self.views.get() + 1);
             let children = (0..self.nodes)
-                .map(|index| Button::new((), format!("Item {index}")).id(format!("item-{index}")))
+                .map(|index| {
+                    let item = crate::Component::into_element(
+                        Button::new((), format!("Item {index}")).id(format!("item-{index}")),
+                    );
+                    if self.ambiguous_effect {
+                        item.backdrop_blur(4.0)
+                    } else {
+                        item
+                    }
+                })
                 .collect::<Vec<_>>();
             let root = Container::new().children(children);
             if self.pointer_geometry {
@@ -6725,6 +6741,25 @@ mod tests {
         assert!(outcome.telemetry.nodes_placed > 0);
         assert!(host.tree.paint_damage().is_none());
         assert_eq!(host.application().views.get(), 1);
+    }
+
+    #[test]
+    fn ambiguous_backdrop_effect_conservatively_falls_back_to_full_rebuild() {
+        let mut host = UiHost::new(
+            RetainedPaintFixture::new(2).with_ambiguous_effect(),
+            240,
+            100,
+        );
+        assert!(host.adopt_input_modality(InputModality::Pointer));
+        host.application().views.set(0);
+
+        let outcome = host.handle_event(UiEvent::PointerMoved(semantic_center(&host, "Item 0")));
+
+        assert!(outcome.telemetry.rebuilt);
+        assert_eq!(outcome.telemetry.retained_paint_refreshes, 0);
+        assert_eq!(outcome.telemetry.view_calls, 1);
+        assert_eq!(outcome.telemetry.paint_damage_rects, 0);
+        assert!(host.tree.paint_damage().is_none());
     }
 
     #[test]

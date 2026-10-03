@@ -173,6 +173,11 @@ impl cosmic_text::Renderer for SampleDecorations<'_> {
 /// shared font system are opaque and are not estimated from source text bytes.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SoftwareRasterDiagnostics {
+    pub damage_hints_accepted: u64,
+    pub damage_hints_fell_back: u64,
+    pub full_repaints: u64,
+    pub partial_repaints: u64,
+    pub clean_frames: u64,
     pub glyph_hits: u64,
     pub glyph_misses: u64,
     pub glyph_resets: u64,
@@ -410,6 +415,15 @@ impl SoftwareRenderer {
         commands: &[PaintCommand],
         damage_hint: Option<&[Rect]>,
     ) -> DamageRegion {
+        let hint_offered = damage_hint.is_some();
+        let hint_usable = hint_offered && self.framebuffer_valid;
+        if hint_usable {
+            self.raster_stats.damage_hints_accepted =
+                self.raster_stats.damage_hints_accepted.saturating_add(1);
+        } else if hint_offered {
+            self.raster_stats.damage_hints_fell_back =
+                self.raster_stats.damage_hints_fell_back.saturating_add(1);
+        }
         let damage = if self.framebuffer_valid {
             damage_hint.map_or_else(
                 || self.damage(commands),
@@ -425,6 +439,7 @@ impl SoftwareRenderer {
             self.damage(commands)
         };
         if damage.is_empty() {
+            self.raster_stats.clean_frames = self.raster_stats.clean_frames.saturating_add(1);
             return damage;
         }
 
@@ -439,6 +454,12 @@ impl SoftwareRenderer {
             .reduce(union_rect)
             .and_then(|rect| intersection(full, rect))
             .unwrap_or(full);
+        if repaint == full {
+            self.raster_stats.full_repaints = self.raster_stats.full_repaints.saturating_add(1);
+        } else {
+            self.raster_stats.partial_repaints =
+                self.raster_stats.partial_repaints.saturating_add(1);
+        }
         self.clear(repaint);
         let mut clips = std::mem::take(&mut self.clips);
         clips.clear();
