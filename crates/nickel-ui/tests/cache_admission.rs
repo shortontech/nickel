@@ -4,8 +4,9 @@ use std::time::Instant;
 mod release_admission;
 
 use nickel_ui::{
-    Button, Column, Component, Container, Rect, SemanticRole, SemanticSelector, SoftwareRenderer,
-    Text, UiFrame, text_layout_cache_diagnostics,
+    Button, Column, Component, Container, Invalidation, Length, Point, Rect, SelectionRegion,
+    SemanticRole, SemanticSelector, SoftwareRenderer, Text, UiEvent, UiFrame, UiStateStore,
+    text_layout_cache_diagnostics,
 };
 use release_admission::AdmissionReport;
 
@@ -209,4 +210,194 @@ fn complete_frame_reconstruction_stays_within_the_frame_work_budget() {
         reconstruction_p95 <= 5.0,
         "focused frame reconstruction exceeded its predeclared 5 ms budget"
     );
+}
+
+fn unicode_selection_fixture(text: &str) -> UiFrame<()> {
+    UiFrame::layout(
+        SelectionRegion::automatic().id("unicode-selection").child(
+            Text::new(text)
+                .id("unicode-content")
+                .width_length(Length::Fill)
+                .wrap(true)
+                .selection_run_id("unicode-content"),
+        ),
+        Rect::new(0.0, 0.0, 420.0, 1200.0),
+    )
+}
+
+fn checksum_bytes(checksum: &mut u64, bytes: &[u8]) {
+    // FNV-1a is deliberately fixed rather than process-seeded: the emitted
+    // checksum is comparable across admission hosts and test invocations.
+    for byte in bytes {
+        *checksum ^= u64::from(*byte);
+        *checksum = checksum.wrapping_mul(0x100_0000_01b3);
+    }
+}
+
+fn checksum_invalidation(checksum: &mut u64, invalidation: Invalidation) {
+    let (tag, delay) = match invalidation {
+        Invalidation::None => (0_u8, 0_u128),
+        Invalidation::Paint => (1, 0),
+        Invalidation::Layout => (2, 0),
+        Invalidation::Scheduled(delay) => (3, delay.as_nanos()),
+    };
+    checksum_bytes(checksum, &[tag]);
+    checksum_bytes(checksum, &delay.to_le_bytes());
+}
+
+#[test]
+#[ignore = "release-mode long-Unicode selection admission workload"]
+fn long_unicode_hit_testing_and_selection_emit_bounded_release_evidence() {
+    const CONSTRUCTION_SAMPLES: usize = 31;
+    const INTERACTION_SAMPLES: usize = 200;
+    const REPETITIONS: usize = 128;
+    const WIDTH: usize = 420;
+    const HEIGHT: usize = 1200;
+
+    // "office affine" exercises ligature-capable shaping, followed by bidi,
+    // a decomposed combining sequence, and one extended ZWJ emoji cluster.
+    // Repetition at a narrow width makes the same corpus cross many wraps.
+    let unit = "office affine שלום عربي e\u{301} 👩🏽‍💻 ";
+    let text = unit.repeat(REPETITIONS);
+    let graphemes =
+        unicode_segmentation::UnicodeSegmentation::graphemes(text.as_str(), true).count();
+
+    // Warm shared shaping once. The measured construction phase still builds
+    // the complete selection document and selectable geometry for every frame.
+    let reference = unicode_selection_fixture(&text);
+    let expected_work = reference.resource_diagnostics();
+    let mut construction = Vec::with_capacity(CONSTRUCTION_SAMPLES);
+    for _ in 0..CONSTRUCTION_SAMPLES {
+        let started = Instant::now();
+        let frame = unicode_selection_fixture(std::hint::black_box(&text));
+        construction.push(started.elapsed());
+        assert_eq!(frame.resource_diagnostics(), expected_work);
+        assert_eq!(frame.selection_region_ids().count(), 1);
+    }
+
+    // A separately reconstructed frame is the cold oracle. Compare every
+    // public native projection plus software pixels before exercising input.
+    let cold = unicode_selection_fixture(&text);
+    assert_eq!(reference.commands(), cold.commands());
+    assert_eq!(reference.semantic_nodes(), cold.semantic_nodes());
+    assert_eq!(reference.accessibility_nodes(), cold.accessibility_nodes());
+    let mut retained_raster = SoftwareRenderer::new_pixel_buffer(WIDTH as u32, HEIGHT as u32, 1.0);
+    let mut cold_raster = SoftwareRenderer::new_pixel_buffer(WIDTH as u32, HEIGHT as u32, 1.0);
+    retained_raster.render(reference.commands());
+    cold_raster.render(cold.commands());
+    assert_eq!(retained_raster.pixels(), cold_raster.pixels());
+
+    let text_bounds = reference
+        .resolved_layout()
+        .nodes()
+        .iter()
+        .find(|node| node.component == "Text")
+        .expect("fixture text layout")
+        .allocated;
+    assert!(text_bounds.size.width > 0.0 && text_bounds.size.height > 0.0);
+    let mut points = Vec::with_capacity(INTERACTION_SAMPLES);
+    for sample in 0..INTERACTION_SAMPLES * 4 {
+        let candidate = Point {
+            x: text_bounds.origin.x
+                + 1.0
+                + ((sample * 97) as f32 % (text_bounds.size.width * 0.75).max(1.0)),
+            y: text_bounds.origin.y + 8.0,
+        };
+        let mut setup_state = UiStateStore::default();
+        if reference
+            .handle_event(&mut setup_state, UiEvent::PointerPressed(candidate))
+            .disposition
+            == nickel_ui::EventDisposition::Handled
+        {
+            points.push(candidate);
+            if points.len() == INTERACTION_SAMPLES {
+                break;
+            }
+        }
+    }
+    assert_eq!(points.len(), INTERACTION_SAMPLES);
+    let mut hit_test = Vec::with_capacity(INTERACTION_SAMPLES);
+    let mut selection_update = Vec::with_capacity(INTERACTION_SAMPLES);
+    let mut selection_text_construction = Vec::with_capacity(INTERACTION_SAMPLES);
+    let mut checksum = 0xcbf2_9ce4_8422_2325_u64;
+    let mut selected_bytes = 0_usize;
+    let mut handled_hits = 0_usize;
+    let mut nonempty_selections = 0_usize;
+
+    for (sample, point) in points.iter().enumerate() {
+        let mut state = UiStateStore::default();
+        let hit_started = Instant::now();
+        let pressed = reference.handle_event(&mut state, UiEvent::PointerPressed(*point));
+        hit_test.push(hit_started.elapsed());
+
+        let destination = Point {
+            x: points[(sample * 37 + 71) % points.len()].x,
+            y: text_bounds.origin.y + (text_bounds.size.height - 2.0).max(1.0),
+        };
+        let update_started = Instant::now();
+        let moved = reference.handle_event(&mut state, UiEvent::PointerMoved(destination));
+        selection_update.push(update_started.elapsed());
+
+        handled_hits += usize::from(pressed.disposition == nickel_ui::EventDisposition::Handled);
+        checksum_invalidation(&mut checksum, pressed.invalidation);
+        checksum_invalidation(&mut checksum, moved.invalidation);
+        let selection_started = Instant::now();
+        let selected = reference.selected_text(&state);
+        selection_text_construction.push(selection_started.elapsed());
+        if let Some(selected) = selected {
+            nonempty_selections += 1;
+            selected_bytes = selected_bytes.saturating_add(selected.len());
+            checksum_bytes(&mut checksum, selected.as_bytes());
+        }
+    }
+
+    // Replay the exact probes against the independently reconstructed frame.
+    // Equal selected text proves hit endpoints and selection updates agree,
+    // while the projection/raster checks above cover construction equivalence.
+    let mut cold_checksum = 0xcbf2_9ce4_8422_2325_u64;
+    let mut cold_selected_bytes = 0_usize;
+    for (sample, point) in points.iter().enumerate() {
+        let mut state = UiStateStore::default();
+        let pressed = cold.handle_event(&mut state, UiEvent::PointerPressed(*point));
+        let destination = Point {
+            x: points[(sample * 37 + 71) % points.len()].x,
+            y: text_bounds.origin.y + (text_bounds.size.height - 2.0).max(1.0),
+        };
+        let moved = cold.handle_event(&mut state, UiEvent::PointerMoved(destination));
+        checksum_invalidation(&mut cold_checksum, pressed.invalidation);
+        checksum_invalidation(&mut cold_checksum, moved.invalidation);
+        if let Some(selected) = cold.selected_text(&state) {
+            cold_selected_bytes = cold_selected_bytes.saturating_add(selected.len());
+            checksum_bytes(&mut cold_checksum, selected.as_bytes());
+        }
+    }
+    assert_eq!(checksum, cold_checksum);
+    assert_eq!(selected_bytes, cold_selected_bytes);
+    assert_eq!(handled_hits, INTERACTION_SAMPLES);
+    assert_eq!(nonempty_selections, INTERACTION_SAMPLES);
+    assert!(selected_bytes > 0, "selection probes must construct text");
+
+    AdmissionReport::new("text_selection", "long_unicode_wrapped")
+        .metadata("construction_samples", CONSTRUCTION_SAMPLES)
+        .metadata("interaction_samples", INTERACTION_SAMPLES)
+        .metadata("input_bytes", text.len())
+        .metadata("input_graphemes", graphemes)
+        .metadata("repetitions", REPETITIONS)
+        .work("checksum_low32", checksum as u32 as usize)
+        .work("cold_equivalent", usize::from(checksum == cold_checksum))
+        .work("handled_hits", handled_hits)
+        .work("nodes_measured", expected_work.nodes_measured)
+        .work("nodes_placed", expected_work.nodes_placed)
+        .work("paint_nodes_executed", expected_work.paint_nodes_executed)
+        .work(
+            "semantic_nodes_executed",
+            expected_work.semantic_nodes_executed,
+        )
+        .work("nonempty_selections", nonempty_selections)
+        .work("selected_bytes", selected_bytes)
+        .timings("selection_construction", &construction)
+        .timings("hit_test", &hit_test)
+        .timings("selection_text_construction", &selection_text_construction)
+        .timings("selection_update", &selection_update)
+        .emit();
 }
