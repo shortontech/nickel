@@ -631,9 +631,9 @@ fn installed_package_settings_follow_activation_and_retirement() {
         value,
     };
     shell.apply_plugin_effects(vec![invoke(serde_json::json!("bad"))]);
-    assert!(!shell.launcher_visible);
+    assert!(!shell.default_shell_surface_visible("launcher"));
     shell.apply_plugin_effects(vec![invoke(serde_json::json!(true))]);
-    assert!(shell.launcher_visible);
+    assert!(shell.default_shell_surface_visible("launcher"));
     shell.set_plugin_enabled(id, false).unwrap();
     assert!(
         !shell
@@ -1095,14 +1095,25 @@ fn closing_dialog_owner_retires_its_dialog_but_preserves_sibling_window() {
         .insert(id.clone(), descriptor.into());
     shell.set_plugin_enabled(&id, true).unwrap();
     assert!(shell.show_plugin_window(&id, "confirm").unwrap());
-    assert_eq!(shell.plugin_panels().len(), 3);
+    assert_eq!(
+        shell
+            .plugin_panels()
+            .into_iter()
+            .filter(|(key, _)| key.plugin_id == id)
+            .count(),
+        3
+    );
     let home = shell
         .plugin_panels()
         .into_iter()
         .find(|(key, _)| key.surface_id == "home")
         .unwrap();
     assert!(shell.close_plugin_window(&home.0).unwrap());
-    let remaining = shell.plugin_panels();
+    let remaining = shell
+        .plugin_panels()
+        .into_iter()
+        .filter(|(key, _)| key.plugin_id == id)
+        .collect::<Vec<_>>();
     assert_eq!(remaining.len(), 1);
     assert_eq!(remaining[0].0.surface_id, "spare");
     assert!(shell.show_plugin_window(&id, "confirm").is_err());
