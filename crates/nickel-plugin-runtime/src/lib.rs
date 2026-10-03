@@ -838,8 +838,9 @@ impl JsxRuntime {
         })
     }
 
-    /// Dispatch a same-package event and transport only native subtrees that
-    /// differ from the last host-accepted render.
+    /// Dispatch a same-package event and transport only dirty component-owned
+    /// native subtrees. The JavaScript runtime does not materialize or compare
+    /// the complete accepted root on this path.
     pub fn dispatch_patched(&mut self, expression: &str) -> Result<ScheduledPatch, String> {
         let wire_value = self.eval_json::<Value>(expression)?;
         let transport_bytes = serde_json::to_vec(&wire_value)
@@ -1221,14 +1222,20 @@ mod tests {
     #[test]
     fn patched_dispatch_transports_only_the_changed_leaf() {
         let source = r#"
-            function Leaf() { const [value,setValue]=useState(0); return h(Button,{onClick:()=>setValue(value+1)},String(value)); }
-            function App() { return h(Window,{},h(Text,{},'stable'.repeat(200)),h(Leaf)); }
+            globalThis.runs={leaf:0,sibling:0};
+            function Sibling() { runs.sibling++; return h(Column,{},...Array.from({length:64},(_,index)=>h(Text,{key:String(index)},'stable'.repeat(20)))); }
+            function Leaf() { runs.leaf++; const [value,setValue]=useState(0); return h(Button,{onClick:()=>setValue(value+1)},String(value)); }
+            function App() { return h(Window,{},h(Sibling),h(Leaf)); }
         "#;
         let mut runtime = super::JsxRuntime::new(source, None).unwrap();
         let initial = runtime
             .render("__nickelRender()", |node| Ok(node.clone()))
             .unwrap();
         let action = initial["children"][1]["action"].as_u64().unwrap();
+        let materialized_before =
+            runtime.runtime_diagnostics().unwrap()["counters"]["nativeNodesMaterialized"]
+                .as_u64()
+                .unwrap();
         let outcome = runtime
             .dispatch_patched(&format!("__nickelDispatchBatchPatched([[{action},null]])"))
             .unwrap();
@@ -1255,7 +1262,27 @@ mod tests {
         );
         assert_eq!(property, "children");
         assert_eq!(value[0], "1");
+        assert_eq!(patch.counters.nodes_visited, 1);
+        assert_eq!(patch.counters.local_materializations, 0);
+        assert_eq!(patch.counters.expansion_nodes, 0);
+        assert_eq!(patch.counters.tree_bytes, 0);
         assert!(transport_bytes < serde_json::to_vec(&initial).unwrap().len());
+        let diagnostics = runtime.runtime_diagnostics().unwrap();
+        assert_eq!(
+            diagnostics["counters"]["nativeNodesMaterialized"]
+                .as_u64()
+                .unwrap()
+                - materialized_before,
+            1,
+            "the dirty leaf is the only native node materialized"
+        );
+        assert_eq!(
+            runtime
+                .eval_json::<serde_json::Value>("JSON.stringify(runs)")
+                .unwrap(),
+            serde_json::json!({"leaf":2,"sibling":1}),
+            "the clean sibling is neither executed nor traversed for native output"
+        );
         runtime.finish_patch_render(true).unwrap();
         runtime.finish_event(true).unwrap();
     }
@@ -2461,6 +2488,25 @@ mod tests {
                 .unwrap(),
             0
         );
+    }
+
+    #[test]
+    fn state_and_reducer_updates_during_render_are_rejected_without_committing() {
+        for source in [
+            "function App(){const [value,setValue]=useState(0);if(value===0)setValue(1);return h(Text,null,String(value))}",
+            "function App(){const [value,dispatch]=useReducer(value=>value+1,0);if(value===0)dispatch();return h(Text,null,String(value))}",
+        ] {
+            let mut runtime = super::JsxRuntime::new(source, None).unwrap();
+            let error = runtime.render("__nickelRender()", |_| Ok(())).unwrap_err();
+            assert!(error.contains("updates are not allowed during component render"));
+            assert_eq!(
+                runtime
+                    .eval_json::<usize>("JSON.stringify(__componentRecords.size)")
+                    .unwrap(),
+                0,
+                "the forbidden render must not admit component state"
+            );
+        }
     }
 
     #[test]

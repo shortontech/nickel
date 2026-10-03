@@ -1376,9 +1376,9 @@ impl ShellCompositionRuntime {
 
     /// Scheduled production bridge. A batch whose handlers do not change any
     /// hook value retains the caller's accepted expanded tree and event table.
-    /// Admitted mounts emit typed patches; only a newly discovered boundary
-    /// without patch authority is materialized for its first admission or a
-    /// cold-oracle path.
+    /// Admitted mounts use component-owned typed patches; only a newly
+    /// discovered boundary without patch authority is materialized for its
+    /// first admission or a cold-oracle path.
     pub fn dispatch_expanded_batch_scheduled_pending_validated<T>(
         &mut self,
         root: &ComponentMount,
@@ -4116,6 +4116,10 @@ mod tests {
         let ScheduledExpandedBatch::Patched { patch, events, .. } = outcome else {
             panic!("dirty nested mount must emit a patch")
         };
+        assert_eq!(
+            patch.counters.nodes_visited, 1,
+            "a derived-shell leaf update must not visit the clean base sibling"
+        );
         assert_eq!(patch.counters.nodes_mutated, 1);
         assert_eq!(patch.counters.local_materializations, 0);
         assert_eq!(patch.counters.expansion_nodes, 0);

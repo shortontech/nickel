@@ -110,8 +110,10 @@ let __currentComponent = null;
 let __hookIndex = 0;
 let __handlers = [];
 let __previousHandlers = [];
+let __handlerSlots = new Map();
 const __handlerBindings = new WeakSet();
 const __virtualNativeNodes = new WeakSet();
+const __resolvedVirtualValues = new WeakSet();
 const __nonRetainedComponents = new WeakSet();
 const __memoComponents = new WeakMap();
 const __errorBoundaryComponents = new WeakSet();
@@ -119,7 +121,8 @@ const __MAX_BOUNDARY_DIAGNOSTICS = 32;
 let __boundaryDiagnostics = [];
 const __MAX_RUNTIME_REASONS = 32;
 let __runtimeReasons = [];
-let __runtimeCounters = {renders:0,executed:0,reused:0,effectsScheduled:0,effectsRun:0,cleanups:0,failures:0};
+let __runtimeCounters = {renders:0,executed:0,reused:0,nativeNodesMaterialized:0,
+    effectsScheduled:0,effectsRun:0,cleanups:0,failures:0};
 let __incrementalRender = false;
 let __effects = [];
 let __listKeyErrors = [];
@@ -247,10 +250,11 @@ function __nickelReplaceSurfaceApp(id, component, identity) {
         if (state?.hooks) __nickelCleanupHooks(state.hooks);
         if (id === __activeSurface) {
             __componentHooks = new Map(); __componentRecords = new Map();
-            __handlers = []; __previousHandlers = []; __effects = []; __dirtyComponents = new Set();
+            __handlers = []; __previousHandlers = []; __handlerSlots = new Map();
+            __effects = []; __dirtyComponents = new Set();
         } else if (state) {
             state.hooks = new Map(); state.records = new Map(); state.handlers = [];
-            state.previousHandlers = []; state.effects = []; state.dirty = new Set();
+            state.previousHandlers = []; state.handlerSlots = new Map(); state.effects = []; state.dirty = new Set();
         }
     }
     __surfaceApps.set(id, component);
@@ -1333,6 +1337,7 @@ function __nickelSelectSurface(id) {
         records: __componentRecords,
         handlers: __handlers,
         previousHandlers: __previousHandlers,
+        handlerSlots: __handlerSlots,
         effects: __effects,
         data: __nickelData,
         dirty: __dirtyComponents,
@@ -1344,6 +1349,7 @@ function __nickelSelectSurface(id) {
     __componentRecords = state?.records ?? new Map();
     __handlers = state?.handlers ?? [];
     __previousHandlers = state?.previousHandlers ?? [];
+    __handlerSlots = state?.handlerSlots ?? new Map();
     __effects = state?.effects ?? [];
     __dirtyComponents = state?.dirty ?? new Set();
     __surfaceStore = state?.surfaceStore ?? {generation:0, snapshot:Object.freeze({
@@ -1373,6 +1379,7 @@ function __nickelDropSurface(id) {
     __componentRecords = new Map();
     __handlers = [];
     __previousHandlers = [];
+    __handlerSlots = new Map();
     __effects = [];
     __dirtyComponents = new Set();
     __acceptedNativeTree = null;
@@ -1407,6 +1414,8 @@ function useState(initial) {
         const entry = {kind: 'state', value: typeof initial === 'function' ? initial() : initial, set: null};
         entry.set = next => {
             if (__componentHooks.get(owner)?.[slot] !== entry) return;
+            if (__currentComponent !== null)
+                throw Error('state updates are not allowed during component render');
             const value = typeof next === 'function' ? next(entry.value) : next;
             if (!Object.is(value, entry.value)) {
                 entry.value = value;
@@ -1431,6 +1440,8 @@ function useReducer(reducer, initialArg, init) {
         const entry = {kind: 'reducer', value: init === undefined ? initialArg : init(initialArg), reducer, dispatch: null};
         entry.dispatch = action => {
             if (__componentHooks.get(owner)?.[slot] !== entry) return;
+            if (__currentComponent !== null)
+                throw Error('reducer updates are not allowed during component render');
             let value;
             try { value = entry.reducer(entry.value, action); }
             catch (error) {
@@ -1757,17 +1768,24 @@ function __nickelApplyDeclarationKey(declaration, node) {
     if (declaration.key === undefined || node === null || typeof node !== 'object' || Array.isArray(node))
         return node;
     const keyed = {...node, key:declaration.key};
-    return __virtualNativeNodes.has(node) ? __nickelVirtualNativeNode(keyed) : keyed;
+    if (!__virtualNativeNodes.has(node)) return keyed;
+    const result=__nickelVirtualNativeNode(keyed);
+    if (__resolvedVirtualValues.has(node)) __resolvedVirtualValues.add(result);
+    return result;
 }
 
 function __nickelResolveVirtual(value) {
     if (__nickelIsComponentDeclaration(value)) return __nickelResolveDeclaration(value);
     if (__nickelIsHandlerBinding(value)) return value;
-    if (Array.isArray(value)) return value.map(__nickelResolveVirtual);
+    if (value && typeof value === 'object' && __resolvedVirtualValues.has(value)) return value;
+    if (Array.isArray(value)) {
+        const resolved=value.map(__nickelResolveVirtual);__resolvedVirtualValues.add(resolved);return resolved;
+    }
     if (value && typeof value === 'object') {
         const resolved = {};
         for (const [key, item] of Object.entries(value)) resolved[key] = __nickelResolveVirtual(item);
-        return __virtualNativeNodes.has(value) ? __nickelVirtualNativeNode(resolved) : resolved;
+        const result=__virtualNativeNodes.has(value)?__nickelVirtualNativeNode(resolved):resolved;
+        __resolvedVirtualValues.add(result);return result;
     }
     return value;
 }
@@ -1799,13 +1817,18 @@ function __nickelIsHandlerBinding(value) {
 function __nickelMaterializeVirtual(value, path = 'root') {
     if (__nickelIsHandlerBinding(value)) {
         const handler = value.handler, owner = value.owner;
-        __handlers.push(input => {
+        let action = __handlerSlots.get(path);
+        if (action === undefined) {
+            action = __handlers.length;
+            __handlerSlots.set(path, action);
+        }
+        __handlers[action] = input => {
             try { return handler(input); }
             catch (error) {
                 if (!__nickelCaptureFailure(owner, error, 'event')) throw error;
             }
-        });
-        return __handlers.length - 1;
+        };
+        return action;
     }
     if (__nickelIsComponentDeclaration(value))
         throw Error('unresolved component declaration reached native materialization');
@@ -1827,11 +1850,30 @@ function __nickelMaterializeVirtual(value, path = 'root') {
             }
             if (native && __nickelIsHandlerBinding(item)) slots[key] = `${path}:${key}`;
         }
-        if (native) materialized.__nativeId = path;
+        if (native) {
+            __runtimeCounters.nativeNodesMaterialized++;
+            materialized.__nativeId = path;
+            __nativeMaterializations.set(value, {node:materialized,path});
+        }
         if (Object.keys(slots).length) materialized.__handlerSlots = slots;
         return materialized;
     }
     return value;
+}
+
+// Virtual output stays private to the JavaScript runtime. This weak association
+// records the native subtree admitted for a component without retaining a
+// second complete native tree or making virtual nodes serializable.
+const __nativeMaterializations = new WeakMap();
+
+function __nickelAttachNativeRecords(boundaries = null) {
+    for (const [path, record] of __componentRecords) {
+        if (boundaries !== null && !boundaries.some(boundary =>
+            path === boundary || path.startsWith(`${boundary}/`))) continue;
+        const admitted = record.output && typeof record.output === 'object'
+            ? __nativeMaterializations.get(record.output) : undefined;
+        if (admitted) __componentRecords.set(path, {...record,native:admitted.node,nativePath:admitted.path});
+    }
 }
 
 function h(kind, props, ...children) {
@@ -1904,9 +1946,10 @@ function h(kind, props, ...children) {
 
 function __nickelRollbackRender() {
     if (__pendingRender !== null) {
-        const {handlers, previousHandlers, hooks, records, values, effectsLength, dirty} = __pendingRender;
+        const {handlers, previousHandlers, handlerSlots, hooks, records, values, effectsLength, dirty} = __pendingRender;
         __handlers = handlers;
         __previousHandlers = previousHandlers;
+        __handlerSlots = handlerSlots;
         __nickelRestoreHooks(hooks, values, effectsLength);
         __componentRecords = records;
         __dirtyComponents = dirty;
@@ -1944,7 +1987,10 @@ function __nickelCommitRender() {
     const pending = __pendingRender;
     __pendingRender = null;
     if (pending === null) return;
-    if (pending.candidateNode !== undefined) __acceptedNativeTree = pending.candidateNode;
+    // Native subtrees are retained by their owning component records. Keeping
+    // a second complete tree here would force every composition checkpoint to
+    // clone the whole mount even when a single leaf is dirty.
+    __acceptedNativeTree = null;
     __dirtyComponents.clear();
     for (const entry of pending.reducerEntries) {
         entry.reducer = entry.nextReducer;
@@ -1971,7 +2017,7 @@ function __nickelActiveEntry() {
     return __surfaceApps.get(__activeSurface) || App;
 }
 
-function __nickelRender(component = __nickelActiveEntry()) {
+function __nickelRender(component = __nickelActiveEntry(), patchOnly = false) {
     if (__pendingRender !== null) throw Error('previous render was not finalized');
     __runtimeCounters.renders++;
     const previousHandlers = __handlers;
@@ -1980,13 +2026,14 @@ function __nickelRender(component = __nickelActiveEntry()) {
     const previousValues = Array.from(__componentHooks.values(), hooks => hooks.map(entry =>
         entry.kind === 'ref' ? entry.value.current : entry.value));
     const previousRecords = __componentRecords;
-    __pendingRender = {handlers: previousHandlers, previousHandlers: olderHandlers, hooks: previousHooks,
+    __pendingRender = {handlers: previousHandlers, previousHandlers: olderHandlers, handlerSlots:new Map(__handlerSlots), hooks: previousHooks,
         records:previousRecords, values: previousValues, effectsLength: __effects.length, dirty:new Set(__dirtyComponents),
         passiveEffects: [], removedEffects: [], reducerEntries: []};
     __componentRecords = new Map(__componentRecords);
     __incrementalRender = __dirtyComponents.size > 0;
-    __handlers = [];
+    __handlers = patchOnly ? previousHandlers.slice() : [];
     __previousHandlers = previousHandlers;
+    if (!patchOnly) __handlerSlots = new Map();
     __listKeyErrors = [];
     __visitedComponents = new Set();
     __componentChildren = new Map();
@@ -1994,9 +2041,14 @@ function __nickelRender(component = __nickelActiveEntry()) {
     __hookIndex = 0;
     try {
         const virtual = __nickelResolveVirtual(h(component, {}));
-        const node = __nickelMaterializeVirtual(virtual);
-        __pendingRender.candidateNode = node;
-        if (node?.kind === 'window' && __listKeyErrors.length) throw Error(__listKeyErrors[0]);
+        const result = patchOnly ? __nickelDirtyNativePatch(__pendingRender.records) : (() => {
+            const node = __nickelMaterializeVirtual(virtual);
+            __nickelAttachNativeRecords();
+            __pendingRender.candidateNode = node;
+            return node;
+        })();
+        const root = patchOnly ? virtual : result;
+        if (root?.kind === 'window' && __listKeyErrors.length) throw Error(__listKeyErrors[0]);
         for (const path of __componentHooks.keys()) {
             if (!__visitedComponents.has(path)) {
                 for (const entry of __componentHooks.get(path))
@@ -2005,11 +2057,50 @@ function __nickelRender(component = __nickelActiveEntry()) {
                 __componentRecords.delete(path);
             }
         }
-        return JSON.stringify(node);
+        return patchOnly ? result : JSON.stringify(result);
     } catch (error) {
         __nickelRollbackRender();
         throw error;
     }
+}
+
+function __nickelDirtyNativePatch(previousRecords) {
+    const dirty = Array.from(__dirtyComponents).sort((left,right)=>left.length-right.length);
+    const boundaries = [];
+    for (const owner of dirty) {
+        let selected = owner;
+        while (selected !== null && !previousRecords.get(selected)?.native) {
+            const identity=selected.lastIndexOf('/');
+            const component=identity<0?-1:selected.lastIndexOf('/',identity-1);
+            selected=component<0?null:selected.slice(0,component);
+            if (selected==='root') selected=null;
+        }
+        if (selected === null || boundaries.some(path => selected === path || selected.startsWith(`${path}/`))) continue;
+        boundaries.push(selected);
+    }
+    if (!boundaries.length) throw Error('dirty component has no admitted native ownership boundary');
+    const operations=[];
+    let nodesVisited=0;
+    for (const path of boundaries) {
+        const previous=previousRecords.get(path), current=__componentRecords.get(path);
+        if (!previous?.native || !previous.nativePath || !current)
+            throw Error('dirty native ownership boundary disappeared');
+        const next=__nickelMaterializeVirtual(current.output,previous.nativePath);
+        const patch=__nickelNativePatch(previous.native,next);
+        operations.push(...patch.operations);nodesVisited+=patch.counters.nodesVisited;
+    }
+    __nickelAttachNativeRecords(boundaries);
+    return {version:1,operations,counters:{nodesVisited,nodesMutated:operations.length,
+        localMaterializations:0,expansionNodes:0,treeBytes:0}};
+}
+
+function __nickelNativeEqual(left,right) {
+    if (Object.is(left,right)) return true;
+    if (!left || !right || typeof left!=='object' || typeof right!=='object') return false;
+    if (Array.isArray(left)!==Array.isArray(right)) return false;
+    const leftKeys=Object.keys(left),rightKeys=Object.keys(right);
+    return leftKeys.length===rightKeys.length && leftKeys.every(key =>
+        Object.prototype.hasOwnProperty.call(right,key) && __nickelNativeEqual(left[key],right[key]));
 }
 
 // Produce a bounded transport delta against the last host-accepted native
@@ -2029,7 +2120,7 @@ function __nickelNativePatch(previous, next) {
         keys.delete('kind');
         keys.delete('key');
         for (const key of keys) {
-            if (JSON.stringify(left[key]) === JSON.stringify(right[key])) continue;
+            if (__nickelNativeEqual(left[key],right[key])) continue;
             const slot = right.__handlerSlots?.[key] ?? left.__handlerSlots?.[key];
             if (slot && Number.isSafeInteger(right[key]) && right[key] >= 0) {
                 operations.push({op:'replaceHandlerSlot', slot, action:right[key]});
@@ -2081,7 +2172,7 @@ function __nickelNativePatch(previous, next) {
         const oldById = new Map(before.map(child => [child.__nativeId, child]));
         for (const child of after) {
             const old = oldById.get(child.__nativeId);
-            if (old && JSON.stringify(old) !== JSON.stringify(child)) walk(old, child);
+            if (old && !__nickelNativeEqual(old,child)) walk(old, child);
             else if (old) visited++;
         }
         return true;
@@ -2108,7 +2199,7 @@ function __nickelNativePatch(previous, next) {
             return;
         }
         if (before.every(primitive) && after.every(primitive)) {
-            if (JSON.stringify(before) !== JSON.stringify(after))
+            if (!__nickelNativeEqual(before,after))
                 operations.push({op:'setPrimitive', target:right.__nativeId, property:'children', value:after});
             return;
         }
@@ -2122,7 +2213,7 @@ function __nickelNativePatch(previous, next) {
         }
         for (let index = 0; index < after.length; index++) {
             const a = before[index], b = after[index];
-            if (JSON.stringify(a) === JSON.stringify(b)) { visited++; continue; }
+            if (__nickelNativeEqual(a,b)) { visited++; continue; }
             if (a?.__nativeId && b?.__nativeId && a.__nativeId === b.__nativeId) walk(a, b);
             else {
                 operations.length = operationStart;
@@ -2131,7 +2222,7 @@ function __nickelNativePatch(previous, next) {
             }
         }
     }
-    if (__acceptedNativeTree === null || previous === null) throw Error('native patch has no accepted base');
+    if (previous === null) throw Error('native patch has no accepted base');
     walk(previous, next);
     return {version:1, operations, counters:{nodesVisited:visited, nodesMutated:operations.length}};
 }
@@ -2204,9 +2295,8 @@ function __nickelDispatchBatchPatched(events, previous = false) {
         }
         const dirty = Array.from(__dirtyComponents);
         if (!dirty.length) return JSON.stringify({rendered:false, dirty});
-        const accepted = __acceptedNativeTree;
-        const node = JSON.parse(__nickelRender());
-        return JSON.stringify({rendered:true, dirty, patch:__nickelNativePatch(accepted, node)});
+        const patch = __nickelRender(undefined,true);
+        return JSON.stringify({rendered:true, dirty, patch});
     } catch (error) {
         __nickelRollbackEvent();
         throw error;
@@ -2240,16 +2330,16 @@ function __nickelBeginCheckpoint() {
         }
         return result;
     }
-    function state(hooks, records, handlers, previousHandlers, effects, data, dirty, surfaceStore, acceptedNativeTree) {
+    function state(hooks, records, handlers, previousHandlers, handlerSlots, effects, data, dirty, surfaceStore, acceptedNativeTree) {
         return {hooks:new Map(Array.from(hooks, ([path, slots]) => [path, slots.slice()])),
             records:new Map(records),
             values:Array.from(hooks.values(), slots => slots.map(entry => copy(entry.kind === 'ref' ? entry.value.current : entry.value))),
-            handlers:handlers.slice(), previousHandlers:previousHandlers.slice(), effects:copy(effects), data,
+            handlers:handlers.slice(), previousHandlers:previousHandlers.slice(), handlerSlots:new Map(handlerSlots), effects:copy(effects), data,
             dirty:new Set(dirty), surfaceStore, acceptedNativeTree:copy(acceptedNativeTree)};
     }
-    const active = state(__componentHooks, __componentRecords, __handlers, __previousHandlers, __effects, __nickelData, __dirtyComponents, __surfaceStore, __acceptedNativeTree);
+    const active = state(__componentHooks, __componentRecords, __handlers, __previousHandlers, __handlerSlots, __effects, __nickelData, __dirtyComponents, __surfaceStore, __acceptedNativeTree);
     const surfaces = new Map(Array.from(__surfaceStates, ([id, value]) => [id,
-        state(value.hooks, value.records, value.handlers, value.previousHandlers, value.effects, value.data, value.dirty, value.surfaceStore, value.acceptedNativeTree)]));
+        state(value.hooks, value.records, value.handlers, value.previousHandlers, value.handlerSlots ?? new Map(), value.effects, value.data, value.dirty, value.surfaceStore, value.acceptedNativeTree)]));
     __compositionCheckpoint = {active, surfaces, graph:seen, extensible, apps:new Map(__surfaceApps), activeSurface:__activeSurface,
         settingsValues:copy(__settingsValues), settingsSnapshot:copy(__settingsSnapshot), settingsPagesSnapshot:copy(__settingsPagesSnapshot)};
 }
@@ -2279,7 +2369,7 @@ function __nickelFinishCheckpoint(accepted) {
             const values = state.values[index++];
             slots.forEach((entry, slot) => { if (entry.kind === 'ref') entry.value.current = original(values[slot]); else entry.value = original(values[slot]); });
         }
-        return {hooks:state.hooks, records:state.records, handlers:state.handlers, previousHandlers:state.previousHandlers,
+        return {hooks:state.hooks, records:state.records, handlers:state.handlers, previousHandlers:state.previousHandlers, handlerSlots:state.handlerSlots,
             effects:original(state.effects), data:state.data, dirty:state.dirty,
             surfaceStore:state.surfaceStore, acceptedNativeTree:original(state.acceptedNativeTree)};
     }
@@ -2289,6 +2379,7 @@ function __nickelFinishCheckpoint(accepted) {
     for (const [id, app] of checkpoint.apps) __surfaceApps.set(id, app);
     const active = restore(checkpoint.active);
     __componentHooks = active.hooks; __componentRecords = active.records; __handlers = active.handlers; __previousHandlers = active.previousHandlers;
+    __handlerSlots = active.handlerSlots;
     __effects = active.effects; __nickelData = active.data; __activeSurface = checkpoint.activeSurface;
     __dirtyComponents = active.dirty;
     __surfaceStore = active.surfaceStore;
