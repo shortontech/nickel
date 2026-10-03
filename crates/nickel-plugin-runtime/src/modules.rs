@@ -171,7 +171,7 @@ function __nickelComponentProxy(selection) {
         function encode(value) {
             if (__nickelIsComponentDeclaration(value)) return encode(__nickelResolveVirtual(value));
             if (__nickelIsContext(value)) throw TypeError('contexts cannot cross package ownership boundaries; pass bounded values as props');
-            if (typeof value === 'function') return {__callbackAction: __handlers.push(args => { value(...args); __effects.push({type:'__compositionCallbackBoundary'}); }) - 1};
+            if (typeof value === 'function') return {__callbackAction: __nickelHandlerBinding(args => { value(...args); __effects.push({type:'__compositionCallbackBoundary'}); })};
             if (typeof value === 'symbol') throw TypeError('cross-package symbol prop is unsupported');
             if (Array.isArray(value)) return value.map(encode);
             if (value && typeof value === 'object') {
@@ -184,7 +184,7 @@ function __nickelComponentProxy(selection) {
             return value;
         }
         props = encode(props);
-        return {kind:'__packageComponent', ...selection, props};
+        return __nickelVirtualNativeNode({kind:'__packageComponent', ...selection, props});
     };
 }
 function __nickelHydrateComponentProps(value) {

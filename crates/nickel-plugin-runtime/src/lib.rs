@@ -293,6 +293,94 @@ impl JsxRuntime {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn virtual_event_bindings_are_opaque_until_materialized() {
+        let source = r#"
+            globalThis.virtualNode = null;
+            function App() {
+                virtualNode = h(Button, {onClick: () => {}}, 'Bound');
+                return virtualNode;
+            }
+        "#;
+        let mut runtime = super::JsxRuntime::new(source, None).unwrap();
+        let node = runtime
+            .render("__nickelRender()", |node| Ok(node.clone()))
+            .unwrap();
+        assert_eq!(node["action"], 0);
+        assert!(runtime.eval("JSON.stringify(virtualNode)").is_err());
+        assert!(
+            runtime
+                .eval("JSON.stringify(h(Text, {}, 'Plain'))")
+                .is_err()
+        );
+        assert_eq!(
+            runtime
+                .eval_json::<usize>("JSON.stringify(__handlers.length)")
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn materialization_rebuilds_handler_indexes_in_tree_order() {
+        let source = r#"
+            globalThis.calls = [];
+            function App() {
+                return h(Column, {},
+                    h(Button, {id:'first', onClick:()=>calls.push('first')}, 'First'),
+                    h(Button, {id:'second', onClick:()=>calls.push('second')}, 'Second'));
+            }
+        "#;
+        let mut runtime = super::JsxRuntime::new(source, None).unwrap();
+        for _ in 0..2 {
+            let node = runtime
+                .render("__nickelRender()", |node| Ok(node.clone()))
+                .unwrap();
+            assert_eq!(node["children"][0]["action"], 0);
+            assert_eq!(node["children"][1]["action"], 1);
+            assert_eq!(
+                runtime
+                    .eval_json::<usize>("JSON.stringify(__handlers.length)")
+                    .unwrap(),
+                2
+            );
+        }
+        runtime.render("__nickelDispatch(1)", |_| Ok(())).unwrap();
+        runtime.finish_event(true).unwrap();
+        assert_eq!(
+            runtime
+                .eval_json::<Vec<String>>("JSON.stringify(calls)")
+                .unwrap(),
+            vec!["second"]
+        );
+    }
+
+    #[test]
+    fn rejected_materialized_render_restores_accepted_handlers() {
+        let source = r#"
+            globalThis.calls = [];
+            globalThis.changed = false;
+            function App() {
+                const label = changed ? 'changed' : 'accepted';
+                return h(Button, {onClick:()=>calls.push(label)}, 'Run');
+            }
+        "#;
+        let mut runtime = super::JsxRuntime::new(source, None).unwrap();
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        runtime.eval("changed = true").unwrap();
+        runtime
+            .render("__nickelRender()", |_| Err::<(), _>("reject".into()))
+            .unwrap_err();
+        runtime.render("__nickelDispatch(0)", |_| Ok(())).unwrap();
+        runtime.finish_event(true).unwrap();
+        assert_eq!(
+            runtime
+                .eval_json::<Vec<String>>("JSON.stringify(calls)")
+                .unwrap(),
+            vec!["accepted"]
+        );
+    }
+
+    #[test]
     fn ids_are_stable_opaque_and_distinct_by_hook_component_and_surface() {
         let source = r#"
             globalThis.ids ||= [];
@@ -594,7 +682,7 @@ mod tests {
         );
         let native_tree = runtime
             .eval_json::<serde_json::Value>(
-                "JSON.stringify(h(Column,{className:'root'},h(Text,{className:'value'},'same')))",
+                "JSON.stringify(__nickelMaterializeVirtual(h(Column,{className:'root'},h(Text,{className:'value'},'same'))))",
             )
             .unwrap();
         assert_eq!(component_tree, native_tree);

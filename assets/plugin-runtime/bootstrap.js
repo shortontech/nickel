@@ -83,6 +83,8 @@ let __currentComponent = null;
 let __hookIndex = 0;
 let __handlers = [];
 let __previousHandlers = [];
+const __handlerBindings = new WeakSet();
+const __virtualNativeNodes = new WeakSet();
 let __effects = [];
 let __listKeyErrors = [];
 let __pendingRender = null;
@@ -951,8 +953,10 @@ function __nickelResolveDeclaration(declaration) {
         }
         if (__hookIndex !== __componentHooks.get(path).length) throw Error('hook order changed');
         const node = result;
-        return declaration.key === undefined || node === null || typeof node !== 'object' || Array.isArray(node)
-            ? node : {...node, key:declaration.key};
+        if (declaration.key === undefined || node === null || typeof node !== 'object' || Array.isArray(node))
+            return node;
+        const keyed = {...node, key:declaration.key};
+        return __virtualNativeNodes.has(node) ? __nickelVirtualNativeNode(keyed) : keyed;
     } finally {
         __currentComponent = previous;
         __hookIndex = previousIndex;
@@ -961,11 +965,52 @@ function __nickelResolveDeclaration(declaration) {
 
 function __nickelResolveVirtual(value) {
     if (__nickelIsComponentDeclaration(value)) return __nickelResolveDeclaration(value);
+    if (__nickelIsHandlerBinding(value)) return value;
     if (Array.isArray(value)) return value.map(__nickelResolveVirtual);
     if (value && typeof value === 'object') {
         const resolved = {};
         for (const [key, item] of Object.entries(value)) resolved[key] = __nickelResolveVirtual(item);
-        return resolved;
+        return __virtualNativeNodes.has(value) ? __nickelVirtualNativeNode(resolved) : resolved;
+    }
+    return value;
+}
+
+function __nickelVirtualNativeNode(node) {
+    Object.defineProperty(node, 'toJSON', {
+        value:()=>{ throw Error('unmaterialized native node cannot be serialized'); }
+    });
+    __virtualNativeNodes.add(node);
+    return node;
+}
+
+function __nickelHandlerBinding(handler) {
+    const binding = Object.create(null);
+    Object.defineProperties(binding, {
+        handler:{value:handler},
+        toJSON:{value:()=>{ throw Error('unmaterialized event binding cannot be serialized'); }}
+    });
+    Object.freeze(binding);
+    __handlerBindings.add(binding);
+    return binding;
+}
+
+function __nickelIsHandlerBinding(value) {
+    return value !== null && typeof value === 'object' && __handlerBindings.has(value);
+}
+
+function __nickelMaterializeVirtual(value) {
+    if (__nickelIsHandlerBinding(value)) {
+        __handlers.push(value.handler);
+        return __handlers.length - 1;
+    }
+    if (__nickelIsComponentDeclaration(value))
+        throw Error('unresolved component declaration reached native materialization');
+    if (Array.isArray(value)) return value.map(__nickelMaterializeVirtual);
+    if (value && typeof value === 'object') {
+        const materialized = {};
+        for (const [key, item] of Object.entries(value))
+            materialized[key] = __nickelMaterializeVirtual(item);
+        return materialized;
     }
     return value;
 }
@@ -987,30 +1032,30 @@ function h(kind, props, ...children) {
         }
     }
     const handler = typeof props?.onClick === 'function' ? props.onClick : props?.onChange;
-    const action = typeof handler === 'function' ? __handlers.push(handler) - 1 : null;
+    const action = typeof handler === 'function' ? __nickelHandlerBinding(handler) : null;
     const contextAction = typeof props?.onContextMenu === 'function'
-        ? __handlers.push(props.onContextMenu) - 1 : null;
+        ? __nickelHandlerBinding(props.onContextMenu) : null;
     const dragAction = typeof props?.onDrag === 'function'
-        ? __handlers.push(props.onDrag) - 1 : null;
+        ? __nickelHandlerBinding(props.onDrag) : null;
     const dropAction = typeof props?.onDrop === 'function'
-        ? __handlers.push(props.onDrop) - 1 : null;
+        ? __nickelHandlerBinding(props.onDrop) : null;
     const focusAction = typeof props?.onFocus === 'function'
-        ? __handlers.push(props.onFocus) - 1 : null;
+        ? __nickelHandlerBinding(props.onFocus) : null;
     const blurAction = typeof props?.onBlur === 'function'
-        ? __handlers.push(props.onBlur) - 1 : null;
+        ? __nickelHandlerBinding(props.onBlur) : null;
     const selectAction = typeof props?.onSelect === 'function'
-        ? __handlers.push(props.onSelect) - 1 : null;
+        ? __nickelHandlerBinding(props.onSelect) : null;
     const moveAction = typeof props?.onMove === 'function'
-        ? __handlers.push(props.onMove) - 1 : null;
+        ? __nickelHandlerBinding(props.onMove) : null;
     const fileAction = typeof props?.onFileAction === 'function'
-        ? __handlers.push(props.onFileAction) - 1 : null;
+        ? __nickelHandlerBinding(props.onFileAction) : null;
     const closeAction = typeof props?.onClose === 'function'
-        ? __handlers.push(props.onClose) - 1 : null;
+        ? __nickelHandlerBinding(props.onClose) : null;
     const escapeAction = typeof props?.onEscape === 'function'
-        ? __handlers.push(props.onEscape) - 1 : null;
+        ? __nickelHandlerBinding(props.onEscape) : null;
     const submitAction = typeof props?.onSubmit === 'function'
-        ? __handlers.push(props.onSubmit) - 1 : null;
-    return {kind, key: props?.key, action, id: props?.id, title: props?.title, className: props?.className, open: props?.open, anchor: props?.anchor,
+        ? __nickelHandlerBinding(props.onSubmit) : null;
+    return __nickelVirtualNativeNode({kind, key: props?.key, action, id: props?.id, title: props?.title, className: props?.className, open: props?.open, anchor: props?.anchor,
         placement: props?.placement, output: props?.output, edge: props?.edge,
         reserveWorkArea: props?.reserveWorkArea, bottomOffset: props?.bottomOffset,
         x: props?.x, y: props?.y, width: props?.width, height: props?.height, grow: props?.grow,
@@ -1035,7 +1080,7 @@ function h(kind, props, ...children) {
         wrap: props?.wrap,
         maxLines: props?.maxLines,
         percent: props?.percent,
-        children: children.flat(Infinity).filter(child => child !== null && child !== false)};
+        children: children.flat(Infinity).filter(child => child !== null && child !== false)});
 }
 
 function __nickelRollbackRender() {
@@ -1121,7 +1166,8 @@ function __nickelRender(component = __nickelActiveEntry()) {
     __currentComponent = null;
     __hookIndex = 0;
     try {
-        const node = __nickelResolveVirtual(h(component, {}));
+        const virtual = __nickelResolveVirtual(h(component, {}));
+        const node = __nickelMaterializeVirtual(virtual);
         if (node?.kind === 'window' && __listKeyErrors.length) throw Error(__listKeyErrors[0]);
         for (const path of __componentHooks.keys()) {
             if (!__visitedComponents.has(path)) {
