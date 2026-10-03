@@ -2064,6 +2064,7 @@ pub struct HostTelemetry {
     pub paint_commands_emitted: usize,
     pub paint_fragments_rebuilt: usize,
     pub paint_fragments_reused: usize,
+    pub paint_damage_rects: usize,
     pub semantic_nodes_rebuilt: usize,
     pub semantic_nodes_reused: usize,
     pub retained_paint_refreshes: usize,
@@ -2176,6 +2177,10 @@ impl HostEventOutcome {
             .telemetry
             .paint_fragments_reused
             .saturating_add(other.telemetry.paint_fragments_reused);
+        self.telemetry.paint_damage_rects = self
+            .telemetry
+            .paint_damage_rects
+            .saturating_add(other.telemetry.paint_damage_rects);
         self.telemetry.semantic_nodes_rebuilt = self
             .telemetry
             .semantic_nodes_rebuilt
@@ -3499,16 +3504,19 @@ impl<A: Application> UiHost<A> {
         if combined.changed {
             let view_context_unchanged = prior_view_context
                 == ViewContext::from_host(self.bounds, &self.state, Some(&self.tree));
-            let retained_paint = combined.invalidation == Invalidation::Paint
+            let retained_paint = (combined.invalidation == Invalidation::Paint
                 && combined.messages.is_empty()
-                && view_context_unchanged
-                && self.tree.refresh_retained_paint(&mut self.state);
-            if retained_paint {
+                && view_context_unchanged)
+                .then(|| self.tree.refresh_retained_paint(&mut self.state))
+                .flatten();
+            if let Some(work) = retained_paint {
                 self.frame_generation = self.frame_generation.wrapping_add(1);
                 let resources = self.tree.resource_diagnostics();
                 combined.telemetry.retained_paint_refreshes = 1;
-                combined.telemetry.paint_commands_emitted = resources.paint_primitive_count;
-                combined.telemetry.paint_fragments_rebuilt = resources.paint_fragment_count;
+                combined.telemetry.paint_commands_emitted = work.emitted_commands;
+                combined.telemetry.paint_fragments_rebuilt = work.rebuilt_fragments;
+                combined.telemetry.paint_fragments_reused = work.reused_fragments;
+                combined.telemetry.paint_damage_rects = work.damage_rects;
                 combined.telemetry.semantic_nodes_reused = resources.accessibility_node_count;
             } else {
                 let (paint_list_us, layout_us, rebuild_outcome) = self.rebuild_timed();
@@ -6604,11 +6612,17 @@ mod tests {
                 resource_bound.accessibility_node_count
             );
             assert!(!retained_outcome.telemetry.rebuilt);
-            assert_eq!(
-                retained_outcome.telemetry.paint_fragments_rebuilt,
-                resource_bound.paint_fragment_count
+            assert!(retained_outcome.telemetry.paint_fragments_rebuilt > 0);
+            assert!(
+                retained_outcome.telemetry.paint_fragments_rebuilt
+                    < resource_bound.paint_fragment_count
             );
-            assert_eq!(retained_outcome.telemetry.paint_fragments_reused, 0);
+            assert!(retained_outcome.telemetry.paint_fragments_reused > 0);
+            assert!(
+                retained_outcome.telemetry.paint_commands_emitted
+                    < resource_bound.paint_primitive_count
+            );
+            assert!(retained_outcome.telemetry.paint_damage_rects > 0);
             assert!(
                 retained_outcome.telemetry.paint_commands_emitted
                     <= resource_bound.paint_primitive_count
@@ -6698,11 +6712,8 @@ mod tests {
                 outcome.telemetry.semantic_nodes_reused,
                 retained.inspect().resources.accessibility_node_count
             );
-            assert_eq!(
-                outcome.telemetry.paint_fragments_rebuilt,
-                retained.inspect().resources.paint_fragment_count
-            );
-            assert_eq!(outcome.telemetry.paint_fragments_reused, 0);
+            assert!(outcome.telemetry.paint_fragments_rebuilt > 0);
+            assert!(outcome.telemetry.paint_fragments_reused > 0);
             assert_eq!(outcome.telemetry.retained_paint_refreshes, 1);
         }
 
@@ -6721,11 +6732,8 @@ mod tests {
                     outcome.telemetry.semantic_nodes_reused,
                     retained.inspect().resources.accessibility_node_count
                 );
-                assert_eq!(
-                    outcome.telemetry.paint_fragments_rebuilt,
-                    retained.inspect().resources.paint_fragment_count
-                );
-                assert_eq!(outcome.telemetry.paint_fragments_reused, 0);
+                assert!(outcome.telemetry.paint_fragments_rebuilt > 0);
+                assert!(outcome.telemetry.paint_fragments_reused > 0);
                 assert_eq!(outcome.telemetry.retained_paint_refreshes, 1);
                 std::hint::black_box(retained.commands());
             }

@@ -389,6 +389,15 @@ pub struct FrameResourceDiagnostics {
 struct PaintFragment {
     id: UiId,
     commands: std::ops::Range<usize>,
+    bounds: Rect,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct RetainedPaintWork {
+    pub emitted_commands: usize,
+    pub rebuilt_fragments: usize,
+    pub reused_fragments: usize,
+    pub damage_rects: usize,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -578,6 +587,29 @@ fn paint_refresh_preserves_geometry<Message>(element: &Element<Message>) -> bool
             .children
             .iter()
             .all(paint_refresh_preserves_geometry)
+}
+
+fn find_declared_element<Message: Clone>(
+    element: &Element<Message>,
+    id: &UiId,
+    target: &UiId,
+    inherited_foreground: Option<Color>,
+) -> Option<(Element<Message>, Option<Color>)> {
+    if id == target {
+        return Some((element.clone(), inherited_foreground));
+    }
+    let foreground = element.style.foreground.or(inherited_foreground);
+    element
+        .children
+        .iter()
+        .enumerate()
+        .find_map(|(index, child)| {
+            let child_id = child.id.as_ref().map_or_else(
+                || id.scoped(format!("#{index}")),
+                |child_id| id.scoped(child_id.as_str()),
+            );
+            find_declared_element(child, &child_id, target, foreground)
+        })
 }
 
 impl<Message: Clone> UiFrame<Message> {
@@ -1735,30 +1767,160 @@ impl<Message: Clone> UiFrame<Message> {
     /// Callers must first prove that active interaction styles do not alter
     /// geometry or semantic state and that no transient layer needs declaration
     /// work.
-    pub(crate) fn refresh_retained_paint(&mut self, state: &mut UiStateStore) -> bool {
+    pub(crate) fn refresh_retained_paint(
+        &mut self,
+        state: &mut UiStateStore,
+    ) -> Option<RetainedPaintWork> {
         let (Some(mut root), Some(root_id)) = (
             self.declaration_root.clone(),
             self.declaration_root_id.clone(),
         ) else {
-            return false;
+            return None;
         };
         if self.active_overlay.is_some() || state.text_context().is_some() {
-            return false;
+            return None;
         }
         if !paint_refresh_preserves_geometry(&root) {
-            return false;
+            return None;
         }
 
+        let changed = self
+            .resolved
+            .nodes
+            .iter()
+            .filter(|node| {
+                node.interaction.hovered != (state.hovered() == Some(&node.id))
+                    || node.interaction.pressed != (state.pressed() == Some(&node.id))
+                    || node.interaction.captured != (state.captured() == Some(&node.id))
+            })
+            .map(|node| node.id.clone())
+            .collect::<Vec<_>>();
+        if changed.is_empty() {
+            return None;
+        }
         apply_transient_state(&mut root, &root_id, state);
         self.apply_interaction_state(state);
         self.prepare_selection_paints(state);
-        self.reset_emission();
-        emit_element(&root, 0, None, self);
-        self.append_scrollbars(Some(state));
-        self.commands.append(&mut self.overlay_commands);
-        self.hits.append(&mut self.overlay_hits);
+        let changed = changed
+            .iter()
+            .filter(|candidate| {
+                !changed.iter().any(|ancestor| {
+                    ancestor != *candidate && self.is_descendant_or_self(ancestor, candidate)
+                })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let total_fragments = self.paint_fragments.len();
+        let mut rebuilt_fragments = 0usize;
+        let mut emitted_commands = 0usize;
+        let mut damage_rects = 0usize;
+        for id in changed {
+            let Some((element, inherited_foreground)) =
+                find_declared_element(&root, &root_id, &id, None)
+            else {
+                return None;
+            };
+            let Some(node_index) = self.resolved.nodes.iter().position(|node| node.id == id) else {
+                return None;
+            };
+            let Some((commands, fragments)) =
+                self.emit_retained_subtree(&element, node_index, inherited_foreground)
+            else {
+                return None;
+            };
+            rebuilt_fragments = rebuilt_fragments.saturating_add(fragments.len());
+            emitted_commands = emitted_commands.saturating_add(commands.len());
+            damage_rects = damage_rects.saturating_add(1);
+            if !self.splice_paint_fragment(&id, commands, fragments) {
+                return None;
+            }
+        }
         self.validate_clip_commands();
         self.release_build_scratch();
+        Some(RetainedPaintWork {
+            emitted_commands,
+            rebuilt_fragments,
+            reused_fragments: total_fragments.saturating_sub(rebuilt_fragments),
+            damage_rects,
+        })
+    }
+
+    fn emit_retained_subtree(
+        &mut self,
+        element: &Element<Message>,
+        node_index: usize,
+        inherited_foreground: Option<Color>,
+    ) -> Option<(Vec<PaintCommand>, Vec<PaintFragment>)> {
+        let command_start = self.commands.len();
+        let fragment_start = self.paint_fragments.len();
+        let hit_len = self.hits.len();
+        let message_len = self.messages.len();
+        let context_len = self.context_messages.len();
+        let focus_len = self.focus_messages.len();
+        let text_input_len = self.text_inputs.len();
+        let hit_stacks = self
+            .resolved
+            .nodes
+            .iter()
+            .map(|node| node.hit_stack)
+            .collect::<Vec<_>>();
+
+        emit_element(element, node_index, inherited_foreground, self);
+        let commands = self.commands.split_off(command_start);
+        let mut fragments = self.paint_fragments.split_off(fragment_start);
+        for fragment in &mut fragments {
+            fragment.commands.start = fragment.commands.start.checked_sub(command_start)?;
+            fragment.commands.end = fragment.commands.end.checked_sub(command_start)?;
+        }
+        self.hits.truncate(hit_len);
+        self.messages.truncate(message_len);
+        self.context_messages.truncate(context_len);
+        self.focus_messages.truncate(focus_len);
+        self.text_inputs.truncate(text_input_len);
+        for (node, hit_stack) in self.resolved.nodes.iter_mut().zip(hit_stacks) {
+            node.hit_stack = hit_stack;
+        }
+        Some((commands, fragments))
+    }
+
+    fn splice_paint_fragment(
+        &mut self,
+        id: &UiId,
+        commands: Vec<PaintCommand>,
+        mut replacements: Vec<PaintFragment>,
+    ) -> bool {
+        let Some(old) = self
+            .paint_fragments
+            .iter()
+            .find(|fragment| &fragment.id == id)
+            .cloned()
+        else {
+            return false;
+        };
+        let old_len = old.commands.end.saturating_sub(old.commands.start);
+        let new_len = commands.len();
+        let delta = new_len as isize - old_len as isize;
+        self.commands.splice(old.commands.clone(), commands);
+
+        self.paint_fragments.retain(|fragment| {
+            !(fragment.commands.start >= old.commands.start
+                && fragment.commands.end <= old.commands.end)
+        });
+        for fragment in &mut self.paint_fragments {
+            if fragment.commands.start >= old.commands.end {
+                fragment.commands.start = fragment.commands.start.saturating_add_signed(delta);
+                fragment.commands.end = fragment.commands.end.saturating_add_signed(delta);
+            } else if fragment.commands.start <= old.commands.start
+                && fragment.commands.end >= old.commands.end
+            {
+                fragment.commands.end = fragment.commands.end.saturating_add_signed(delta);
+            }
+        }
+        for fragment in &mut replacements {
+            fragment.commands.start = fragment.commands.start.saturating_add(old.commands.start);
+            fragment.commands.end = fragment.commands.end.saturating_add(old.commands.start);
+        }
+        self.paint_fragments.extend(replacements);
         true
     }
 

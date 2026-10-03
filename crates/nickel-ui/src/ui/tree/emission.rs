@@ -205,6 +205,7 @@ pub(super) fn emit_element<Message: Clone>(
         tree.paint_fragments.push(PaintFragment {
             id: node.id,
             commands: fragment_start..tree.commands.len(),
+            bounds: node.border_box,
         });
         return;
     }
@@ -1180,5 +1181,6 @@ pub(super) fn emit_element<Message: Clone>(
     tree.paint_fragments.push(PaintFragment {
         id: node.id,
         commands: fragment_start..tree.commands.len(),
+        bounds: node.border_box,
     });
 }
