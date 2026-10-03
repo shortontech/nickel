@@ -143,6 +143,7 @@ pub(super) fn emit_element<Message: Clone>(
     tree: &mut UiFrame<Message>,
 ) {
     let node = tree.resolved.nodes[node_index].clone();
+    let fragment_start = tree.commands.len();
     let rect = node.allocated;
     let value_bounds = match &element.kind {
         Kind::Slider {
@@ -201,6 +202,10 @@ pub(super) fn emit_element<Message: Clone>(
                 emit_element(child, child_index, foreground, tree);
             }
         }
+        tree.paint_fragments.push(PaintFragment {
+            id: node.id,
+            commands: fragment_start..tree.commands.len(),
+        });
         return;
     }
     let rounded_solid_border = match (element.style.background, element.style.border) {
@@ -1172,4 +1177,8 @@ pub(super) fn emit_element<Message: Clone>(
     if clips_descendants {
         tree.commands.push(PaintCommand::PopClip);
     }
+    tree.paint_fragments.push(PaintFragment {
+        id: node.id,
+        commands: fragment_start..tree.commands.len(),
+    });
 }

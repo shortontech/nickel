@@ -373,6 +373,7 @@ pub enum SemanticQueryError {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct FrameResourceDiagnostics {
     pub node_count: usize,
+    pub paint_fragment_count: usize,
     pub paint_primitive_count: usize,
     pub hit_target_count: usize,
     pub message_binding_count: usize,
@@ -382,6 +383,12 @@ pub struct FrameResourceDiagnostics {
     /// or resource cache and are intentionally not guessed here.
     pub estimated_retained_bytes: usize,
     pub retained_build_scratch_bytes: usize,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct PaintFragment {
+    id: UiId,
+    commands: std::ops::Range<usize>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -476,6 +483,7 @@ pub struct UiFrame<Message = String> {
     declaration_root: Option<Element<Message>>,
     declaration_root_id: Option<UiId>,
     commands: Vec<PaintCommand>,
+    paint_fragments: Vec<PaintFragment>,
     overlay_commands: Vec<PaintCommand>,
     hits: Vec<HitRegion<Message>>,
     overlay_hits: Vec<HitRegion<Message>>,
@@ -511,6 +519,7 @@ impl<Message> Default for UiFrame<Message> {
             declaration_root: None,
             declaration_root_id: None,
             commands: Vec::new(),
+            paint_fragments: Vec::new(),
             overlay_commands: Vec::new(),
             hits: Vec::new(),
             overlay_hits: Vec::new(),
@@ -1863,6 +1872,15 @@ impl<Message: Clone> UiFrame<Message> {
         &self.commands
     }
 
+    #[cfg(test)]
+    pub(crate) fn paint_fragment_commands(&self, id: &UiId) -> Option<&[PaintCommand]> {
+        let fragment = self
+            .paint_fragments
+            .iter()
+            .find(|fragment| &fragment.id == id)?;
+        self.commands.get(fragment.commands.clone())
+    }
+
     pub fn accessibility_nodes(&self) -> &[AccessibilityNode] {
         &self.accessibility
     }
@@ -2585,6 +2603,7 @@ impl<Message: Clone> UiFrame<Message> {
 
     pub fn resource_diagnostics(&self) -> FrameResourceDiagnostics {
         let vector_bytes = self.commands.capacity() * std::mem::size_of::<PaintCommand>()
+            + self.paint_fragments.capacity() * std::mem::size_of::<PaintFragment>()
             + self.hits.capacity() * std::mem::size_of::<HitRegion<Message>>()
             + self.messages.capacity() * std::mem::size_of::<MessageRegion<Message>>()
             + self.context_messages.capacity() * std::mem::size_of::<MessageRegion<Message>>()
@@ -2619,6 +2638,7 @@ impl<Message: Clone> UiFrame<Message> {
             + self.seen_ids.capacity() * std::mem::size_of::<UiId>();
         FrameResourceDiagnostics {
             node_count: self.resolved.nodes.len(),
+            paint_fragment_count: self.paint_fragments.len(),
             paint_primitive_count: self.commands.len(),
             hit_target_count: self.hits.len(),
             message_binding_count: self.messages.len() + self.context_messages.len(),
@@ -5709,6 +5729,7 @@ impl<Message: Clone> UiFrame<Message> {
 
     fn reset_emission(&mut self) {
         self.commands.clear();
+        self.paint_fragments.clear();
         self.overlay_commands.clear();
         self.hits.clear();
         self.overlay_hits.clear();

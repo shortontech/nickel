@@ -2062,6 +2062,8 @@ pub struct HostTelemetry {
     pub nodes_measured: usize,
     pub nodes_placed: usize,
     pub paint_commands_emitted: usize,
+    pub paint_fragments_rebuilt: usize,
+    pub paint_fragments_reused: usize,
     pub semantic_nodes_rebuilt: usize,
     pub semantic_nodes_reused: usize,
     pub retained_paint_refreshes: usize,
@@ -2166,6 +2168,14 @@ impl HostEventOutcome {
             .telemetry
             .paint_commands_emitted
             .saturating_add(other.telemetry.paint_commands_emitted);
+        self.telemetry.paint_fragments_rebuilt = self
+            .telemetry
+            .paint_fragments_rebuilt
+            .saturating_add(other.telemetry.paint_fragments_rebuilt);
+        self.telemetry.paint_fragments_reused = self
+            .telemetry
+            .paint_fragments_reused
+            .saturating_add(other.telemetry.paint_fragments_reused);
         self.telemetry.semantic_nodes_rebuilt = self
             .telemetry
             .semantic_nodes_rebuilt
@@ -3498,6 +3508,7 @@ impl<A: Application> UiHost<A> {
                 let resources = self.tree.resource_diagnostics();
                 combined.telemetry.retained_paint_refreshes = 1;
                 combined.telemetry.paint_commands_emitted = resources.paint_primitive_count;
+                combined.telemetry.paint_fragments_rebuilt = resources.paint_fragment_count;
                 combined.telemetry.semantic_nodes_reused = resources.accessibility_node_count;
             } else {
                 let (paint_list_us, layout_us, rebuild_outcome) = self.rebuild_timed();
@@ -4067,6 +4078,10 @@ impl<A: Application> UiHost<A> {
             .telemetry
             .paint_commands_emitted
             .saturating_add(resources.paint_primitive_count);
+        cancellation.telemetry.paint_fragments_rebuilt = cancellation
+            .telemetry
+            .paint_fragments_rebuilt
+            .saturating_add(resources.paint_fragment_count);
         cancellation.telemetry.semantic_nodes_rebuilt = cancellation
             .telemetry
             .semantic_nodes_rebuilt
@@ -6499,6 +6514,12 @@ mod tests {
         assert_eq!(retained.layout_snapshot(), cold.layout_snapshot());
         assert_eq!(retained.commands(), cold.commands());
         assert_eq!(retained.semantic_nodes(), cold.semantic_nodes());
+        let (width, height) = retained.render_frame().logical_size;
+        let mut retained_raster = crate::SoftwareRenderer::new(width, height, 1.0);
+        let mut cold_raster = crate::SoftwareRenderer::new(width, height, 1.0);
+        retained.render_software(&mut retained_raster);
+        cold.render_software(&mut cold_raster);
+        assert_eq!(retained_raster.pixels(), cold_raster.pixels());
         assert_eq!(
             retained.inspect().pointer_hover,
             cold.inspect().pointer_hover
@@ -6564,6 +6585,11 @@ mod tests {
 
         for event in transitions {
             let semantics_before = retained.semantic_nodes();
+            let stable_sibling_before = retained
+                .tree
+                .paint_fragment_commands(&UiId::from("root/item-2"))
+                .expect("stable sibling fragment")
+                .to_vec();
             let retained_outcome = retained.handle_event(event.clone());
             cold.handle_event(event);
             cold.rebuild();
@@ -6578,12 +6604,24 @@ mod tests {
                 resource_bound.accessibility_node_count
             );
             assert!(!retained_outcome.telemetry.rebuilt);
+            assert_eq!(
+                retained_outcome.telemetry.paint_fragments_rebuilt,
+                resource_bound.paint_fragment_count
+            );
+            assert_eq!(retained_outcome.telemetry.paint_fragments_reused, 0);
             assert!(
                 retained_outcome.telemetry.paint_commands_emitted
                     <= resource_bound.paint_primitive_count
             );
             emitted = emitted.saturating_add(retained_outcome.telemetry.paint_commands_emitted);
             assert_eq!(retained.semantic_nodes(), semantics_before);
+            assert_eq!(
+                retained
+                    .tree
+                    .paint_fragment_commands(&UiId::from("root/item-2"))
+                    .expect("stable sibling fragment"),
+                stable_sibling_before
+            );
             assert_cold_equivalent(&retained, &cold);
         }
 
@@ -6660,6 +6698,11 @@ mod tests {
                 outcome.telemetry.semantic_nodes_reused,
                 retained.inspect().resources.accessibility_node_count
             );
+            assert_eq!(
+                outcome.telemetry.paint_fragments_rebuilt,
+                retained.inspect().resources.paint_fragment_count
+            );
+            assert_eq!(outcome.telemetry.paint_fragments_reused, 0);
             assert_eq!(outcome.telemetry.retained_paint_refreshes, 1);
         }
 
@@ -6678,6 +6721,11 @@ mod tests {
                     outcome.telemetry.semantic_nodes_reused,
                     retained.inspect().resources.accessibility_node_count
                 );
+                assert_eq!(
+                    outcome.telemetry.paint_fragments_rebuilt,
+                    retained.inspect().resources.paint_fragment_count
+                );
+                assert_eq!(outcome.telemetry.paint_fragments_reused, 0);
                 assert_eq!(outcome.telemetry.retained_paint_refreshes, 1);
                 std::hint::black_box(retained.commands());
             }
