@@ -700,14 +700,15 @@ impl PluginPanelApplication {
             }
             images
         };
-        let rendered =
-            host.borrow_mut()
-                .render_expanded(&mount, &serde_json::json!({}), |value| {
-                    let node = parse_panel_for_manifest(value, &manifest, Some(&surface.id))?;
-                    node.requested_surface(surface, &stylesheet)?;
-                    Ok(())
-                })?;
-        let node = parse_panel_for_manifest(&rendered.node, &manifest, Some(&surface.id))?;
+        let (rendered, node) = host.borrow_mut().render_expanded_validated(
+            &mount,
+            &serde_json::json!({}),
+            |value| {
+                let node = parse_panel_for_manifest(value, &manifest, Some(&surface.id))?;
+                node.requested_surface(surface, &stylesheet)?;
+                Ok(node)
+            },
+        )?;
         let snapshots = {
             let host = host.borrow();
             host.participating_owners()
@@ -1055,15 +1056,15 @@ impl PluginPanelApplication {
             let owner = host.resolution().active.clone();
             state.snapshots.insert(owner.clone(), data.clone());
             host.update_snapshot(&owner, &data)?;
-            let rendered = host.render_expanded(&state.mount, &serde_json::json!({}), |value| {
-                parse_panel_for_manifest(value, &self.manifest, self.expected_surface_id.as_deref())
-                    .map(|_| ())
-            })?;
-            self.node = parse_panel_for_manifest(
-                &rendered.node,
-                &self.manifest,
-                self.expected_surface_id.as_deref(),
-            )?;
+            let (rendered, node) =
+                host.render_expanded_validated(&state.mount, &serde_json::json!({}), |value| {
+                    parse_panel_for_manifest(
+                        value,
+                        &self.manifest,
+                        self.expected_surface_id.as_deref(),
+                    )
+                })?;
+            self.node = node;
             state.events = rendered.events;
             self.projection_data = Some(serialized);
             self.projection_value = Some(data);
@@ -2983,8 +2984,10 @@ impl nickel_ui::Application for PluginPanelApplication {
                     .collect::<Result<Vec<_>, String>>()?;
                 let mut host = state.host.borrow_mut();
 
-                let rendered =
-                    host.dispatch_expanded_batch_pending(&state.mount, &events, |value| {
+                let (rendered, node) = host.dispatch_expanded_batch_pending_validated(
+                    &state.mount,
+                    &events,
+                    |value| {
                         let node = parse_panel_for_manifest(
                             value,
                             &self.manifest,
@@ -2999,12 +3002,8 @@ impl nickel_ui::Application for PluginPanelApplication {
                                 .ok_or("composed surface grant is missing")?;
                             node.requested_surface(surface, &self.stylesheet)?;
                         }
-                        Ok(())
-                    })?;
-                let node = parse_panel_for_manifest(
-                    &rendered.node,
-                    &self.manifest,
-                    self.expected_surface_id.as_deref(),
+                        Ok(node)
+                    },
                 )?;
                 state.events = rendered.events;
                 let effects = host

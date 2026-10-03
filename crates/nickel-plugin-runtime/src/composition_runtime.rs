@@ -18,7 +18,9 @@ use crate::{JsxModuleGraph, JsxRuntime, ModuleSource};
 static NEXT_RUNTIME: AtomicU64 = AtomicU64::new(1);
 static NEXT_SHARED_MOUNT: AtomicU64 = AtomicU64::new(1);
 const MAX_MOUNTS: usize = 512;
-const MAX_NODES: usize = 4096;
+const MAX_COMPONENT_NODES: usize = 4096;
+const MAX_TREE_DEPTH: usize = 128;
+const MAX_HANDLERS: usize = 4096;
 const MAX_JSON_BYTES: usize = 1024 * 1024;
 const MAX_EFFECTS: usize = 1024;
 
@@ -867,6 +869,16 @@ impl ShellCompositionRuntime {
         props: &Value,
         validate: impl FnOnce(&Value) -> Result<(), String>,
     ) -> Result<RenderedComponent, String> {
+        self.render_expanded_validated(mount, props, validate)
+            .map(|(rendered, ())| rendered)
+    }
+
+    pub fn render_expanded_validated<T>(
+        &mut self,
+        mount: &ComponentMount,
+        props: &Value,
+        validate: impl FnOnce(&Value) -> Result<T, String>,
+    ) -> Result<(RenderedComponent, T), String> {
         self.transactional(|host| {
             host.validate_mount(mount)?;
             if let Some(surface) = host.mounts[&mount.id].surface.clone() {
@@ -925,6 +937,16 @@ impl ShellCompositionRuntime {
         events: &[(ComponentEventHandle, Value)],
         validate: impl FnOnce(&Value) -> Result<(), String>,
     ) -> Result<RenderedComponent, String> {
+        self.dispatch_expanded_batch_pending_validated(root, events, validate)
+            .map(|(rendered, ())| rendered)
+    }
+
+    pub fn dispatch_expanded_batch_pending_validated<T>(
+        &mut self,
+        root: &ComponentMount,
+        events: &[(ComponentEventHandle, Value)],
+        validate: impl FnOnce(&Value) -> Result<T, String>,
+    ) -> Result<(RenderedComponent, T), String> {
         self.begin_transaction()?;
         let result = (|| {
             self.validate_mount(root)?;
@@ -958,7 +980,7 @@ impl ShellCompositionRuntime {
             }
 
             let props = self.mounts[&root.id].props.clone();
-            self.render_expanded(root, &props, validate)
+            self.render_expanded_validated(root, &props, validate)
         })();
         if result.is_err() {
             self.finish_transaction(false)?;
@@ -966,12 +988,12 @@ impl ShellCompositionRuntime {
         result
     }
 
-    fn expand_rendered(
+    fn expand_rendered<T>(
         &mut self,
         root: u64,
         rendered: RenderedComponent,
-        validate: impl FnOnce(&Value) -> Result<(), String>,
-    ) -> Result<RenderedComponent, String> {
+        validate: impl FnOnce(&Value) -> Result<T, String>,
+    ) -> Result<(RenderedComponent, T), String> {
         let mut expansion = ExpansionState {
             root,
             events: BTreeMap::new(),
@@ -986,7 +1008,7 @@ impl ShellCompositionRuntime {
             0,
         )?;
         bounded_json(&node)?;
-        validate(&node)?;
+        let validated = validate(&node)?;
         let removed = self
             .nested_mounts
             .keys()
@@ -997,10 +1019,13 @@ impl ShellCompositionRuntime {
             let mount = self.nested_mounts.remove(&key).unwrap();
             self.unmount(&mount)?;
         }
-        Ok(RenderedComponent {
-            node,
-            events: expansion.events,
-        })
+        Ok((
+            RenderedComponent {
+                node,
+                events: expansion.events,
+            },
+            validated,
+        ))
     }
 
     fn expand_node(
@@ -1012,7 +1037,7 @@ impl ShellCompositionRuntime {
         expansion: &mut ExpansionState,
         depth: usize,
     ) -> Result<Value, String> {
-        if depth > 64 || expansion.events.len() > MAX_NODES {
+        if depth > 64 || expansion.events.len() > MAX_HANDLERS {
             return Err("composition expansion exceeds limits".into());
         }
         if node.get("kind").and_then(Value::as_str) == Some("__packageChild") {
@@ -1183,7 +1208,7 @@ impl ShellCompositionRuntime {
                 }
                 let node = object["__ownedChild"].clone();
                 bounded_json(&node)?;
-                if self.children.len() + self.callbacks.len() + self.children.len() >= MAX_NODES
+                if self.children.len() + self.callbacks.len() + self.children.len() >= MAX_HANDLERS
                     || self
                         .children
                         .values()
@@ -1227,7 +1252,7 @@ impl ShellCompositionRuntime {
                     )
                     .ok_or("unknown callback action")?
                     .clone();
-                if self.callbacks.len() >= MAX_NODES {
+                if self.callbacks.len() >= MAX_HANDLERS {
                     return Err("too many component callback props".into());
                 }
                 self.next_callback = self
@@ -1459,7 +1484,8 @@ impl ShellCompositionRuntime {
                 generation,
                 &owner,
                 &mut events,
-                &mut 0,
+                &mut TreeBudget::default(),
+                0,
             )?;
             validate(&node)?;
             Ok(RenderedComponent { node, events })
@@ -1709,16 +1735,34 @@ fn rewrite_events(
     generation: u64,
     owner: &PackageIdentity,
     events: &mut BTreeMap<u64, ComponentEventHandle>,
-    count: &mut usize,
+    budget: &mut TreeBudget,
+    depth: usize,
 ) -> Result<(), String> {
-    *count += 1;
-    if *count > MAX_NODES {
+    if depth > MAX_TREE_DEPTH {
+        return Err("component tree exceeds depth limit".into());
+    }
+    if value
+        .as_object()
+        .is_some_and(|object| object.get("kind").and_then(Value::as_str).is_some())
+    {
+        budget.nodes += 1;
+    }
+    if budget.nodes > MAX_COMPONENT_NODES {
         return Err("component tree exceeds node limit".into());
     }
     match value {
         Value::Array(values) => {
             for value in values {
-                rewrite_events(value, runtime, mount, generation, owner, events, count)?;
+                rewrite_events(
+                    value,
+                    runtime,
+                    mount,
+                    generation,
+                    owner,
+                    events,
+                    budget,
+                    depth + 1,
+                )?;
             }
         }
         Value::Object(object) => {
@@ -1726,8 +1770,11 @@ fn rewrite_events(
                 if is_action(key) && !value.is_null() {
                     let action = value
                         .as_u64()
-                        .filter(|action| *action < MAX_NODES as u64)
+                        .filter(|action| *action < MAX_HANDLERS as u64)
                         .ok_or("invalid component action")?;
+                    if events.len() >= MAX_HANDLERS {
+                        return Err("component tree exceeds handler limit".into());
+                    }
                     let token = events.len() as u64;
                     events.insert(
                         token,
@@ -1741,13 +1788,27 @@ fn rewrite_events(
                     );
                     *value = Value::from(token);
                 } else {
-                    rewrite_events(value, runtime, mount, generation, owner, events, count)?;
+                    rewrite_events(
+                        value,
+                        runtime,
+                        mount,
+                        generation,
+                        owner,
+                        events,
+                        budget,
+                        depth + 1,
+                    )?;
                 }
             }
         }
         _ => {}
     }
     Ok(())
+}
+
+#[derive(Default)]
+struct TreeBudget {
+    nodes: usize,
 }
 
 #[cfg(test)]
@@ -2341,5 +2402,107 @@ mod tests {
         host.unmount(&a).unwrap();
         assert!(host.dispatch(&a_tree.events[&0], &Value::Null).is_err());
         assert!(host.dispatch(&updated_b.events[&0], &Value::Null).is_ok());
+    }
+
+    #[test]
+    fn settings_sized_tree_counts_components_instead_of_every_json_value() {
+        let owner = make_host().resolution().active.clone();
+        let rows = (0..512)
+            .map(|index| {
+                serde_json::json!({
+                    "kind": "button",
+                    "id": format!("setting-{index}"),
+                    "title": format!("Setting {index}"),
+                    "description": "A production-shaped Settings row with several scalar properties",
+                    "className": "settings-row",
+                    "disabled": false,
+                    "selected": false,
+                    "width": 480,
+                    "height": 40,
+                    "action": index,
+                    "children": [format!("Setting {index}")]
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut tree = serde_json::json!({
+            "kind": "column",
+            "className": "settings-page",
+            "children": rows
+        });
+        let mut events = BTreeMap::new();
+
+        rewrite_events(
+            &mut tree,
+            1,
+            2,
+            3,
+            &owner,
+            &mut events,
+            &mut TreeBudget::default(),
+            0,
+        )
+        .unwrap();
+
+        assert_eq!(events.len(), 512);
+    }
+
+    #[test]
+    fn component_depth_and_handler_budgets_remain_independent() {
+        let owner = make_host().resolution().active.clone();
+        let mut too_many_handlers = Value::Array(
+            (0..=MAX_HANDLERS)
+                .map(|_| serde_json::json!({"action": 0}))
+                .collect(),
+        );
+        let error = rewrite_events(
+            &mut too_many_handlers,
+            1,
+            2,
+            3,
+            &owner,
+            &mut BTreeMap::new(),
+            &mut TreeBudget::default(),
+            0,
+        )
+        .unwrap_err();
+        assert!(error.contains("handler limit"));
+
+        let mut too_deep = Value::Null;
+        for _ in 0..=MAX_TREE_DEPTH {
+            too_deep = Value::Array(vec![too_deep]);
+        }
+        let error = rewrite_events(
+            &mut too_deep,
+            1,
+            2,
+            3,
+            &owner,
+            &mut BTreeMap::new(),
+            &mut TreeBudget::default(),
+            0,
+        )
+        .unwrap_err();
+        assert!(error.contains("depth limit"));
+    }
+
+    #[test]
+    fn rejected_settings_surface_does_not_retire_the_shell_owner() {
+        let mut host = make_host();
+        let settings = host.component("shell.quickSettings").unwrap();
+        let settings_mount = host.mount(&settings).unwrap();
+        let error = host
+            .render_expanded(&settings_mount, &serde_json::json!({}), |_| {
+                Err("local Settings presentation rejected".into())
+            })
+            .err()
+            .expect("rejected Settings presentation must return an error");
+        assert!(error.contains("local Settings presentation rejected"));
+
+        let shell = host.component("shell.taskbar").unwrap();
+        let shell_mount = host.mount(&shell).unwrap();
+        let rendered = host
+            .render_expanded(&shell_mount, &serde_json::json!({}), |_| Ok(()))
+            .unwrap();
+        assert!(rendered.node.to_string().contains("child"));
     }
 }
