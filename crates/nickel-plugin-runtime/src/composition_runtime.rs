@@ -181,6 +181,8 @@ struct MountState {
 struct MountPatchAuthority {
     /// Package-local handler slot -> stable expanded event token.
     slots: BTreeMap<String, u64>,
+    /// Package-local native identity -> retained composition expansion path.
+    splices: BTreeMap<String, String>,
 }
 
 struct CompositionCheckpoint {
@@ -1290,8 +1292,15 @@ impl ShellCompositionRuntime {
             let mut tree_bytes = 0u64;
             let mut generation = 0;
             for (boundary, mount_id, namespace) in &boundaries {
-                if let Some(local_patch) = patched_mounts.remove(mount_id) {
+                if let Some(mut local_patch) = patched_mounts.remove(mount_id) {
                     generation = generation.max(self.mounts[mount_id].generation);
+                    let structurally_expanded = self.expand_structural_patch_payloads(
+                        root.id,
+                        *mount_id,
+                        boundary,
+                        &mut local_patch,
+                        &mut expansion,
+                    )?;
                     translate_package_patch(
                         local_patch,
                         if *namespace {
@@ -1307,6 +1316,7 @@ impl ShellCompositionRuntime {
                         &mut expansion,
                         &mut operations,
                         &mut patch_nodes_visited,
+                        structurally_expanded,
                     )?;
                     continue;
                 }
@@ -1533,8 +1543,125 @@ impl ShellCompositionRuntime {
         }
         visit(node, events, &prefixes, &mut authority)?;
         for mount in std::iter::once(root).chain(prefixes.keys().copied()) {
+            if let Some(previous) = self.patch_authority.get(&mount) {
+                authority
+                    .entry(mount)
+                    .or_default()
+                    .splices
+                    .clone_from(&previous.splices);
+            }
             self.patch_authority
                 .insert(mount, authority.remove(&mount).unwrap_or_default());
+        }
+        Ok(())
+    }
+
+    fn expand_structural_patch_payloads(
+        &mut self,
+        root: u64,
+        mount: u64,
+        boundary: &str,
+        patch: &mut NativePatchEnvelope,
+        expansion: &mut ExpansionState,
+    ) -> Result<bool, String> {
+        let retained_splices = self
+            .patch_authority
+            .get(&mount)
+            .map(|authority| &authority.splices);
+        let has_structural = patch.operations.iter().any(|operation| match operation {
+            NativePatchOperation::InsertChild { node, .. } => contains_package_transport(node),
+            NativePatchOperation::ReplaceSubtree { target, node } => {
+                contains_package_transport(node)
+                    || retained_splices.is_some_and(|splices| splices.contains_key(target))
+            }
+            NativePatchOperation::RemoveChild { child_id, .. } => {
+                retained_splices.is_some_and(|splices| splices.contains_key(child_id))
+            }
+            _ => false,
+        });
+        if !has_structural {
+            return Ok(false);
+        }
+        let source_events = expansion
+            .events
+            .values()
+            .filter(|handle| handle.mount == mount)
+            .map(|handle| (handle.action, handle.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let mut expanded = false;
+        for operation in &mut patch.operations {
+            let (identity, node, is_insert) = match operation {
+                NativePatchOperation::InsertChild { child_id, node, .. } => {
+                    (child_id.clone(), Some(node), true)
+                }
+                NativePatchOperation::ReplaceSubtree { target, node } => {
+                    (target.clone(), Some(node), false)
+                }
+                NativePatchOperation::RemoveChild { child_id, .. } => {
+                    if let Some(path) = self
+                        .patch_authority
+                        .get_mut(&mount)
+                        .and_then(|authority| authority.splices.remove(child_id))
+                    {
+                        self.retire_composition_splice(root, &path)?;
+                    }
+                    continue;
+                }
+                _ => continue,
+            };
+            let Some(node) = node else { continue };
+            let path = format!("{boundary}/splice:{}", identity.replace('/', "%2f"));
+            if is_insert && self.patch_authority[&mount].splices.contains_key(&identity) {
+                return Err("duplicate retained composition splice".into());
+            }
+            if !is_insert
+                && let Some(previous) = self
+                    .patch_authority
+                    .get_mut(&mount)
+                    .and_then(|authority| authority.splices.remove(&identity))
+            {
+                self.retire_composition_splice(root, &previous)?;
+            }
+            self.patch_authority
+                .entry(mount)
+                .or_default()
+                .splices
+                .insert(identity, path.clone());
+            if boundary != "root" {
+                namespace_native_metadata(node, boundary, 0)?;
+            }
+            *node = self.expand_node(
+                &path,
+                std::mem::take(node),
+                &source_events,
+                mount,
+                expansion,
+                0,
+                &mut None,
+            )?;
+            expanded = true;
+        }
+        Ok(expanded)
+    }
+
+    fn retire_composition_splice(&mut self, root: u64, path: &str) -> Result<(), String> {
+        let mut removed = self
+            .nested_mounts
+            .keys()
+            .filter(|(owner, candidate)| {
+                *owner == root
+                    && (candidate == path
+                        || candidate
+                            .strip_prefix(path)
+                            .is_some_and(|suffix| suffix.starts_with('/')))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        removed.sort_by(|left, right| right.1.len().cmp(&left.1.len()));
+        for key in removed {
+            if let Some(child) = self.nested_mounts.remove(&key) {
+                self.unmount(&child)?;
+            }
         }
         Ok(())
     }
@@ -1925,6 +2052,7 @@ impl ShellCompositionRuntime {
             self.unmount(&child)?;
         }
         let state = self.mounts.remove(&mount.id).unwrap();
+        self.patch_authority.remove(&mount.id);
         self.callbacks
             .retain(|_, grant| grant.receiver != mount.id && grant.source.mount != mount.id);
         self.children
@@ -2434,6 +2562,20 @@ fn contains_owned_transport(value: &Value) -> bool {
     }
 }
 
+fn contains_package_transport(value: &Value) -> bool {
+    if matches!(
+        value.get("kind").and_then(Value::as_str),
+        Some("__packageComponent" | "__packageChild")
+    ) {
+        return true;
+    }
+    match value {
+        Value::Object(object) => object.values().any(contains_package_transport),
+        Value::Array(values) => values.iter().any(contains_package_transport),
+        _ => false,
+    }
+}
+
 fn find_unique_native_prefix<'a>(
     value: &'a Value,
     prefix: &str,
@@ -2648,6 +2790,7 @@ fn translate_package_patch(
     expansion: &mut ExpansionState,
     output: &mut Vec<NativePatchOperation>,
     visited: &mut u64,
+    payloads_expanded: bool,
 ) -> Result<(), String> {
     fn namespaced(namespace: Option<&str>, value: String) -> String {
         namespace.map_or(value.clone(), |prefix| format!("{prefix}::{value}"))
@@ -2799,10 +2942,12 @@ fn translate_package_patch(
                 index,
                 mut node,
             } => {
-                rewrite_payload(
-                    &mut node, namespace, mount, owner, runtime, generation, authority, expansion,
-                    0,
-                )?;
+                if !payloads_expanded {
+                    rewrite_payload(
+                        &mut node, namespace, mount, owner, runtime, generation, authority,
+                        expansion, 0,
+                    )?;
+                }
                 output.push(NativePatchOperation::InsertChild {
                     parent: namespaced(namespace, parent),
                     key,
@@ -2852,10 +2997,12 @@ fn translate_package_patch(
                     }
                     keep
                 });
-                rewrite_payload(
-                    &mut node, namespace, mount, owner, runtime, generation, authority, expansion,
-                    0,
-                )?;
+                if !payloads_expanded {
+                    rewrite_payload(
+                        &mut node, namespace, mount, owner, runtime, generation, authority,
+                        expansion, 0,
+                    )?;
+                }
                 output.push(NativePatchOperation::ReplaceSubtree {
                     target: namespaced(namespace, target),
                     node,
@@ -3597,6 +3744,122 @@ mod tests {
         assert_eq!(validated.local_materializations, 0);
         assert_eq!(validated.expansion_nodes, 0);
         assert_eq!(validated.tree_bytes, 0);
+        host.finish_transaction(true).unwrap();
+    }
+
+    #[test]
+    fn structural_package_component_insert_expands_transactionally_and_matches_cold_oracle() {
+        fn structural_host() -> ShellCompositionRuntime {
+            let mut base = package(
+                "base",
+                "export function Shell(){const [step,setStep]=useState(0);return h(Column,null,h(Button,{key:'toggle',onClick:()=>setStep(step+1)},'show'),...(step===0?[]:[step===1?h(nickel.component('shell.taskbar'),{key:'nested'}):h(Text,{key:'nested'},'replacement')]));}\nexport function Taskbar(){}\nexport function QuickSettings(){}\nexport default Shell;",
+                None,
+            );
+            base.manifest
+                .composition
+                .as_mut()
+                .unwrap()
+                .exports
+                .insert("shell".into(), "./main.js#Shell".into());
+            let child = package(
+                "child",
+                "export function Taskbar(){return h(Text,{key:'owned'},'nested-child');}\nexport default Taskbar;",
+                Some("base"),
+            );
+            ShellCompositionRuntime::new(
+                &BTreeMap::from([("base".into(), base), ("child".into(), child)]),
+                "child",
+                &BTreeMap::new(),
+            )
+            .unwrap()
+        }
+
+        let mut host = structural_host();
+        let root = host.mount(&host.component("shell").unwrap()).unwrap();
+        let initial = host
+            .render_expanded(&root, &serde_json::json!({}), |_| Ok(()))
+            .unwrap();
+        let event = initial.events[&0].clone();
+        assert!(
+            host.dispatch_expanded_batch_scheduled_pending_validated(
+                &root,
+                &[(event.clone(), Value::Null)],
+                &initial.events,
+                &initial.node,
+                |_, _, _| Err::<(), _>("reject structural splice".into()),
+            )
+            .is_err()
+        );
+        let outcome = host
+            .dispatch_expanded_batch_scheduled_pending_validated(
+                &root,
+                &[(event, Value::Null)],
+                &initial.events,
+                &initial.node,
+                |patch, _, _| Ok(patch.clone()),
+            )
+            .unwrap();
+        let ScheduledExpandedBatch::Patched {
+            patch, validated, ..
+        } = outcome
+        else {
+            panic!()
+        };
+        let encoded = serde_json::to_string(&patch).unwrap();
+        assert!(encoded.contains("nested-child"));
+        assert!(!encoded.contains("__packageComponent"));
+        assert_eq!(validated, patch);
+
+        let mut oracle = structural_host();
+        let oracle_root = oracle.mount(&oracle.component("shell").unwrap()).unwrap();
+        let oracle_initial = oracle
+            .render_expanded(&oracle_root, &serde_json::json!({}), |_| Ok(()))
+            .unwrap();
+        let oracle_next = oracle
+            .dispatch_expanded(
+                &oracle_root,
+                &oracle_initial.events[&0],
+                &Value::Null,
+                |_| Ok(()),
+            )
+            .unwrap();
+        assert!(oracle_next.node.to_string().contains("nested-child"));
+        host.finish_transaction(true).unwrap();
+
+        let accepted = host
+            .render_expanded(&root, &serde_json::json!({}), |_| Ok(()))
+            .unwrap();
+        let mounts_before_replace = host.mounts.len();
+        assert!(
+            host.dispatch_expanded_batch_scheduled_pending_validated(
+                &root,
+                &[(accepted.events[&0].clone(), Value::Null)],
+                &accepted.events,
+                &accepted.node,
+                |_, _, _| Err::<(), _>("reject structural replacement".into()),
+            )
+            .is_err()
+        );
+        assert_eq!(host.mounts.len(), mounts_before_replace);
+        let replaced = host
+            .dispatch_expanded_batch_scheduled_pending_validated(
+                &root,
+                &[(accepted.events[&0].clone(), Value::Null)],
+                &accepted.events,
+                &accepted.node,
+                |patch, _, _| Ok(patch.clone()),
+            )
+            .unwrap();
+        let ScheduledExpandedBatch::Patched { patch, .. } = replaced else {
+            panic!()
+        };
+        assert!(
+            patch
+                .operations
+                .iter()
+                .any(|operation| matches!(operation, NativePatchOperation::ReplaceSubtree { node, .. } if node.to_string().contains("replacement")))
+        );
+        assert!(host.mounts.len() < mounts_before_replace);
         host.finish_transaction(true).unwrap();
     }
 
