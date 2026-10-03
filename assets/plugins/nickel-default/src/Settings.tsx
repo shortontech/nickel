@@ -1,7 +1,7 @@
 // @jsx h
 import "./styles/settings.css";
-import { SettingsCollection } from "./SettingsCollection.js";
-import { SettingShortcut } from "./SettingShortcut.js";
+import { SettingsCollection } from "./SettingsCollection.tsx";
+import { SettingShortcut } from "./SettingShortcut.tsx";
 
 function settingValue(setting) {
     const value = typeof setting.value === "function" ? setting.value() : setting.value;

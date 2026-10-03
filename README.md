@@ -5,8 +5,10 @@ it.** Nickel brings its own desktop, taskbar or dock, launcher, task switching,
 system controls, controller navigation, and apps.
 
 **Powered by JavaScript, best-in-class DX, and cross-platform.** The production
-shell is composed from capability-constrained JSX components and rendered by
-Nickel—not a browser. On Linux, Nickel can also run as a Wayland compositor.
+shell is canonically authored in TSX, compiled by Oxc, and run through direct
+V8 bindings as capability-constrained components rendered by Nickel—not a
+browser. JavaScript, JSX, and TypeScript packages work too. On Linux, Nickel can
+also run as a Wayland compositor.
 
 [![Nickel Default Shell with the launcher open](assets/screenshots/nickel-default-shell-thumbnail.png)](assets/screenshots/nickel-default-shell.png)
 
@@ -93,15 +95,16 @@ surfaces, and request only the capabilities they need. The bundled shells live
 in [`assets/plugins`](assets/plugins/), alongside examples and package tooling.
 
 The visible shell is powered by JavaScript, but it is not Electron or a web
-view. Nickel executes generated JavaScript in a bounded package runtime and
-translates its component tree into native layout and drawing. The native host
-keeps input, hit testing, effects, protected data, and platform access under its
-control.
+view. Oxc lowers JS, JSX, TS, and TSX modules when a package loads or changes;
+Nickel caches that output and executes it through direct V8 bindings. Retained
+typed mutations—not complete serialized component trees—cross into native
+layout and drawing. The native host keeps input, hit testing, effects, protected
+data, and platform access under its control.
 
 ## Architecture
 
 Rust crates own portable application state, search, ranking, navigation,
-rendering, package validation, and capability enforcement. The selected JSX
+rendering, package validation, and capability enforcement. The selected TSX
 shell owns presentation and composes those native facilities into the visible
 desktop. Narrow adapters connect the shared behavior to Windows APIs or to
 Nickel's Linux compositor.

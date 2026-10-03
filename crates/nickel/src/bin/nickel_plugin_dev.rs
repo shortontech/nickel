@@ -53,7 +53,10 @@ fn compile_jsx_modules(
     // be imported by the entry merely to make the compiler emit its artifact.
     let jsx_roots = PluginPackage::load_module_sources(directory)?
         .into_iter()
-        .filter(|module| module.path.ends_with(".jsx") && Path::new(&module.path) != source)
+        .filter(|module| {
+            (module.path.ends_with(".jsx") || module.path.ends_with(".tsx"))
+                && Path::new(&module.path) != source
+        })
         .map(|module| module.path)
         .collect::<Vec<_>>();
     let compiler = directory.join("node_modules/.bin").join(tsc_executable());
@@ -139,6 +142,14 @@ pub(super) fn load_package(directory: &Path) -> Result<PluginPackage, String> {
     let manifest_source = std::str::from_utf8(&manifest_bytes)
         .map_err(|error| format!("plugin.json is not UTF-8: {error}"))?;
     let manifest = PluginManifest::from_json(manifest_source)?;
+    if matches!(
+        Path::new(&manifest.entry)
+            .extension()
+            .and_then(|extension| extension.to_str()),
+        Some("jsx" | "ts" | "tsx")
+    ) {
+        return PluginPackage::load(&directory);
+    }
     if let Some(source) = jsx_source(&directory, &manifest.entry)? {
         let (source, modules) = compile_jsx_modules(&directory, &manifest.entry, &source)?;
         Ok(PluginPackage {
@@ -705,12 +716,12 @@ mod platform {
             std::fs::create_dir(directory.path().join("styles")).unwrap();
             std::fs::write(
                 directory.path().join("Wifi.jsx"),
-                include_str!("../../../../assets/plugins/nickel-default/src/Wifi.jsx"),
+                include_str!("../../../../assets/plugins/nickel-default/src/Wifi.tsx"),
             )
             .unwrap();
             std::fs::write(
                 directory.path().join("Bluetooth.jsx"),
-                include_str!("../../../../assets/plugins/nickel-default/src/Bluetooth.jsx"),
+                include_str!("../../../../assets/plugins/nickel-default/src/Bluetooth.tsx"),
             )
             .unwrap();
             std::fs::write(
@@ -865,7 +876,7 @@ mod platform {
             std::fs::create_dir(directory.path().join("styles")).unwrap();
             std::fs::write(
                 directory.path().join("OnScreenKeyboard.jsx"),
-                include_str!("../../../../assets/plugins/nickel-default/src/OnScreenKeyboard.jsx"),
+                include_str!("../../../../assets/plugins/nickel-default/src/OnScreenKeyboard.tsx"),
             )
             .unwrap();
             std::fs::write(
@@ -978,7 +989,7 @@ mod platform {
                 use nickel_plugin_runtime::{JsxModuleGraph, ModuleSource, JsxRuntime};
                 let directory=tempfile::tempdir().unwrap();
                 std::fs::create_dir(directory.path().join("styles")).unwrap();
-                std::fs::write(directory.path().join("QuickSettings.jsx"),include_str!("../../../../assets/plugins/nickel-default/src/QuickSettings.jsx")).unwrap();
+                std::fs::write(directory.path().join("QuickSettings.jsx"),include_str!("../../../../assets/plugins/nickel-default/src/QuickSettings.tsx")).unwrap();
                 std::fs::write(directory.path().join("styles/quick-settings.css"),include_str!("../../../../assets/plugins/nickel-default/src/styles/quick-settings.css")).unwrap();
                 std::fs::write(directory.path().join("main.jsx"),"import {QuickSettings} from './QuickSettings.js'; export default QuickSettings;").unwrap();
                 let (source,modules)=super::super::compile_jsx_modules(directory.path(),"main.js",Path::new("main.jsx")).unwrap();
@@ -1009,8 +1020,8 @@ mod platform {
                 use nickel_plugin_runtime::{JsxModuleGraph, ModuleSource, JsxRuntime};
                 let directory = tempfile::tempdir().unwrap();
                 std::fs::create_dir(directory.path().join("styles")).unwrap();
-                std::fs::write(directory.path().join("OptionalFeatures.jsx"), include_str!("../../../../assets/plugins/nickel-default/src/OptionalFeatures.jsx")).unwrap();
-                std::fs::write(directory.path().join("KeyboardShortcuts.jsx"), include_str!("../../../../assets/plugins/nickel-default/src/KeyboardShortcuts.jsx")).unwrap();
+                std::fs::write(directory.path().join("OptionalFeatures.jsx"), include_str!("../../../../assets/plugins/nickel-default/src/OptionalFeatures.tsx")).unwrap();
+                std::fs::write(directory.path().join("KeyboardShortcuts.jsx"), include_str!("../../../../assets/plugins/nickel-default/src/KeyboardShortcuts.tsx")).unwrap();
                 std::fs::write(directory.path().join("styles/features.css"), include_str!("../../../../assets/plugins/nickel-default/src/styles/features.css")).unwrap();
                 std::fs::write(directory.path().join("main.jsx"), "import {OptionalFeatures} from './OptionalFeatures.js'; import {KeyboardShortcuts} from './KeyboardShortcuts.js'; export default function App() { return <Window id='main' width={520} height={340}><Column><OptionalFeatures/><KeyboardShortcuts/></Column></Window>; }").unwrap();
                 let (source, modules) = super::super::compile_jsx_modules(directory.path(), "main.js", Path::new("main.jsx")).unwrap();
@@ -1047,7 +1058,7 @@ mod platform {
                 use nickel_plugin_runtime::{JsxModuleGraph, ModuleSource, JsxRuntime};
                 let directory = tempfile::tempdir().unwrap();
                 std::fs::create_dir(directory.path().join("styles")).unwrap();
-                std::fs::write(directory.path().join("Launcher.jsx"), include_str!("../../../../assets/plugins/nickel-default/src/Launcher.jsx")).unwrap();
+                std::fs::write(directory.path().join("Launcher.jsx"), include_str!("../../../../assets/plugins/nickel-default/src/Launcher.tsx")).unwrap();
                 std::fs::write(directory.path().join("styles/launcher.css"), include_str!("../../../../assets/plugins/nickel-default/src/styles/launcher.css")).unwrap();
                 std::fs::write(directory.path().join("main.jsx"), "import {Launcher} from './Launcher.js'; export default Launcher;").unwrap();
                 let (source, modules) = super::super::compile_jsx_modules(directory.path(), "main.js", Path::new("main.jsx")).unwrap();
@@ -1106,7 +1117,7 @@ mod platform {
                 });
                 let directory = tempfile::tempdir().unwrap();
                 std::fs::create_dir(directory.path().join("styles")).unwrap();
-                std::fs::write(directory.path().join("Launcher.jsx"), include_str!("../../../../assets/plugins/nickel-default/src/Launcher.jsx")).unwrap();
+                std::fs::write(directory.path().join("Launcher.jsx"), include_str!("../../../../assets/plugins/nickel-default/src/Launcher.tsx")).unwrap();
                 std::fs::write(directory.path().join("styles/launcher.css"), include_str!("../../../../assets/plugins/nickel-default/src/styles/launcher.css")).unwrap();
                 std::fs::write(directory.path().join("main.jsx"), "import {Launcher} from './Launcher.js'; export default Launcher;").unwrap();
                 let (source, modules) = super::super::compile_jsx_modules(directory.path(), "main.js", Path::new("main.jsx")).unwrap();

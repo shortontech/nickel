@@ -106,7 +106,7 @@ package retains its own execution context and grants.
 
 ## Appearance capability migration
 
-`Appearance.jsx` registers an ordinary Settings page in this package's module
+`Appearance.tsx` registers an ordinary Settings page in this package's module
 graph. It reads configured preferences and resolved native hue/intensity, and
 uses `nickel.appearance` / `nickel.wallpaper` for changes. Theme modes, preset
 accent hues, custom hue entry, hue/intensity sliders, system accent inheritance,
@@ -118,7 +118,7 @@ Wallpaper labels/previews and image choosing use public native capabilities; the
 chooser reports cancellation and unavailable platform support. File artwork uses
 its ordinary registered Settings page.
 
-`DefaultApps.jsx` registers the Applications page through the same module graph.
+`DefaultApps.tsx` registers the Applications page through the same module graph.
 It consumes association targets/handlers and native revision strings, renders
 search and current/protected/read-only state, and reports native consent and
 write results. Writes invoke `nickel.associations.setDefault` with stable native
@@ -128,7 +128,7 @@ passed. The ABI deliberately bounds each catalog to 128 targets and handlers and
 reports truncation; users can open the operating system's default-app settings for
 entries outside that bound. Paginated traversal of larger catalogs is not implemented.
 
-`Displays.jsx` owns display selection, draft layout, drag arrangement/snapping,
+`Displays.tsx` owns display selection, draft layout, drag arrangement/snapping,
 mode selection, scale, and primary display selection. It submits whole layouts
 with native connector identities; changed native snapshots discard stale drafts.
 Preview confirmation uses capability snapshot state. Orientation controls require
@@ -143,9 +143,9 @@ installed TypeScript compiler in JavaScript mode. Regenerate them from the
 repository root after changing JSX:
 
 ```sh
-tsc --allowJs --noResolve --checkJs false --jsx react --jsxFactory h --jsxFragmentFactory Fragment --target ES2022 --module ES2022 --outDir /tmp/nickel-default-js assets/plugins/nickel-default/src/*.jsx
-for source in assets/plugins/nickel-default/src/*.jsx; do
-  name=$(basename "$source" .jsx)
+tsc --allowJs --noResolve --checkJs false --jsx react --jsxFactory h --jsxFragmentFactory Fragment --target ES2022 --module ES2022 --outDir /tmp/nickel-default-js assets/plugins/nickel-default/src/*.tsx
+for source in assets/plugins/nickel-default/src/*.tsx; do
+  name=$(basename "$source" .tsx)
   cp "/tmp/nickel-default-js/$name.js" assets/plugins/nickel-default/src/
 done
 ```

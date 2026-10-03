@@ -266,7 +266,10 @@ impl PluginPackage {
         let mut modules = Vec::new();
         let mut total = 0usize;
         for (&path, bytes) in &catalog {
-            if !matches!(path.rsplit('.').next(), Some("js" | "jsx" | "css")) {
+            if !matches!(
+                path.rsplit('.').next(),
+                Some("js" | "jsx" | "ts" | "tsx" | "css")
+            ) {
                 continue;
             }
             total = total.saturating_add(bytes.len());
@@ -368,7 +371,7 @@ impl PluginPackage {
                 }
                 let path = entry.path();
                 let extension = path.extension().and_then(|value| value.to_str());
-                if !matches!(extension, Some("js" | "jsx" | "css")) {
+                if !matches!(extension, Some("js" | "jsx" | "ts" | "tsx" | "css")) {
                     continue;
                 }
                 if files.len() >= MAX_PLUGIN_MODULES {
@@ -1188,9 +1191,17 @@ impl PluginManifest {
         }) {
             return Err("plugin version must contain 1 to 64 version characters".into());
         }
-        if !safe_relative_path(&self.entry) || !self.entry.ends_with(".js") {
+        if !safe_relative_path(&self.entry)
+            || !matches!(
+                Path::new(&self.entry)
+                    .extension()
+                    .and_then(|value| value.to_str()),
+                Some("js" | "jsx" | "ts" | "tsx")
+            )
+        {
             return Err(
-                "plugin entry must be a relative .js path inside the plugin directory".into(),
+                "plugin entry must be a relative .js, .jsx, .ts, or .tsx path inside the plugin directory"
+                    .into(),
             );
         }
         if self.stylesheet.as_ref().is_some_and(|path| {
@@ -1789,7 +1800,7 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(manifest.entry, "src/Shell.js");
-        assert_eq!(manifest.surfaces.len(), 5);
+        assert_eq!(manifest.surfaces.len(), 10);
         assert!(
             manifest
                 .composition
@@ -1849,6 +1860,16 @@ mod tests {
         )
         .unwrap();
         std::fs::write(directory.path().join("ui/card.css"), ".card {}").unwrap();
+        std::fs::write(
+            directory.path().join("ui/types.ts"),
+            "export type Id = string;",
+        )
+        .unwrap();
+        std::fs::write(
+            directory.path().join("ui/view.tsx"),
+            "export const View = () => <Text>view</Text>;",
+        )
+        .unwrap();
         std::fs::write(directory.path().join("ui/icon.png"), b"ignored").unwrap();
 
         let modules = PluginPackage::load_module_sources(directory.path()).unwrap();
@@ -1857,9 +1878,21 @@ mod tests {
                 .iter()
                 .map(|module| module.path.as_str())
                 .collect::<Vec<_>>(),
-            ["main.js", "ui/card.css", "ui/card.js"]
+            [
+                "main.js",
+                "ui/card.css",
+                "ui/card.js",
+                "ui/types.ts",
+                "ui/view.tsx"
+            ]
         );
         assert_eq!(modules[2].source, "export const Card = 1;");
+    }
+
+    #[test]
+    fn accepts_tsx_as_a_package_entry() {
+        let manifest = PluginManifest::from_json(&VALID.replace("main.js", "main.tsx")).unwrap();
+        assert_eq!(manifest.entry, "main.tsx");
     }
 
     #[cfg(unix)]

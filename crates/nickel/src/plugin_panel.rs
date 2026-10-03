@@ -3899,7 +3899,7 @@ mod tests {
             .stack_size(16 * 1024 * 1024)
             .spawn(|| {
         let package = crate::bundled_plugin_assets::load_package("nickel-default").unwrap();
-        assert_eq!(package.manifest.entry, "src/Shell.js");
+        assert_eq!(package.manifest.entry, "src/Shell.tsx");
         assert!(
             package
                 .manifest
@@ -3914,13 +3914,13 @@ mod tests {
         );
         assert_eq!(
             package.manifest.composition.as_ref().unwrap().exports["shell.settings.plugins"],
-            "./src/Plugins.js#Plugins"
+            "./src/Plugins.tsx#Plugins"
         );
         assert!(
             package
                 .modules
                 .iter()
-                .any(|module| module.path == "src/Shell.jsx")
+                .any(|module| module.path == "src/Shell.tsx")
         );
         let runtime = PluginPanelApplication::shared_package_runtime(
             &package,

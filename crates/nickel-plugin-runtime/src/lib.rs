@@ -1,9 +1,8 @@
 //! Shared JavaScript evaluator for Nickel's native JSX hosts.
 //!
 //! Hosts own component validation and effect authority. This crate owns only
-//! the Boa context and the bootstrap's render and event transactions.
+//! the direct V8 context and the bootstrap's render and event transactions.
 
-use boa_engine::{Context, JsValue, Source, js_string};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -11,6 +10,7 @@ use std::time::Instant;
 
 mod composition;
 pub mod composition_runtime;
+mod engine;
 mod modules;
 pub mod settings;
 
@@ -18,9 +18,6 @@ pub use composition::ComposedShellGraph;
 pub use modules::{JsxModuleGraph, ModuleSource};
 
 const BOOTSTRAP: &str = include_str!("../../../assets/plugin-runtime/bootstrap.js");
-// Boa enforces this per JavaScript call frame. It bounds accidental infinite
-// loops in plugin code without retaining an event or frame history.
-const MAX_JS_LOOP_ITERATIONS: u64 = 100_000;
 
 fn encoded_json_len(value: &Value) -> Result<usize, String> {
     struct Counter(usize);
@@ -94,7 +91,7 @@ const PLUGIN_CAPABILITY_NAMES: &[&str] = &[
 ];
 
 pub struct JsxRuntime {
-    context: Context,
+    engine: engine::JavascriptEngine,
     settings_provider: Option<String>,
     settings_pages: std::collections::BTreeSet<String>,
     settings_revision: u64,
@@ -461,7 +458,7 @@ struct ReconciliationRequest {
 impl JsxRuntime {
     pub fn new(source: &str, data: Option<&str>) -> Result<Self, String> {
         let mut runtime = Self {
-            context: Context::default(),
+            engine: engine::JavascriptEngine::new(),
             settings_provider: None,
             settings_pages: Default::default(),
             settings_revision: 0,
@@ -469,10 +466,6 @@ impl JsxRuntime {
             checkpoint: None,
             invalidated: false,
         };
-        runtime
-            .context
-            .runtime_limits_mut()
-            .set_loop_iteration_limit(MAX_JS_LOOP_ITERATIONS);
         runtime.eval(BOOTSTRAP)?;
         runtime.set_capability_store(&[], &serde_json::json!({}))?;
         if let Some(data) = data {
@@ -504,10 +497,7 @@ impl JsxRuntime {
         if self.invalidated {
             return Err("runtime checkpoint was invalidated".into());
         }
-        self.context
-            .eval(Source::from_bytes(source))
-            .map_err(|error| error.to_string())?;
-        Ok(())
+        self.engine.eval(source)
     }
 
     pub(crate) fn set_diagnostic_owner(&mut self, owner: &str) -> Result<(), String> {
@@ -519,15 +509,7 @@ impl JsxRuntime {
         if self.invalidated {
             return Err("runtime checkpoint was invalidated".into());
         }
-        let value = self
-            .context
-            .eval(Source::from_bytes(source))
-            .map_err(|error| error.to_string())?;
-        let text = value
-            .to_string(&mut self.context)
-            .map_err(|error| error.to_string())?
-            .to_std_string_escaped();
-        serde_json::from_str(&text).map_err(|error| error.to_string())
+        self.engine.eval_json(source)
     }
 
     pub fn set_data(&mut self, serialized_json: &str) -> Result<(), String> {
@@ -635,18 +617,8 @@ impl JsxRuntime {
         }
         // Host snapshots are data, not source code. Compiling a large object
         // literal on every input/projection update stalls the compositor.
-        let argument =
-            JsValue::from_json(&data, &mut self.context).map_err(|error| error.to_string())?;
-        let setter = self
-            .context
-            .global_object()
-            .get(js_string!("__nickelSetData"), &mut self.context)
-            .map_err(|error| error.to_string())?;
-        setter
-            .as_callable()
-            .ok_or("host data setter is not callable")?
-            .call(&JsValue::undefined(), &[argument], &mut self.context)
-            .map_err(|error| error.to_string())?;
+        self.engine
+            .call_global_void("__nickelSetData", &[data.clone()])?;
         // Surface geometry does not change package setting values.
         if let Some(object) = data.as_object_mut() {
             object.remove("surface");
@@ -665,19 +637,8 @@ impl JsxRuntime {
         if self.invalidated {
             return Err("runtime checkpoint was invalidated".into());
         }
-        let snapshot =
-            JsValue::from_json(snapshot, &mut self.context).map_err(|error| error.to_string())?;
-        let setter = self
-            .context
-            .global_object()
-            .get(js_string!("__nickelSetWindowsStore"), &mut self.context)
-            .map_err(|error| error.to_string())?;
-        setter
-            .as_callable()
-            .ok_or("windows store setter is not callable")?
-            .call(&JsValue::undefined(), &[snapshot], &mut self.context)
-            .map(|changed| changed.to_boolean())
-            .map_err(|error| error.to_string())
+        self.engine
+            .call_global_bool("__nickelSetWindowsStore", std::slice::from_ref(snapshot))
     }
 
     /// Publish the package owner's already capability-filtered application
@@ -686,22 +647,10 @@ impl JsxRuntime {
         if self.invalidated {
             return Err("runtime checkpoint was invalidated".into());
         }
-        let snapshot =
-            JsValue::from_json(snapshot, &mut self.context).map_err(|error| error.to_string())?;
-        let setter = self
-            .context
-            .global_object()
-            .get(
-                js_string!("__nickelSetApplicationsStore"),
-                &mut self.context,
-            )
-            .map_err(|error| error.to_string())?;
-        setter
-            .as_callable()
-            .ok_or("applications store setter is not callable")?
-            .call(&JsValue::undefined(), &[snapshot], &mut self.context)
-            .map(|changed| changed.to_boolean())
-            .map_err(|error| error.to_string())
+        self.engine.call_global_bool(
+            "__nickelSetApplicationsStore",
+            std::slice::from_ref(snapshot),
+        )
     }
 
     /// Publish the owner's already filtered public notification feed. Invoke
@@ -710,79 +659,34 @@ impl JsxRuntime {
         if self.invalidated {
             return Err("runtime checkpoint was invalidated".into());
         }
-        let snapshot =
-            JsValue::from_json(snapshot, &mut self.context).map_err(|error| error.to_string())?;
-        let setter = self
-            .context
-            .global_object()
-            .get(
-                js_string!("__nickelSetNotificationsStore"),
-                &mut self.context,
-            )
-            .map_err(|error| error.to_string())?;
-        setter
-            .as_callable()
-            .ok_or("notifications store setter is not callable")?
-            .call(&JsValue::undefined(), &[snapshot], &mut self.context)
-            .map(|changed| changed.to_boolean())
-            .map_err(|error| error.to_string())
+        self.engine.call_global_bool(
+            "__nickelSetNotificationsStore",
+            std::slice::from_ref(snapshot),
+        )
     }
 
     pub fn set_workspaces_store(&mut self, snapshot: &Value) -> Result<bool, String> {
         if self.invalidated {
             return Err("runtime checkpoint was invalidated".into());
         }
-        let snapshot =
-            JsValue::from_json(snapshot, &mut self.context).map_err(|error| error.to_string())?;
-        let setter = self
-            .context
-            .global_object()
-            .get(js_string!("__nickelSetWorkspacesStore"), &mut self.context)
-            .map_err(|error| error.to_string())?;
-        setter
-            .as_callable()
-            .ok_or("workspaces store setter is not callable")?
-            .call(&JsValue::undefined(), &[snapshot], &mut self.context)
-            .map(|changed| changed.to_boolean())
-            .map_err(|error| error.to_string())
+        self.engine
+            .call_global_bool("__nickelSetWorkspacesStore", std::slice::from_ref(snapshot))
     }
 
     pub fn set_outputs_store(&mut self, snapshot: &Value) -> Result<bool, String> {
         if self.invalidated {
             return Err("runtime checkpoint was invalidated".into());
         }
-        let snapshot =
-            JsValue::from_json(snapshot, &mut self.context).map_err(|error| error.to_string())?;
-        let setter = self
-            .context
-            .global_object()
-            .get(js_string!("__nickelSetOutputsStore"), &mut self.context)
-            .map_err(|error| error.to_string())?;
-        setter
-            .as_callable()
-            .ok_or("outputs store setter is not callable")?
-            .call(&JsValue::undefined(), &[snapshot], &mut self.context)
-            .map(|changed| changed.to_boolean())
-            .map_err(|error| error.to_string())
+        self.engine
+            .call_global_bool("__nickelSetOutputsStore", std::slice::from_ref(snapshot))
     }
 
     pub fn set_locale_store(&mut self, snapshot: &Value) -> Result<bool, String> {
         if self.invalidated {
             return Err("runtime checkpoint was invalidated".into());
         }
-        let snapshot =
-            JsValue::from_json(snapshot, &mut self.context).map_err(|error| error.to_string())?;
-        let setter = self
-            .context
-            .global_object()
-            .get(js_string!("__nickelSetLocaleStore"), &mut self.context)
-            .map_err(|error| error.to_string())?;
-        setter
-            .as_callable()
-            .ok_or("locale store setter is not callable")?
-            .call(&JsValue::undefined(), &[snapshot], &mut self.context)
-            .map(|changed| changed.to_boolean())
-            .map_err(|error| error.to_string())
+        self.engine
+            .call_global_bool("__nickelSetLocaleStore", std::slice::from_ref(snapshot))
     }
 
     /// Publish host-owned effective presentation state. This is observation,
@@ -791,19 +695,8 @@ impl JsxRuntime {
         if self.invalidated {
             return Err("runtime checkpoint was invalidated".into());
         }
-        let snapshot =
-            JsValue::from_json(snapshot, &mut self.context).map_err(|error| error.to_string())?;
-        let setter = self
-            .context
-            .global_object()
-            .get(js_string!("__nickelSetThemeStore"), &mut self.context)
-            .map_err(|error| error.to_string())?;
-        setter
-            .as_callable()
-            .ok_or("theme store setter is not callable")?
-            .call(&JsValue::undefined(), &[snapshot], &mut self.context)
-            .map(|changed| changed.to_boolean())
-            .map_err(|error| error.to_string())
+        self.engine
+            .call_global_bool("__nickelSetThemeStore", std::slice::from_ref(snapshot))
     }
 
     /// Publish the current owner's declared grants and bounded runtime
@@ -873,19 +766,8 @@ impl JsxRuntime {
             );
         }
         let value = serde_json::json!({"known":PLUGIN_CAPABILITY_NAMES,"entries":entries});
-        let value =
-            JsValue::from_json(&value, &mut self.context).map_err(|error| error.to_string())?;
-        let setter = self
-            .context
-            .global_object()
-            .get(js_string!("__nickelSetCapabilityStore"), &mut self.context)
-            .map_err(|error| error.to_string())?;
-        setter
-            .as_callable()
-            .ok_or("capability store setter is not callable")?
-            .call(&JsValue::undefined(), &[value], &mut self.context)
-            .map(|changed| changed.to_boolean())
-            .map_err(|error| error.to_string())
+        self.engine
+            .call_global_bool("__nickelSetCapabilityStore", &[value])
     }
 
     pub fn select_surface(&mut self, id: &str) -> Result<(), String> {
@@ -900,20 +782,10 @@ impl JsxRuntime {
         if self.invalidated {
             return Err("runtime checkpoint was invalidated".into());
         }
-        let mount = JsValue::from(js_string!(mount_id));
-        let snapshot =
-            JsValue::from_json(snapshot, &mut self.context).map_err(|error| error.to_string())?;
-        let setter = self
-            .context
-            .global_object()
-            .get(js_string!("__nickelSetSurfaceStore"), &mut self.context)
-            .map_err(|error| error.to_string())?;
-        setter
-            .as_callable()
-            .ok_or("surface store setter is not callable")?
-            .call(&JsValue::undefined(), &[mount, snapshot], &mut self.context)
-            .map(|changed| changed.to_boolean())
-            .map_err(|error| error.to_string())
+        self.engine.call_global_bool(
+            "__nickelSetSurfaceStore",
+            &[Value::String(mount_id.to_owned()), snapshot.clone()],
+        )
     }
 
     pub fn register_surface_entry(&mut self, id: &str, source: &str) -> Result<(), String> {

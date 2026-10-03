@@ -4,7 +4,7 @@
   "name": "Nickel Cupertino Dock",
   "author": "Nickel",
   "version": "0.1.0",
-  "entry": "main.js",
+  "entry": "main.tsx",
   "stylesheet": "ui.css",
   "images": [
     { "id": "nickel-logo", "path": "images/nickel-logo.png" }
@@ -18,8 +18,8 @@
       "nickel-default": "^0.2"
     },
     "replaces": {
-      "shell": "./main.js#Shell",
-      "shell.taskbar": "./main.js#Taskbar"
+      "shell": "./main.tsx#Shell",
+      "shell.taskbar": "./main.tsx#Taskbar"
     }
   },
   "capabilities": [

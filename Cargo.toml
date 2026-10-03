@@ -56,7 +56,7 @@ smithay = { path = "vendor/smithay" }
 [workspace.package]
 edition = "2024"
 license = "MIT OR Apache-2.0"
-rust-version = "1.94"
+rust-version = "1.96"
 
 [workspace.dependencies]
 alacritty_terminal = { version = "0.26.0", default-features = false }

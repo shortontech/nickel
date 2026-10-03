@@ -2,8 +2,10 @@
 
 `bootstrap.js` defines components, hooks, Settings registration, and the public
 `nickel` capability clients evaluated inside a package's JavaScript context.
-Nickel runs compiled JavaScript with Boa, without Node, a browser, or a DOM.
-JSX and CSS remain ordinary authorable package files.
+Nickel uses Oxc to erase TypeScript and lower JSX, then runs the cached JavaScript
+through direct V8 bindings without Node, Deno, a browser, or a DOM. TSX is the
+canonical authoring format; JavaScript, JSX, TypeScript, and CSS remain supported
+package files.
 
 Rust supplies bounded capability snapshots and validates effects before native
 execution. Presentation and interaction logic belong in JSX; a custom Settings

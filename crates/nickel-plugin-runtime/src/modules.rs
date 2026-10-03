@@ -1,4 +1,13 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
+use std::sync::{Arc, OnceLock};
+
+use oxc_allocator::Allocator;
+use oxc_codegen::Codegen;
+use oxc_parser::Parser;
+use oxc_semantic::SemanticBuilder;
+use oxc_span::SourceType;
+use oxc_transformer::{JsxOptions, JsxRuntime, TransformOptions, Transformer};
 
 /// One UTF-8 source file inside a plugin package.
 #[derive(Clone, Copy, Debug)]
@@ -23,6 +32,7 @@ pub struct JsxModuleGraph {
     component_bridge: bool,
     contribution_catalog: serde_json::Value,
     local_components: serde_json::Value,
+    compiled: Arc<OnceLock<Result<String, String>>>,
 }
 
 impl JsxModuleGraph {
@@ -37,7 +47,11 @@ impl JsxModuleGraph {
             let path = normalize_path(module.path)?;
             let target = if path.ends_with(".css") {
                 &mut stylesheets
-            } else if path.ends_with(".js") || path.ends_with(".jsx") {
+            } else if path.ends_with(".js")
+                || path.ends_with(".jsx")
+                || path.ends_with(".ts")
+                || path.ends_with(".tsx")
+            {
                 &mut scripts
             } else {
                 return Err(format!("unsupported module type {path:?}"));
@@ -60,6 +74,7 @@ impl JsxModuleGraph {
             component_bridge: false,
             contribution_catalog: serde_json::json!({}),
             local_components: serde_json::json!({}),
+            compiled: Arc::new(OnceLock::new()),
         };
         graph.validate_reachable()?;
         Ok(graph)
@@ -75,6 +90,7 @@ impl JsxModuleGraph {
         self.contribution_catalog = contributions;
         self.local_components = local;
         self.component_bridge = true;
+        self.compiled = Arc::new(OnceLock::new());
         self
     }
 
@@ -107,6 +123,7 @@ impl JsxModuleGraph {
                 .insert(contract.clone(), (path, name.into()));
         }
         self.validate_reachable()?;
+        self.compiled = Arc::new(OnceLock::new());
         Ok(self)
     }
 
@@ -141,6 +158,12 @@ impl JsxModuleGraph {
     }
 
     pub(crate) fn compile(&self) -> Result<String, String> {
+        self.compiled
+            .get_or_init(|| self.compile_uncached())
+            .clone()
+    }
+
+    fn compile_uncached(&self) -> Result<String, String> {
         let mut visited = BTreeSet::new();
         let mut order = Vec::new();
         self.visit_roots(&mut visited, &mut order, &mut Vec::new())?;
@@ -226,7 +249,8 @@ const __nickelCompositionClient = Object.freeze({...nickel, get data() { return 
         }
         for path in order {
             let source = &self.scripts[&path];
-            let transformed = transform_module(&path, source)?;
+            let source = transpile_module(&path, source)?;
+            let transformed = transform_module(&path, &source)?;
             output.push_str(&format!(
                 "__nickelDefineModule({}, function(module, exports, require) {{\n{}\n}});\n",
                 js_string(&path),
@@ -296,6 +320,66 @@ const __nickelCompositionClient = Object.freeze({...nickel, get data() { return 
         scripts.push(path.to_owned());
         Ok(())
     }
+}
+
+/// Parse, type-erase, and lower JSX once when the bounded package graph is
+/// compiled. V8 receives ordinary JavaScript; this is never a render-time path.
+fn transpile_module(path: &str, source: &str) -> Result<String, String> {
+    let source_type = SourceType::from_path(Path::new(path)).map_err(|error| error.to_string())?;
+    let allocator = Allocator::default();
+    let parsed = Parser::new(&allocator, source, source_type).parse();
+    if !parsed.diagnostics.is_empty() {
+        return Err(format!(
+            "Oxc could not parse {path:?}: {}",
+            parsed
+                .diagnostics
+                .iter()
+                .map(|diagnostic| format!("{diagnostic:?}"))
+                .collect::<Vec<_>>()
+                .join("; ")
+        ));
+    }
+    let mut program = parsed.program;
+    let semantic = SemanticBuilder::new()
+        .with_excess_capacity(2.0)
+        .with_enum_eval(true)
+        .build(&program);
+    if !semantic.diagnostics.is_empty() {
+        return Err(format!(
+            "Oxc rejected {path:?}: {}",
+            semantic
+                .diagnostics
+                .iter()
+                .map(|diagnostic| format!("{diagnostic:?}"))
+                .collect::<Vec<_>>()
+                .join("; ")
+        ));
+    }
+    let options = TransformOptions {
+        jsx: JsxOptions {
+            runtime: JsxRuntime::Classic,
+            pragma: Some("h".into()),
+            pragma_frag: Some("Fragment".into()),
+            pure: false,
+            display_name_plugin: false,
+            ..JsxOptions::default()
+        },
+        ..TransformOptions::default()
+    };
+    let transformed = Transformer::new(&allocator, Path::new(path), &options)
+        .build_with_scoping(semantic.semantic.into_scoping(), &mut program);
+    if !transformed.diagnostics.is_empty() {
+        return Err(format!(
+            "Oxc could not transform {path:?}: {}",
+            transformed
+                .diagnostics
+                .iter()
+                .map(|diagnostic| format!("{diagnostic:?}"))
+                .collect::<Vec<_>>()
+                .join("; ")
+        ));
+    }
+    Ok(Codegen::new().build(&program).code)
 }
 
 fn transform_module(path: &str, source: &str) -> Result<String, String> {
@@ -573,5 +657,62 @@ mod tests {
             .render("__nickelRender()", |node| Ok(node.clone()))
             .unwrap();
         assert!(rendered.to_string().contains("Nickel!"));
+    }
+
+    #[test]
+    fn tsx_is_type_erased_and_jsx_remains_supported() {
+        let graph = JsxModuleGraph::new("main.tsx", [
+            ModuleSource {
+                path: "main.tsx",
+                source: "import type { Label } from './values.ts';\nimport { suffix } from './values.ts';\ninterface GreetingProps { prefix: string }\nfunction Greeting({prefix}: GreetingProps) { const label: Label = 'Nickel'; return <Text>{prefix + label + suffix}</Text>; }\nexport default function App() { return <Window><Greeting prefix=\"Hello \" /></Window>; }",
+            },
+            ModuleSource {
+                path: "values.ts",
+                source: "export type Label = string;\nexport const suffix: string = '!';",
+            },
+        ])
+        .unwrap();
+        let mut runtime = JsxRuntime::new_modules(&graph, None).unwrap();
+        let rendered: serde_json::Value = runtime
+            .render("__nickelRender()", |node| Ok(node.clone()))
+            .unwrap();
+        assert!(rendered.to_string().contains("Hello Nickel!"));
+
+        let jsx = JsxModuleGraph::new(
+            "main.jsx",
+            [ModuleSource {
+                path: "main.jsx",
+                source: "export default function App() { return <Text>JSX compatibility</Text>; }",
+            }],
+        )
+        .unwrap();
+        let mut runtime = JsxRuntime::new_modules(&jsx, None).unwrap();
+        let rendered: serde_json::Value = runtime
+            .render("__nickelRender()", |node| Ok(node.clone()))
+            .unwrap();
+        assert!(rendered.to_string().contains("JSX compatibility"));
+    }
+
+    #[test]
+    fn unchanged_graphs_share_one_compiled_artifact() {
+        let graph = JsxModuleGraph::new(
+            "main.tsx",
+            [ModuleSource {
+                path: "main.tsx",
+                source: "export default function App(): unknown { return <Text>cached</Text>; }",
+            }],
+        )
+        .unwrap();
+        assert!(graph.compiled.get().is_none());
+        let first = graph.compile().unwrap();
+        assert!(graph.compiled.get().is_some());
+
+        let clone = graph.clone();
+        assert!(Arc::ptr_eq(&graph.compiled, &clone.compiled));
+        assert_eq!(clone.compile().unwrap(), first);
+
+        let changed = clone.with_component_bridge(serde_json::json!({}), serde_json::json!({}));
+        assert!(!Arc::ptr_eq(&graph.compiled, &changed.compiled));
+        assert!(changed.compiled.get().is_none());
     }
 }
