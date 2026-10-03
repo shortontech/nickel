@@ -5,7 +5,7 @@ mod emission;
 mod layout;
 mod scrollbar;
 mod selection;
-use emission::emit_element;
+use emission::{EmissionPhases, emit_element};
 use layout::{
     apply_transient_state, explicit_px, layout_element, resolve_grid_columns,
     scale_explicit_geometry,
@@ -420,11 +420,10 @@ pub struct FrameResourceDiagnostics {
     pub nodes_measured: usize,
     /// Resolver nodes whose placement actually executed for this frame.
     pub nodes_placed: usize,
-    /// Nodes for which the combined paint/interaction collector executed.
-    pub output_nodes_executed: usize,
-    /// Nodes whose combined paint/interaction records were copied from the
-    /// authoritative previous fragments without entering the collector.
-    pub output_nodes_reused: usize,
+    pub paint_nodes_executed: usize,
+    pub paint_nodes_reused: usize,
+    pub interaction_nodes_executed: usize,
+    pub interaction_nodes_reused: usize,
     pub semantic_nodes_executed: usize,
     pub semantic_nodes_reused: usize,
 }
@@ -537,8 +536,10 @@ pub struct UiFrame<Message = String> {
     retained_layout: HashMap<UiId, ResolvedNode>,
     nodes_measured: usize,
     nodes_placed: usize,
-    output_nodes_executed: usize,
-    output_nodes_reused: usize,
+    paint_nodes_executed: usize,
+    paint_nodes_reused: usize,
+    interaction_nodes_executed: usize,
+    interaction_nodes_reused: usize,
     semantic_nodes_executed: usize,
     semantic_nodes_reused: usize,
     declaration_root: Option<Element<Message>>,
@@ -585,8 +586,10 @@ impl<Message> Default for UiFrame<Message> {
             retained_layout: HashMap::new(),
             nodes_measured: 0,
             nodes_placed: 0,
-            output_nodes_executed: 0,
-            output_nodes_reused: 0,
+            paint_nodes_executed: 0,
+            paint_nodes_reused: 0,
+            interaction_nodes_executed: 0,
+            interaction_nodes_reused: 0,
             semantic_nodes_executed: 0,
             semantic_nodes_reused: 0,
             declaration_root: None,
@@ -654,14 +657,14 @@ fn paint_refresh_preserves_geometry<Message>(element: &Element<Message>) -> bool
             .all(paint_refresh_preserves_geometry)
 }
 
-fn output_subtree_reuse_safe<Message>(element: &Element<Message>) -> bool {
+fn independent_output_reuse_safe<Message>(element: &Element<Message>) -> bool {
     !matches!(
         element.kind,
         Kind::Grid { .. } | Kind::VerticalScroll { .. } | Kind::Dropdown { .. }
     ) && !matches!(element.style.overflow_x, Overflow::Scroll | Overflow::Auto)
         && !matches!(element.style.overflow_y, Overflow::Scroll | Overflow::Auto)
         && element.style.proximity_magnification.is_none()
-        && element.children.iter().all(output_subtree_reuse_safe)
+        && element.children.iter().all(independent_output_reuse_safe)
 }
 
 fn find_declared_element<Message: Clone>(
@@ -927,7 +930,7 @@ impl<Message: Clone> UiFrame<Message> {
         apply_transient_state(&mut content, &content_id, state);
         let index = layout_element(&content, &content_id, content_rect, None, Some(rect), self);
         self.resolved.nodes[parent].children.push(index);
-        emit_element(&content, index, None, self, None);
+        emit_element(&content, index, None, self, None, EmissionPhases::ALL);
         for node in &self.resolved.nodes[index..] {
             state.touch(node.id.clone());
         }
@@ -1871,7 +1874,7 @@ impl<Message: Clone> UiFrame<Message> {
         }
         tree.prepare_selection_paints(state);
         tree.reset_emission();
-        tree.emit_incremental(&root, 0, None, previous);
+        tree.emit_incremental(&root, 0, None, previous, EmissionPhases::ALL);
         tree.present_text_context(state);
         tree.append_scrollbars(Some(state));
         tree.commands.append(&mut tree.overlay_commands);
@@ -1987,46 +1990,78 @@ impl<Message: Clone> UiFrame<Message> {
         })
     }
 
-    pub(super) fn emit_incremental(
+    fn emit_incremental(
         &mut self,
         element: &Element<Message>,
         node_index: usize,
         inherited_foreground: Option<Color>,
         previous: Option<&Self>,
+        requested: EmissionPhases,
     ) {
+        if requested.is_empty() {
+            return;
+        }
         let id = self.resolved.nodes[node_index].id.clone();
-        let reusable = previous.is_some()
-            && output_subtree_reuse_safe(element)
-            && self
-                .retained_nodes
-                .subtree_phase_is_clean(&id, super::retained::DirtyPhases::PAINT)
-            && self
-                .retained_nodes
-                .subtree_phase_is_clean(&id, super::retained::DirtyPhases::INTERACTION)
+        let safe = previous.is_some()
+            && independent_output_reuse_safe(element)
             && previous.is_some_and(|previous| {
                 previous
                     .resolved
                     .find(&id)
                     .is_some_and(|node| node.allocated == self.resolved.nodes[node_index].allocated)
             });
-        if reusable
-            && let Some(previous) = previous
-            && self.reuse_output_subtree(previous, &id)
+        let count = self
+            .resolved
+            .nodes
+            .iter()
+            .filter(|node| self.is_descendant_or_self(&id, &node.id))
+            .count();
+        let mut execute = requested;
+        if requested.paint
+            && safe
+            && self
+                .retained_nodes
+                .subtree_phase_is_clean(&id, super::retained::DirtyPhases::PAINT)
+            && previous.is_some_and(|previous| self.reuse_paint_subtree(previous, &id))
         {
-            let reused = self
-                .resolved
-                .nodes
-                .iter()
-                .filter(|node| self.is_descendant_or_self(&id, &node.id))
-                .count();
-            self.output_nodes_reused = self.output_nodes_reused.saturating_add(reused);
+            self.paint_nodes_reused = self.paint_nodes_reused.saturating_add(count);
+            execute.paint = false;
+        }
+        if requested.interaction
+            && safe
+            && self
+                .retained_nodes
+                .subtree_phase_is_clean(&id, super::retained::DirtyPhases::INTERACTION)
+            && previous.is_some_and(|previous| self.reuse_interaction_subtree(previous, &id))
+        {
+            self.interaction_nodes_reused = self.interaction_nodes_reused.saturating_add(count);
+            execute.interaction = false;
+        }
+        if execute.is_empty() {
             return;
         }
-        self.output_nodes_executed = self.output_nodes_executed.saturating_add(1);
-        emit_element(element, node_index, inherited_foreground, self, previous);
+        // Containers that synthesize or reorder output across phase boundaries
+        // remain deliberately coupled until their topology has retained records.
+        if !independent_output_reuse_safe(element) {
+            execute = EmissionPhases::ALL;
+        }
+        if execute.paint {
+            self.paint_nodes_executed = self.paint_nodes_executed.saturating_add(1);
+        }
+        if execute.interaction {
+            self.interaction_nodes_executed = self.interaction_nodes_executed.saturating_add(1);
+        }
+        emit_element(
+            element,
+            node_index,
+            inherited_foreground,
+            self,
+            previous,
+            execute,
+        );
     }
 
-    fn reuse_output_subtree(&mut self, previous: &Self, id: &UiId) -> bool {
+    fn reuse_paint_subtree(&mut self, previous: &Self, id: &UiId) -> bool {
         let Some(root_fragment) = previous
             .paint_fragments
             .iter()
@@ -2060,7 +2095,13 @@ impl<Message: Clone> UiFrame<Message> {
             });
         }
 
-        let hit_offset = self.hits.len();
+        true
+    }
+
+    fn reuse_interaction_subtree(&mut self, previous: &Self, id: &UiId) -> bool {
+        if previous.resolved.find(id).is_none() {
+            return false;
+        }
         for hit in &previous.hits {
             if previous.is_descendant_or_self(id, &hit.id) {
                 let current_index = self.hits.len();
@@ -2070,7 +2111,6 @@ impl<Message: Clone> UiFrame<Message> {
                 }
             }
         }
-        debug_assert!(self.hits.len() >= hit_offset);
         self.messages.extend(
             previous
                 .messages
@@ -2129,7 +2169,17 @@ impl<Message: Clone> UiFrame<Message> {
             .map(|node| node.hit_stack)
             .collect::<Vec<_>>();
 
-        emit_element(element, node_index, inherited_foreground, self, None);
+        emit_element(
+            element,
+            node_index,
+            inherited_foreground,
+            self,
+            None,
+            EmissionPhases {
+                paint: true,
+                interaction: false,
+            },
+        );
         let commands = self.commands.split_off(command_start);
         let mut fragments = self.paint_fragments.split_off(fragment_start);
         for fragment in &mut fragments {
@@ -2221,7 +2271,7 @@ impl<Message: Clone> UiFrame<Message> {
         layout_element(&root, &root_id, bounds, None, None, &mut tree);
         tree.selection_regions = collect_selection_regions(&root, &tree.resolved);
         tree.reset_emission();
-        emit_element(&root, 0, None, &mut tree, None);
+        emit_element(&root, 0, None, &mut tree, None, EmissionPhases::ALL);
         tree.append_scrollbars(None);
         tree.commands.append(&mut tree.overlay_commands);
         tree.hits.append(&mut tree.overlay_hits);
@@ -3116,8 +3166,10 @@ impl<Message: Clone> UiFrame<Message> {
             retained_nodes_replaced: retained.replaced,
             nodes_measured: self.nodes_measured,
             nodes_placed: self.nodes_placed,
-            output_nodes_executed: self.output_nodes_executed,
-            output_nodes_reused: self.output_nodes_reused,
+            paint_nodes_executed: self.paint_nodes_executed,
+            paint_nodes_reused: self.paint_nodes_reused,
+            interaction_nodes_executed: self.interaction_nodes_executed,
+            interaction_nodes_reused: self.interaction_nodes_reused,
             semantic_nodes_executed: self.semantic_nodes_executed,
             semantic_nodes_reused: self.semantic_nodes_reused,
         }

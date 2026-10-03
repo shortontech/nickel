@@ -1,5 +1,22 @@
 use super::*;
 
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct EmissionPhases {
+    pub(super) paint: bool,
+    pub(super) interaction: bool,
+}
+
+impl EmissionPhases {
+    pub(super) const ALL: Self = Self {
+        paint: true,
+        interaction: true,
+    };
+
+    pub(super) const fn is_empty(self) -> bool {
+        !self.paint && !self.interaction
+    }
+}
+
 fn paint_bounds(commands: &[PaintCommand], fallback: Rect) -> Rect {
     commands
         .iter()
@@ -150,6 +167,7 @@ pub(super) fn emit_element<Message: Clone>(
     inherited_foreground: Option<Color>,
     tree: &mut UiFrame<Message>,
     previous: Option<&UiFrame<Message>>,
+    phases: EmissionPhases,
 ) {
     let node = tree.resolved.nodes[node_index].clone();
     let fragment_start = tree.commands.len();
@@ -169,7 +187,7 @@ pub(super) fn emit_element<Message: Clone>(
         }
         _ => rect,
     };
-    if element.focus_message.is_some() || element.blur_message.is_some() {
+    if phases.interaction && (element.focus_message.is_some() || element.blur_message.is_some()) {
         tree.focus_messages.push((
             node.id.clone(),
             element.focus_message.clone(),
@@ -182,7 +200,9 @@ pub(super) fn emit_element<Message: Clone>(
     {
         // Pointer hit regions are clipped, but semantic controller traversal
         // must retain off-screen actions so it can reveal them on selection.
-        if let Some(message) = &element.message {
+        if phases.interaction
+            && let Some(message) = &element.message
+        {
             tree.messages.push(MessageRegion {
                 id: node.id.clone(),
                 navigation_owner: None,
@@ -192,7 +212,9 @@ pub(super) fn emit_element<Message: Clone>(
                 seeded_value_mapper: element.seeded_value_mapper,
             });
         }
-        if let Some(message) = &element.context_message {
+        if phases.interaction
+            && let Some(message) = &element.context_message
+        {
             tree.context_messages.push(MessageRegion {
                 id: node.id.clone(),
                 navigation_owner: None,
@@ -208,14 +230,16 @@ pub(super) fn emit_element<Message: Clone>(
             Kind::Flex(_) | Kind::Grid { .. } | Kind::Layer
         ) {
             for (&child_index, child) in node.children.iter().zip(&element.children) {
-                tree.emit_incremental(child, child_index, foreground, previous);
+                tree.emit_incremental(child, child_index, foreground, previous, phases);
             }
         }
-        tree.paint_fragments.push(PaintFragment {
-            id: node.id,
-            commands: fragment_start..tree.commands.len(),
-            bounds: paint_bounds(&tree.commands[fragment_start..], node.border_box),
-        });
+        if phases.paint {
+            tree.paint_fragments.push(PaintFragment {
+                id: node.id,
+                commands: fragment_start..tree.commands.len(),
+                bounds: paint_bounds(&tree.commands[fragment_start..], node.border_box),
+            });
+        }
         return;
     }
     let rounded_solid_border = match (element.style.background, element.style.border) {
@@ -226,7 +250,8 @@ pub(super) fn emit_element<Message: Clone>(
         }
         _ => None,
     };
-    if let Some(blur) = element.style.backdrop_blur
+    if phases.paint
+        && let Some(blur) = element.style.backdrop_blur
         && blur > 0.0
     {
         tree.commands.push(PaintCommand::BackdropBlur {
@@ -235,7 +260,8 @@ pub(super) fn emit_element<Message: Clone>(
             blur,
         });
     }
-    if let Some(shadow) = element.style.box_shadow
+    if phases.paint
+        && let Some(shadow) = element.style.box_shadow
         && shadow.color != 0
     {
         let layers = shadow.blur.ceil().clamp(1.0, 12.0) as u32;
@@ -259,7 +285,9 @@ pub(super) fn emit_element<Message: Clone>(
             });
         }
     }
-    if let Some((background, border)) = rounded_solid_border {
+    if phases.paint
+        && let Some((background, border)) = rounded_solid_border
+    {
         let width = element
             .style
             .border_width
@@ -275,7 +303,7 @@ pub(super) fn emit_element<Message: Clone>(
             color: background,
             radius: (element.style.corner_radius - width).max(0.0),
         });
-    } else {
+    } else if phases.paint {
         if let Some(background) = element.style.background {
             tree.commands.push(match background {
                 Background::Solid(color) if element.style.corner_radius > 0.0 => {
@@ -313,7 +341,9 @@ pub(super) fn emit_element<Message: Clone>(
             });
         }
     }
-    if let Some(message) = &element.message {
+    if phases.interaction
+        && let Some(message) = &element.message
+    {
         tree.messages.push(MessageRegion {
             id: node.id.clone(),
             navigation_owner: None,
@@ -344,7 +374,8 @@ pub(super) fn emit_element<Message: Clone>(
             });
         }
     }
-    if element.message.is_none()
+    if phases.interaction
+        && element.message.is_none()
         && element.context_message.is_none()
         && element.drop_mapper.is_some()
         && !is_scroll_container(element)
@@ -368,7 +399,9 @@ pub(super) fn emit_element<Message: Clone>(
             drop_mapper: element.drop_mapper,
         });
     }
-    if let Some(message) = &element.context_message {
+    if phases.interaction
+        && let Some(message) = &element.context_message
+    {
         tree.context_messages.push(MessageRegion {
             id: node.id.clone(),
             navigation_owner: None,
@@ -400,7 +433,8 @@ pub(super) fn emit_element<Message: Clone>(
             });
         }
     }
-    if element.message.is_none()
+    if phases.interaction
+        && element.message.is_none()
         && element.context_message.is_none()
         && element.drag_seed.is_some()
         && let Some(hit_rect) = node
@@ -423,7 +457,8 @@ pub(super) fn emit_element<Message: Clone>(
             drop_mapper: element.drop_mapper,
         });
     }
-    if let Some(map) = &element.text_mapper
+    if phases.interaction
+        && let Some(map) = &element.text_mapper
         && let Kind::Text {
             value, input_value, ..
         } = &element.kind
@@ -497,10 +532,12 @@ pub(super) fn emit_element<Message: Clone>(
     let foreground = element.style.foreground.or(inherited_foreground);
     let clips_descendants = element.style.overflow_x != Overflow::Visible
         || element.style.overflow_y != Overflow::Visible;
-    if clips_descendants {
+    if phases.paint && clips_descendants {
         tree.commands.push(PaintCommand::PushClip(rect));
     }
-    if let Some(rects) = tree.selection_paints.get(&node_index) {
+    if phases.paint
+        && let Some(rects) = tree.selection_paints.get(&node_index)
+    {
         tree.commands
             .extend(rects.iter().map(|rect| PaintCommand::Fill {
                 rect: *rect,
@@ -512,12 +549,13 @@ pub(super) fn emit_element<Message: Clone>(
     } else {
         rect
     };
-    if let Kind::Text {
-        scale,
-        line_height,
-        selection_x: Some((start, end)),
-        ..
-    } = &element.kind
+    if phases.paint
+        && let Kind::Text {
+            scale,
+            line_height,
+            selection_x: Some((start, end)),
+            ..
+        } = &element.kind
     {
         let color = element
             .style
@@ -550,12 +588,13 @@ pub(super) fn emit_element<Message: Clone>(
             });
         }
     }
-    if let Kind::Text {
-        scale,
-        line_height,
-        caret_position: Some(caret_position),
-        ..
-    } = &element.kind
+    if phases.paint
+        && let Kind::Text {
+            scale,
+            line_height,
+            caret_position: Some(caret_position),
+            ..
+        } = &element.kind
     {
         let parts = element.style.editing_parts.as_ref();
         let color = parts.map_or_else(
@@ -591,6 +630,9 @@ pub(super) fn emit_element<Message: Clone>(
     }
     match &element.kind {
         Kind::CustomPaint { paint } => {
+            if !phases.paint {
+                return;
+            }
             tree.commands.push(PaintCommand::PushClip(rect));
             tree.commands
                 .extend((paint)(rect).into_iter().filter(|command| {
@@ -599,6 +641,9 @@ pub(super) fn emit_element<Message: Clone>(
             tree.commands.push(PaintCommand::PopClip);
         }
         Kind::CustomPaintCommands { commands } => {
+            if !phases.paint {
+                return;
+            }
             tree.commands.push(PaintCommand::PushClip(rect));
             tree.commands
                 .extend(commands.iter().cloned().filter_map(|command| {
@@ -618,6 +663,9 @@ pub(super) fn emit_element<Message: Clone>(
             outline,
             ..
         } => {
+            if !phases.paint {
+                return;
+            }
             let text = text_for_bounds(value, *scale, *bold, *ellipsis, text_rect.size.width);
             if let Some((color, width)) = outline {
                 for (x, y) in [
@@ -665,16 +713,18 @@ pub(super) fn emit_element<Message: Clone>(
             wrap,
             line_height,
         } => {
-            tree.commands.push(PaintCommand::StyledText {
-                bounds: rect,
-                text: value.clone(),
-                spans: spans.clone(),
-                scale: *scale,
-                font_size: None,
-                color: foreground.unwrap_or(0x00ff_ffff),
-                align: element.style.text_align,
-            });
-            if !element.inline_messages.is_empty() {
+            if phases.paint {
+                tree.commands.push(PaintCommand::StyledText {
+                    bounds: rect,
+                    text: value.clone(),
+                    spans: spans.clone(),
+                    scale: *scale,
+                    font_size: None,
+                    color: foreground.unwrap_or(0x00ff_ffff),
+                    align: element.style.text_align,
+                });
+            }
+            if phases.interaction && !element.inline_messages.is_empty() {
                 let glyphs = shape_selection_glyphs(
                     value,
                     rect,
@@ -724,6 +774,9 @@ pub(super) fn emit_element<Message: Clone>(
             high_density,
             presentation,
         } => {
+            if !phases.paint {
+                return;
+            }
             let source = Size::new(image.width() as f32, image.height() as f32);
             let bounds = presentation.bounds(rect, source);
             if presentation.fit == ImageFit::Tile
@@ -772,6 +825,9 @@ pub(super) fn emit_element<Message: Clone>(
             geometry,
             presentation,
         } => {
+            if !phases.paint {
+                return;
+            }
             if let Some(parts) = presentation {
                 let track_style = &parts[0];
                 let track_rect = slider_track_rect(node.content, track_style);
@@ -1161,20 +1217,21 @@ pub(super) fn emit_element<Message: Clone>(
                 .unwrap_or(node.content);
             tree.commands.push(PaintCommand::PushClip(content_clip));
             for (&child_index, child) in node.children.iter().zip(&element.children) {
-                tree.emit_incremental(child, child_index, foreground, previous);
+                tree.emit_incremental(child, child_index, foreground, previous, phases);
             }
             tree.commands.push(PaintCommand::PopClip);
         }
         Kind::Flex(_) | Kind::Grid { .. } | Kind::Layer => {
             for (&child_index, child) in node.children.iter().zip(&element.children) {
-                tree.emit_incremental(child, child_index, foreground, previous);
+                tree.emit_incremental(child, child_index, foreground, previous, phases);
             }
         }
     }
     // Sliders and dropdowns paint their native surface after the generic
     // style layer. Repeat an active/focused border in the foreground so their
     // own track or header cannot cover the selection indicator.
-    if matches!(element.kind, Kind::Slider { .. } | Kind::Dropdown { .. })
+    if phases.paint
+        && matches!(element.kind, Kind::Slider { .. } | Kind::Dropdown { .. })
         && let Some(color) = element.style.border
         && element.style.border_width > 0.0
     {
@@ -1184,12 +1241,14 @@ pub(super) fn emit_element<Message: Clone>(
             width: element.style.border_width,
         });
     }
-    if clips_descendants {
+    if phases.paint && clips_descendants {
         tree.commands.push(PaintCommand::PopClip);
     }
-    tree.paint_fragments.push(PaintFragment {
-        id: node.id,
-        commands: fragment_start..tree.commands.len(),
-        bounds: paint_bounds(&tree.commands[fragment_start..], node.border_box),
-    });
+    if phases.paint {
+        tree.paint_fragments.push(PaintFragment {
+            id: node.id,
+            commands: fragment_start..tree.commands.len(),
+            bounds: paint_bounds(&tree.commands[fragment_start..], node.border_box),
+        });
+    }
 }

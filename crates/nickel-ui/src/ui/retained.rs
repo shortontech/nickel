@@ -1063,7 +1063,7 @@ mod tests {
     }
 
     #[test]
-    fn combined_output_fragments_and_semantics_reuse_only_proven_clean_authority() {
+    fn output_phases_reuse_independently_from_proven_clean_authority() {
         let bounds = Rect::new(0.0, 0.0, 240.0, 80.0);
         let paint_view = |color| {
             Column::new()
@@ -1082,8 +1082,10 @@ mod tests {
             &first,
         );
         let work = painted.resource_diagnostics();
-        assert_eq!(work.output_nodes_executed, 2);
-        assert_eq!(work.output_nodes_reused, 1);
+        assert_eq!(work.paint_nodes_executed, 2);
+        assert_eq!(work.paint_nodes_reused, 1);
+        assert_eq!(work.interaction_nodes_executed, 0);
+        assert_eq!(work.interaction_nodes_reused, 3);
         assert_eq!(work.semantic_nodes_executed, 0);
         assert_eq!(work.semantic_nodes_reused, 3);
         let mut cold_state = UiStateStore::default();
@@ -1114,8 +1116,10 @@ mod tests {
             &first,
         );
         let work = interactive.resource_diagnostics();
-        assert_eq!(work.output_nodes_executed, 2);
-        assert_eq!(work.output_nodes_reused, 1);
+        assert_eq!(work.paint_nodes_executed, 0);
+        assert_eq!(work.paint_nodes_reused, 3);
+        assert_eq!(work.interaction_nodes_executed, 2);
+        assert_eq!(work.interaction_nodes_reused, 1);
         assert!(work.semantic_nodes_executed > 0);
         assert_eq!(work.semantic_nodes_reused, 2);
         let mut cold_state = UiStateStore::default();
@@ -1142,9 +1146,11 @@ mod tests {
             &first,
         );
         let work = semantic.resource_diagnostics();
-        assert_eq!(work.output_nodes_executed, 0);
+        assert_eq!(work.paint_nodes_executed, 0);
+        assert_eq!(work.interaction_nodes_executed, 0);
         assert!(work.semantic_nodes_executed > 0);
-        assert_eq!(work.output_nodes_reused, 3);
+        assert_eq!(work.paint_nodes_reused, 3);
+        assert_eq!(work.interaction_nodes_reused, 3);
         assert_eq!(work.semantic_nodes_reused, 2);
         let mut cold_state = UiStateStore::default();
         let cold = UiFrame::resolve(
@@ -1203,6 +1209,8 @@ mod tests {
                     let work = next.resource_diagnostics();
                     prop_assert_eq!(work.nodes_measured, 0);
                     prop_assert_eq!(work.nodes_placed, 0);
+                    prop_assert_eq!(work.interaction_nodes_executed, 0);
+                    prop_assert_eq!(work.interaction_nodes_reused, order.len() + 1);
                 }
                 let mut cold_state = retained_state.clone();
                 let cold = UiFrame::resolve(
