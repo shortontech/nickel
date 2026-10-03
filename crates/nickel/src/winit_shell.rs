@@ -4029,11 +4029,13 @@ mod tests {
         );
         assert_eq!(
             surface_geometry(SurfaceRole::Taskbar, display, PanelEdge::Bottom),
-            ("Nickel Taskbar", 40, 970, 1920, 56, false)
+            ("Nickel Taskbar", 40, 1026, 1920, 0, false),
+            "the retired taskbar host must not reserve work area"
         );
         assert_eq!(
             surface_geometry(SurfaceRole::Taskbar, display, PanelEdge::Top),
-            ("Nickel Taskbar", 40, 20, 1920, 56, false)
+            ("Nickel Taskbar", 40, 20, 1920, 0, false),
+            "the retired taskbar host must not reserve work area"
         );
     }
 
