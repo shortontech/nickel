@@ -377,10 +377,12 @@ struct GpuPresenter {
     config: wgpu::SurfaceConfiguration,
     configured: bool,
     pipeline: wgpu::RenderPipeline,
+    clear_pipeline: wgpu::RenderPipeline,
     retained: Option<RetainedFramebuffer>,
     retained_diagnostics: RetainedFramebufferDiagnostics,
     vertex_buffer: Option<wgpu::Buffer>,
     vertex_capacity: usize,
+    previous_commands: Vec<PaintCommand>,
 }
 
 struct RetainedFramebuffer {
@@ -400,6 +402,107 @@ pub struct RetainedFramebufferDiagnostics {
     pub composited_frames: u64,
     pub direct_full_frames: u64,
     pub full_initializations: u64,
+    pub partial_redraws: u64,
+    pub full_redraws: u64,
+    pub unchanged_reuses: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum OffscreenRedraw {
+    Full,
+    Partial(Rect),
+    Reuse,
+}
+
+fn command_bounds(command: &PaintCommand) -> Option<Rect> {
+    match command {
+        PaintCommand::Fill { rect, .. }
+        | PaintCommand::TopRoundedFill { rect, .. }
+        | PaintCommand::RoundedFill { rect, .. }
+        | PaintCommand::Gradient { rect, .. }
+        | PaintCommand::RoundedStroke { rect, .. }
+        | PaintCommand::Stroke { rect, .. }
+        | PaintCommand::OverlayFill { rect, .. }
+        | PaintCommand::OverlayStroke { rect, .. } => Some(*rect),
+        PaintCommand::Text { bounds, .. }
+        | PaintCommand::StyledText { bounds, .. }
+        | PaintCommand::Image { bounds, .. } => Some(*bounds),
+        PaintCommand::BackdropBlur { .. } | PaintCommand::PushClip(_) | PaintCommand::PopClip => {
+            None
+        }
+    }
+}
+
+fn union_rect(left: Rect, right: Rect) -> Rect {
+    let x = left.origin.x.min(right.origin.x);
+    let y = left.origin.y.min(right.origin.y);
+    let right_edge = (left.origin.x + left.size.width).max(right.origin.x + right.size.width);
+    let bottom_edge = (left.origin.y + left.size.height).max(right.origin.y + right.size.height);
+    Rect::new(x, y, right_edge - x, bottom_edge - y)
+}
+
+fn offscreen_redraw(
+    previous: &[PaintCommand],
+    commands: &[PaintCommand],
+    valid: bool,
+) -> OffscreenRedraw {
+    if !valid
+        || previous
+            .iter()
+            .chain(commands)
+            .any(|command| matches!(command, PaintCommand::BackdropBlur { .. }))
+    {
+        return OffscreenRedraw::Full;
+    }
+    let mut damage = None;
+    for index in 0..previous.len().max(commands.len()) {
+        let old = previous.get(index);
+        let new = commands.get(index);
+        if old == new {
+            continue;
+        }
+        for command in [old, new].into_iter().flatten() {
+            let Some(bounds) = command_bounds(command) else {
+                return OffscreenRedraw::Full;
+            };
+            damage = Some(damage.map_or(bounds, |current| union_rect(current, bounds)));
+        }
+    }
+    damage.map_or(OffscreenRedraw::Reuse, OffscreenRedraw::Partial)
+}
+
+fn physical_scissor(
+    rect: Rect,
+    width: u32,
+    height: u32,
+    scale: f32,
+) -> Option<(u32, u32, u32, u32)> {
+    let left = (rect.origin.x * scale).floor().clamp(0.0, width as f32) as u32;
+    let top = (rect.origin.y * scale).floor().clamp(0.0, height as f32) as u32;
+    let right = ((rect.origin.x + rect.size.width) * scale)
+        .ceil()
+        .clamp(0.0, width as f32) as u32;
+    let bottom = ((rect.origin.y + rect.size.height) * scale)
+        .ceil()
+        .clamp(0.0, height as f32) as u32;
+    (right > left && bottom > top).then_some((left, top, right - left, bottom - top))
+}
+
+fn intersect_scissor(
+    left: (u32, u32, u32, u32),
+    right: (u32, u32, u32, u32),
+) -> Option<(u32, u32, u32, u32)> {
+    let x = left.0.max(right.0);
+    let y = left.1.max(right.1);
+    let right_edge = left
+        .0
+        .saturating_add(left.2)
+        .min(right.0.saturating_add(right.2));
+    let bottom = left
+        .1
+        .saturating_add(left.3)
+        .min(right.1.saturating_add(right.3));
+    (right_edge > x && bottom > y).then_some((x, y, right_edge - x, bottom - y))
 }
 
 impl GpuPresenter {
@@ -469,15 +572,49 @@ impl GpuPresenter {
                 multiview_mask: None,
                 cache: None,
             });
+        let clear_pipeline =
+            graphics
+                .device
+                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("Nickel shell damage clear"),
+                    layout: Some(&layout),
+                    vertex: wgpu::VertexState {
+                        module: &graphics.shader,
+                        entry_point: Some("vs_main"),
+                        compilation_options: Default::default(),
+                        buffers: &[Some(wgpu::VertexBufferLayout {
+                            array_stride: std::mem::size_of::<Vertex>() as u64,
+                            step_mode: wgpu::VertexStepMode::Vertex,
+                            attributes: &attributes,
+                        })],
+                    },
+                    primitive: wgpu::PrimitiveState::default(),
+                    depth_stencil: None,
+                    multisample: wgpu::MultisampleState::default(),
+                    fragment: Some(wgpu::FragmentState {
+                        module: &graphics.shader,
+                        entry_point: Some("fs_main"),
+                        compilation_options: Default::default(),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format: config.format,
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                    }),
+                    multiview_mask: None,
+                    cache: None,
+                });
         Ok(Self {
             surface,
             config,
             configured: false,
             pipeline,
+            clear_pipeline,
             retained: None,
             retained_diagnostics: RetainedFramebufferDiagnostics::default(),
             vertex_buffer: None,
             vertex_capacity: 0,
+            previous_commands: Vec::new(),
         })
     }
 
@@ -579,11 +716,35 @@ impl GpuPresenter {
         }
         let scale = width as f32 / geometry.logical_width.max(1) as f32;
         let retained = self.ensure_retained_framebuffer(graphics, width, height, scale);
+        let retained_valid = self.retained.as_ref().is_some_and(|target| target.valid);
+        let mut redraw = if retained {
+            offscreen_redraw(&self.previous_commands, commands, retained_valid)
+        } else {
+            OffscreenRedraw::Full
+        };
         let mut frame = Frame::new(width, height, scale, graphics.white.clone());
         frame.prepare(commands, graphics);
+        let clear_start = frame.vertices.len() as u32;
+        let mut damage_scissor = match redraw {
+            OffscreenRedraw::Partial(damage) => physical_scissor(damage, width, height, scale),
+            OffscreenRedraw::Full | OffscreenRedraw::Reuse => None,
+        };
+        if damage_scissor == Some((0, 0, width, height)) {
+            redraw = OffscreenRedraw::Full;
+            damage_scissor = None;
+        } else if matches!(redraw, OffscreenRedraw::Partial(_)) && damage_scissor.is_none() {
+            redraw = OffscreenRedraw::Reuse;
+        }
+        if damage_scissor.is_some() {
+            frame
+                .vertices
+                .extend_from_slice(&fullscreen_vertices([0.0; 4]));
+        }
         let composite_start = frame.vertices.len() as u32;
         if retained {
-            frame.vertices.extend_from_slice(&fullscreen_vertices());
+            frame
+                .vertices
+                .extend_from_slice(&fullscreen_vertices([1.0; 4]));
         }
         let output = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(output) => output,
@@ -644,7 +805,11 @@ impl GpuPresenter {
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        load: if matches!(redraw, OffscreenRedraw::Full) {
+                            wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)
+                        } else {
+                            wgpu::LoadOp::Load
+                        },
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -653,15 +818,24 @@ impl GpuPresenter {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            pass.set_pipeline(&self.pipeline);
             pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+            if let Some(scissor) = damage_scissor {
+                pass.set_pipeline(&self.clear_pipeline);
+                pass.set_scissor_rect(scissor.0, scissor.1, scissor.2, scissor.3);
+                pass.set_bind_group(0, graphics.white.as_ref(), &[]);
+                pass.draw(clear_start..clear_start + 6, 0..1);
+            }
+            pass.set_pipeline(&self.pipeline);
             for draw in &frame.draws {
-                pass.set_scissor_rect(
-                    draw.scissor.0,
-                    draw.scissor.1,
-                    draw.scissor.2,
-                    draw.scissor.3,
-                );
+                let scissor = match redraw {
+                    OffscreenRedraw::Full => Some(draw.scissor),
+                    OffscreenRedraw::Partial(_) => {
+                        damage_scissor.and_then(|damage| intersect_scissor(draw.scissor, damage))
+                    }
+                    OffscreenRedraw::Reuse => None,
+                };
+                let Some(scissor) = scissor else { continue };
+                pass.set_scissor_rect(scissor.0, scissor.1, scissor.2, scissor.3);
                 pass.set_bind_group(0, draw.texture.as_ref(), &[]);
                 pass.draw(draw.start..draw.end, 0..1);
             }
@@ -699,6 +873,26 @@ impl GpuPresenter {
                 .saturating_add(1);
         }
         graphics.queue.submit(Some(encoder.finish()));
+        match redraw {
+            OffscreenRedraw::Full => {
+                self.retained_diagnostics.full_redraws =
+                    self.retained_diagnostics.full_redraws.saturating_add(1);
+            }
+            OffscreenRedraw::Partial(_) => {
+                self.retained_diagnostics.partial_redraws =
+                    self.retained_diagnostics.partial_redraws.saturating_add(1);
+            }
+            OffscreenRedraw::Reuse => {
+                self.retained_diagnostics.unchanged_reuses =
+                    self.retained_diagnostics.unchanged_reuses.saturating_add(1);
+            }
+        }
+        if self.previous_commands.len() == commands.len() {
+            self.previous_commands.clone_from_slice(commands);
+        } else {
+            self.previous_commands.clear();
+            self.previous_commands.extend_from_slice(commands);
+        }
         if let Some(retained) = self.retained.as_mut().filter(|_| retained)
             && !retained.valid
         {
@@ -732,26 +926,26 @@ struct Frame {
     clips: Vec<Rect>,
 }
 
-fn fullscreen_vertices() -> [Vertex; 6] {
+fn fullscreen_vertices(color: [f32; 4]) -> [Vertex; 6] {
     let top_left = Vertex {
         position: [-1.0, 1.0],
         uv: [0.0, 0.0],
-        color: [1.0; 4],
+        color,
     };
     let top_right = Vertex {
         position: [1.0, 1.0],
         uv: [1.0, 0.0],
-        color: [1.0; 4],
+        color,
     };
     let bottom_left = Vertex {
         position: [-1.0, -1.0],
         uv: [0.0, 1.0],
-        color: [1.0; 4],
+        color,
     };
     let bottom_right = Vertex {
         position: [1.0, -1.0],
         uv: [1.0, 1.0],
-        color: [1.0; 4],
+        color,
     };
     [
         top_left,
@@ -865,6 +1059,7 @@ impl Frame {
     fn prepare(&mut self, commands: &[PaintCommand], graphics: &GpuGraphics) {
         for command in commands {
             match command {
+                PaintCommand::BackdropBlur { .. } => {}
                 PaintCommand::Fill { rect, color } | PaintCommand::OverlayFill { rect, color } => {
                     self.solid(*rect, *color)
                 }
@@ -1070,9 +1265,10 @@ fn mix(start: u32, end: u32, at: f32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_RETAINED_FRAMEBUFFER_BYTES, fullscreen_vertices, retained_framebuffer_bytes,
-        retained_framebuffer_configuration,
+        MAX_RETAINED_FRAMEBUFFER_BYTES, OffscreenRedraw, fullscreen_vertices, offscreen_redraw,
+        retained_framebuffer_bytes, retained_framebuffer_configuration,
     };
+    use nickel_ui::{Rect, backend::PaintCommand};
 
     #[test]
     fn retained_framebuffer_admission_is_bounded_and_overflow_safe() {
@@ -1086,7 +1282,7 @@ mod tests {
 
     #[test]
     fn retained_framebuffer_composite_covers_the_cold_frame_exactly() {
-        let vertices = fullscreen_vertices();
+        let vertices = fullscreen_vertices([1.0; 4]);
         assert_eq!(vertices.len(), 6);
         let positions = vertices.map(|vertex| vertex.position);
         assert!(positions.contains(&[-1.0, 1.0]));
@@ -1111,6 +1307,66 @@ mod tests {
         assert_ne!(
             original,
             retained_framebuffer_configuration(800, 600, 1.0, wgpu::TextureFormat::Rgba8Unorm)
+        );
+    }
+
+    #[test]
+    fn offscreen_damage_admission_is_local_and_conservative() {
+        let left = PaintCommand::Fill {
+            rect: Rect::new(0.0, 0.0, 20.0, 20.0),
+            color: 0xff0000,
+        };
+        let old_right = PaintCommand::Fill {
+            rect: Rect::new(100.0, 0.0, 20.0, 20.0),
+            color: 0x00ff00,
+        };
+        let new_right = PaintCommand::Fill {
+            rect: Rect::new(100.0, 0.0, 20.0, 20.0),
+            color: 0x0000ff,
+        };
+
+        assert_eq!(
+            offscreen_redraw(&[left.clone(), old_right], &[left, new_right], true),
+            OffscreenRedraw::Partial(Rect::new(100.0, 0.0, 20.0, 20.0))
+        );
+        assert_eq!(offscreen_redraw(&[], &[], true), OffscreenRedraw::Reuse);
+        assert_eq!(offscreen_redraw(&[], &[], false), OffscreenRedraw::Full);
+    }
+
+    #[test]
+    fn clips_and_backdrop_effects_force_full_offscreen_redraw() {
+        let fill = PaintCommand::Fill {
+            rect: Rect::new(0.0, 0.0, 20.0, 20.0),
+            color: 0xff0000,
+        };
+        assert_eq!(
+            offscreen_redraw(
+                &[
+                    PaintCommand::PushClip(Rect::new(0.0, 0.0, 10.0, 10.0)),
+                    fill.clone()
+                ],
+                &[
+                    PaintCommand::PushClip(Rect::new(1.0, 0.0, 10.0, 10.0)),
+                    fill.clone()
+                ],
+                true,
+            ),
+            OffscreenRedraw::Full
+        );
+        assert_eq!(
+            offscreen_redraw(
+                &[fill.clone()],
+                &[
+                    PaintCommand::BackdropBlur {
+                        rect: Rect::new(0.0, 0.0, 20.0, 20.0),
+                        radius: 4.0,
+                        blur: 8.0,
+                    },
+                    fill,
+                ],
+                true,
+            ),
+            OffscreenRedraw::Full
         );
     }
 }
