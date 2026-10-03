@@ -1991,18 +1991,11 @@ impl<Message: Clone> UiFrame<Message> {
         let id = self.resolved.nodes[node_index].id.clone();
         let safe = previous.is_some()
             && independent_output_reuse_safe(element)
-            && previous.is_some_and(|previous| {
-                previous
-                    .resolved
-                    .find(&id)
-                    .is_some_and(|node| node.allocated == self.resolved.nodes[node_index].allocated)
-            });
-        let count = self
-            .resolved
-            .nodes
-            .iter()
-            .filter(|node| self.is_descendant_or_self(&id, &node.id))
-            .count();
+            && self
+                .retained_layout
+                .get(&id)
+                .is_some_and(|node| node.allocated == self.resolved.nodes[node_index].allocated);
+        let count = self.retained_nodes.subtree_node_count(&id).unwrap_or(1);
         let mut execute = requested;
         if requested.paint
             && safe
@@ -2049,11 +2042,11 @@ impl<Message: Clone> UiFrame<Message> {
     }
 
     fn reuse_paint_subtree(&mut self, previous: &Self, id: &UiId) -> bool {
-        let Some(root_fragment) = previous
-            .paint_fragments
-            .iter()
-            .find(|fragment| &fragment.id == id)
-        else {
+        let Some(fragment_range) = self.retained_nodes.subtree_postorder_range(id) else {
+            return false;
+        };
+        let root_index = *fragment_range.end();
+        let Some(root_fragment) = previous.paint_fragments.get(root_index) else {
             return false;
         };
         let Some(commands) = previous.commands.get(root_fragment.commands.clone()) else {
@@ -2061,11 +2054,19 @@ impl<Message: Clone> UiFrame<Message> {
         };
         let command_offset = self.commands.len();
         self.commands.extend_from_slice(commands);
-        for fragment in previous.paint_fragments.iter().filter(|fragment| {
-            fragment.commands.start >= root_fragment.commands.start
-                && fragment.commands.end <= root_fragment.commands.end
-                && previous.is_descendant_or_self(id, &fragment.id)
-        }) {
+        let Some(fragments) = previous.paint_fragments.get(fragment_range) else {
+            return false;
+        };
+        if fragments.last().is_none_or(|fragment| &fragment.id != id)
+            || fragments.iter().any(|fragment| {
+                fragment.commands.start < root_fragment.commands.start
+                    || fragment.commands.end > root_fragment.commands.end
+                    || !self.retained_nodes.is_descendant_or_self(id, &fragment.id)
+            })
+        {
+            return false;
+        }
+        for fragment in fragments {
             self.paint_fragments.push(PaintFragment {
                 id: fragment.id.clone(),
                 commands: (command_offset
@@ -2086,7 +2087,7 @@ impl<Message: Clone> UiFrame<Message> {
     }
 
     fn reuse_interaction_subtree(&mut self, previous: &Self, id: &UiId) -> bool {
-        if previous.resolved.find(id).is_none() {
+        if !self.retained_layout.contains_key(id) {
             return false;
         }
         for hit in &previous.hits {
@@ -2217,13 +2218,29 @@ impl<Message: Clone> UiFrame<Message> {
         let old_len = old.commands.end.saturating_sub(old.commands.start);
         let new_len = commands.len();
         let delta = new_len as isize - old_len as isize;
+        let removed_start = self.paint_fragments.iter().position(|fragment| {
+            fragment.commands.start >= old.commands.start
+                && fragment.commands.end <= old.commands.end
+        })?;
+        let removed_end = self.paint_fragments.iter().rposition(|fragment| {
+            fragment.commands.start >= old.commands.start
+                && fragment.commands.end <= old.commands.end
+        })?;
+        if self.paint_fragments[removed_start..=removed_end]
+            .iter()
+            .any(|fragment| {
+                fragment.commands.start < old.commands.start
+                    || fragment.commands.end > old.commands.end
+            })
+        {
+            return None;
+        }
         self.commands.splice(old.commands.clone(), commands);
 
-        self.paint_fragments.retain(|fragment| {
-            !(fragment.commands.start >= old.commands.start
-                && fragment.commands.end <= old.commands.end)
-        });
-        for fragment in &mut self.paint_fragments {
+        for (index, fragment) in self.paint_fragments.iter_mut().enumerate() {
+            if (removed_start..=removed_end).contains(&index) {
+                continue;
+            }
             if fragment.commands.start >= old.commands.end {
                 fragment.commands.start = fragment.commands.start.saturating_add_signed(delta);
                 fragment.commands.end = fragment.commands.end.saturating_add_signed(delta);
@@ -2237,7 +2254,8 @@ impl<Message: Clone> UiFrame<Message> {
             fragment.commands.start = fragment.commands.start.saturating_add(old.commands.start);
             fragment.commands.end = fragment.commands.end.saturating_add(old.commands.start);
         }
-        self.paint_fragments.extend(replacements);
+        self.paint_fragments
+            .splice(removed_start..=removed_end, replacements);
         Some((old.bounds, new_bounds))
     }
 

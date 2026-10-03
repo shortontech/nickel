@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 
 use crate::{Rect, Size, UiId};
@@ -70,6 +70,9 @@ pub(crate) struct RetainedNode {
     signatures: PhaseSignatures,
     dirty: DirtyPhases,
     children: Vec<RetainedNodeId>,
+    subtree_dirty: DirtyPhases,
+    subtree_nodes: usize,
+    postorder_index: usize,
     pub(crate) phases: RetainedPhaseData,
 }
 
@@ -112,6 +115,7 @@ pub(crate) struct RetainedNodeArena {
     next_id: u64,
     root: Option<RetainedNodeId>,
     nodes: HashMap<RetainedNodeId, RetainedNode>,
+    by_ui_id: BTreeMap<UiId, RetainedNodeId>,
     last: ReconcileStats,
 }
 
@@ -452,26 +456,57 @@ fn phase_matches(
 
 impl RetainedNodeArena {
     pub(crate) fn phase_is_clean(&self, id: &UiId, phase: DirtyPhases) -> bool {
-        self.nodes
-            .values()
-            .find(|node| &node.ui_id == id)
+        self.by_ui_id
+            .get(id)
+            .and_then(|node| self.nodes.get(node))
             .is_some_and(|node| !node.dirty.contains(phase))
     }
 
     pub(crate) fn subtree_phase_is_clean(&self, id: &UiId, phase: DirtyPhases) -> bool {
-        let Some(node) = self.nodes.values().find(|node| &node.ui_id == id) else {
+        let Some(node) = self.by_ui_id.get(id).and_then(|node| self.nodes.get(node)) else {
             return false;
         };
-        self.subtree_phase_is_clean_from(node.id, phase)
+        !node.subtree_dirty.contains(phase)
     }
 
-    fn subtree_phase_is_clean_from(&self, id: RetainedNodeId, phase: DirtyPhases) -> bool {
-        let node = &self.nodes[&id];
-        !node.dirty.contains(phase)
-            && node
-                .children
-                .iter()
-                .all(|child| self.subtree_phase_is_clean_from(*child, phase))
+    pub(crate) fn subtree_node_count(&self, id: &UiId) -> Option<usize> {
+        self.by_ui_id
+            .get(id)
+            .and_then(|node| self.nodes.get(node))
+            .map(|node| node.subtree_nodes)
+    }
+
+    pub(crate) fn subtree_postorder_range(
+        &self,
+        id: &UiId,
+    ) -> Option<std::ops::RangeInclusive<usize>> {
+        let node = self
+            .by_ui_id
+            .get(id)
+            .and_then(|node| self.nodes.get(node))?;
+        let start = node
+            .postorder_index
+            .checked_add(1)?
+            .checked_sub(node.subtree_nodes)?;
+        Some(start..=node.postorder_index)
+    }
+
+    pub(crate) fn is_descendant_or_self(&self, ancestor: &UiId, candidate: &UiId) -> bool {
+        let (Some(&ancestor), Some(mut candidate)) = (
+            self.by_ui_id.get(ancestor),
+            self.by_ui_id.get(candidate).copied(),
+        ) else {
+            return false;
+        };
+        loop {
+            if candidate == ancestor {
+                return true;
+            }
+            let Some(parent) = self.nodes.get(&candidate).and_then(|node| node.parent) else {
+                return false;
+            };
+            candidate = parent;
+        }
     }
 
     pub(crate) fn reconcile<Message>(&mut self, root: &Element<Message>) -> ReconcileStats {
@@ -494,7 +529,12 @@ impl RetainedNodeArena {
         );
         self.root = Some(root_id);
         self.last.removed = old_nodes.len().saturating_sub(consumed.len());
-        self.propagate_descendant_work(root_id);
+        let mut postorder_index = 0;
+        self.propagate_descendant_work(root_id, &mut postorder_index);
+        self.by_ui_id.clear();
+        for node in self.nodes.values() {
+            self.by_ui_id.entry(node.ui_id.clone()).or_insert(node.id);
+        }
         for node in self.nodes.values_mut() {
             node.invalidate_dirty_phases();
         }
@@ -522,10 +562,10 @@ impl RetainedNodeArena {
         let kind = kind_tag(&element.kind);
         let old = candidate.and_then(|id| old_nodes.get(&id));
         let reusable = old.filter(|node| node.kind == kind && node.identity == identity);
+        let current = signatures(element);
         let (id, phases, mut dirty) = if let Some(old) = reusable {
             consumed.insert(old.id);
             self.last.reused += 1;
-            let current = signatures(element);
             let mut dirty = DirtyPhases::default();
             if !phase_matches(
                 current.measure,
@@ -627,9 +667,12 @@ impl RetainedNodeArena {
             identity,
             ui_id,
             kind,
-            signatures: signatures(element),
+            signatures: current,
             dirty,
             children,
+            subtree_dirty: dirty,
+            subtree_nodes: 1,
+            postorder_index: 0,
             phases,
         };
         let _ = position;
@@ -637,12 +680,20 @@ impl RetainedNodeArena {
         id
     }
 
-    fn propagate_descendant_work(&mut self, root: RetainedNodeId) -> DirtyPhases {
+    fn propagate_descendant_work(
+        &mut self,
+        root: RetainedNodeId,
+        postorder_index: &mut usize,
+    ) -> DirtyPhases {
         let children = self.nodes[&root].children.clone();
         let mut descendants = DirtyPhases::default();
-        for child in children {
-            descendants.insert(self.propagate_descendant_work(child));
+        for &child in &children {
+            descendants.insert(self.propagate_descendant_work(child, postorder_index));
         }
+        let subtree_nodes = 1 + children
+            .iter()
+            .map(|child| self.nodes[child].subtree_nodes)
+            .sum::<usize>();
         let node = self.nodes.get_mut(&root).expect("retained node exists");
         if node.dirty.contains(DirtyPhases::CHILDREN) || descendants.contains(DirtyPhases::MEASURE)
         {
@@ -661,7 +712,11 @@ impl RetainedNodeArena {
                     .union(DirtyPhases::SEMANTICS),
             );
         }
-        node.dirty
+        node.subtree_dirty = node.dirty.union(descendants);
+        node.subtree_nodes = subtree_nodes;
+        node.postorder_index = *postorder_index;
+        *postorder_index = postorder_index.saturating_add(1);
+        node.subtree_dirty
     }
 
     #[cfg(test)]
@@ -1297,7 +1352,10 @@ mod tests {
                 // geometry remains authoritative while its fragment changes.
                 assert_eq!(work.nodes_measured, 0);
                 assert_eq!(work.nodes_placed, 0);
-                assert!(work.paint_nodes_executed > 0);
+                assert_eq!(work.paint_nodes_executed, 2);
+                assert_eq!(work.paint_nodes_reused, NODES - 1);
+                assert_eq!(work.interaction_nodes_executed, 0);
+                assert_eq!(work.interaction_nodes_reused, NODES + 1);
                 label_work.get_or_insert(work);
                 assert_eq!(label_work, Some(work));
                 retained = next;
