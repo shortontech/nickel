@@ -451,6 +451,29 @@ fn phase_matches(
 }
 
 impl RetainedNodeArena {
+    pub(crate) fn phase_is_clean(&self, id: &UiId, phase: DirtyPhases) -> bool {
+        self.nodes
+            .values()
+            .find(|node| &node.ui_id == id)
+            .is_some_and(|node| !node.dirty.contains(phase))
+    }
+
+    pub(crate) fn subtree_phase_is_clean(&self, id: &UiId, phase: DirtyPhases) -> bool {
+        let Some(node) = self.nodes.values().find(|node| &node.ui_id == id) else {
+            return false;
+        };
+        self.subtree_phase_is_clean_from(node.id, phase)
+    }
+
+    fn subtree_phase_is_clean_from(&self, id: RetainedNodeId, phase: DirtyPhases) -> bool {
+        let node = &self.nodes[&id];
+        !node.dirty.contains(phase)
+            && node
+                .children
+                .iter()
+                .all(|child| self.subtree_phase_is_clean_from(*child, phase))
+    }
+
     pub(crate) fn reconcile<Message>(&mut self, root: &Element<Message>) -> ReconcileStats {
         let old_nodes = std::mem::take(&mut self.nodes);
         let old_root = self.root.take();
@@ -1022,6 +1045,115 @@ mod tests {
         assert!(work.nodes_placed > 0);
     }
 
+    fn assert_frame_oracle<Message: Clone + PartialEq + std::fmt::Debug>(
+        incremental: &UiFrame<Message>,
+        cold: &UiFrame<Message>,
+    ) {
+        assert_eq!(incremental.resolved_layout(), cold.resolved_layout());
+        assert_eq!(incremental.commands(), cold.commands());
+        assert_eq!(incremental.semantic_nodes(), cold.semantic_nodes());
+        assert_eq!(
+            incremental.accessibility_nodes(),
+            cold.accessibility_nodes()
+        );
+        assert_eq!(
+            incremental.interaction_record_counts(),
+            cold.interaction_record_counts()
+        );
+    }
+
+    #[test]
+    fn combined_output_fragments_and_semantics_reuse_only_proven_clean_authority() {
+        let bounds = Rect::new(0.0, 0.0, 240.0, 80.0);
+        let paint_view = |color| {
+            Column::new()
+                .child(keyed_text("label", "stable").foreground(color))
+                .child(keyed_text("sibling", "unchanged"))
+                .into_element()
+        };
+        let mut state = UiStateStore::default();
+        let first = UiFrame::resolve(
+            paint_view(0xff11_2233),
+            FrameRequest::new(bounds, &mut state),
+        );
+        let painted = UiFrame::resolve_against(
+            paint_view(0xff33_2211),
+            FrameRequest::new(bounds, &mut state),
+            &first,
+        );
+        let work = painted.resource_diagnostics();
+        assert_eq!(work.output_nodes_executed, 2);
+        assert_eq!(work.output_nodes_reused, 1);
+        assert_eq!(work.semantic_nodes_executed, 0);
+        assert_eq!(work.semantic_nodes_reused, 3);
+        let mut cold_state = UiStateStore::default();
+        let cold = UiFrame::resolve(
+            paint_view(0xff33_2211),
+            FrameRequest::new(bounds, &mut cold_state),
+        );
+        assert_frame_oracle(&painted, &cold);
+
+        let interaction_view = |interactive| {
+            let label = keyed_text("label", "stable");
+            Column::new()
+                .child(if interactive {
+                    label.message(())
+                } else {
+                    label
+                })
+                .child(keyed_text("sibling", "unchanged"))
+                .into_element()
+        };
+        let first = UiFrame::resolve(
+            interaction_view(false),
+            FrameRequest::new(bounds, &mut state),
+        );
+        let interactive = UiFrame::resolve_against(
+            interaction_view(true),
+            FrameRequest::new(bounds, &mut state),
+            &first,
+        );
+        let work = interactive.resource_diagnostics();
+        assert_eq!(work.output_nodes_executed, 2);
+        assert_eq!(work.output_nodes_reused, 1);
+        assert!(work.semantic_nodes_executed > 0);
+        assert_eq!(work.semantic_nodes_reused, 2);
+        let mut cold_state = UiStateStore::default();
+        let cold = UiFrame::resolve(
+            interaction_view(true),
+            FrameRequest::new(bounds, &mut cold_state),
+        );
+        assert_frame_oracle(&interactive, &cold);
+
+        let semantic_view = |role| {
+            let view = Column::new()
+                .child(keyed_text("label", "stable"))
+                .child(keyed_text("sibling", "unchanged"));
+            if role {
+                view.accessibility_role("group").into_element()
+            } else {
+                view.into_element()
+            }
+        };
+        let first = UiFrame::resolve(semantic_view(false), FrameRequest::new(bounds, &mut state));
+        let semantic = UiFrame::resolve_against(
+            semantic_view(true),
+            FrameRequest::new(bounds, &mut state),
+            &first,
+        );
+        let work = semantic.resource_diagnostics();
+        assert_eq!(work.output_nodes_executed, 0);
+        assert!(work.semantic_nodes_executed > 0);
+        assert_eq!(work.output_nodes_reused, 3);
+        assert_eq!(work.semantic_nodes_reused, 2);
+        let mut cold_state = UiStateStore::default();
+        let cold = UiFrame::resolve(
+            semantic_view(true),
+            FrameRequest::new(bounds, &mut cold_state),
+        );
+        assert_frame_oracle(&semantic, &cold);
+    }
+
     proptest! {
         #[test]
         fn incremental_reconciliation_matches_a_cold_frame(
@@ -1080,6 +1212,8 @@ mod tests {
                 prop_assert_eq!(next.resolved_layout(), cold.resolved_layout());
                 prop_assert_eq!(next.commands(), cold.commands());
                 prop_assert_eq!(next.semantic_nodes(), cold.semantic_nodes());
+                prop_assert_eq!(next.interaction_record_counts(), cold.interaction_record_counts());
+                prop_assert!(next.resource_diagnostics().estimated_retained_bytes <= 512 * 1024);
                 retained = next;
                 retained_state = next_state;
             }

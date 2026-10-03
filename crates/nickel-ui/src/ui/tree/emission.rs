@@ -149,6 +149,7 @@ pub(super) fn emit_element<Message: Clone>(
     node_index: usize,
     inherited_foreground: Option<Color>,
     tree: &mut UiFrame<Message>,
+    previous: Option<&UiFrame<Message>>,
 ) {
     let node = tree.resolved.nodes[node_index].clone();
     let fragment_start = tree.commands.len();
@@ -207,7 +208,7 @@ pub(super) fn emit_element<Message: Clone>(
             Kind::Flex(_) | Kind::Grid { .. } | Kind::Layer
         ) {
             for (&child_index, child) in node.children.iter().zip(&element.children) {
-                emit_element(child, child_index, foreground, tree);
+                tree.emit_incremental(child, child_index, foreground, previous);
             }
         }
         tree.paint_fragments.push(PaintFragment {
@@ -1160,13 +1161,13 @@ pub(super) fn emit_element<Message: Clone>(
                 .unwrap_or(node.content);
             tree.commands.push(PaintCommand::PushClip(content_clip));
             for (&child_index, child) in node.children.iter().zip(&element.children) {
-                emit_element(child, child_index, foreground, tree);
+                tree.emit_incremental(child, child_index, foreground, previous);
             }
             tree.commands.push(PaintCommand::PopClip);
         }
         Kind::Flex(_) | Kind::Grid { .. } | Kind::Layer => {
             for (&child_index, child) in node.children.iter().zip(&element.children) {
-                emit_element(child, child_index, foreground, tree);
+                tree.emit_incremental(child, child_index, foreground, previous);
             }
         }
     }

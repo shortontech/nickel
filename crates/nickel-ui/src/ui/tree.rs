@@ -420,6 +420,13 @@ pub struct FrameResourceDiagnostics {
     pub nodes_measured: usize,
     /// Resolver nodes whose placement actually executed for this frame.
     pub nodes_placed: usize,
+    /// Nodes for which the combined paint/interaction collector executed.
+    pub output_nodes_executed: usize,
+    /// Nodes whose combined paint/interaction records were copied from the
+    /// authoritative previous fragments without entering the collector.
+    pub output_nodes_reused: usize,
+    pub semantic_nodes_executed: usize,
+    pub semantic_nodes_reused: usize,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -530,6 +537,10 @@ pub struct UiFrame<Message = String> {
     retained_layout: HashMap<UiId, ResolvedNode>,
     nodes_measured: usize,
     nodes_placed: usize,
+    output_nodes_executed: usize,
+    output_nodes_reused: usize,
+    semantic_nodes_executed: usize,
+    semantic_nodes_reused: usize,
     declaration_root: Option<Element<Message>>,
     declaration_root_id: Option<UiId>,
     commands: Vec<PaintCommand>,
@@ -574,6 +585,10 @@ impl<Message> Default for UiFrame<Message> {
             retained_layout: HashMap::new(),
             nodes_measured: 0,
             nodes_placed: 0,
+            output_nodes_executed: 0,
+            output_nodes_reused: 0,
+            semantic_nodes_executed: 0,
+            semantic_nodes_reused: 0,
             declaration_root: None,
             declaration_root_id: None,
             commands: Vec::new(),
@@ -637,6 +652,16 @@ fn paint_refresh_preserves_geometry<Message>(element: &Element<Message>) -> bool
             .children
             .iter()
             .all(paint_refresh_preserves_geometry)
+}
+
+fn output_subtree_reuse_safe<Message>(element: &Element<Message>) -> bool {
+    !matches!(
+        element.kind,
+        Kind::Grid { .. } | Kind::VerticalScroll { .. } | Kind::Dropdown { .. }
+    ) && !matches!(element.style.overflow_x, Overflow::Scroll | Overflow::Auto)
+        && !matches!(element.style.overflow_y, Overflow::Scroll | Overflow::Auto)
+        && element.style.proximity_magnification.is_none()
+        && element.children.iter().all(output_subtree_reuse_safe)
 }
 
 fn find_declared_element<Message: Clone>(
@@ -902,7 +927,7 @@ impl<Message: Clone> UiFrame<Message> {
         apply_transient_state(&mut content, &content_id, state);
         let index = layout_element(&content, &content_id, content_rect, None, Some(rect), self);
         self.resolved.nodes[parent].children.push(index);
-        emit_element(&content, index, None, self);
+        emit_element(&content, index, None, self, None);
         for node in &self.resolved.nodes[index..] {
             state.touch(node.id.clone());
         }
@@ -934,7 +959,7 @@ impl<Message: Clone> UiFrame<Message> {
 
     pub(crate) fn finalize_transient_layers(&mut self, state: &UiStateStore) {
         self.apply_interaction_state(state);
-        self.emit_accessibility_geometry();
+        self.emit_accessibility_geometry(None);
         self.validate_clip_commands();
     }
 
@@ -1846,7 +1871,7 @@ impl<Message: Clone> UiFrame<Message> {
         }
         tree.prepare_selection_paints(state);
         tree.reset_emission();
-        emit_element(&root, 0, None, &mut tree);
+        tree.emit_incremental(&root, 0, None, previous);
         tree.present_text_context(state);
         tree.append_scrollbars(Some(state));
         tree.commands.append(&mut tree.overlay_commands);
@@ -1859,7 +1884,7 @@ impl<Message: Clone> UiFrame<Message> {
         {
             tree.move_controller(state, 1, true);
         }
-        tree.emit_accessibility_geometry();
+        tree.emit_accessibility_geometry(previous);
         tree.validate_clip_commands();
         for scroll in &tree.scrolls {
             let transient = state.touch(scroll.id.clone());
@@ -1962,6 +1987,128 @@ impl<Message: Clone> UiFrame<Message> {
         })
     }
 
+    pub(super) fn emit_incremental(
+        &mut self,
+        element: &Element<Message>,
+        node_index: usize,
+        inherited_foreground: Option<Color>,
+        previous: Option<&Self>,
+    ) {
+        let id = self.resolved.nodes[node_index].id.clone();
+        let reusable = previous.is_some()
+            && output_subtree_reuse_safe(element)
+            && self
+                .retained_nodes
+                .subtree_phase_is_clean(&id, super::retained::DirtyPhases::PAINT)
+            && self
+                .retained_nodes
+                .subtree_phase_is_clean(&id, super::retained::DirtyPhases::INTERACTION)
+            && previous.is_some_and(|previous| {
+                previous
+                    .resolved
+                    .find(&id)
+                    .is_some_and(|node| node.allocated == self.resolved.nodes[node_index].allocated)
+            });
+        if reusable
+            && let Some(previous) = previous
+            && self.reuse_output_subtree(previous, &id)
+        {
+            let reused = self
+                .resolved
+                .nodes
+                .iter()
+                .filter(|node| self.is_descendant_or_self(&id, &node.id))
+                .count();
+            self.output_nodes_reused = self.output_nodes_reused.saturating_add(reused);
+            return;
+        }
+        self.output_nodes_executed = self.output_nodes_executed.saturating_add(1);
+        emit_element(element, node_index, inherited_foreground, self, previous);
+    }
+
+    fn reuse_output_subtree(&mut self, previous: &Self, id: &UiId) -> bool {
+        let Some(root_fragment) = previous
+            .paint_fragments
+            .iter()
+            .find(|fragment| &fragment.id == id)
+        else {
+            return false;
+        };
+        let Some(commands) = previous.commands.get(root_fragment.commands.clone()) else {
+            return false;
+        };
+        let command_offset = self.commands.len();
+        self.commands.extend_from_slice(commands);
+        for fragment in previous.paint_fragments.iter().filter(|fragment| {
+            fragment.commands.start >= root_fragment.commands.start
+                && fragment.commands.end <= root_fragment.commands.end
+                && previous.is_descendant_or_self(id, &fragment.id)
+        }) {
+            self.paint_fragments.push(PaintFragment {
+                id: fragment.id.clone(),
+                commands: (command_offset
+                    + fragment
+                        .commands
+                        .start
+                        .saturating_sub(root_fragment.commands.start))
+                    ..(command_offset
+                        + fragment
+                            .commands
+                            .end
+                            .saturating_sub(root_fragment.commands.start)),
+                bounds: fragment.bounds,
+            });
+        }
+
+        let hit_offset = self.hits.len();
+        for hit in &previous.hits {
+            if previous.is_descendant_or_self(id, &hit.id) {
+                let current_index = self.hits.len();
+                self.hits.push(hit.clone());
+                if let Some(node) = self.resolved.find_mut(&hit.id) {
+                    node.hit_stack = Some(current_index);
+                }
+            }
+        }
+        debug_assert!(self.hits.len() >= hit_offset);
+        self.messages.extend(
+            previous
+                .messages
+                .iter()
+                .filter(|region| previous.is_descendant_or_self(id, &region.id))
+                .cloned(),
+        );
+        self.context_messages.extend(
+            previous
+                .context_messages
+                .iter()
+                .filter(|region| previous.is_descendant_or_self(id, &region.id))
+                .cloned(),
+        );
+        self.focus_messages.extend(
+            previous
+                .focus_messages
+                .iter()
+                .filter(|(target, _, _)| previous.is_descendant_or_self(id, target))
+                .cloned(),
+        );
+        self.text_inputs.extend(
+            previous
+                .text_inputs
+                .iter()
+                .filter(|region| previous.is_descendant_or_self(id, &region.id))
+                .cloned(),
+        );
+        self.text_commands.extend(
+            previous
+                .text_commands
+                .iter()
+                .filter(|region| previous.is_descendant_or_self(id, &region.id))
+                .cloned(),
+        );
+        true
+    }
+
     fn emit_retained_subtree(
         &mut self,
         element: &Element<Message>,
@@ -1982,7 +2129,7 @@ impl<Message: Clone> UiFrame<Message> {
             .map(|node| node.hit_stack)
             .collect::<Vec<_>>();
 
-        emit_element(element, node_index, inherited_foreground, self);
+        emit_element(element, node_index, inherited_foreground, self, None);
         let commands = self.commands.split_off(command_start);
         let mut fragments = self.paint_fragments.split_off(fragment_start);
         for fragment in &mut fragments {
@@ -2074,11 +2221,11 @@ impl<Message: Clone> UiFrame<Message> {
         layout_element(&root, &root_id, bounds, None, None, &mut tree);
         tree.selection_regions = collect_selection_regions(&root, &tree.resolved);
         tree.reset_emission();
-        emit_element(&root, 0, None, &mut tree);
+        emit_element(&root, 0, None, &mut tree, None);
         tree.append_scrollbars(None);
         tree.commands.append(&mut tree.overlay_commands);
         tree.hits.append(&mut tree.overlay_hits);
-        tree.emit_accessibility_geometry();
+        tree.emit_accessibility_geometry(None);
         tree.validate_clip_commands();
         crate::ui::assert_background_color_policy(root_id.as_str(), &tree.commands);
         tree.release_build_scratch();
@@ -2169,6 +2316,19 @@ impl<Message: Clone> UiFrame<Message> {
 
     pub fn commands(&self) -> &[PaintCommand] {
         &self.commands
+    }
+
+    #[cfg(test)]
+    pub(crate) fn interaction_record_counts(&self) -> [usize; 7] {
+        [
+            self.hits.len(),
+            self.messages.len(),
+            self.context_messages.len(),
+            self.focus_messages.len(),
+            self.text_inputs.len(),
+            self.text_commands.len(),
+            self.scrolls.len(),
+        ]
     }
 
     #[cfg(test)]
@@ -2956,6 +3116,10 @@ impl<Message: Clone> UiFrame<Message> {
             retained_nodes_replaced: retained.replaced,
             nodes_measured: self.nodes_measured,
             nodes_placed: self.nodes_placed,
+            output_nodes_executed: self.output_nodes_executed,
+            output_nodes_reused: self.output_nodes_reused,
+            semantic_nodes_executed: self.semantic_nodes_executed,
+            semantic_nodes_reused: self.semantic_nodes_reused,
         }
     }
 
@@ -5959,7 +6123,7 @@ impl<Message: Clone> UiFrame<Message> {
         }
     }
 
-    fn emit_accessibility_geometry(&mut self) {
+    fn emit_accessibility_geometry(&mut self, previous: Option<&Self>) {
         self.semantic_parents = vec![None; self.resolved.nodes.len()];
         for (index, node) in self.resolved.nodes.iter().enumerate() {
             for child in &node.children {
@@ -5974,6 +6138,8 @@ impl<Message: Clone> UiFrame<Message> {
             self.navigation_depths[index] =
                 parent_depth + usize::from(self.resolved.nodes[index].navigation_scope.is_some());
         }
+        let mut executed = 0usize;
+        let mut reused = 0usize;
         self.accessibility = self
             .resolved
             .nodes
@@ -5986,10 +6152,32 @@ impl<Message: Clone> UiFrame<Message> {
                 let rect = node.clip.map_or(node.allocated, |clip| {
                     intersection(node.allocated, clip).unwrap_or(node.allocated)
                 });
+                let parent = self.semantic_parents[index]
+                    .map(|parent| self.resolved.nodes[parent].id.clone());
+                if self
+                    .retained_nodes
+                    .phase_is_clean(&node.id, super::retained::DirtyPhases::SEMANTICS)
+                    && previous.is_some_and(|previous| {
+                        previous.resolved.find(&node.id).is_some_and(|old| {
+                            old.interaction == node.interaction
+                                && old.allocated == node.allocated
+                                && old.clip == node.clip
+                        })
+                    })
+                    && let Some(cached) = previous.and_then(|previous| {
+                        previous
+                            .accessibility
+                            .iter()
+                            .find(|cached| cached.id == node.id && cached.parent == parent)
+                    })
+                {
+                    reused = reused.saturating_add(1);
+                    return Some(cached.clone());
+                }
+                executed = executed.saturating_add(1);
                 Some(AccessibilityNode {
                     id: node.id.clone(),
-                    parent: self.semantic_parents[index]
-                        .map(|parent| self.resolved.nodes[parent].id.clone()),
+                    parent,
                     component: node.component,
                     rect,
                     interactive: node.interaction.interactive,
@@ -6011,6 +6199,8 @@ impl<Message: Clone> UiFrame<Message> {
                 })
             })
             .collect();
+        self.semantic_nodes_executed = executed;
+        self.semantic_nodes_reused = reused;
         if let Some(overlay) = self.active_interaction_overlay().cloned() {
             let scoped = self
                 .resolved
