@@ -75,10 +75,12 @@ function TrayItem({item}) {
 }
 
 export function Taskbar() {
+    const applications = useApplications();
+    const windows = useWindows();
     const features = nickel.features?.get() || {keyboard: {}, codex: {}};
     const keyboardEnabled = features.keyboard.enabled === true;
     const codexAvailable = ["enabled", "enabling", "rejected", "stale"].includes(features.codex.state);
-    const items = taskItems(nickel.applications.list(), nickel.windows.list());
+    const items = taskItems(applications, windows);
     const tray = nickel.tray.list().slice(0, 4);
     const contributions = nickel.contributions("taskbar.items");
     const clock = nickel.clock.get();

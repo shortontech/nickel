@@ -75,6 +75,8 @@ function TrayItem(props) {
 }
 
 export function Taskbar(props) {
+    const applications = useApplications();
+    const windows = useWindows();
     const features = nickel.features?.get() || {keyboard:{},codex:{}};
     const keyboardEnabled = features.keyboard.enabled === true;
     const codexAvailable = ['enabled', 'enabling', 'rejected', 'stale'].includes(features.codex.state);
@@ -82,7 +84,7 @@ export function Taskbar(props) {
     const localTime = new Date(clock.unixMilliseconds + clock.utcOffsetMinutes * 60000);
     const hours = localTime.getUTCHours();
     const clockText = (hours % 12 || 12) + ':' + String(localTime.getUTCMinutes()).padStart(2, '0') + (hours >= 12 ? ' PM' : ' AM');
-    const items = taskItems(nickel.applications.list(), nickel.windows.list());
+    const items = taskItems(applications, windows);
     const tray = nickel.tray.list();
     const contributions = nickel.contributions("taskbar.items");
     return <FixedWindow id="taskbar" output="all" edge="bottom"

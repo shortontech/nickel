@@ -31,7 +31,7 @@ function taskItems(applications, windows) {
         }
         const group = groups.get(id);
         group.windows.push(window);
-        group.active || (group.active = window.active);
+        group.active ||= window.active;
     }
     return Array.from(groups.values()).slice(0, 5);
 }
@@ -56,10 +56,12 @@ function TrayItem({ item }) {
     return h(Button, { id: "cupertino-dock-tray-" + item.id, className: "dock-utility", width: 44, height: 52, accessibilityLabel: item.title, icon: item.icon ? "tray:" + item.id : null, iconSize: 30, showLabel: false, onContextMenu: () => nickel.tray.contextMenu(item.id), onClick: () => nickel.tray.activate(item.id) }, item.title.charAt(0).toUpperCase() || "?");
 }
 export function Taskbar() {
+    const applications = useApplications();
+    const windows = useWindows();
     const features = nickel.features?.get() || { keyboard: {}, codex: {} };
     const keyboardEnabled = features.keyboard.enabled === true;
     const codexAvailable = ["enabled", "enabling", "rejected", "stale"].includes(features.codex.state);
-    const items = taskItems(nickel.applications.list(), nickel.windows.list());
+    const items = taskItems(applications, windows);
     const tray = nickel.tray.list().slice(0, 4);
     const contributions = nickel.contributions("taskbar.items");
     const clock = nickel.clock.get();

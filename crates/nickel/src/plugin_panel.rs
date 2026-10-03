@@ -1230,25 +1230,74 @@ impl PluginPanelApplication {
                 serde_json::from_str(&serialized).map_err(|error| error.to_string())?;
             let mut host = state.host.borrow_mut();
             let owner = host.resolution().active.clone();
-            state.snapshots.insert(owner.clone(), data.clone());
-            host.update_snapshot(&owner, &data)?;
-            let (rendered, ()) =
-                host.render_expanded_validated(&state.mount, &serde_json::json!({}), |value| {
-                    RetainedPanelTree::admit(
-                        value,
+            let accepted_tree = self.accepted.clone();
+            let accepted_source = accepted_tree.source().clone();
+            let outcome = host.update_snapshot_and_reconcile_expanded_pending_validated(
+                &owner,
+                &data,
+                &state.mount,
+                &state.events,
+                &accepted_source,
+                |patch, _, generation| {
+                    let mut candidate = accepted_tree.clone();
+                    let transport_bytes = serde_json::to_vec(patch)
+                        .map_err(|error| error.to_string())?
+                        .len();
+                    #[cfg(test)]
+                    {
+                        self.diagnostic_patch_operations = self
+                            .diagnostic_patch_operations
+                            .saturating_add(patch.operations.len() as u64);
+                        self.diagnostic_patch_transport_bytes = self
+                            .diagnostic_patch_transport_bytes
+                            .saturating_add(transport_bytes as u64);
+                        self.diagnostic_patch_counters.nodes_visited = self
+                            .diagnostic_patch_counters
+                            .nodes_visited
+                            .saturating_add(patch.counters.nodes_visited);
+                        self.diagnostic_patch_counters.nodes_mutated = self
+                            .diagnostic_patch_counters
+                            .nodes_mutated
+                            .saturating_add(patch.counters.nodes_mutated);
+                        self.diagnostic_patch_counters.local_materializations = self
+                            .diagnostic_patch_counters
+                            .local_materializations
+                            .saturating_add(patch.counters.local_materializations);
+                        self.diagnostic_patch_counters.expansion_nodes = self
+                            .diagnostic_patch_counters
+                            .expansion_nodes
+                            .saturating_add(patch.counters.expansion_nodes);
+                        self.diagnostic_patch_counters.tree_bytes = self
+                            .diagnostic_patch_counters
+                            .tree_bytes
+                            .saturating_add(patch.counters.tree_bytes);
+                    }
+                    candidate.apply_patch(
+                        patch,
                         &self.manifest,
                         self.expected_surface_id.as_deref(),
-                        0,
-                    )
-                    .map(|_| ())
-                })?;
-            self.accepted = RetainedPanelTree::admit(
-                &rendered.node,
-                &self.manifest,
-                self.expected_surface_id.as_deref(),
-                rendered.generation(),
+                        &self.stylesheet,
+                        generation,
+                        transport_bytes,
+                    )?;
+                    Ok(candidate)
+                },
             )?;
-            state.events = rendered.events;
+            match outcome {
+                ScheduledExpandedBatch::Unchanged => {}
+                ScheduledExpandedBatch::Patched {
+                    events, validated, ..
+                } => {
+                    state.events = events;
+                    self.accepted = validated;
+                }
+                ScheduledExpandedBatch::Rendered { .. } => {
+                    host.finish_transaction(false)?;
+                    return Err("snapshot reconciliation lost typed patch authority".into());
+                }
+            }
+            host.finish_transaction(true)?;
+            state.snapshots.insert(owner, data.clone());
             self.projection_data = Some(serialized);
             self.projection_value = Some(data);
             drop(host);
@@ -8291,8 +8340,8 @@ mod tests {
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     struct TwoOutputShellWork {
-        left: [u64; 7],
-        right: [u64; 7],
+        left: [u64; 10],
+        right: [u64; 10],
         mounts_open: usize,
         mounts_closed: usize,
     }
@@ -8375,6 +8424,37 @@ mod tests {
 
     fn subtract_profile(after: [u64; 7], before: [u64; 7]) -> [u64; 7] {
         std::array::from_fn(|index| after[index] - before[index])
+    }
+
+    fn two_output_patch_work(profile: [u64; 7], counters: NativePatchCounters) -> [u64; 10] {
+        [
+            profile[0],
+            profile[1],
+            profile[2],
+            profile[3],
+            profile[4],
+            profile[5],
+            profile[6],
+            counters.local_materializations,
+            counters.expansion_nodes,
+            counters.tree_bytes,
+        ]
+    }
+
+    fn assert_incremental_two_output_work(active: &str, output: &str, work: [u64; 10]) {
+        assert_eq!(work[0], 0, "{active} {output} rebuilt a complete tree");
+        assert!(work[1] > 0, "{active} {output} omitted typed transport");
+        assert_eq!(work[2], 1, "{active} {output} patch was not localized");
+        assert_eq!(work[3], 2, "{active} {output} traversed unexpected nodes");
+        assert!(
+            work[4] <= 3,
+            "{active} {output} executed unrelated components"
+        );
+        assert_eq!(work[5], 1, "{active} {output} skipped native admission");
+        assert_eq!(work[6], 0, "{active} {output} rejected its typed patch");
+        assert_eq!(work[7], 0, "{active} {output} materialized a local tree");
+        assert_eq!(work[8], 0, "{active} {output} re-expanded composition");
+        assert_eq!(work[9], 0, "{active} {output} transported tree bytes");
     }
 
     fn canonicalize_composition_assets(value: &mut Value) {
@@ -8482,8 +8562,10 @@ mod tests {
                 .unwrap()
         );
         let middle = composition_profile_totals(&composition);
+        let left_patch_counters = left.diagnostic_patch_counters;
         assert!(right.refresh_composition_snapshots().unwrap());
         let after = composition_profile_totals(&composition);
+        let right_patch_counters = right.diagnostic_patch_counters;
         let update = update_started.elapsed();
         let left_after = find_settings_source(left.accepted.source(), control_id).unwrap();
         let right_after = find_settings_source(right.accepted.source(), control_id).unwrap();
@@ -8567,11 +8649,13 @@ mod tests {
         right.retire_surface().unwrap();
         let close = close_started.elapsed();
         let work = TwoOutputShellWork {
-            left: subtract_profile(middle, before),
-            right: subtract_profile(after, middle),
+            left: two_output_patch_work(subtract_profile(middle, before), left_patch_counters),
+            right: two_output_patch_work(subtract_profile(after, middle), right_patch_counters),
             mounts_open,
             mounts_closed: composition.borrow().mount_count(),
         };
+        assert_incremental_two_output_work(active, "DP-1", work.left);
+        assert_incremental_two_output_work(active, "HDMI-A-1", work.right);
         assert_eq!(work.mounts_closed, 0);
         (work, [open, update, close, total_started.elapsed()])
     }
@@ -8593,11 +8677,13 @@ mod tests {
                     for (samples, duration) in timings.iter_mut().zip(measured) { samples.push(duration); }
                 }
                 let work = exact.unwrap();
-                let fields = |values: [u64; 7]| serde_json::json!({
+                let fields = |values: [u64; 10]| serde_json::json!({
                     "coldTreeTransportBytes":values[0], "patchEnvelopeTransportBytes":values[1],
                     "patchOperations":values[2], "patchNodesVisited":values[3],
                     "componentExecutions":values[4], "typedPatchApplyAttempts":values[5],
-                    "typedPatchApplyRejections":values[6]
+                    "typedPatchApplyRejections":values[6],
+                    "patchLocalMaterializations":values[7], "patchExpansionNodes":values[8],
+                    "patchCompleteTreeBytes":values[9]
                 });
                 let report = serde_json::json!({
                     "schema":1,"suite":"jsx_incremental","workload":"production_two_output_shell_lifecycle",

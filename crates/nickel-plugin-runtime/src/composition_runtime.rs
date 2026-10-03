@@ -1415,6 +1415,40 @@ impl ShellCompositionRuntime {
             accepted_events,
             accepted_source,
             &mut validate,
+            true,
+        )
+    }
+
+    /// Atomically publish one owner's host snapshot and reconcile only the
+    /// mounted components whose versioned selectors observed a change. The
+    /// accepted expanded tree remains native-owned and crosses this boundary
+    /// solely as a typed patch; rejecting that patch restores both the package
+    /// stores and the host snapshot.
+    pub fn update_snapshot_and_reconcile_expanded_pending_validated<T>(
+        &mut self,
+        owner: &PackageIdentity,
+        data: &Value,
+        root: &ComponentMount,
+        accepted_events: &BTreeMap<u64, ComponentEventHandle>,
+        accepted_source: &Value,
+        mut validate: impl FnMut(
+            &NativePatchEnvelope,
+            &BTreeMap<u64, ComponentEventHandle>,
+            u64,
+        ) -> Result<T, String>,
+    ) -> Result<ScheduledExpandedBatch<T>, String> {
+        self.begin_transaction()?;
+        if let Err(error) = self.update_snapshot(owner, data) {
+            self.finish_transaction(false)?;
+            return Err(error);
+        }
+        self.dispatch_expanded_batch_scheduled_pending_with_validator(
+            root,
+            &[],
+            accepted_events,
+            accepted_source,
+            &mut validate,
+            false,
         )
     }
 
@@ -1425,8 +1459,13 @@ impl ShellCompositionRuntime {
         accepted_events: &BTreeMap<u64, ComponentEventHandle>,
         accepted_source: &Value,
         validate: &mut NativePatchValidator<'_, T>,
+        begin_transaction: bool,
     ) -> Result<ScheduledExpandedBatch<T>, String> {
-        self.begin_transaction()?;
+        if begin_transaction {
+            self.begin_transaction()?;
+        } else if !self.transaction_pending() {
+            return Err("composition transaction is unavailable".into());
+        }
         let mut rejected_native = None;
         let result = (|| {
             self.validate_mount(root)?;
@@ -1610,6 +1649,8 @@ impl ShellCompositionRuntime {
                         &mut local_patch,
                         &mut expansion,
                     )?;
+                    let patch_owner = self.mounts[mount_id].reference.owner.clone();
+                    let asset_aliases = &self.packages[&patch_owner].assets;
                     translate_package_patch(
                         local_patch,
                         if *namespace {
@@ -1618,7 +1659,7 @@ impl ShellCompositionRuntime {
                             None
                         },
                         *mount_id,
-                        &self.mounts[mount_id].reference.owner,
+                        &patch_owner,
                         self.id,
                         self.mounts[mount_id].generation,
                         &mut self.patch_authority,
@@ -1626,6 +1667,7 @@ impl ShellCompositionRuntime {
                         &mut operations,
                         &mut patch_nodes_visited,
                         structurally_expanded,
+                        asset_aliases,
                     )?;
                     continue;
                 }
@@ -1773,6 +1815,7 @@ impl ShellCompositionRuntime {
                         accepted_events,
                         accepted_source,
                         validate,
+                        true,
                     );
                 }
             }
@@ -3289,7 +3332,26 @@ fn translate_package_patch(
     output: &mut Vec<NativePatchOperation>,
     visited: &mut u64,
     payloads_expanded: bool,
+    asset_aliases: &BTreeMap<String, String>,
 ) -> Result<(), String> {
+    fn rewrite_asset_value(
+        property: &str,
+        value: &mut Value,
+        asset_aliases: &BTreeMap<String, String>,
+    ) -> Result<(), String> {
+        if matches!(property, "asset" | "icon")
+            && let Value::String(name) = value
+        {
+            if name.starts_with("composition.asset.") {
+                return Err("reserved native asset reference".into());
+            }
+            if let Some(alias) = asset_aliases.get(name) {
+                *name = alias.clone();
+            }
+        }
+        Ok(())
+    }
+
     fn namespaced(namespace: Option<&str>, value: String) -> String {
         namespace.map_or(value.clone(), |prefix| format!("{prefix}::{value}"))
     }
@@ -3302,6 +3364,7 @@ fn translate_package_patch(
         generation: u64,
         authority: &mut MountPatchAuthority,
         expansion: &mut ExpansionState,
+        asset_aliases: &BTreeMap<String, String>,
         depth: usize,
     ) -> Result<(), String> {
         if depth > MAX_TREE_DEPTH {
@@ -3325,6 +3388,7 @@ fn translate_package_patch(
                         generation,
                         authority,
                         expansion,
+                        asset_aliases,
                         depth + 1,
                     )?;
                 }
@@ -3363,6 +3427,7 @@ fn translate_package_patch(
                         authority.slots.insert(slot, token);
                         *value = Value::from(token);
                     } else {
+                        rewrite_asset_value(property, value, asset_aliases)?;
                         rewrite_payload(
                             value,
                             namespace,
@@ -3372,6 +3437,7 @@ fn translate_package_patch(
                             generation,
                             authority,
                             expansion,
+                            asset_aliases,
                             depth + 1,
                         )?;
                     }
@@ -3409,12 +3475,15 @@ fn translate_package_patch(
             NativePatchOperation::SetPrimitive {
                 target,
                 property,
-                value,
-            } => output.push(NativePatchOperation::SetPrimitive {
-                target: namespaced(namespace, target),
-                property,
-                value,
-            }),
+                mut value,
+            } => {
+                rewrite_asset_value(&property, &mut value, asset_aliases)?;
+                output.push(NativePatchOperation::SetPrimitive {
+                    target: namespaced(namespace, target),
+                    property,
+                    value,
+                });
+            }
             NativePatchOperation::ReplaceHandlerSlot { slot, action } => {
                 let token = *authority
                     .slots
@@ -3442,8 +3511,16 @@ fn translate_package_patch(
             } => {
                 if !payloads_expanded {
                     rewrite_payload(
-                        &mut node, namespace, mount, owner, runtime, generation, authority,
-                        expansion, 0,
+                        &mut node,
+                        namespace,
+                        mount,
+                        owner,
+                        runtime,
+                        generation,
+                        authority,
+                        expansion,
+                        asset_aliases,
+                        0,
                     )?;
                 }
                 output.push(NativePatchOperation::InsertChild {
@@ -3497,8 +3574,16 @@ fn translate_package_patch(
                 });
                 if !payloads_expanded {
                     rewrite_payload(
-                        &mut node, namespace, mount, owner, runtime, generation, authority,
-                        expansion, 0,
+                        &mut node,
+                        namespace,
+                        mount,
+                        owner,
+                        runtime,
+                        generation,
+                        authority,
+                        expansion,
+                        asset_aliases,
+                        0,
                     )?;
                 }
                 output.push(NativePatchOperation::ReplaceSubtree {
