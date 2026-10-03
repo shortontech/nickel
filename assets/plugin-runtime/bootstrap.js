@@ -1,11 +1,33 @@
 const __nickelPublicComponents = new Map();
 const __nickelComponentMetadata = new WeakMap();
+let __nickelHotSignatures = null;
+let __nickelHotPrevious = null;
 let __nickelPackageOwner = null;
 function __nickelSetDiagnosticOwner(owner) { __nickelPackageOwner = owner; }
 function __nickelPublishComponent(contract, component, module = null, exported = null) {
     if (typeof component !== 'function') throw TypeError(`public component ${contract} is not a function`);
+    const previous = __nickelHotPrevious?.get(contract);
+    const key = `${module}#${exported ?? contract}`;
+    if (previous && __nickelHotSignatures?.[key] !== undefined) {
+        const metadata = __nickelComponentMetadata.get(previous);
+        const previousKey = `${metadata?.module}#${metadata?.export}`;
+        if (previousKey === key && __nickelHotSignatures[key] !== null
+            && __componentIds.has(previous))
+            __componentIds.set(component, __componentIds.get(previous));
+    }
     __nickelPublicComponents.set(contract, component);
     __nickelComponentMetadata.set(component, Object.freeze({module,export:exported ?? contract}));
+}
+
+function __nickelInstallHotModules(installer, signatures) {
+    const previous = new Map(__nickelPublicComponents);
+    __nickelHotPrevious = previous; __nickelHotSignatures = signatures;
+    try { installer(); }
+    catch (error) {
+        __nickelPublicComponents.clear();
+        for (const [key,value] of previous) __nickelPublicComponents.set(key,value);
+        throw error;
+    } finally { __nickelHotPrevious = null; __nickelHotSignatures = null; }
 }
 
 const Window = 'window';

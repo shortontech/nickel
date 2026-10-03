@@ -315,6 +315,18 @@ impl JsxRuntime {
         Self::new(&graph.compile()?, data)
     }
 
+    pub(crate) fn hot_install_modules(
+        &mut self,
+        graph: &JsxModuleGraph,
+        signatures: &std::collections::BTreeMap<String, String>,
+    ) -> Result<(), String> {
+        let compiled = graph.compile()?;
+        let signatures = serde_json::to_string(signatures).map_err(|e| e.to_string())?;
+        self.eval(&format!(
+            "__nickelInstallHotModules(function(){{ (function(){{{compiled}}})(); }}, {signatures})"
+        ))
+    }
+
     pub fn eval(&mut self, source: &str) -> Result<(), String> {
         if self.invalidated {
             return Err("runtime checkpoint was invalidated".into());

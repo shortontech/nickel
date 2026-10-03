@@ -98,6 +98,29 @@ pub struct ScheduledComponentDispatch {
     pub requires_expansion: bool,
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct PackageReloadSignatures {
+    /// Signatures for the graph which is currently accepted.
+    pub previous: BTreeMap<String, String>,
+    /// Signatures for the candidate graph. Keys are normalized module#export names.
+    pub replacement: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ReloadedMountPatch {
+    pub mount: ComponentMount,
+    pub patch: NativePatchEnvelope,
+    pub events: BTreeMap<u64, ComponentEventHandle>,
+    pub generation: u64,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct CompositionReload {
+    pub preserved_packages: Vec<PackageIdentity>,
+    pub restarted_packages: Vec<PackageIdentity>,
+    pub patches: Vec<ReloadedMountPatch>,
+}
+
 pub enum ScheduledExpandedBatch<T> {
     Unchanged,
     Rendered {
@@ -268,7 +291,234 @@ fn extend_installed_contributions(
     Ok(())
 }
 
+fn package_graph(
+    package: &PluginPackage,
+    resolution: &ResolvedShellPackage,
+) -> Result<JsxModuleGraph, String> {
+    let composition = package
+        .manifest
+        .composition
+        .as_ref()
+        .ok_or("package has no composition")?;
+    let mut exports = BTreeMap::new();
+    let mut keys = BTreeMap::new();
+    for implementation in composition
+        .exports
+        .values()
+        .chain(composition.replaces.values())
+        .chain(
+            composition
+                .contributions
+                .iter()
+                .map(|entry| &entry.implementation),
+        )
+    {
+        if !keys.contains_key(implementation) {
+            let key = format!("owned.component.{}", keys.len());
+            exports.insert(key.clone(), implementation.clone());
+            keys.insert(implementation.clone(), key);
+        }
+    }
+    exports.extend(composition.exports.clone());
+    exports.extend(composition.replaces.clone());
+    let contributions = resolution.contributions.iter().map(|(collection, entries)| (
+        collection.clone(), Value::Array(entries.iter().map(|entry| serde_json::json!({
+            "id":entry.id,"provider":entry.contributed_by.id,"version":entry.contributed_by.version.to_string(),
+            "key":format!("{}/{}@{}/{}/{}", entry.collection, entry.contributed_by.id,
+                entry.contributed_by.version, entry.id, entry.implementation)
+        })).collect()))).collect::<serde_json::Map<_,_>>();
+    JsxModuleGraph::new(
+        &package.manifest.entry,
+        package
+            .modules
+            .iter()
+            .filter(|module| module.path != package.manifest.entry)
+            .map(|module| ModuleSource {
+                path: &module.path,
+                source: &module.source,
+            })
+            .chain(std::iter::once(ModuleSource {
+                path: &package.manifest.entry,
+                source: &package.source,
+            })),
+    )?
+    .with_public_exports(&exports)
+    .map(|graph| {
+        graph.with_component_bridge(
+            Value::Object(contributions),
+            Value::Object(serde_json::Map::new()),
+        )
+    })
+}
+
 impl ShellCompositionRuntime {
+    /// Atomically validates and admits a trusted development catalog. Candidate
+    /// code is first evaluated in isolated contexts. The accepted graph remains
+    /// untouched if validation or evaluation fails.
+    pub fn reload_catalog(
+        &mut self,
+        catalog: &BTreeMap<String, PluginPackage>,
+        signatures: &BTreeMap<PackageIdentity, PackageReloadSignatures>,
+    ) -> Result<CompositionReload, String> {
+        if self.checkpoint.is_some() {
+            return Err("cannot hot reload during a composition transaction".into());
+        }
+        let snapshots = self
+            .packages
+            .iter()
+            .map(|(owner, package)| (owner.clone(), package.data.clone()))
+            .collect::<BTreeMap<_, _>>();
+        // This performs manifest, ancestry, composition, capability, module and
+        // eager module evaluation checks without mutating the accepted host.
+        let mut candidate = Self::new(catalog, &self.resolution.active.id, &snapshots)?;
+        let old_owners = self.packages.keys().cloned().collect::<Vec<_>>();
+        let changed = old_owners
+            .iter()
+            .filter(|owner| {
+                self.packages
+                    .get(*owner)
+                    .zip(candidate.packages.get(*owner))
+                    .is_none_or(|(old, new)| {
+                        old.source_digest != new.source_digest || old.manifest != new.manifest
+                    })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let affected_roots = self
+            .mounts
+            .iter()
+            .filter(|(_, mount)| changed.contains(&mount.reference.owner))
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>();
+        let mut result = CompositionReload::default();
+
+        // Exercise every affected production root against the isolated graph,
+        // including its real props and cross-package expansion, before any
+        // accepted context is touched.
+        for id in &affected_roots {
+            let state = &self.mounts[id];
+            let replacement = candidate
+                .packages
+                .get(&state.reference.owner)
+                .ok_or("candidate removed a mounted package")?;
+            let reference = ComponentReference {
+                runtime: candidate.id,
+                owner: state.reference.owner.clone(),
+                implementation: state.reference.implementation.clone(),
+                incarnation: replacement.incarnation,
+            };
+            let mount = candidate.mount(&reference)?;
+            candidate.render_expanded(&mount, &state.props, |_| Ok(()))?;
+        }
+
+        for owner in &changed {
+            let compatible = signatures.get(owner).is_some_and(|set| {
+                set.previous == set.replacement
+                    && self.packages.get(owner).is_some_and(|old| {
+                        candidate
+                            .packages
+                            .get(owner)
+                            .is_some_and(|new| old.manifest == new.manifest)
+                    })
+            });
+            if compatible {
+                let package = &catalog[&owner.id];
+                let graph = package_graph(package, &candidate.resolution)?;
+                self.packages
+                    .get_mut(owner)
+                    .unwrap()
+                    .runtime
+                    .borrow_mut()
+                    .hot_install_modules(&graph, &signatures[owner].replacement)?;
+                let replacement = candidate.packages.remove(owner).unwrap();
+                let current = self.packages.get_mut(owner).unwrap();
+                current.source_digest = replacement.source_digest;
+                current.manifest = replacement.manifest;
+                current.exports = replacement.exports;
+                current.assets = replacement.assets;
+                result.preserved_packages.push(owner.clone());
+            } else {
+                // Dropping the old context performs effect/subscription cleanup;
+                // all typed authorities sourced by it are retired below.
+                let surfaces = self
+                    .mounts
+                    .iter()
+                    .filter(|(_, mount)| &mount.reference.owner == owner)
+                    .map(|(id, _)| surface(*id))
+                    .collect::<Vec<_>>();
+                if let Some(old) = self.packages.get_mut(owner) {
+                    for surface in surfaces {
+                        old.runtime.borrow_mut().drop_surface(&surface)?;
+                    }
+                }
+                let mut replacement = candidate
+                    .packages
+                    .remove(owner)
+                    .ok_or("candidate package missing")?;
+                replacement.incarnation = NEXT_RUNTIME.fetch_add(1, Ordering::Relaxed);
+                self.packages.insert(owner.clone(), replacement);
+                result.restarted_packages.push(owner.clone());
+            }
+        }
+        self.resolution = candidate.resolution;
+        self.callbacks
+            .retain(|_, grant| !changed.contains(&grant.source.owner));
+        self.children.retain(|_, grant| {
+            self.mounts.contains_key(&grant.receiver) && self.mounts.contains_key(&grant.source)
+        });
+        self.effects
+            .retain(|effect| !changed.contains(&effect.owner));
+        self.scheduled_renders
+            .retain(|mount, _| !affected_roots.contains(mount));
+
+        for id in affected_roots {
+            let state = self
+                .mounts
+                .get(&id)
+                .cloned()
+                .ok_or("reload mount disappeared")?;
+            let package = self
+                .packages
+                .get_mut(&state.reference.owner)
+                .ok_or("reload owner disappeared")?;
+            package.runtime.borrow_mut().register_surface_entry(&surface(id), &format!(
+                "function App() {{ const {{children, ...props}} = __nickelHydrateComponentProps(nickel.data.__componentProps); return h(nickel.component({}), props, ...(children ?? [])); }}",
+                serde_json::to_string(package.exports.get(&state.reference.implementation).ok_or("reloaded implementation is unpublished")?).unwrap()))
+                .or_else(|error| if result.preserved_packages.contains(&state.reference.owner) { Ok(()) } else { Err(error) })?;
+            self.next_generation = self
+                .next_generation
+                .checked_add(1)
+                .ok_or("component generation exhausted")?;
+            self.mounts.get_mut(&id).unwrap().generation = self.next_generation;
+            let mount = ComponentMount {
+                runtime: self.id,
+                id,
+            };
+            let props = state.props;
+            let rendered = self.render_expanded(&mount, &props, |_| Ok(()))?;
+            result.patches.push(ReloadedMountPatch {
+                mount,
+                patch: NativePatchEnvelope {
+                    version: 1,
+                    operations: vec![NativePatchOperation::ReplaceSubtree {
+                        target: "root".into(),
+                        node: rendered.node,
+                    }],
+                    counters: NativePatchCounters {
+                        nodes_visited: 1,
+                        nodes_mutated: 1,
+                        local_materializations: 1,
+                        expansion_nodes: 1,
+                        tree_bytes: 0,
+                    },
+                },
+                events: rendered.events,
+                generation: rendered.generation,
+            });
+        }
+        self.publish_contribution_catalog()?;
+        Ok(result)
+    }
     /// Catalog contents and per-package capability snapshots must already have
     /// passed the host's installation/approval checks. No dependency receives
     /// the active shell's snapshot or grants implicitly.
@@ -3220,6 +3470,7 @@ mod tests {
     use super::*;
     use nickel_core::package_composition::{CompositionGrants, SemanticContribution};
     use nickel_core::plugins::{PluginCapability, PluginManifest};
+    use serde_json::json;
 
     fn package(id: &str, source: &str, base: Option<&str>) -> PluginPackage {
         let mut manifest = PluginManifest::from_json(include_str!(
@@ -3309,6 +3560,87 @@ mod tests {
             &BTreeMap::new(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn catalog_reload_preserves_compatible_hooks_and_rejects_stale_events() {
+        let old = package(
+            "base",
+            "export function Taskbar(){const [count,setCount]=useState(0);return h(Button,{onClick:()=>setCount(count+1)},'old:'+count)}\nexport function QuickSettings(){}\nexport default Taskbar;",
+            None,
+        );
+        let mut catalog = BTreeMap::from([("base".into(), old)]);
+        let mut host = ShellCompositionRuntime::new(&catalog, "base", &BTreeMap::new()).unwrap();
+        let mount = host
+            .mount(&host.component("shell.taskbar").unwrap())
+            .unwrap();
+        let rendered = host
+            .render_expanded(&mount, &json!({}), |_| Ok(()))
+            .unwrap();
+        let stale = rendered.events[&0].clone();
+        host.dispatch(&stale, &Value::Null).unwrap();
+
+        catalog.insert("base".into(), package(
+            "base",
+            "export function Taskbar(){const [count,setCount]=useState(0);return h(Button,{onClick:()=>setCount(count+1)},'new:'+count)}\nexport function QuickSettings(){}\nexport default Taskbar;",
+            None,
+        ));
+        let signature = BTreeMap::from([("main.js#Taskbar".into(), "state".into())]);
+        let reload = host
+            .reload_catalog(
+                &catalog,
+                &BTreeMap::from([(
+                    host.resolution.active.clone(),
+                    PackageReloadSignatures {
+                        previous: signature.clone(),
+                        replacement: signature,
+                    },
+                )]),
+            )
+            .unwrap();
+        assert_eq!(reload.preserved_packages.len(), 1);
+        assert_eq!(reload.patches[0].patch.operations.len(), 1);
+        assert_eq!(
+            reload.patches[0].patch.operations[0],
+            NativePatchOperation::ReplaceSubtree {
+                target: "root".into(),
+                node: reload.patches[0]
+                    .patch
+                    .operations
+                    .iter()
+                    .find_map(|op| match op {
+                        NativePatchOperation::ReplaceSubtree { node, .. } => Some(node.clone()),
+                        _ => None,
+                    })
+                    .unwrap()
+            }
+        );
+        if let NativePatchOperation::ReplaceSubtree { node, .. } =
+            &reload.patches[0].patch.operations[0]
+        {
+            assert_eq!(node["children"][0], "new:1");
+        }
+        assert!(host.dispatch(&stale, &Value::Null).is_err());
+    }
+
+    #[test]
+    fn rejected_catalog_reload_leaves_the_accepted_graph_live() {
+        let old = package(
+            "base",
+            "export function Taskbar(){return h(Text,null,'accepted')}\nexport function QuickSettings(){}\nexport default Taskbar;",
+            None,
+        );
+        let mut catalog = BTreeMap::from([("base".into(), old)]);
+        let mut host = ShellCompositionRuntime::new(&catalog, "base", &BTreeMap::new()).unwrap();
+        let mount = host
+            .mount(&host.component("shell.taskbar").unwrap())
+            .unwrap();
+        catalog.get_mut("base").unwrap().source = "export function Taskbar( {".into();
+        assert!(host.reload_catalog(&catalog, &BTreeMap::new()).is_err());
+        let rendered = host
+            .render_expanded(&mount, &json!({}), |_| Ok(()))
+            .unwrap();
+        assert_eq!(rendered.node["children"][0], "accepted");
     }
 
     #[test]
