@@ -239,10 +239,12 @@ const __nickelCompositionClient = Object.freeze({...nickel, get data() { return 
         }
         for (contract, (path, name)) in &self.public_exports {
             output.push_str(&format!(
-                "__nickelPublishComponent({}, __nickelRequireModule({})[{}]);\n",
+                "__nickelPublishComponent({}, __nickelRequireModule({})[{}], {}, {});\n",
                 js_string(contract),
                 js_string(path),
-                js_string(name)
+                js_string(name),
+                js_string(path),
+                js_string(name),
             ));
         }
         output.push_str(&format!(

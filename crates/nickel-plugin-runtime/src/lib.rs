@@ -83,6 +83,104 @@ pub struct JsxRuntime {
     invalidated: bool,
 }
 
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HotReloadIdentity<'a> {
+    pub owner: &'a str,
+    pub module: &'a str,
+    pub export: &'a str,
+    pub signature: &'a str,
+}
+
+/// Deterministic low-level driver for runtime conformance tests. It deliberately
+/// bypasses native presentation while retaining the normal render/event/effect
+/// transaction boundaries.
+#[doc(hidden)]
+pub struct JsxTestHarness {
+    runtime: JsxRuntime,
+    source: String,
+    data: Option<String>,
+    accepted: Option<Value>,
+    errors: Vec<String>,
+}
+
+impl JsxTestHarness {
+    pub fn new(source: &str, data: Option<&str>) -> Result<Self, String> {
+        Ok(Self {
+            runtime: JsxRuntime::new(source, data)?,
+            source: source.into(),
+            data: data.map(str::to_owned),
+            accepted: None,
+            errors: Vec::new(),
+        })
+    }
+    pub fn render(&mut self) -> Result<&Value, String> {
+        let value = self
+            .runtime
+            .render("__nickelRender()", |node| Ok(node.clone()));
+        match value {
+            Ok(value) => {
+                self.accepted = Some(value);
+                Ok(self.accepted.as_ref().unwrap())
+            }
+            Err(error) => {
+                self.errors.push(error.clone());
+                Err(error)
+            }
+        }
+    }
+    pub fn rerender(&mut self) -> Result<&Value, String> {
+        self.render()
+    }
+    pub fn inject_store(&mut self, name: &str, value: &Value) -> Result<(), String> {
+        let setter = match name {
+            "windows" => "__nickelSetWindowsStore",
+            "applications" => "__nickelSetApplicationsStore",
+            "notifications" => "__nickelSetNotificationsStore",
+            "workspaces" => "__nickelSetWorkspacesStore",
+            "outputs" => "__nickelSetOutputsStore",
+            "theme" => "__nickelSetThemeStore",
+            _ => return Err("unknown test store".into()),
+        };
+        self.runtime.eval(&format!("{setter}({value})"))
+    }
+    pub fn event(&mut self, action: usize, value: &Value) -> Result<&Value, String> {
+        let expression = format!("__nickelDispatch({action},{value})");
+        let result = self.runtime.render(&expression, |node| Ok(node.clone()));
+        match result {
+            Ok(value) => {
+                self.runtime.finish_event(true)?;
+                self.accepted = Some(value);
+                Ok(self.accepted.as_ref().unwrap())
+            }
+            Err(error) => {
+                self.errors.push(error.clone());
+                Err(error)
+            }
+        }
+    }
+    pub fn flush_effects(&mut self) -> Result<Vec<Value>, String> {
+        self.runtime.take_effects()
+    }
+    pub fn unmount(&mut self) -> Result<(), String> {
+        self.runtime.drop_surface("default")
+    }
+    pub fn errors(&self) -> &[String] {
+        &self.errors
+    }
+    pub fn cold_equivalent(&self) -> Result<bool, String> {
+        let Some(accepted) = &self.accepted else {
+            return Err("test harness has no accepted render".into());
+        };
+        let mut cold = JsxRuntime::new(&self.source, self.data.as_deref())?;
+        let rendered = cold.render("__nickelRender()", |node| Ok(node.clone()))?;
+        Ok(&rendered == accepted)
+    }
+    pub fn runtime_mut(&mut self) -> &mut JsxRuntime {
+        &mut self.runtime
+    }
+}
+
 #[derive(Debug, PartialEq)]
 pub enum ScheduledRender<T> {
     Unchanged,
@@ -216,6 +314,11 @@ impl JsxRuntime {
             .eval(Source::from_bytes(source))
             .map_err(|error| error.to_string())?;
         Ok(())
+    }
+
+    pub(crate) fn set_diagnostic_owner(&mut self, owner: &str) -> Result<(), String> {
+        let owner = serde_json::to_string(owner).map_err(|error| error.to_string())?;
+        self.eval(&format!("__nickelSetDiagnosticOwner({owner})"))
     }
 
     pub fn eval_json<T: DeserializeOwned>(&mut self, source: &str) -> Result<T, String> {
@@ -626,6 +729,35 @@ impl JsxRuntime {
         ))
     }
 
+    pub fn register_surface_entry_with_identity(
+        &mut self,
+        id: &str,
+        source: &str,
+        identity: &HotReloadIdentity<'_>,
+    ) -> Result<(), String> {
+        let id = serde_json::to_string(id).map_err(|error| error.to_string())?;
+        let identity = serde_json::to_string(identity).map_err(|error| error.to_string())?;
+        self.eval(&format!(
+            "__nickelRegisterSurfaceApp({id}, (function() {{\n{source}\nreturn App;\n}})(), {identity})"
+        ))
+    }
+
+    /// Atomically admits a development replacement after it evaluates. State
+    /// is retained only for the exact same function and full source identity;
+    /// incompatible replacements clean up the old surface before admission.
+    pub fn hot_replace_surface_entry(
+        &mut self,
+        id: &str,
+        source: &str,
+        identity: &HotReloadIdentity<'_>,
+    ) -> Result<bool, String> {
+        let id = serde_json::to_string(id).map_err(|error| error.to_string())?;
+        let identity = serde_json::to_string(identity).map_err(|error| error.to_string())?;
+        self.eval_json(&format!(
+            "JSON.stringify(__nickelReplaceSurfaceApp({id}, (function() {{\n{source}\nreturn App;\n}})(), {identity}))"
+        ))
+    }
+
     pub fn drop_surface(&mut self, id: &str) -> Result<(), String> {
         let id = serde_json::to_string(id).map_err(|error| error.to_string())?;
         self.eval(&format!("__nickelDropSurface({id})"))
@@ -770,6 +902,11 @@ impl JsxRuntime {
     /// this package context. Reading diagnostics does not clear them.
     pub fn boundary_diagnostics(&mut self) -> Result<Vec<Value>, String> {
         self.eval_json("__nickelBoundaryDiagnostics()")
+    }
+
+    /// Bounded retained-render reasons and cumulative execution/effect counts.
+    pub fn runtime_diagnostics(&mut self) -> Result<Value, String> {
+        self.eval_json("__nickelRuntimeDiagnostics()")
     }
 
     pub fn finish_event(&mut self, accepted: bool) -> Result<(), String> {
@@ -930,6 +1067,92 @@ mod tests {
         runtime.render("__nickelDispatch(0)", |_| Ok(())).unwrap();
         runtime.finish_event(true).unwrap();
         assert_eq!(runtime.take_effects().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn hot_replacement_preserves_only_compatible_state_and_rejects_atomically() {
+        let source = "function App(){const [value,setValue]=useState(0);useEffect(()=>()=>log.push('cleanup'),[]);return h(Button,{onClick:()=>setValue(value+1)},'old:'+value)}";
+        let identity = super::HotReloadIdentity {
+            owner: "shell",
+            module: "src/App.jsx",
+            export: "App",
+            signature: "state,effect",
+        };
+        let mut runtime =
+            super::JsxRuntime::new("globalThis.log=[];function App(){return null}", None).unwrap();
+        runtime
+            .register_surface_entry_with_identity("hot", source, &identity)
+            .unwrap();
+        runtime.select_surface("hot").unwrap();
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        runtime.render("__nickelDispatch(0)", |_| Ok(())).unwrap();
+        runtime.finish_event(true).unwrap();
+
+        let compatible = "function App(){const [value,setValue]=useState(0);useEffect(()=>()=>log.push('cleanup'),[]);return h(Button,{onClick:()=>setValue(value+1)},'new:'+value)}";
+        assert!(
+            runtime
+                .hot_replace_surface_entry("hot", compatible, &identity)
+                .unwrap()
+        );
+        let tree = runtime
+            .render("__nickelRender()", |node| Ok(node.clone()))
+            .unwrap();
+        assert_eq!(tree["children"][0], "new:1");
+
+        assert!(
+            runtime
+                .hot_replace_surface_entry("hot", "function App( {", &identity)
+                .is_err()
+        );
+        let tree = runtime
+            .render("__nickelRender()", |node| Ok(node.clone()))
+            .unwrap();
+        assert_eq!(tree["children"][0], "new:1");
+
+        let incompatible = super::HotReloadIdentity {
+            signature: "state",
+            ..identity
+        };
+        assert!(
+            !runtime
+                .hot_replace_surface_entry(
+                    "hot",
+                    "function App(){const [value]=useState(9);return h(Text,null,'reset:'+value)}",
+                    &incompatible
+                )
+                .unwrap()
+        );
+        let tree = runtime
+            .render("__nickelRender()", |node| Ok(node.clone()))
+            .unwrap();
+        assert_eq!(tree["children"][0], "reset:9");
+        assert_eq!(
+            runtime
+                .eval_json::<Vec<String>>("JSON.stringify(log)")
+                .unwrap(),
+            ["cleanup"]
+        );
+    }
+
+    #[test]
+    fn runtime_diagnostics_are_bounded_and_include_owner_surface_and_stack() {
+        let source = "function Child(){throw Error('boom')} function App(){return h(ErrorBoundary,{fallback:h(Text,null,'fallback')},h(Child))}";
+        let mut runtime = super::JsxRuntime::new(source, None).unwrap();
+        runtime.set_diagnostic_owner("diagnostic.package").unwrap();
+        runtime
+            .set_surface_store("mount-7", &serde_json::json!({"id":"settings"}))
+            .unwrap();
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        let failures = runtime.boundary_diagnostics().unwrap();
+        assert_eq!(failures[0]["package"], "diagnostic.package");
+        assert_eq!(failures[0]["mount"], "mount-7");
+        assert!(failures[0]["stack"].as_array().unwrap().len() >= 2);
+        for _ in 0..40 {
+            runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        }
+        let diagnostics = runtime.runtime_diagnostics().unwrap();
+        assert!(diagnostics["counters"]["renders"].as_u64().unwrap() >= 41);
+        assert_eq!(diagnostics["reasons"].as_array().unwrap().len(), 32);
     }
 
     #[test]

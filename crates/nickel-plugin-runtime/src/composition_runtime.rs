@@ -404,6 +404,7 @@ impl ShellCompositionRuntime {
                 return Err("package snapshot must be an object".into());
             }
             let mut runtime = JsxRuntime::new_modules(&graph, Some(&data.to_string()))?;
+            runtime.set_diagnostic_owner(&owner.id)?;
             runtime.set_capability_store(&package.manifest.capabilities, &data)?;
             let runtime = std::rc::Rc::new(std::cell::RefCell::new(runtime));
             let assets = package

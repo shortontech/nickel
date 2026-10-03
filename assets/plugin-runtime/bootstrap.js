@@ -1,7 +1,11 @@
 const __nickelPublicComponents = new Map();
-function __nickelPublishComponent(contract, component) {
+const __nickelComponentMetadata = new WeakMap();
+let __nickelPackageOwner = null;
+function __nickelSetDiagnosticOwner(owner) { __nickelPackageOwner = owner; }
+function __nickelPublishComponent(contract, component, module = null, exported = null) {
     if (typeof component !== 'function') throw TypeError(`public component ${contract} is not a function`);
     __nickelPublicComponents.set(contract, component);
+    __nickelComponentMetadata.set(component, Object.freeze({module,export:exported ?? contract}));
 }
 
 const Window = 'window';
@@ -91,6 +95,9 @@ const __memoComponents = new WeakMap();
 const __errorBoundaryComponents = new WeakSet();
 const __MAX_BOUNDARY_DIAGNOSTICS = 32;
 let __boundaryDiagnostics = [];
+const __MAX_RUNTIME_REASONS = 32;
+let __runtimeReasons = [];
+let __runtimeCounters = {renders:0,executed:0,reused:0,effectsScheduled:0,effectsRun:0,cleanups:0,failures:0};
 let __incrementalRender = false;
 let __effects = [];
 let __listKeyErrors = [];
@@ -120,7 +127,17 @@ function __nickelRecordBoundaryFailure(boundary, phase, error) {
         previous.occurrences = Math.min(65535, previous.occurrences + 1); return;
     }
     if (__boundaryDiagnostics.length === __MAX_BOUNDARY_DIAGNOSTICS) __boundaryDiagnostics.shift();
-    __boundaryDiagnostics.push({surface:__activeSurface,boundary,phase,message,occurrences:1});
+    const stack = [];
+    for (const [path, record] of __componentRecords) {
+        if (boundary !== path && !boundary.startsWith(`${path}/`)) continue;
+        const metadata = __nickelComponentMetadata.get(record.kind);
+        stack.push({path,module:metadata?.module ?? null,export:metadata?.export ?? record.kind?.name ?? null});
+    }
+    if (error?.__nickelComponent && !stack.some(entry => entry.path === error.__nickelComponent.path))
+        stack.push(error.__nickelComponent);
+    __runtimeCounters.failures++;
+    __boundaryDiagnostics.push({package:__nickelPackageOwner,surface:__activeSurface,mount:__surfaceStore.snapshot.mountId,
+        boundary,phase,message,hookIndex:__hookIndex,stack,occurrences:1});
 }
 function __nickelNearestBoundary(owner) {
     if (typeof owner !== 'string') return null;
@@ -141,6 +158,7 @@ function __nickelCaptureFailure(owner, error, phase) {
     return true;
 }
 function __nickelBoundaryDiagnostics() { return JSON.stringify(__boundaryDiagnostics); }
+function __nickelRuntimeDiagnostics() { return JSON.stringify({counters:__runtimeCounters,reasons:__runtimeReasons}); }
 let __windowsStore = {generation:0, snapshot:Object.freeze([])};
 let __applicationsStore = {generation:0, snapshot:Object.freeze([])};
 let __notificationsStore = {generation:0, snapshot:Object.freeze({notification:null,history:Object.freeze([]),visible:false})};
@@ -181,12 +199,41 @@ function __nickelNotifyExternalStore(name) {
 let __activeSurface = 'default';
 const __surfaceStates = new Map();
 const __surfaceApps = new Map();
+const __surfaceAppIdentities = new Map();
 
-function __nickelRegisterSurfaceApp(id, component) {
+function __nickelRegisterSurfaceApp(id, component, identity = null) {
     if (typeof id !== 'string' || !id.length || typeof component !== 'function')
         throw Error('invalid surface entry');
     if (__surfaceApps.has(id)) throw Error('surface entry is already registered');
     __surfaceApps.set(id, component);
+    __surfaceAppIdentities.set(id, {...(identity ?? {owner:null,module:null,export:null,signature:null}),component});
+}
+
+function __nickelReplaceSurfaceApp(id, component, identity) {
+    if (typeof id !== 'string' || !__surfaceApps.has(id) || typeof component !== 'function')
+        throw Error('hot replacement target is unavailable');
+    if (!identity || typeof identity !== 'object' || Array.isArray(identity))
+        throw Error('hot replacement identity is required');
+    const previous = __surfaceAppIdentities.get(id);
+    const compatible = previous.owner === identity.owner
+        && previous.module === identity.module && previous.export === identity.export
+        && previous.signature === identity.signature;
+    if (compatible && __componentIds.has(previous.component))
+        __componentIds.set(component, __componentIds.get(previous.component));
+    if (!compatible) {
+        const state = id === __activeSurface ? {hooks:__componentHooks} : __surfaceStates.get(id);
+        if (state?.hooks) __nickelCleanupHooks(state.hooks);
+        if (id === __activeSurface) {
+            __componentHooks = new Map(); __componentRecords = new Map();
+            __handlers = []; __previousHandlers = []; __effects = []; __dirtyComponents = new Set();
+        } else if (state) {
+            state.hooks = new Map(); state.records = new Map(); state.handlers = [];
+            state.previousHandlers = []; state.effects = []; state.dirty = new Set();
+        }
+    }
+    __surfaceApps.set(id, component);
+    __surfaceAppIdentities.set(id, {...identity,component});
+    return compatible;
 }
 
 // Registrations retain executable values in this package's module graph. Only
@@ -1296,6 +1343,7 @@ function __nickelDropSurface(id) {
     if (retired) __nickelCleanupHooks(retired);
     __surfaceStates.delete(id);
     __surfaceApps.delete(id);
+    __surfaceAppIdentities.delete(id);
     if (id !== __activeSurface) return;
     __componentHooks = new Map();
     __componentRecords = new Map();
@@ -1473,14 +1521,17 @@ function useEffect(setup, deps) {
     let entry = hooks[slot];
     if (!entry) hooks[slot] = entry = {kind: 'effect', owner:__currentComponent, deps: undefined, cleanup: undefined};
     if (entry.kind !== 'effect') throw Error('hook order changed');
-    if (!__nickelDepsEqual(entry.deps, nextDeps))
+    if (!__nickelDepsEqual(entry.deps, nextDeps)) {
+        __runtimeCounters.effectsScheduled++;
         __pendingRender.passiveEffects.push({entry, setup, deps: nextDeps});
+    }
 }
 
 function __nickelRunCleanup(entry) {
     if (typeof entry.cleanup !== 'function') return;
     const cleanup = entry.cleanup;
     entry.cleanup = undefined;
+    __runtimeCounters.cleanups++;
     try { cleanup(); }
     catch (error) { __nickelCaptureFailure(entry.owner, error, 'cleanup'); }
 }
@@ -1582,12 +1633,18 @@ function __nickelResolveDeclaration(declaration) {
     const execute = !__incrementalRender || !retained || __nonRetainedComponents.has(kind)
         || __dirtyComponents.has(path) || !declarationSame;
     if (!execute && !__nickelDirtyAtOrBelow(path)) {
+        __runtimeCounters.reused++;
         __nickelMarkRetainedVisited(path);
         return retained.output;
     }
     const previous = __currentComponent;
     const previousIndex = __hookIndex;
     __currentComponent = path;
+    __runtimeCounters.executed++;
+    const reason = !retained ? 'mount' : __dirtyComponents.has(path) ? 'hook-or-store'
+        : !declarationSame ? 'props' : 'descendant';
+    if (__runtimeReasons.length === __MAX_RUNTIME_REASONS) __runtimeReasons.shift();
+    __runtimeReasons.push({surface:__activeSurface,path,reason});
     __hookIndex = 0;
     try {
         if (__errorBoundaryComponents.has(kind)) {
@@ -1650,7 +1707,15 @@ function __nickelResolveDeclaration(declaration) {
                 if (!values.length) __contextValues.delete(context);
             }
         } else {
-            raw = execute ? kind({...declaration.props, children:declaration.children}) : retained.raw;
+            if (execute) {
+                try { raw = kind({...declaration.props, children:declaration.children}); }
+                catch (error) {
+                    const metadata = __nickelComponentMetadata.get(kind);
+                    try { Object.defineProperty(error, '__nickelComponent', {value:{path,module:metadata?.module ?? null,export:metadata?.export ?? kind.name ?? null}}); }
+                    catch (_) { /* diagnostics must not replace the component failure */ }
+                    throw error;
+                }
+            } else raw = retained.raw;
             const result = __nickelResolveVirtual(raw);
             if (execute && __hookIndex !== __componentHooks.get(path).length) throw Error('hook order changed');
             const output = __nickelApplyDeclarationKey(declaration, result);
@@ -1865,6 +1930,7 @@ function __nickelCommitRender() {
         __nickelRunCleanup(effect.entry);
         effect.entry.deps = effect.deps;
         try {
+            __runtimeCounters.effectsRun++;
             const cleanup = effect.setup();
             if (cleanup !== undefined && typeof cleanup !== 'function') continue;
             effect.entry.cleanup = cleanup;
@@ -1882,6 +1948,7 @@ function __nickelActiveEntry() {
 
 function __nickelRender(component = __nickelActiveEntry()) {
     if (__pendingRender !== null) throw Error('previous render was not finalized');
+    __runtimeCounters.renders++;
     const previousHandlers = __handlers;
     const olderHandlers = __previousHandlers;
     const previousHooks = new Map(Array.from(__componentHooks, ([path, hooks]) => [path, hooks.slice()]));
