@@ -7,6 +7,7 @@ use boa_engine::{Context, JsValue, Source, js_string};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
+use std::time::Instant;
 
 mod composition;
 pub mod composition_runtime;
@@ -20,6 +21,25 @@ const BOOTSTRAP: &str = include_str!("../../../assets/plugin-runtime/bootstrap.j
 // Boa enforces this per JavaScript call frame. It bounds accidental infinite
 // loops in plugin code without retaining an event or frame history.
 const MAX_JS_LOOP_ITERATIONS: u64 = 100_000;
+
+fn encoded_json_len(value: &Value) -> Result<usize, String> {
+    struct Counter(usize);
+    impl std::io::Write for Counter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 = self
+                .0
+                .checked_add(bytes.len())
+                .ok_or_else(|| std::io::Error::other("encoded JSON length overflow"))?;
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut counter = Counter(0);
+    serde_json::to_writer(&mut counter, value).map_err(|error| error.to_string())?;
+    Ok(counter.0)
+}
 const PLUGIN_CAPABILITY_NAMES: &[&str] = &[
     "launcher-show",
     "control-center-show",
@@ -942,9 +962,19 @@ impl JsxRuntime {
         expression: &str,
         parse: impl FnOnce(&Value) -> Result<T, String>,
     ) -> Result<T, String> {
-        let parsed = self
-            .eval_json::<Value>(expression)
-            .and_then(|value| parse(&value));
+        let value = self.eval_json::<Value>(expression);
+        let transport_bytes = value
+            .as_ref()
+            .ok()
+            .map(encoded_json_len)
+            .transpose()?
+            .unwrap_or(0);
+        let validation_started = Instant::now();
+        let parsed = value.and_then(|value| parse(&value));
+        let validation_micros = validation_started
+            .elapsed()
+            .as_micros()
+            .min(u128::from(u64::MAX));
         let finalizer = if parsed.is_ok() {
             "__nickelCommitRender()"
         } else {
@@ -952,6 +982,7 @@ impl JsxRuntime {
         };
         self.eval(finalizer)
             .map_err(|error| format!("could not finalize plugin render: {error}"))?;
+        self.report_host_profile("cold-tree", validation_micros as u64, transport_bytes)?;
         parsed
     }
 
@@ -973,13 +1004,20 @@ impl JsxRuntime {
             return Ok(ScheduledRender::Unchanged);
         }
         let node = outcome.node.ok_or("scheduled render omitted its tree")?;
+        let transport_bytes = encoded_json_len(&node)?;
+        let validation_started = Instant::now();
         let parsed = parse(&node);
+        let validation_micros = validation_started
+            .elapsed()
+            .as_micros()
+            .min(u128::from(u64::MAX));
         self.eval(if parsed.is_ok() {
             "__nickelCommitRender()"
         } else {
             "__nickelRollbackRender()"
         })
         .map_err(|error| format!("could not finalize scheduled plugin render: {error}"))?;
+        self.report_host_profile("cold-tree", validation_micros as u64, transport_bytes)?;
         let value = parsed?;
         let reconciliation_requested = self
             .eval_json::<ReconciliationRequest>("__nickelReconciliationRequest()")?
@@ -996,9 +1034,8 @@ impl JsxRuntime {
     /// the complete accepted root on this path.
     pub fn dispatch_patched(&mut self, expression: &str) -> Result<ScheduledPatch, String> {
         let wire_value = self.eval_json::<Value>(expression)?;
-        let transport_bytes = serde_json::to_vec(&wire_value)
-            .map_err(|error| error.to_string())?
-            .len();
+        let transport_bytes = encoded_json_len(&wire_value)?;
+        self.report_host_profile("typed-patch", 0, transport_bytes)?;
         let outcome: ScheduledPatchWire =
             serde_json::from_value(wire_value).map_err(|error| error.to_string())?;
         if !outcome.rendered {
@@ -1107,9 +1144,20 @@ impl JsxRuntime {
         .map_err(|error| error.to_string())
     }
 
-    /// Bounded retained-render reasons and cumulative execution/effect counts.
+    /// Bounded render diagnostics plus per-mount execution and transport profiles.
     pub fn runtime_diagnostics(&mut self) -> Result<Value, String> {
         self.eval_json("__nickelRuntimeDiagnostics()")
+    }
+
+    fn report_host_profile(
+        &mut self,
+        transport_kind: &str,
+        native_validation_micros: u64,
+        transport_bytes: usize,
+    ) -> Result<(), String> {
+        self.eval(&format!(
+            "__nickelReportHostProfile({transport_kind:?},{native_validation_micros},{transport_bytes})"
+        ))
     }
 
     pub fn finish_event(&mut self, accepted: bool) -> Result<(), String> {
@@ -1759,6 +1807,114 @@ mod tests {
         assert_eq!(diagnostics["counters"]["nativeMutations"], 40);
         assert!(diagnostics["storeChanges"].to_string().len() < 4096);
         assert!(diagnostics["nativeMutations"].to_string().len() < 8192);
+    }
+
+    #[test]
+    fn developer_diagnostics_cover_identity_selectors_props_depth_and_loops() {
+        fn kinds(runtime: &mut super::JsxRuntime) -> Vec<String> {
+            runtime.runtime_diagnostics().unwrap()["developerDiagnostics"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|entry| entry["kind"].as_str().unwrap().to_owned())
+                .collect()
+        }
+
+        let mut identity = super::JsxRuntime::new(
+            "function App(){return h(Column,null,[h(Text,null,'unkeyed')])}",
+            None,
+        )
+        .unwrap();
+        identity.render("__nickelRender()", |_| Ok(())).unwrap();
+        assert!(kinds(&mut identity).contains(&"positional-identity-churn".into()));
+
+        let mut selector = super::JsxRuntime::new(
+            "function App(){const value=useWindows(items=>({count:items.length}));return h(Text,null,String(value.count))}",
+            None,
+        )
+        .unwrap();
+        selector.render("__nickelRender()", |_| Ok(())).unwrap();
+        selector.render("__nickelRender()", |_| Ok(())).unwrap();
+        assert!(kinds(&mut selector).contains(&"unstable-selector".into()));
+
+        let mut props = super::JsxRuntime::new(
+            "function Bad(){return h(Slider,{min:1,max:0,value:0,onChange:()=>{}})} function App(){return h(ErrorBoundary,{fallback:h(Text,null,'fallback')},h(Bad))}",
+            None,
+        )
+        .unwrap();
+        props.render("__nickelRender()", |_| Ok(())).unwrap();
+        assert!(kinds(&mut props).contains(&"invalid-props".into()));
+
+        let mut depth = super::JsxRuntime::new(
+            "function Nest({depth}){return depth?h(Nest,{depth:depth-1}):h(Text,null,'leaf')} function App(){return h(Nest,{depth:52})}",
+            None,
+        )
+        .unwrap();
+        depth.render("__nickelRender()", |_| Ok(())).unwrap();
+        let diagnostics = depth.runtime_diagnostics().unwrap();
+        let depth_diagnostic = diagnostics["developerDiagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["kind"] == "excessive-component-depth")
+            .unwrap();
+        assert!(depth_diagnostic["stack"].as_array().unwrap().len() <= 16);
+        assert!(
+            depth_diagnostic["suggestion"]
+                .as_str()
+                .unwrap()
+                .contains("Flatten")
+        );
+        assert!(kinds(&mut depth).contains(&"render-loop".into()));
+
+        let mut effect_loop = super::JsxRuntime::new(
+            "function App(){const [value,setValue]=useState(0);useEffect(()=>setValue(value+1));return h(Text,null,String(value))}",
+            None,
+        )
+        .unwrap();
+        for _ in 0..25 {
+            effect_loop.render("__nickelRender()", |_| Ok(())).unwrap();
+        }
+        assert!(kinds(&mut effect_loop).contains(&"effect-loop".into()));
+    }
+
+    #[test]
+    fn per_mount_profile_counts_execution_patches_commits_and_transport() {
+        let source = "function App(){const [value,setValue]=useState(0);return h(Button,{onClick:()=>setValue(value+1)},String(value))}";
+        let mut runtime = super::JsxRuntime::new(source, None).unwrap();
+        let initial = runtime
+            .render("__nickelRender()", |node| Ok(node.clone()))
+            .unwrap();
+        let action = initial["action"].as_u64().unwrap();
+        let outcome = runtime
+            .dispatch_patched(&format!("__nickelDispatchBatchPatched([[{action},null]])"))
+            .unwrap();
+        assert!(matches!(outcome, super::ScheduledPatch::Patched { .. }));
+        runtime.finish_patch_render(true).unwrap();
+        runtime.finish_event(true).unwrap();
+        let diagnostics = runtime.runtime_diagnostics().unwrap();
+        let profile = &diagnostics["profiles"][0];
+        assert_eq!(profile["surface"], "default");
+        assert_eq!(profile["renders"], 2);
+        assert_eq!(profile["componentExecutions"], 2);
+        assert_eq!(profile["patches"], 1);
+        assert_eq!(profile["patchOperations"], 1);
+        assert_eq!(profile["lifecycleCommits"], 2);
+        assert!(profile["coldTreeTransportBytes"].as_u64().unwrap() > 0);
+        assert!(profile["patchEnvelopeTransportBytes"].as_u64().unwrap() > 0);
+        assert!(profile["nativeValidationMicros"].is_u64());
+        assert_eq!(profile["timingPrecision"], "wall-clock-milliseconds");
+
+        runtime.select_surface("settings").unwrap();
+        runtime
+            .set_surface_store("mount-settings", &serde_json::json!({"id":"settings"}))
+            .unwrap();
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        let diagnostics = runtime.runtime_diagnostics().unwrap();
+        assert_eq!(diagnostics["profiles"].as_array().unwrap().len(), 2);
+        assert!(diagnostics["profiles"].as_array().unwrap().iter().any(
+            |profile| profile["surface"] == "settings" && profile["mount"] == "mount-settings"
+        ));
     }
 
     #[test]

@@ -122,6 +122,7 @@ let __componentRecords = new Map();
 let __visitedComponents = new Set();
 let __componentChildren = new Map();
 let __currentComponent = null;
+let __componentExecutionStack = [];
 let __hookIndex = 0;
 let __handlers = [];
 let __previousHandlers = [];
@@ -139,6 +140,8 @@ let __runtimeReasons = [];
 const __MAX_RUNTIME_CHANGES = 32;
 let __runtimeStoreChanges = [];
 let __runtimeNativeMutations = [];
+let __developerDiagnostics = [];
+const __mountProfiles = new Map();
 let __runtimeCounters = {renders:0,executed:0,reused:0,nativeNodesMaterialized:0,
     effectsScheduled:0,effectsRun:0,cleanups:0,failures:0,storeChanges:0,nativeMutations:0};
 let __incrementalRender = false;
@@ -221,6 +224,9 @@ function __nickelCaptureNativeFailure(owners, message) {
         __componentRecords.set(boundary, {...record, boundaryError:error});
         __dirtyComponents.add(boundary);
         __nickelRecordBoundaryFailure(boundary, 'native-validation', error);
+        if(/invalid|unsupported|must|needs/i.test(error.message))
+            __nickelDeveloperDiagnostic('invalid-props',error.message,
+                'Check the native component prop contract and bounded values.',boundary);
         captured.add(boundary);
     }
     return JSON.stringify({captured:Array.from(captured)});
@@ -245,8 +251,73 @@ function __nickelRecordNativeMutations(operations,nodesVisited) {
     const kinds={}; for(const operation of operations) kinds[operation.op]=(kinds[operation.op]??0)+1;
     __nickelBoundedDiagnosticPush(__runtimeNativeMutations,{count:operations.length,nodesVisited,kinds});
 }
+function __nickelComponentStack(path) {
+    if(__componentExecutionStack.some(entry=>entry.path===path))return __componentExecutionStack.slice(-16)
+        .map(({path,module,export:exported})=>({path,module,export:exported}));
+    const stack=[];
+    for(const [candidate,record] of __componentRecords) {
+        if(candidate!==path&&!path.startsWith(`${candidate}/`))continue;
+        const metadata=__nickelComponentMetadata.get(record.kind);
+        stack.push({path:candidate,module:metadata?.module??null,export:metadata?.export??record.kind?.name??null});
+    }
+    return stack.slice(-16);
+}
+function __nickelDeveloperDiagnostic(kind,message,suggestion,path=__currentComponent,detail={}) {
+    const bounded=String(message).slice(0,512), owner=typeof path==='string'?path:null;
+    const previous=__developerDiagnostics[__developerDiagnostics.length-1];
+    if(previous&&previous.kind===kind&&previous.surface===__activeSurface&&previous.path===owner&&previous.message===bounded) {
+        previous.occurrences=Math.min(65535,previous.occurrences+1);return;
+    }
+    if(__developerDiagnostics.length===__MAX_RUNTIME_CHANGES)__developerDiagnostics.shift();
+    __developerDiagnostics.push({kind,severity:'warning',package:__nickelPackageOwner,surface:__activeSurface,
+        mount:__surfaceStore.snapshot.mountId,path:owner,message:bounded,suggestion,stack:owner?__nickelComponentStack(owner):[],
+        occurrences:1,...detail});
+}
+function __nickelProfile() {
+    let profile=__mountProfiles.get(__activeSurface);
+    if(!profile) {
+        if(__mountProfiles.size===64) {
+            const retired=Array.from(__mountProfiles.keys()).find(surface=>surface!==__activeSurface);
+            if(retired!==undefined)__mountProfiles.delete(retired);
+        }
+        profile={surface:__activeSurface,mount:__surfaceStore.snapshot.mountId,renders:0,componentExecutions:0,
+            componentExecutionMillis:0,reconciliationMillis:0,patches:0,patchOperations:0,patchNodesVisited:0,
+            lifecycleCommits:0,lifecycleCommitMillis:0,timingPrecision:'wall-clock-milliseconds',
+            nativeValidationMicros:0,coldTreeTransportBytes:0,patchEnvelopeTransportBytes:0,
+            consecutiveEffectTurns:0};
+        __mountProfiles.set(__activeSurface,profile);
+    }
+    profile.mount=__surfaceStore.snapshot.mountId;return profile;
+}
+function __nickelReportHostProfile(transportKind,nativeValidationMicros,transportBytes) {
+    const profile=__nickelProfile();
+    if(Number.isSafeInteger(nativeValidationMicros)&&nativeValidationMicros>=0)
+        profile.nativeValidationMicros+=nativeValidationMicros;
+    if(Number.isSafeInteger(transportBytes)&&transportBytes>=0) {
+        if(transportKind==='cold-tree')profile.coldTreeTransportBytes+=transportBytes;
+        else if(transportKind==='typed-patch')profile.patchEnvelopeTransportBytes+=transportBytes;
+    }
+}
+function __nickelSelectedValue(entry,selector,snapshot,generation,store) {
+    const selected=selector?selector(snapshot):snapshot;
+    if(selector&&entry.generation===generation&&entry.value!==undefined&&!Object.is(selected,entry.value))
+        __nickelDeveloperDiagnostic('unstable-selector',`${store} selector changed for an unchanged generation`,
+            'Return a stable snapshot member or memoize the derived selector result.');
+    return selected;
+}
+function __nickelSelectedStoreEntry(hooks,slot,kind,selector,store) {
+    let entry=hooks[slot];
+    if(entry?.kind===kind&&entry.selector!==selector)
+        __nickelDeveloperDiagnostic('unstable-selector',`${store} selector function identity changed`,
+            'Declare the selector outside the component or retain it with useCallback.');
+    if(!entry||(entry.kind===kind&&entry.selector!==selector))
+        hooks[slot]=entry={kind,selector,value:undefined,generation:0};
+    if(entry.kind!==kind)throw Error('hook order changed');
+    return entry;
+}
 function __nickelRuntimeDiagnostics() { return JSON.stringify({counters:__runtimeCounters,reasons:__runtimeReasons,
-    storeChanges:__runtimeStoreChanges,nativeMutations:__runtimeNativeMutations}); }
+    storeChanges:__runtimeStoreChanges,nativeMutations:__runtimeNativeMutations,
+    developerDiagnostics:__developerDiagnostics,profiles:Array.from(__mountProfiles.values())}); }
 let __windowsStore = {generation:0, snapshot:Object.freeze([])};
 let __applicationsStore = {generation:0, snapshot:Object.freeze([])};
 let __notificationsStore = {generation:0, snapshot:Object.freeze({notification:null,history:Object.freeze([]),visible:false})};
@@ -890,12 +961,9 @@ function useWindows(selector) {
     const slot = __hookIndex++;
     const hooks = __componentHooks.get(__currentComponent);
     const normalized = selector ?? null;
-    let entry = hooks[slot];
-    if (!entry || (entry.kind === 'windows-store' && entry.selector !== normalized))
-        hooks[slot] = entry = {kind:'windows-store', selector:normalized, value:undefined, generation:0};
-    if (entry.kind !== 'windows-store') throw Error('hook order changed');
+    const entry=__nickelSelectedStoreEntry(hooks,slot,'windows-store',normalized,'windows');
     entry.storeError = undefined;
-    entry.value = normalized ? normalized(__windowsStore.snapshot) : __windowsStore.snapshot;
+    entry.value = __nickelSelectedValue(entry,normalized,__windowsStore.snapshot,__windowsStore.generation,'windows');
     entry.generation = __windowsStore.generation;
     return entry.value;
 }
@@ -959,12 +1027,9 @@ function useApplications(selector) {
     const slot = __hookIndex++;
     const hooks = __componentHooks.get(__currentComponent);
     const normalized = selector ?? null;
-    let entry = hooks[slot];
-    if (!entry || (entry.kind === 'applications-store' && entry.selector !== normalized))
-        hooks[slot] = entry = {kind:'applications-store', selector:normalized, value:undefined, generation:0};
-    if (entry.kind !== 'applications-store') throw Error('hook order changed');
+    const entry=__nickelSelectedStoreEntry(hooks,slot,'applications-store',normalized,'applications');
     entry.storeError = undefined;
-    entry.value = normalized ? normalized(__applicationsStore.snapshot) : __applicationsStore.snapshot;
+    entry.value = __nickelSelectedValue(entry,normalized,__applicationsStore.snapshot,__applicationsStore.generation,'applications');
     entry.generation = __applicationsStore.generation;
     return entry.value;
 }
@@ -1038,12 +1103,9 @@ function useNotifications(selector) {
     if (__currentComponent === null) throw Error('useNotifications requires a component');
     if (selector !== undefined && typeof selector !== 'function') throw TypeError('useNotifications selector must be a function');
     const slot=__hookIndex++, hooks=__componentHooks.get(__currentComponent), normalized=selector??null;
-    let entry=hooks[slot];
-    if (!entry || (entry.kind === 'notifications-store' && entry.selector !== normalized))
-        hooks[slot]=entry={kind:'notifications-store',selector:normalized,value:undefined,generation:0};
-    if (entry.kind !== 'notifications-store') throw Error('hook order changed');
+    const entry=__nickelSelectedStoreEntry(hooks,slot,'notifications-store',normalized,'notifications');
     entry.storeError=undefined;
-    entry.value=normalized?normalized(__notificationsStore.snapshot):__notificationsStore.snapshot;
+    entry.value=__nickelSelectedValue(entry,normalized,__notificationsStore.snapshot,__notificationsStore.generation,'notifications');
     entry.generation=__notificationsStore.generation;
     return entry.value;
 }
@@ -1103,10 +1165,9 @@ function __nickelSetWorkspacesStore(value) {
 function useWorkspaces(selector) {
     if(__currentComponent===null)throw Error('useWorkspaces requires a component');
     if(selector!==undefined&&typeof selector!=='function')throw TypeError('useWorkspaces selector must be a function');
-    const slot=__hookIndex++,hooks=__componentHooks.get(__currentComponent),normalized=selector??null;let entry=hooks[slot];
-    if(!entry||(entry.kind==='workspaces-store'&&entry.selector!==normalized))hooks[slot]=entry={kind:'workspaces-store',selector:normalized,value:undefined,generation:0};
-    if(entry.kind!=='workspaces-store')throw Error('hook order changed');
-    entry.storeError=undefined;entry.value=normalized?normalized(__workspacesStore.snapshot):__workspacesStore.snapshot;entry.generation=__workspacesStore.generation;return entry.value;
+    const slot=__hookIndex++,hooks=__componentHooks.get(__currentComponent),normalized=selector??null;
+    const entry=__nickelSelectedStoreEntry(hooks,slot,'workspaces-store',normalized,'workspaces');
+    entry.storeError=undefined;entry.value=__nickelSelectedValue(entry,normalized,__workspacesStore.snapshot,__workspacesStore.generation,'workspaces');entry.generation=__workspacesStore.generation;return entry.value;
 }
 const __nickelSelectWorkspace=snapshot=>snapshot.workspaces.find(workspace=>workspace.id===snapshot.activeWorkspace)??null;
 function useWorkspace(){return useWorkspaces(__nickelSelectWorkspace);}
@@ -1140,8 +1201,9 @@ function __nickelSetOutputsStore(value){
         try{const selected=entry.selector?entry.selector(snapshot):snapshot;entry.storeError=undefined;if(!Object.is(selected,entry.value))dirty.add(owner);}catch(error){entry.storeError=error;dirty.add(owner);}}});__nickelRecordStoreChange('outputs',generation,before);return true;
 }
 function useOutputs(selector){if(__currentComponent===null)throw Error('useOutputs requires a component');if(selector!==undefined&&typeof selector!=='function')throw TypeError('useOutputs selector must be a function');
-    const slot=__hookIndex++,hooks=__componentHooks.get(__currentComponent),normalized=selector??null;let entry=hooks[slot];if(!entry||(entry.kind==='outputs-store'&&entry.selector!==normalized))hooks[slot]=entry={kind:'outputs-store',selector:normalized,value:undefined,generation:0};
-    if(entry.kind!=='outputs-store')throw Error('hook order changed');entry.storeError=undefined;entry.value=normalized?normalized(__outputsStore.snapshot):__outputsStore.snapshot;entry.generation=__outputsStore.generation;return entry.value;}
+    const slot=__hookIndex++,hooks=__componentHooks.get(__currentComponent),normalized=selector??null;
+    const entry=__nickelSelectedStoreEntry(hooks,slot,'outputs-store',normalized,'outputs');
+    entry.storeError=undefined;entry.value=__nickelSelectedValue(entry,normalized,__outputsStore.snapshot,__outputsStore.generation,'outputs');entry.generation=__outputsStore.generation;return entry.value;}
 function __nickelSetLocaleStore(value){
     const before=__nickelDirtyComponentCount();
     if(!value||typeof value!=='object'||Array.isArray(value))throw Error('invalid locale snapshot');
@@ -1167,6 +1229,9 @@ function useSyncExternalStore(subscribe,getSnapshot) {
     if(entry.kind!=='sync-external-store')throw Error('hook order changed');
     const before=store.read(),value=getSnapshot(),after=store.read();
     if(before.generation!==after.generation||!Object.is(value,after.snapshot))throw Error('external store changed during render');
+    if(entry.generation===before.generation&&entry.value!==undefined&&!Object.is(value,entry.value))
+        __nickelDeveloperDiagnostic('unstable-selector',`${store.name} external snapshot changed for an unchanged generation`,
+            'Return the store snapshot directly; do not allocate a new snapshot from getSnapshot.');
     entry.storeError=undefined;entry.value=value;entry.generation=after.generation;return value;
 }
 
@@ -1252,12 +1317,9 @@ function useTheme(selector) {
     const slot = __hookIndex++;
     const hooks = __componentHooks.get(__currentComponent);
     const normalized = selector ?? null;
-    let entry = hooks[slot];
-    if (!entry || (entry.kind === 'theme-store' && entry.selector !== normalized))
-        hooks[slot] = entry = {kind:'theme-store', selector:normalized, value:undefined, generation:0};
-    if (entry.kind !== 'theme-store') throw Error('hook order changed');
+    const entry=__nickelSelectedStoreEntry(hooks,slot,'theme-store',normalized,'theme');
     entry.storeError = undefined;
-    entry.value = normalized ? normalized(__themeStore.snapshot) : __themeStore.snapshot;
+    entry.value = __nickelSelectedValue(entry,normalized,__themeStore.snapshot,__themeStore.generation,'theme');
     entry.generation = __themeStore.generation;
     return entry.value;
 }
@@ -1444,6 +1506,7 @@ function __nickelDropSurface(id) {
     const retired = id === __activeSurface ? __componentHooks : __surfaceStates.get(id)?.hooks;
     if (retired) __nickelCleanupHooks(retired);
     __surfaceStates.delete(id);
+    __mountProfiles.delete(id);
     __surfaceApps.delete(id);
     __surfaceAppIdentities.delete(id);
     if (id !== __activeSurface) return;
@@ -1748,12 +1811,25 @@ function __nickelResolveDeclaration(declaration) {
     const previous = __currentComponent;
     const previousIndex = __hookIndex;
     __currentComponent = path;
+    const componentMetadata=__nickelComponentMetadata.get(kind);
+    __componentExecutionStack.push({path,module:componentMetadata?.module??null,
+        export:componentMetadata?.export??kind.name??null,kind});
     __runtimeCounters.executed++;
+    const profile=__nickelProfile();
+    const recursiveExecutions=__componentExecutionStack.filter(entry=>entry.kind===kind).length;
+    if(recursiveExecutions===33)
+        __nickelDeveloperDiagnostic('render-loop','the same component recursively rendered 33 times in one reconciliation',
+            'Add a bounded termination condition or replace recursive composition with an iterative child list.',path,
+            {recursiveExecutions});
     const reason = !retained ? 'mount' : __dirtyComponents.has(path) ? 'hook-or-store'
         : !declarationSame ? 'props' : 'descendant';
     if (__runtimeReasons.length === __MAX_RUNTIME_REASONS) __runtimeReasons.shift();
     __runtimeReasons.push({surface:__activeSurface,path,reason});
     __hookIndex = 0;
+    const componentDepth=__componentExecutionStack.length;
+    if(componentDepth>48)
+        __nickelDeveloperDiagnostic('excessive-component-depth',`component depth ${componentDepth} exceeds the development threshold`,
+            'Flatten wrapper components or split the surface into smaller retained boundaries.',path,{depth:componentDepth});
     try {
         if (__errorBoundaryComponents.has(kind)) {
             const resetKeys = declaration.props?.resetKeys;
@@ -1816,13 +1892,14 @@ function __nickelResolveDeclaration(declaration) {
             }
         } else {
             if (execute) {
+                const componentStarted=Date.now();profile.componentExecutions++;
                 try { raw = kind({...declaration.props, children:declaration.children}); }
                 catch (error) {
                     const metadata = __nickelComponentMetadata.get(kind);
                     try { Object.defineProperty(error, '__nickelComponent', {value:{path,module:metadata?.module ?? null,export:metadata?.export ?? kind.name ?? null}}); }
                     catch (_) { /* diagnostics must not replace the component failure */ }
                     throw error;
-                }
+                } finally { profile.componentExecutionMillis+=Math.max(0,Date.now()-componentStarted); }
             } else raw = retained.raw;
             const result = __nickelResolveVirtual(raw);
             if (execute && __hookIndex !== __componentHooks.get(path).length) throw Error('hook order changed');
@@ -1830,7 +1907,13 @@ function __nickelResolveDeclaration(declaration) {
             __componentRecords.set(path, {kind, declaration, raw, output});
             return output;
         }
+    } catch(error) {
+        if(error instanceof TypeError||error instanceof RangeError)
+            __nickelDeveloperDiagnostic('invalid-props',__nickelErrorMessage(error),
+                'Check this component’s declared prop types and bounded native values.',path);
+        throw error;
     } finally {
+        __componentExecutionStack.pop();
         __currentComponent = previous;
         __hookIndex = previousIndex;
     }
@@ -1957,6 +2040,8 @@ function h(kind, props, ...children) {
             if (typeof item !== 'object') continue;
             if (item?.key === undefined) {
                 __listKeyErrors.push('items rendered from an array need a stable key');
+                __nickelDeveloperDiagnostic('positional-identity-churn','dynamic children are using positional identity',
+                    'Add a stable key to every component or native node produced by an array.');
                 continue;
             }
             const key = String(item.key);
@@ -2064,6 +2149,7 @@ function __nickelCommitRender() {
     // clone the whole mount even when a single leaf is dirty.
     __acceptedNativeTree = null;
     __dirtyComponents.clear();
+    const commitStarted=Date.now(),profile=__nickelProfile();
     for (const entry of pending.reducerEntries) {
         entry.reducer = entry.nextReducer;
         delete entry.nextReducer;
@@ -2079,6 +2165,13 @@ function __nickelCommitRender() {
             effect.entry.cleanup = cleanup;
         } catch (error) { __nickelCaptureFailure(effect.entry.owner, error, 'effect'); }
     }
+    profile.lifecycleCommits++;profile.lifecycleCommitMillis+=Math.max(0,Date.now()-commitStarted);
+    if(pending.passiveEffects.length&&__dirtyComponents.size)profile.consecutiveEffectTurns++;
+    else profile.consecutiveEffectTurns=0;
+    if(profile.consecutiveEffectTurns===25)
+        __nickelDeveloperDiagnostic('effect-loop','effects scheduled another render for 25 consecutive commits',
+            'Add stable dependencies and avoid unconditional state updates from an effect.',null,
+            {turns:profile.consecutiveEffectTurns});
 }
 
 function __nickelAcceptEvent() {
@@ -2092,6 +2185,7 @@ function __nickelActiveEntry() {
 function __nickelRender(component = __nickelActiveEntry(), patchOnly = false) {
     if (__pendingRender !== null) throw Error('previous render was not finalized');
     __runtimeCounters.renders++;
+    const profile=__nickelProfile(),reconciliationStarted=Date.now();profile.renders++;
     const previousHandlers = __handlers;
     const olderHandlers = __previousHandlers;
     const previousHooks = new Map(Array.from(__componentHooks, ([path, hooks]) => [path, hooks.slice()]));
@@ -2133,6 +2227,8 @@ function __nickelRender(component = __nickelActiveEntry(), patchOnly = false) {
     } catch (error) {
         __nickelRollbackRender();
         throw error;
+    } finally {
+        profile.reconciliationMillis+=Math.max(0,Date.now()-reconciliationStarted);
     }
 }
 
@@ -2162,6 +2258,8 @@ function __nickelDirtyNativePatch(previousRecords) {
         operations.push(...patch.operations);nodesVisited+=patch.counters.nodesVisited;
     }
     __nickelAttachNativeRecords(boundaries);
+    const profile=__nickelProfile();profile.patches++;profile.patchOperations+=operations.length;
+    profile.patchNodesVisited+=nodesVisited;
     return {version:1,operations,counters:{nodesVisited,nodesMutated:operations.length,
         localMaterializations:0,expansionNodes:0,treeBytes:0}};
 }
