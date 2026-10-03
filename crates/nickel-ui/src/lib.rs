@@ -12,6 +12,8 @@ pub mod layout;
 pub mod on_screen_keyboard;
 pub mod overlay;
 pub mod primitives;
+#[cfg(test)]
+mod release_admission;
 pub mod retained_surface;
 mod runtime;
 pub mod state;

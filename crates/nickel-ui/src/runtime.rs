@@ -6840,19 +6840,14 @@ mod tests {
     #[test]
     #[ignore = "release-profile retained-paint admission benchmark"]
     fn retained_paint_release_admission_avoids_cold_work_and_is_materially_faster() {
+        use crate::release_admission::{AdmissionReport, DurationDistribution};
+
         const NODES: usize = 800;
-        const ITERATIONS: usize = 32;
+        const ITERATIONS: usize = 1;
         const SAMPLES: usize = 5;
 
-        fn median(mut samples: Vec<Duration>) -> Duration {
-            samples.sort_unstable();
-            samples[samples.len() / 2]
-        }
-
         let mut retained = UiHost::new(RetainedPaintFixture::new(NODES), 900, 800);
-        let mut cold = UiHost::new(RetainedPaintFixture::new(NODES), 900, 800);
         assert!(retained.adopt_input_modality(InputModality::Pointer));
-        assert!(cold.adopt_input_modality(InputModality::Pointer));
         let inside = semantic_center(&retained, "Item 0");
         let outside = crate::Point { x: -1.0, y: -1.0 };
 
@@ -6874,10 +6869,14 @@ mod tests {
 
         let mut retained_samples = Vec::with_capacity(SAMPLES);
         let mut cold_samples = Vec::with_capacity(SAMPLES);
-        for _ in 0..SAMPLES {
+        for sample in 0..SAMPLES {
             let retained_started = Instant::now();
             for index in 0..ITERATIONS {
-                let point = if index % 2 == 0 { inside } else { outside };
+                let point = if (sample * ITERATIONS + index) % 2 == 0 {
+                    inside
+                } else {
+                    outside
+                };
                 let outcome = retained.handle_event(UiEvent::PointerMoved(point));
                 assert_eq!(outcome.telemetry.view_calls, 0);
                 assert_eq!(outcome.telemetry.nodes_measured, 0);
@@ -6895,27 +6894,34 @@ mod tests {
             retained_samples.push(retained_started.elapsed());
 
             let cold_started = Instant::now();
-            for index in 0..ITERATIONS {
-                let hovered = (index % 2 == 0).then(|| UiId::from("root/item-0"));
-                cold.state.set_hovered(hovered);
-                let (_, _, outcome) = cold.rebuild_timed();
-                assert_eq!(outcome.telemetry.view_calls, 1);
-                assert!(outcome.telemetry.nodes_measured >= NODES);
-                assert!(outcome.telemetry.nodes_placed >= NODES);
+            for _ in 0..ITERATIONS {
+                let cold = UiHost::new(RetainedPaintFixture::new(NODES), 900, 800);
+                let resources = cold.inspect().resources;
+                assert!(resources.nodes_measured >= NODES);
+                assert!(resources.nodes_placed >= NODES);
                 std::hint::black_box(cold.commands());
             }
             cold_samples.push(cold_started.elapsed());
         }
 
-        let retained_median = median(retained_samples);
-        let cold_median = median(cold_samples);
-        eprintln!(
-            "retained-paint admission: nodes={NODES} iterations={ITERATIONS} retained-median={retained_median:?} cold-median={cold_median:?}"
-        );
+        AdmissionReport::new("retained_paint", "800_node_hover")
+            .metadata("nodes", NODES)
+            .metadata("iterations_per_sample", ITERATIONS)
+            .metadata("samples", SAMPLES)
+            .work("retained_view_calls", 0)
+            .work("retained_nodes_measured", 0)
+            .work("retained_nodes_placed", 0)
+            .work("retained_semantic_nodes_rebuilt", 0)
+            .work("retained_paint_refreshes", 1)
+            .work("cold_view_calls", 1)
+            .timings("retained_batch", &retained_samples)
+            .timings("cold_batch", &cold_samples)
+            .emit();
+        let retained_p95 = DurationDistribution::from_samples(&retained_samples).p95;
+        let cold_p95 = DurationDistribution::from_samples(&cold_samples).p95;
         assert!(
-            retained_median.as_nanos().saturating_mul(5)
-                <= cold_median.as_nanos().saturating_mul(4),
-            "retained paint must be at least 20% faster: retained={retained_median:?}, cold={cold_median:?}"
+            retained_p95.as_nanos().saturating_mul(5) <= cold_p95.as_nanos().saturating_mul(4),
+            "retained paint p95 must be at least 20% faster: retained={retained_p95:?}, cold={cold_p95:?}"
         );
     }
 

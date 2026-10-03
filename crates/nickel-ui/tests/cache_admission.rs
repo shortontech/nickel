@@ -1,9 +1,13 @@
 use std::time::Instant;
 
+#[path = "../src/release_admission.rs"]
+mod release_admission;
+
 use nickel_ui::{
     Button, Column, Component, Container, Rect, SemanticRole, SemanticSelector, SoftwareRenderer,
-    Text, UiFrame,
+    Text, UiFrame, text_layout_cache_diagnostics,
 };
+use release_admission::AdmissionReport;
 
 fn p95(mut samples: Vec<f64>) -> f64 {
     samples.sort_by(f64::total_cmp);
@@ -132,21 +136,71 @@ fn bounded_semantic_role_name_index_meets_its_admission_budget() {
 #[test]
 #[ignore = "release-mode admission measurement"]
 fn complete_frame_reconstruction_stays_within_the_frame_work_budget() {
-    let mut samples = Vec::new();
-    for _ in 0..100 {
-        let started = Instant::now();
-        let frame = fixture(200);
-        samples.push(started.elapsed().as_secs_f64() * 1_000.0);
+    const NODES: usize = 200;
+    const SAMPLES: usize = 100;
+    let mut declaration_samples = Vec::with_capacity(SAMPLES);
+    let mut resolution_samples = Vec::with_capacity(SAMPLES);
+    let mut complete_samples = Vec::with_capacity(SAMPLES);
+    let diagnostics_before = text_layout_cache_diagnostics();
+    let mut work = None;
+    for _ in 0..SAMPLES {
+        let complete_started = Instant::now();
+        let declaration_started = Instant::now();
+        let root = Column::new().children((0..NODES).map(|index| {
+            Button::new(index, format!("Action {index}"))
+                .id(format!("action-{index}"))
+                .into_element()
+        }));
+        declaration_samples.push(declaration_started.elapsed());
+        let resolution_started = Instant::now();
+        let frame = UiFrame::layout(root, Rect::new(0.0, 0.0, 800.0, 1200.0));
+        resolution_samples.push(resolution_started.elapsed());
+        complete_samples.push(complete_started.elapsed());
         assert_eq!(
             frame
                 .query(&SemanticSelector::Role(SemanticRole::Button))
                 .len(),
-            200
+            NODES
         );
-        assert_eq!(frame.resource_diagnostics().retained_build_scratch_bytes, 0);
+        let resources = frame.resource_diagnostics();
+        assert_eq!(resources.retained_build_scratch_bytes, 0);
+        work.get_or_insert(resources);
+        assert_eq!(work, Some(resources));
     }
-    let reconstruction_p95 = p95(samples);
-    println!("frame_reconstruction_200_nodes_p95_ms={reconstruction_p95:.3}");
+    let diagnostics_after = text_layout_cache_diagnostics();
+    let work = work.expect("frame work sample");
+    AdmissionReport::new("cold_frame", "200_node_reconstruction")
+        .metadata("nodes", NODES)
+        .metadata("samples", SAMPLES)
+        .work("nodes_measured", work.nodes_measured)
+        .work("nodes_placed", work.nodes_placed)
+        .work("paint_nodes_executed", work.paint_nodes_executed)
+        .work(
+            "interaction_nodes_executed",
+            work.interaction_nodes_executed,
+        )
+        .work("semantic_nodes_executed", work.semantic_nodes_executed)
+        .work(
+            "text_cache_hits",
+            diagnostics_after
+                .hits
+                .saturating_sub(diagnostics_before.hits) as usize,
+        )
+        .work(
+            "text_cache_misses",
+            diagnostics_after
+                .misses
+                .saturating_sub(diagnostics_before.misses) as usize,
+        )
+        .timings("declaration", &declaration_samples)
+        .timings("resolution", &resolution_samples)
+        .timings("complete", &complete_samples)
+        .emit();
+    let reconstruction_p95 =
+        release_admission::DurationDistribution::from_samples(&complete_samples)
+            .p95
+            .as_secs_f64()
+            * 1_000.0;
     assert!(
         reconstruction_p95 <= 5.0,
         "focused frame reconstruction exceeded its predeclared 5 ms budget"

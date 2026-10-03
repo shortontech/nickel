@@ -1232,71 +1232,131 @@ mod tests {
     #[test]
     #[ignore = "release-profile retained layout admission benchmark"]
     fn retained_layout_release_admission_skips_work_and_beats_cold_resolution() {
-        const NODES: usize = 500;
-        const ITERATIONS: usize = 12;
+        use crate::release_admission::AdmissionReport;
+
+        const NODES: usize = 2_000;
+        const CHANGED_LABEL: usize = NODES / 2;
+        const ITERATIONS: usize = 2;
         const SAMPLES: usize = 5;
 
-        fn view(generation: usize) -> Element<()> {
+        fn view(changed_label: Option<char>) -> Element<()> {
             Column::new()
                 .children((0..NODES).map(|index| {
+                    let suffix = if index == CHANGED_LABEL {
+                        changed_label.unwrap_or('a')
+                    } else {
+                        'a'
+                    };
                     keyed_text(
                         &format!("item-{index}"),
-                        &format!(
-                            "generation {generation}: retained measurement admission item {index} \
-                             with enough shaped text to make cold work observable"
-                        ),
+                        &format!("retained admission item {index:04} value {suffix}"),
                     )
                 }))
                 .into_element()
         }
 
-        fn median(mut samples: Vec<std::time::Duration>) -> std::time::Duration {
-            samples.sort_unstable();
-            samples[samples.len() / 2]
-        }
-
         let bounds = Rect::new(0.0, 0.0, 900.0, 800.0);
         let mut retained_state = UiStateStore::default();
         let mut retained =
-            UiFrame::resolve(view(0), FrameRequest::new(bounds, &mut retained_state));
-        let mut retained_samples = Vec::with_capacity(SAMPLES);
+            UiFrame::resolve(view(None), FrameRequest::new(bounds, &mut retained_state));
+        let mut unchanged_samples = Vec::with_capacity(SAMPLES * ITERATIONS);
+        let mut one_label_samples = Vec::with_capacity(SAMPLES * ITERATIONS);
         let mut cold_samples = Vec::with_capacity(SAMPLES);
-        let mut generation = 1;
+        let mut unchanged_work = None;
+        let mut label_work = None;
         for _ in 0..SAMPLES {
-            let started = std::time::Instant::now();
             for _ in 0..ITERATIONS {
+                let started = std::time::Instant::now();
                 let next = UiFrame::resolve_against(
-                    view(generation),
+                    view(None),
                     FrameRequest::new(bounds, &mut retained_state),
                     &retained,
                 );
                 let work = next.resource_diagnostics();
                 assert_eq!(work.nodes_measured, 0);
                 assert_eq!(work.nodes_placed, 0);
+                assert_eq!(work.paint_nodes_executed, 0);
+                assert_eq!(work.interaction_nodes_executed, 0);
+                assert_eq!(work.semantic_nodes_executed, 0);
+                unchanged_work.get_or_insert(work);
+                assert_eq!(unchanged_work, Some(work));
                 retained = next;
-                generation += 1;
+                unchanged_samples.push(started.elapsed());
             }
-            retained_samples.push(started.elapsed());
 
-            let started = std::time::Instant::now();
-            for _ in 0..ITERATIONS {
-                let mut state = UiStateStore::default();
-                let cold =
-                    UiFrame::resolve(view(generation), FrameRequest::new(bounds, &mut state));
-                assert_eq!(cold.resource_diagnostics().nodes_measured, NODES + 1);
-                std::hint::black_box(cold.commands());
-                generation += 1;
+            for iteration in 0..ITERATIONS {
+                let suffix = if iteration % 2 == 0 { 'b' } else { 'a' };
+                let started = std::time::Instant::now();
+                let next = UiFrame::resolve_against(
+                    view(Some(suffix)),
+                    FrameRequest::new(bounds, &mut retained_state),
+                    &retained,
+                );
+                let work = next.resource_diagnostics();
+                // The equal-width label mutation is paint-only: cached intrinsic
+                // geometry remains authoritative while its fragment changes.
+                assert_eq!(work.nodes_measured, 0);
+                assert_eq!(work.nodes_placed, 0);
+                assert!(work.paint_nodes_executed > 0);
+                label_work.get_or_insert(work);
+                assert_eq!(label_work, Some(work));
+                retained = next;
+                one_label_samples.push(started.elapsed());
             }
+
+            let mut state = UiStateStore::default();
+            let started = std::time::Instant::now();
+            let cold = UiFrame::resolve(view(None), FrameRequest::new(bounds, &mut state));
             cold_samples.push(started.elapsed());
+            assert_eq!(cold.resource_diagnostics().nodes_measured, NODES + 1);
+            std::hint::black_box(cold.commands());
         }
-        let retained = median(retained_samples);
-        let cold = median(cold_samples);
-        eprintln!(
-            "retained-layout admission: nodes={NODES} iterations={ITERATIONS} retained-median={retained:?} cold-median={cold:?}"
-        );
+
+        let unchanged_work = unchanged_work.expect("unchanged work sample");
+        let label_work = label_work.expect("label work sample");
+        AdmissionReport::new("retained_layout", "2000_node_unchanged_and_one_label")
+            .metadata("nodes", NODES)
+            .metadata("iterations_per_sample", ITERATIONS)
+            .metadata("samples", SAMPLES)
+            .work("unchanged_nodes_measured", unchanged_work.nodes_measured)
+            .work("unchanged_nodes_placed", unchanged_work.nodes_placed)
+            .work(
+                "unchanged_paint_nodes_executed",
+                unchanged_work.paint_nodes_executed,
+            )
+            .work(
+                "unchanged_interaction_nodes_executed",
+                unchanged_work.interaction_nodes_executed,
+            )
+            .work(
+                "unchanged_semantic_nodes_executed",
+                unchanged_work.semantic_nodes_executed,
+            )
+            .work("one_label_nodes_measured", label_work.nodes_measured)
+            .work("one_label_nodes_placed", label_work.nodes_placed)
+            .work(
+                "one_label_paint_nodes_executed",
+                label_work.paint_nodes_executed,
+            )
+            .work(
+                "one_label_interaction_nodes_executed",
+                label_work.interaction_nodes_executed,
+            )
+            .work(
+                "one_label_semantic_nodes_executed",
+                label_work.semantic_nodes_executed,
+            )
+            .timings("unchanged", &unchanged_samples)
+            .timings("one_label_same_size", &one_label_samples)
+            .timings("cold", &cold_samples)
+            .emit();
+
+        let retained =
+            crate::release_admission::DurationDistribution::from_samples(&unchanged_samples).p95;
+        let cold = crate::release_admission::DurationDistribution::from_samples(&cold_samples).p95;
         assert!(
             retained.as_nanos().saturating_mul(5) <= cold.as_nanos().saturating_mul(4),
-            "retained layout must be at least 20% faster: retained={retained:?}, cold={cold:?}"
+            "retained layout p95 must be at least 20% faster: retained={retained:?}, cold={cold:?}"
         );
     }
 }
