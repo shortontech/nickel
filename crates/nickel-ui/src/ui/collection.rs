@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fmt};
+use std::{collections::HashMap, fmt, ops::Range, sync::Arc};
 
 use super::{
     AnyView, Background, Color, Column, Component, ComponentBuilderExt, Container, Element, Grid,
@@ -59,6 +59,177 @@ pub enum CollectionError<K> {
     },
 }
 
+struct CollectionSourceInner<T, K> {
+    items: Vec<(K, Arc<T>)>,
+    key_positions: HashMap<K, usize>,
+    id_positions: HashMap<String, usize>,
+}
+
+/// An immutable, prevalidated authority for a large keyed collection.
+///
+/// Construction derives every key and rejects duplicate keys and UI identity
+/// strings once. Clones share that validated authority. Virtual collections
+/// built from a source only clone the keys and item handles in their visible
+/// window, so scrolling work is independent of the logical item count.
+pub struct CollectionSource<T, K> {
+    inner: Arc<CollectionSourceInner<T, K>>,
+}
+
+impl<T, K> Clone for CollectionSource<T, K> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+}
+
+impl<T, K> CollectionSource<T, K>
+where
+    T: 'static,
+    K: Clone + Eq + std::hash::Hash + fmt::Display + 'static,
+{
+    pub fn try_new(items: Vec<T>, key: impl Fn(&T) -> K) -> Result<Self, CollectionError<K>> {
+        let mut keyed_items = Vec::with_capacity(items.len());
+        let mut key_positions = HashMap::<K, usize>::with_capacity(items.len());
+        let mut id_positions = HashMap::<String, usize>::with_capacity(items.len());
+        for (index, item) in items.into_iter().enumerate() {
+            let item_key = key(&item);
+            if let Some(first) = key_positions.insert(item_key.clone(), index) {
+                return Err(CollectionError::DuplicateKey {
+                    key: item_key,
+                    first,
+                    duplicate: index,
+                });
+            }
+            let item_id = item_key.to_string();
+            if let Some(first) = id_positions.insert(item_id.clone(), index) {
+                return Err(CollectionError::DuplicateId {
+                    id: item_id,
+                    first,
+                    duplicate: index,
+                });
+            }
+            keyed_items.push((item_key, Arc::new(item)));
+        }
+        Ok(Self {
+            inner: Arc::new(CollectionSourceInner {
+                items: keyed_items,
+                key_positions,
+                id_positions,
+            }),
+        })
+    }
+
+    pub fn len(&self) -> usize {
+        self.inner.items.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.inner.items.is_empty()
+    }
+
+    /// Creates a collection declaration backed by this validated source.
+    pub fn collection<Message, Render, View>(
+        &self,
+        render: Render,
+    ) -> Collection<Arc<T>, K, Message, impl Fn(Arc<T>) -> View, View>
+    where
+        Render: Fn(&T) -> View,
+        View: Component<Message>,
+    {
+        let window_inner = Arc::clone(&self.inner);
+        let key_inner = Arc::clone(&self.inner);
+        let id_inner = Arc::clone(&self.inner);
+        Collection::from_items(
+            CollectionState::Ready(Vec::new()),
+            CollectionItems::Windowed {
+                len: self.inner.items.len(),
+                window: Box::new(move |range| {
+                    window_inner.items[range]
+                        .iter()
+                        .map(|(key, item)| (key.clone(), Arc::clone(item)))
+                        .collect()
+                }),
+                key_index: Box::new(move |key| key_inner.key_positions.get(key).copied()),
+                id_index: Box::new(move |id| id_inner.id_positions.get(id).copied()),
+            },
+            move |item| render(item.as_ref()),
+        )
+    }
+}
+
+type CollectionWindow<T, K> = Box<dyn Fn(Range<usize>) -> Vec<(K, T)>>;
+type CollectionKeyIndex<K> = Box<dyn Fn(&K) -> Option<usize>>;
+type CollectionIdIndex = Box<dyn Fn(&str) -> Option<usize>>;
+
+enum CollectionItems<T, K> {
+    Owned(Vec<(K, T)>),
+    Windowed {
+        len: usize,
+        window: CollectionWindow<T, K>,
+        key_index: CollectionKeyIndex<K>,
+        id_index: CollectionIdIndex,
+    },
+}
+
+impl<T, K> CollectionItems<T, K> {
+    fn len(&self) -> usize {
+        match self {
+            Self::Owned(items) => items.len(),
+            Self::Windowed { len, .. } => *len,
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    fn key_index(&self, key: &K) -> Option<usize>
+    where
+        K: Eq,
+    {
+        match self {
+            Self::Owned(items) => items.iter().position(|(candidate, _)| candidate == key),
+            Self::Windowed { key_index, .. } => key_index(key),
+        }
+    }
+
+    fn id_index(&self, target: &UiId) -> Option<usize>
+    where
+        K: fmt::Display,
+    {
+        match self {
+            Self::Owned(items) => items
+                .iter()
+                .position(|(key, _)| target.as_str().ends_with(&format!("/{key}"))),
+            Self::Windowed { id_index, .. } => {
+                let path = target.as_str();
+                id_index(path).or_else(|| {
+                    path.match_indices('/')
+                        .map(|(index, _)| &path[index + 1..])
+                        .find_map(id_index)
+                })
+            }
+        }
+    }
+
+    fn into_window(self, range: Range<usize>) -> Vec<(usize, K, T)> {
+        let start = range.start;
+        match self {
+            Self::Owned(mut items) => items
+                .drain(range)
+                .enumerate()
+                .map(|(offset, (key, item))| (start + offset, key, item))
+                .collect(),
+            Self::Windowed { window, .. } => window(range)
+                .into_iter()
+                .enumerate()
+                .map(|(offset, (key, item))| (start + offset, key, item))
+                .collect(),
+        }
+    }
+}
+
 type CollectionAction<K, Message> = Box<dyn Fn(&K) -> Message>;
 type CollectionPredicate<K> = Box<dyn Fn(&K) -> bool>;
 type CollectionItemLabel<T> = Box<dyn Fn(&T) -> String>;
@@ -115,7 +286,7 @@ impl<K: fmt::Debug + fmt::Display> std::error::Error for CollectionError<K> {}
 /// caller's key and fed into the normal `UiFrame` identity, semantics, and hit paths.
 pub struct Collection<T, K, Message, Render, View> {
     state: CollectionState<T>,
-    keyed_items: Vec<(K, T)>,
+    keyed_items: CollectionItems<T, K>,
     render: Render,
     presentation: CollectionPresentation,
     id: UiId,
@@ -149,6 +320,42 @@ where
     Render: Fn(T) -> View,
     View: Component<Message>,
 {
+    fn from_items(
+        state: CollectionState<T>,
+        keyed_items: CollectionItems<T, K>,
+        render: Render,
+    ) -> Self {
+        Self {
+            state,
+            keyed_items,
+            render,
+            presentation: CollectionPresentation::List,
+            id: UiId::from("collection"),
+            accessibility_label: None,
+            gap: 0.0,
+            item_focus_background_tint: None,
+            item_controller_focus_background_tint: None,
+            item_hover_background: None,
+            item_pressed_background: None,
+            item_selected_background: None,
+            navigation_scope: None,
+            controller_scope_background: None,
+            interactions: CollectionInteractions::default(),
+            item_label: None,
+            item_revision: None,
+            reveal: None,
+            reveal_target: None,
+            direction: ReadingDirection::LeftToRight,
+            empty_label: "No items".into(),
+            loading_label: "Loading".into(),
+            error_prefix: "Error: ".into(),
+            empty_slot: None,
+            loading_slot: None,
+            error_slot: None,
+            _view: std::marker::PhantomData,
+        }
+    }
+
     pub fn try_new(
         state: CollectionState<T>,
         key: impl Fn(&T) -> K,
@@ -183,35 +390,11 @@ where
             CollectionState::Error(error) => CollectionState::Error(error),
             CollectionState::Loading => CollectionState::Loading,
         };
-        Ok(Self {
+        Ok(Self::from_items(
             state,
-            keyed_items,
+            CollectionItems::Owned(keyed_items),
             render,
-            presentation: CollectionPresentation::List,
-            id: UiId::from("collection"),
-            accessibility_label: None,
-            gap: 0.0,
-            item_focus_background_tint: None,
-            item_controller_focus_background_tint: None,
-            item_hover_background: None,
-            item_pressed_background: None,
-            item_selected_background: None,
-            navigation_scope: None,
-            controller_scope_background: None,
-            interactions: CollectionInteractions::default(),
-            item_label: None,
-            item_revision: None,
-            reveal: None,
-            reveal_target: None,
-            direction: ReadingDirection::LeftToRight,
-            empty_label: "No items".into(),
-            loading_label: "Loading".into(),
-            error_prefix: "Error: ".into(),
-            empty_slot: None,
-            loading_slot: None,
-            error_slot: None,
-            _view: std::marker::PhantomData,
-        })
+        ))
     }
 
     pub fn id(mut self, id: impl Into<UiId>) -> Self {
@@ -436,16 +619,11 @@ where
             let reveal_index = self
                 .reveal
                 .as_ref()
-                .and_then(|key| {
-                    self.keyed_items
-                        .iter()
-                        .position(|(candidate, _)| candidate == key)
-                })
+                .and_then(|key| self.keyed_items.key_index(key))
                 .or_else(|| {
-                    let target = self.reveal_target.as_ref()?;
-                    self.keyed_items
-                        .iter()
-                        .position(|(key, _)| target.as_str().ends_with(&format!("/{key}")))
+                    self.reveal_target
+                        .as_ref()
+                        .and_then(|target| self.keyed_items.id_index(target))
                 });
             if let Some(index) = reveal_index
                 && !resolved.range.contains(&index)
@@ -490,16 +668,11 @@ where
             let reveal_index = self
                 .reveal
                 .as_ref()
-                .and_then(|key| {
-                    self.keyed_items
-                        .iter()
-                        .position(|(candidate, _)| candidate == key)
-                })
+                .and_then(|key| self.keyed_items.key_index(key))
                 .or_else(|| {
-                    let target = self.reveal_target.as_ref()?;
-                    self.keyed_items
-                        .iter()
-                        .position(|(key, _)| target.as_str().ends_with(&format!("/{key}")))
+                    self.reveal_target
+                        .as_ref()
+                        .and_then(|target| self.keyed_items.id_index(target))
                 });
             if let Some(index) = reveal_index {
                 let row = index / columns;
@@ -533,69 +706,68 @@ where
             _ => None,
         };
         let direction = self.direction;
-        let children = self
-            .keyed_items
-            .into_iter()
-            .enumerate()
-            .filter(|(index, _)| window.contains(index))
-            .map(|(index, (key, item))| {
-                let content_revision = item_revision.as_ref().map(|revision| revision(&item));
-                let accessible_name = item_label
-                    .as_ref()
-                    .map_or_else(|| key.to_string(), |label| label(&item));
-                let is_selected = selected.as_ref().is_some_and(|predicate| predicate(&key));
-                let is_disabled = disabled.as_ref().is_some_and(|predicate| predicate(&key));
-                let mut item_container = Container::new()
-                    .id(key.to_string())
-                    .semantic_role(item_role)
-                    .accessibility_label(accessible_name)
-                    .accessibility_description(if let Some(columns) = columns {
-                        let row = index / columns + 1;
-                        let logical_column = index % columns;
-                        let column = match direction {
-                            ReadingDirection::LeftToRight => logical_column + 1,
-                            ReadingDirection::RightToLeft => columns - logical_column,
-                        };
-                        format!("row {row}, column {column}, item {} of {total}", index + 1)
-                    } else {
-                        format!("item {} of {total}", index + 1)
-                    })
-                    .accessibility_state(match (is_selected, is_disabled) {
-                        (true, true) => "selected, disabled",
-                        (true, false) => "selected",
-                        (false, true) => "disabled",
-                        (false, false) => "unselected",
-                    })
-                    .child(AnyView::new((self.render)(item)));
-                if let Some(row_height) = virtual_row_height {
-                    item_container = item_container.height(row_height);
-                }
-                if let Some(color) = self.item_focus_background_tint {
-                    item_container = item_container.focus_background_tint(color);
-                }
-                if let Some(color) = self.item_controller_focus_background_tint {
-                    item_container = item_container.controller_focus_background_tint(color);
-                }
-                if let (Some(hover), Some(pressed)) =
-                    (self.item_hover_background, self.item_pressed_background)
-                {
-                    item_container = item_container.interaction_backgrounds(hover, pressed);
-                }
-                if is_selected && let Some(background) = self.item_selected_background {
-                    item_container = item_container.background(background);
-                }
-                let mut element = item_container.into_element();
-                if let Some(revision) = content_revision {
-                    element = element.content_revision(revision);
-                }
-                if !is_disabled && let Some(action) = &self.interactions.activate {
-                    element = element.message(action(&key));
-                }
-                if !is_disabled && let Some(action) = &self.interactions.context {
-                    element = element.context_message(action(&key));
-                }
-                element
-            });
+        let children =
+            self.keyed_items
+                .into_window(window)
+                .into_iter()
+                .map(|(index, key, item)| {
+                    let content_revision = item_revision.as_ref().map(|revision| revision(&item));
+                    let accessible_name = item_label
+                        .as_ref()
+                        .map_or_else(|| key.to_string(), |label| label(&item));
+                    let is_selected = selected.as_ref().is_some_and(|predicate| predicate(&key));
+                    let is_disabled = disabled.as_ref().is_some_and(|predicate| predicate(&key));
+                    let mut item_container = Container::new()
+                        .id(key.to_string())
+                        .semantic_role(item_role)
+                        .accessibility_label(accessible_name)
+                        .accessibility_description(if let Some(columns) = columns {
+                            let row = index / columns + 1;
+                            let logical_column = index % columns;
+                            let column = match direction {
+                                ReadingDirection::LeftToRight => logical_column + 1,
+                                ReadingDirection::RightToLeft => columns - logical_column,
+                            };
+                            format!("row {row}, column {column}, item {} of {total}", index + 1)
+                        } else {
+                            format!("item {} of {total}", index + 1)
+                        })
+                        .accessibility_state(match (is_selected, is_disabled) {
+                            (true, true) => "selected, disabled",
+                            (true, false) => "selected",
+                            (false, true) => "disabled",
+                            (false, false) => "unselected",
+                        })
+                        .child(AnyView::new((self.render)(item)));
+                    if let Some(row_height) = virtual_row_height {
+                        item_container = item_container.height(row_height);
+                    }
+                    if let Some(color) = self.item_focus_background_tint {
+                        item_container = item_container.focus_background_tint(color);
+                    }
+                    if let Some(color) = self.item_controller_focus_background_tint {
+                        item_container = item_container.controller_focus_background_tint(color);
+                    }
+                    if let (Some(hover), Some(pressed)) =
+                        (self.item_hover_background, self.item_pressed_background)
+                    {
+                        item_container = item_container.interaction_backgrounds(hover, pressed);
+                    }
+                    if is_selected && let Some(background) = self.item_selected_background {
+                        item_container = item_container.background(background);
+                    }
+                    let mut element = item_container.into_element();
+                    if let Some(revision) = content_revision {
+                        element = element.content_revision(revision);
+                    }
+                    if !is_disabled && let Some(action) = &self.interactions.activate {
+                        element = element.message(action(&key));
+                    }
+                    if !is_disabled && let Some(action) = &self.interactions.context {
+                        element = element.context_message(action(&key));
+                    }
+                    element
+                });
 
         let mut element = match self.presentation {
             CollectionPresentation::List => Column::new()
@@ -755,6 +927,125 @@ mod tests {
                 first: 0,
                 duplicate: 1
             })
+        ));
+    }
+
+    #[test]
+    fn collection_source_validates_keys_and_ids_once() {
+        let key_calls = Rc::new(Cell::new(0));
+        let counted = Rc::clone(&key_calls);
+        let source = CollectionSource::try_new((0_u32..100).collect(), move |item| {
+            counted.set(counted.get() + 1);
+            *item
+        })
+        .unwrap();
+        assert_eq!(key_calls.get(), 100);
+
+        for offset in [0.0, 20.0, 40.0] {
+            let tree = UiFrame::layout(
+                source
+                    .collection(|item| Text::<Message>::new(item.to_string()))
+                    .presentation(CollectionPresentation::VirtualList {
+                        item_height: 20.0,
+                        offset,
+                        viewport_height: 20.0,
+                        overscan: 0.0,
+                    }),
+                Rect::new(0.0, 0.0, 200.0, 20.0),
+            );
+            assert!(
+                tree.semantic_nodes()
+                    .iter()
+                    .filter(|node| node.role == Some(SemanticRole::ListItem))
+                    .count()
+                    <= 3
+            );
+        }
+        let revealed = UiFrame::layout(
+            source
+                .collection(|item| Text::<Message>::new(item.to_string()))
+                .presentation(CollectionPresentation::VirtualList {
+                    item_height: 20.0,
+                    offset: 0.0,
+                    viewport_height: 20.0,
+                    overscan: 0.0,
+                })
+                .reveal(80),
+            Rect::new(0.0, 0.0, 200.0, 20.0),
+        );
+        assert!(
+            revealed
+                .semantic_nodes()
+                .iter()
+                .any(|node| node.id.as_str().ends_with("/80"))
+        );
+        assert_eq!(
+            key_calls.get(),
+            100,
+            "scrolling must not revalidate the source"
+        );
+    }
+
+    #[test]
+    fn collection_source_bounds_virtual_grid_declaration() {
+        let rendered = Rc::new(Cell::new(0));
+        let counted = Rc::clone(&rendered);
+        let source = CollectionSource::try_new((0_u32..4096).collect(), |item| *item).unwrap();
+        let tree = UiFrame::layout(
+            source
+                .collection(move |item| {
+                    counted.set(counted.get() + 1);
+                    Text::<Message>::new(item.to_string())
+                })
+                .gap(10.0)
+                .presentation(CollectionPresentation::VirtualGrid {
+                    minimum_item_width: 100.0,
+                    row_height: 100.0,
+                    offset: 2_200.0,
+                    viewport_width: 430.0,
+                    viewport_height: 250.0,
+                    overscan: 100.0,
+                }),
+            Rect::new(0.0, 0.0, 430.0, 250.0),
+        );
+        assert!(rendered.get() <= 24, "rendered {} items", rendered.get());
+        assert_eq!(rendered.get() % 4, 0);
+        assert_eq!(
+            tree.semantic_nodes()
+                .iter()
+                .filter(|node| node.role == Some(SemanticRole::GridCell))
+                .count(),
+            rendered.get()
+        );
+    }
+
+    #[test]
+    fn collection_source_preserves_duplicate_diagnostics() {
+        let duplicate_key = CollectionSource::try_new(vec![(7_u32, "a"), (7, "b")], |item| item.0);
+        assert!(matches!(
+            duplicate_key,
+            Err(CollectionError::DuplicateKey {
+                key: 7,
+                first: 0,
+                duplicate: 1
+            })
+        ));
+
+        #[derive(Clone, Debug, Eq, PartialEq, Hash)]
+        struct SameId(u32);
+        impl fmt::Display for SameId {
+            fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("same")
+            }
+        }
+        let duplicate_id = CollectionSource::try_new(vec![1_u32, 2], |item| SameId(*item));
+        assert!(matches!(
+            duplicate_id,
+            Err(CollectionError::DuplicateId {
+                ref id,
+                first: 0,
+                duplicate: 1
+            }) if id == "same"
         ));
     }
 
@@ -1025,25 +1316,25 @@ mod tests {
         const SAMPLES: usize = 20;
         const ITERATIONS_PER_SAMPLE: usize = 2;
 
-        fn view(offset: f32, rendered: Rc<Cell<usize>>) -> Element<()> {
-            Collection::try_new(
-                CollectionState::Ready((0..ITEMS).collect()),
-                |item| *item,
-                move |item| {
+        fn view(
+            source: &CollectionSource<usize, usize>,
+            offset: f32,
+            rendered: Rc<Cell<usize>>,
+        ) -> Element<()> {
+            source
+                .collection(move |item| {
                     rendered.set(rendered.get() + 1);
                     Text::<()>::new(format!("Virtual item {item:05}"))
-                },
-            )
-            .expect("10,000 stable integer keys are unique")
-            .id("virtual-admission")
-            .item_revision(|item| *item as u64)
-            .presentation(CollectionPresentation::VirtualList {
-                item_height: ITEM_HEIGHT,
-                offset,
-                viewport_height: VIEWPORT_HEIGHT,
-                overscan: OVERSCAN,
-            })
-            .into_element()
+                })
+                .id("virtual-admission")
+                .item_revision(|item| **item as u64)
+                .presentation(CollectionPresentation::VirtualList {
+                    item_height: ITEM_HEIGHT,
+                    offset,
+                    viewport_height: VIEWPORT_HEIGHT,
+                    overscan: OVERSCAN,
+                })
+                .into_element()
         }
 
         fn assert_oracle(incremental: &UiFrame<()>, cold: &UiFrame<()>) {
@@ -1065,10 +1356,18 @@ mod tests {
             FIRST_ITEM as f32 * ITEM_HEIGHT,
             (FIRST_ITEM + 1) as f32 * ITEM_HEIGHT,
         ];
+        let key_derivations = Rc::new(Cell::new(0));
+        let counted_derivations = Rc::clone(&key_derivations);
+        let source = CollectionSource::try_new((0..ITEMS).collect(), move |item| {
+            counted_derivations.set(counted_derivations.get() + 1);
+            *item
+        })
+        .expect("10,000 stable integer keys are unique");
+        assert_eq!(key_derivations.get(), ITEMS);
         let initial_rendered = Rc::new(Cell::new(0));
         let mut retained_state = UiStateStore::default();
         let mut retained = UiFrame::resolve(
-            view(offsets[0], initial_rendered.clone()),
+            view(&source, offsets[0], initial_rendered.clone()),
             FrameRequest::new(bounds, &mut retained_state),
         );
         let visible_items = initial_rendered.get();
@@ -1087,7 +1386,7 @@ mod tests {
                 let rendered = Rc::new(Cell::new(0));
                 let started = Instant::now();
                 let next = UiFrame::resolve_against(
-                    view(offset, rendered.clone()),
+                    view(&source, offset, rendered.clone()),
                     FrameRequest::new(bounds, &mut retained_state),
                     &retained,
                 );
@@ -1107,7 +1406,7 @@ mod tests {
             let offset = offsets[sample % offsets.len()];
             let oracle_rendered = Rc::new(Cell::new(0));
             let incremental = UiFrame::resolve_against(
-                view(offset, oracle_rendered),
+                view(&source, offset, oracle_rendered),
                 FrameRequest::new(bounds, &mut retained_state),
                 &retained,
             );
@@ -1115,7 +1414,7 @@ mod tests {
             let mut cold_state = UiStateStore::default();
             let started = Instant::now();
             let cold = UiFrame::resolve(
-                view(offset, rendered.clone()),
+                view(&source, offset, rendered.clone()),
                 FrameRequest::new(bounds, &mut cold_state),
             );
             cold_samples.push(started.elapsed());
@@ -1123,6 +1422,11 @@ mod tests {
             assert_oracle(&incremental, &cold);
             retained = incremental;
         }
+        assert_eq!(
+            key_derivations.get(),
+            ITEMS,
+            "all measured declarations must reuse the validated source authority"
+        );
 
         let work = expected_work.expect("retained work sample");
         assert_eq!(expected_rendered, Some(26));
@@ -1145,6 +1449,8 @@ mod tests {
             .metadata("samples", SAMPLES)
             .metadata("iterations_per_sample", ITERATIONS_PER_SAMPLE)
             .work("logical_items", ITEMS)
+            .work("source_key_derivations_once", key_derivations.get())
+            .work("source_key_derivations_per_scroll", 0)
             .work(
                 "visible_items_constructed",
                 expected_rendered.expect("rendered sample"),
