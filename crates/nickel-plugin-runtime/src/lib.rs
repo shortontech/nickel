@@ -194,6 +194,12 @@ impl JsxRuntime {
         if self.invalidated {
             return Err("runtime checkpoint was invalidated".into());
         }
+        // Window data has already been capability-filtered by the native owner.
+        // Publish it through its retained store before replacing the compatibility
+        // projection so hooks never inspect an unfiltered host catalog.
+        if let Some(windows) = data.get("windows") {
+            self.set_windows_store(windows)?;
+        }
         // Host snapshots are data, not source code. Compiling a large object
         // literal on every input/projection update stalls the compositor.
         let argument =
@@ -217,6 +223,28 @@ impl JsxRuntime {
             self.settings_data = Some(std::rc::Rc::new(data));
         }
         Ok(())
+    }
+
+    /// Publish the package owner's already capability-filtered public window
+    /// observation. The JavaScript store retains identity for unchanged values
+    /// and advances its monotonic generation only for a public change.
+    pub fn set_windows_store(&mut self, snapshot: &Value) -> Result<bool, String> {
+        if self.invalidated {
+            return Err("runtime checkpoint was invalidated".into());
+        }
+        let snapshot =
+            JsValue::from_json(snapshot, &mut self.context).map_err(|error| error.to_string())?;
+        let setter = self
+            .context
+            .global_object()
+            .get(js_string!("__nickelSetWindowsStore"), &mut self.context)
+            .map_err(|error| error.to_string())?;
+        setter
+            .as_callable()
+            .ok_or("windows store setter is not callable")?
+            .call(&JsValue::undefined(), &[snapshot], &mut self.context)
+            .map(|changed| changed.to_boolean())
+            .map_err(|error| error.to_string())
     }
 
     pub fn select_surface(&mut self, id: &str) -> Result<(), String> {
@@ -607,6 +635,157 @@ mod tests {
                 .eval_json::<serde_json::Value>("JSON.stringify(runs)")
                 .unwrap(),
             serde_json::json!({"app":1,"reducer":2,"store":2,"sibling":1})
+        );
+    }
+
+    #[test]
+    fn windows_store_is_versioned_immutable_and_retains_unchanged_identity() {
+        let source = r#"
+            globalThis.observed=[];
+            function App(){const windows=useWindows();observed.push(windows);return h(Text,null,String(windows.length))}
+        "#;
+        let mut runtime = super::JsxRuntime::new(source, None).unwrap();
+        let first =
+            serde_json::json!([{"id":"1","title":"Editor","active":true,"canActivate":true}]);
+        assert!(runtime.set_windows_store(&first).unwrap());
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        assert!(!runtime.set_windows_store(&first).unwrap());
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        assert!(
+            runtime
+                .eval_json::<bool>(
+                    "observed[0] === observed[1] && observed[0][0] === observed[1][0]"
+                )
+                .unwrap()
+        );
+        assert!(
+            runtime
+                .eval_json::<bool>(
+                    "Object.isFrozen(observed[0]) && Object.isFrozen(observed[0][0])"
+                )
+                .unwrap()
+        );
+        assert_eq!(
+            runtime
+                .eval_json::<u64>("__windowsStore.generation")
+                .unwrap(),
+            1
+        );
+
+        let second = serde_json::json!([
+            {"id":"1","title":"Editor","active":true,"canActivate":true},
+            {"id":"2","title":"Terminal","active":false}
+        ]);
+        assert!(runtime.set_windows_store(&second).unwrap());
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        assert!(
+            runtime
+                .eval_json::<bool>(
+                    "observed[1] !== observed[2] && observed[1][0] === observed[2][0]"
+                )
+                .unwrap()
+        );
+        assert_eq!(
+            runtime
+                .eval_json::<u64>("__windowsStore.generation")
+                .unwrap(),
+            2
+        );
+    }
+
+    #[test]
+    fn active_window_follows_public_store_order_and_updates() {
+        let source = r#"
+            globalThis.seen=[];
+            function App(){const active=useActiveWindow();seen.push(active?.id ?? null);return h(Text,null,active?.title ?? 'none')}
+        "#;
+        let mut runtime = super::JsxRuntime::new(source, None).unwrap();
+        runtime
+            .set_windows_store(&serde_json::json!([
+                {"id":"first","title":"First","active":true},
+                {"id":"second","title":"Second","active":true}
+            ]))
+            .unwrap();
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        runtime
+            .set_windows_store(&serde_json::json!([
+                {"id":"first","title":"First","active":false},
+                {"id":"second","title":"Second","active":true}
+            ]))
+            .unwrap();
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        runtime.set_windows_store(&serde_json::json!([])).unwrap();
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        assert_eq!(
+            runtime
+                .eval_json::<Vec<Option<String>>>("JSON.stringify(seen)")
+                .unwrap(),
+            [Some("first".into()), Some("second".into()), None]
+        );
+    }
+
+    #[test]
+    fn window_and_surface_stores_dirty_only_their_subscribers() {
+        let source = r#"
+            globalThis.runs={app:0,windows:0,surface:0,sibling:0};
+            function Windows(){runs.windows++;return h(Text,null,useWindows(items=>items[0]?.title ?? 'none'))}
+            function Surface(){runs.surface++;return h(Text,null,String(useSurface().logicalSize?.width ?? 0))}
+            function Sibling(){runs.sibling++;return h(Text,null,'stable')}
+            function App(){runs.app++;return h(Window,{},h(Windows),h(Surface),h(Sibling))}
+        "#;
+        let mut runtime = super::JsxRuntime::new(source, None).unwrap();
+        runtime
+            .set_windows_store(&serde_json::json!([{"id":"1","title":"One"}]))
+            .unwrap();
+        runtime
+            .set_surface_store(
+                "mount",
+                &serde_json::json!({"id":"main","kind":"window","width":640,"height":480}),
+            )
+            .unwrap();
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        runtime
+            .set_surface_store(
+                "mount",
+                &serde_json::json!({"id":"main","kind":"window","width":800,"height":480}),
+            )
+            .unwrap();
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        assert_eq!(
+            runtime
+                .eval_json::<serde_json::Value>("JSON.stringify(runs)")
+                .unwrap(),
+            serde_json::json!({"app":1,"windows":1,"surface":2,"sibling":1})
+        );
+        runtime
+            .set_windows_store(&serde_json::json!([{"id":"1","title":"Two"}]))
+            .unwrap();
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        assert_eq!(
+            runtime
+                .eval_json::<serde_json::Value>("JSON.stringify(runs)")
+                .unwrap(),
+            serde_json::json!({"app":1,"windows":2,"surface":2,"sibling":1})
+        );
+    }
+
+    #[test]
+    fn rejected_window_consumer_render_does_not_install_subscription() {
+        let mut runtime = super::JsxRuntime::new(
+            "function App(){return h(Text,null,String(useWindows().length))}",
+            None,
+        )
+        .unwrap();
+        runtime
+            .render("__nickelRender()", |_| Err::<(), _>("reject".into()))
+            .unwrap_err();
+        runtime
+            .set_windows_store(&serde_json::json!([{"id":"1","title":"One"}]))
+            .unwrap();
+        assert!(
+            !runtime
+                .eval_json::<bool>("JSON.parse(__nickelReconciliationRequest()).requested")
+                .unwrap()
         );
     }
 

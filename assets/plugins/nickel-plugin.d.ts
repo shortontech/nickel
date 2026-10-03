@@ -245,6 +245,9 @@ declare function useId(): string;
 interface NickelContext<T> { readonly Provider: NickelComponent<{value:T;children?:NickelChild}>; readonly defaultValue: T }
 declare function createContext<T>(defaultValue: T): NickelContext<T>;
 declare function useContext<T>(context: NickelContext<T>): T;
+declare function useWindows(): ReadonlyArray<Readonly<NickelNativeWindow>>;
+declare function useWindows<T>(selector: (windows: ReadonlyArray<Readonly<NickelNativeWindow>>) => T): T;
+declare function useActiveWindow(): Readonly<NickelNativeWindow> | null;
 declare function useEffect(setup: () => void | (() => void), dependencies?: ReadonlyArray<unknown>): void;
 interface NickelSurfaceSnapshot {
     readonly generation:number;

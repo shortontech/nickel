@@ -101,6 +101,7 @@ let __surfaceStore = {generation:0, snapshot:Object.freeze({
     generation:0, mountId:null, id:null, kind:null, logicalSize:null,
     output:null, availableSize:null, scaleFactor:null, focused:null, visible:null
 })};
+let __windowsStore = {generation:0, snapshot:Object.freeze([])};
 let __nickelData = Object.freeze({query: '', results: []});
 let __activeSurface = 'default';
 const __surfaceStates = new Map();
@@ -586,6 +587,105 @@ const nickel = Object.freeze({
 });
 
 function __nickelSetData(data) { __nickelData = Object.freeze(data); }
+
+function __nickelWindowEqual(left, right) {
+    const fields = ['id','applicationId','title','active','minimized','maximized','fullscreen',
+        'workspace','output','canActivate','canClose','canMinimize','canMaximize','canFullscreen',
+        'canSnap','canMoveToWorkspace','canMoveToOutput'];
+    return fields.every(field => Object.is(left[field] ?? null, right[field] ?? null));
+}
+
+function __nickelWindowSnapshot(value) {
+    if (!Array.isArray(value) || value.length > 128) throw Error('invalid bounded windows snapshot');
+    const previous = new Map(__windowsStore.snapshot.map(window => [window.id, window]));
+    const seen = new Set();
+    return Object.freeze(value.map(window => {
+        if (!window || typeof window !== 'object' || Array.isArray(window)
+            || typeof window.id !== 'string' || !window.id.length || window.id.length > 256
+            || (window.title !== undefined && (typeof window.title !== 'string' || window.title.length > 480))
+            || (window.applicationId !== undefined && window.applicationId !== null
+                && (typeof window.applicationId !== 'string' || window.applicationId.length > 256))
+            || (window.workspace !== undefined && window.workspace !== null
+                && (typeof window.workspace !== 'string' || window.workspace.length > 64))
+            || (window.output !== undefined && window.output !== null
+                && (typeof window.output !== 'string' || window.output.length > 256))
+            || seen.has(window.id)) throw Error('invalid public window snapshot');
+        seen.add(window.id);
+        const copy = Object.freeze({
+            id:window.id,
+            applicationId:typeof window.applicationId === 'string' ? window.applicationId : null,
+            title:typeof window.title === 'string' ? window.title : '',
+            active:window.active === true,
+            minimized:window.minimized === true,
+            maximized:window.maximized === true,
+            fullscreen:window.fullscreen === true,
+            workspace:typeof window.workspace === 'string' ? window.workspace : null,
+            output:typeof window.output === 'string' ? window.output : null,
+            canActivate:window.canActivate === true,
+            canClose:window.canClose === true,
+            canMinimize:window.canMinimize === true,
+            canMaximize:window.canMaximize === true,
+            canFullscreen:window.canFullscreen === true,
+            canSnap:window.canSnap === true,
+            canMoveToWorkspace:window.canMoveToWorkspace === true,
+            canMoveToOutput:window.canMoveToOutput === true
+        });
+        const retained = previous.get(copy.id);
+        return retained && __nickelWindowEqual(retained, copy) ? retained : copy;
+    }));
+}
+
+function __nickelForEachSurfaceHooks(visit) {
+    visit(__componentHooks, __dirtyComponents);
+    for (const state of __surfaceStates.values())
+        if (state.hooks !== __componentHooks) visit(state.hooks, state.dirty);
+}
+
+function __nickelSetWindowsStore(value) {
+    if (__pendingRender !== null || __pendingEvent !== null)
+        throw Error('cannot publish windows store during a render or event');
+    const windows = __nickelWindowSnapshot(value);
+    const previous = __windowsStore.snapshot;
+    if (previous.length === windows.length && previous.every((window, index) => window === windows[index]))
+        return false;
+    const generation = __windowsStore.generation + 1;
+    __windowsStore = {generation, snapshot:windows};
+    __nickelForEachSurfaceHooks((hooks, dirty) => {
+        for (const [owner, slots] of hooks) {
+            for (const entry of slots) {
+                if (entry?.kind !== 'windows-store') continue;
+                try {
+                    const selected = entry.selector ? entry.selector(windows) : windows;
+                    entry.storeError = undefined;
+                    if (!Object.is(selected, entry.value)) dirty.add(owner);
+                } catch (error) {
+                    entry.storeError = error;
+                    dirty.add(owner);
+                }
+            }
+        }
+    });
+    return true;
+}
+
+function useWindows(selector) {
+    if (__currentComponent === null) throw Error('useWindows requires a component');
+    if (selector !== undefined && typeof selector !== 'function') throw TypeError('useWindows selector must be a function');
+    const slot = __hookIndex++;
+    const hooks = __componentHooks.get(__currentComponent);
+    const normalized = selector ?? null;
+    let entry = hooks[slot];
+    if (!entry || (entry.kind === 'windows-store' && entry.selector !== normalized))
+        hooks[slot] = entry = {kind:'windows-store', selector:normalized, value:undefined, generation:0};
+    if (entry.kind !== 'windows-store') throw Error('hook order changed');
+    entry.storeError = undefined;
+    entry.value = normalized ? normalized(__windowsStore.snapshot) : __windowsStore.snapshot;
+    entry.generation = __windowsStore.generation;
+    return entry.value;
+}
+
+const __nickelSelectActiveWindow = windows => windows.find(window => window.active) ?? null;
+function useActiveWindow() { return useWindows(__nickelSelectActiveWindow); }
 
 function __nickelSurfaceSelection(name, snapshot) {
     if (name === 'surface') return snapshot;

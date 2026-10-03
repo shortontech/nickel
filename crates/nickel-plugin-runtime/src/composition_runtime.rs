@@ -2981,4 +2981,69 @@ mod tests {
             1
         );
     }
+
+    #[test]
+    fn composition_host_publishes_filtered_windows_store_by_owner_snapshot() {
+        let package = package(
+            "windows-shell",
+            "globalThis.windowObservation=null;\nexport function Taskbar(){const windows=useWindows();windowObservation={windows,generation:__windowsStore.generation};return h(Text,null,windows.map(window=>window.title).join(','));}\nexport function QuickSettings(){return h(Text,null,'settings');}\nexport default Taskbar;",
+            None,
+        );
+        let owner = PackageIdentity {
+            id: "windows-shell".into(),
+            version: package
+                .manifest
+                .composition
+                .as_ref()
+                .unwrap()
+                .version
+                .parse()
+                .unwrap(),
+        };
+        let first = serde_json::json!({"windows":[{"id":"1","title":"Editor","active":true}]});
+        let mut host = ShellCompositionRuntime::new(
+            &BTreeMap::from([("windows-shell".into(), package)]),
+            "windows-shell",
+            &BTreeMap::from([(owner.clone(), first.clone())]),
+        )
+        .unwrap();
+        let mount = host
+            .mount(&host.component("shell.taskbar").unwrap())
+            .unwrap();
+        let rendered = host.render(&mount, &serde_json::json!({})).unwrap();
+        assert!(rendered.node.to_string().contains("Editor"));
+        let runtime = host.shared_owner_runtime(&owner).unwrap();
+        assert_eq!(
+            runtime
+                .borrow_mut()
+                .eval_json::<u64>("windowObservation.generation")
+                .unwrap(),
+            1
+        );
+
+        host.update_snapshot(&owner, &first).unwrap();
+        host.render(&mount, &serde_json::json!({})).unwrap();
+        assert_eq!(
+            runtime
+                .borrow_mut()
+                .eval_json::<u64>("__windowsStore.generation")
+                .unwrap(),
+            1
+        );
+
+        host.update_snapshot(
+            &owner,
+            &serde_json::json!({"windows":[{"id":"1","title":"Terminal","active":true}]}),
+        )
+        .unwrap();
+        let rendered = host.render(&mount, &serde_json::json!({})).unwrap();
+        assert!(rendered.node.to_string().contains("Terminal"));
+        assert_eq!(
+            runtime
+                .borrow_mut()
+                .eval_json::<u64>("windowObservation.generation")
+                .unwrap(),
+            2
+        );
+    }
 }
