@@ -2462,6 +2462,27 @@ struct InternalShellTimer {
     token: Option<smithay::reexports::calloop::RegistrationToken>,
     generation: u64,
     counters: InternalShellTimerCounters,
+    last_due_warning: Option<Instant>,
+    suppressed_due_warnings: u64,
+}
+
+const INTERNAL_SHELL_DUE_WARNING_GRACE: Duration = Duration::from_secs(1);
+const INTERNAL_SHELL_DUE_WARNING_INTERVAL: Duration = Duration::from_secs(30);
+
+impl InternalShellTimer {
+    fn take_due_warning(&mut self, now: Instant, deadline: Instant) -> Option<u64> {
+        if now.saturating_duration_since(deadline) < INTERNAL_SHELL_DUE_WARNING_GRACE {
+            return None;
+        }
+        if self.last_due_warning.is_some_and(|last| {
+            now.saturating_duration_since(last) < INTERNAL_SHELL_DUE_WARNING_INTERVAL
+        }) {
+            self.suppressed_due_warnings = self.suppressed_due_warnings.saturating_add(1);
+            return None;
+        }
+        self.last_due_warning = Some(now);
+        Some(std::mem::take(&mut self.suppressed_due_warnings))
+    }
 }
 
 struct CompatibilityControlState {
@@ -5263,16 +5284,22 @@ impl NickelSession {
             .internal_codex
             .as_ref()
             .and_then(|host| host.next_deadline(&self.internal_ui));
+        let internal_ui_deadline = self.internal_ui.next_deadline();
         let deadline = shell_deadline
             .into_iter()
             .chain(codex_deadline)
-            .chain(self.internal_ui.next_deadline())
+            .chain(internal_ui_deadline)
             .min();
-        if deadline.is_some_and(|deadline| deadline <= Instant::now()) {
+        let now = Instant::now();
+        if let Some(deadline) = deadline
+            && let Some(suppressed) = self.internal_shell_timer.take_due_warning(now, deadline)
+        {
             tracing::warn!(
                 ?shell_deadline,
                 ?codex_deadline,
-                internal_ui_deadline = ?self.internal_ui.next_deadline(),
+                ?internal_ui_deadline,
+                overdue_ms = now.saturating_duration_since(deadline).as_millis(),
+                suppressed,
                 "internal shell deadline remained due"
             );
         }

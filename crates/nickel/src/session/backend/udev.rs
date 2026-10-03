@@ -3,7 +3,6 @@ use std::{
     collections::{HashMap, HashSet},
     hash::Hash,
     path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant},
 };
 
@@ -89,7 +88,6 @@ const BOOTSTRAP_RENDER_TIMEOUT: Duration = Duration::from_secs(30);
 // completion event to provide natural pacing, so an eager client could keep
 // the compositor event-loop thread in this path indefinitely.
 const EVDI_MIN_RENDER_INTERVAL: Duration = Duration::from_millis(16);
-static LAST_EXTERNAL_SCENE_SIGNATURE: AtomicU64 = AtomicU64::new(u64::MAX);
 
 fn output_model(connector_name: &str) -> String {
     output_edid(connector_name)
@@ -2549,8 +2547,6 @@ impl NickelSession {
             crate::session::window_frame::retain_titlebars_for_windows(
                 self.surface_windows.values().map(|id| id.0),
             );
-            let mut mapped_external_windows = 0_u32;
-            let mut external_render_elements = 0_u32;
             let mut client_element_starts = Vec::new();
             if let Some(output_geometry) = self.space.output_geometry(&output) {
                 // Space stores windows back-to-front. Build each window and its
@@ -2568,7 +2564,6 @@ impl NickelSession {
                     }
                     let client_start = elements.len();
                     client_element_starts.push((window.clone(), client_start));
-                    mapped_external_windows = mapped_external_windows.saturating_add(1);
                     let Some(location) = self.space.element_location(window) else {
                         continue;
                     };
@@ -2581,8 +2576,6 @@ impl NickelSession {
                             1.0,
                         );
                     let has_content = !window_elements.is_empty();
-                    external_render_elements = external_render_elements
-                        .saturating_add(u32::try_from(window_elements.len()).unwrap_or(u32::MAX));
                     elements.extend(
                         window_elements
                             .into_iter()
@@ -2808,18 +2801,6 @@ impl NickelSession {
             }
             for (_, group) in client_groups {
                 elements.extend(group.into_iter().flatten());
-            }
-            let external_scene_signature =
-                (u64::from(mapped_external_windows) << 32) | u64::from(external_render_elements);
-            if LAST_EXTERNAL_SCENE_SIGNATURE.swap(external_scene_signature, Ordering::Relaxed)
-                != external_scene_signature
-            {
-                tracing::warn!(
-                    output = %output.name(),
-                    mapped_external_windows,
-                    external_render_elements,
-                    "diagnostic: native external scene composition changed"
-                );
             }
             if !self.locked
                 && let Some(highlight) = self.preview_highlight

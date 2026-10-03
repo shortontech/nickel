@@ -6993,6 +6993,35 @@ fn unchanged_internal_desktop_has_no_sixty_hertz_poll_or_redraw_loop() {
 }
 
 #[test]
+fn overdue_shell_deadline_warning_is_graced_and_rate_limited() {
+    let mut timer = super::InternalShellTimer::default();
+    let start = Instant::now();
+
+    assert_eq!(
+        timer.take_due_warning(start, start - Duration::from_millis(999)),
+        None
+    );
+    assert_eq!(
+        timer.take_due_warning(start, start - Duration::from_secs(2)),
+        Some(0)
+    );
+    assert_eq!(
+        timer.take_due_warning(
+            start + Duration::from_secs(1),
+            start - Duration::from_secs(2)
+        ),
+        None
+    );
+    assert_eq!(
+        timer.take_due_warning(
+            start + Duration::from_secs(30),
+            start - Duration::from_secs(2)
+        ),
+        Some(1)
+    );
+}
+
+#[test]
 fn protocol_snapshot_change_wakes_the_internal_bar_projection() {
     let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
     let (mut event_loop, mut session) = preview_test_session();
