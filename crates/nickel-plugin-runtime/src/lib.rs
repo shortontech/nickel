@@ -1127,6 +1127,172 @@ impl JsxRuntime {
 
 #[cfg(test)]
 mod tests {
+    fn declaration_object_body<'a>(source: &'a str, marker: &str) -> &'a str {
+        let start = source
+            .find(marker)
+            .unwrap_or_else(|| panic!("missing declaration marker {marker}"));
+        let open = source[start..].find('{').unwrap() + start;
+        let mut depth = 0usize;
+        for (offset, byte) in source.as_bytes()[open..].iter().enumerate() {
+            match byte {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &source[open + 1..open + offset];
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("unterminated declaration object after {marker}")
+    }
+
+    fn declaration_members(body: &str) -> std::collections::BTreeMap<String, String> {
+        let mut members = std::collections::BTreeMap::new();
+        let insert =
+            |declaration: &str, members: &mut std::collections::BTreeMap<String, String>| {
+                let declaration = declaration.trim();
+                let declaration = declaration.strip_prefix("readonly ").unwrap_or(declaration);
+                let name = declaration
+                    .chars()
+                    .take_while(|character| character.is_ascii_alphanumeric() || *character == '_')
+                    .collect::<String>();
+                if !name.is_empty() {
+                    members.insert(name, declaration.to_owned());
+                }
+            };
+        let mut start = 0usize;
+        let mut round = 0usize;
+        let mut square = 0usize;
+        let mut curly = 0usize;
+        let mut angle = 0usize;
+        for (index, byte) in body.as_bytes().iter().enumerate() {
+            match byte {
+                b'(' => round += 1,
+                b')' => round = round.saturating_sub(1),
+                b'[' => square += 1,
+                b']' => square = square.saturating_sub(1),
+                b'{' => curly += 1,
+                b'}' => curly = curly.saturating_sub(1),
+                b'<' => angle += 1,
+                b'>' => angle = angle.saturating_sub(1),
+                b';' if round == 0 && square == 0 && curly == 0 && angle == 0 => {
+                    insert(&body[start..index], &mut members);
+                    start = index + 1;
+                }
+                _ => {}
+            }
+        }
+        insert(&body[start..], &mut members);
+        members
+    }
+
+    fn declarations_without_comments(source: &str) -> String {
+        let bytes = source.as_bytes();
+        let mut result = String::with_capacity(source.len());
+        let mut index = 0usize;
+        while index < bytes.len() {
+            if bytes[index..].starts_with(b"/*") {
+                index += 2;
+                while index < bytes.len() && !bytes[index..].starts_with(b"*/") {
+                    index += 1;
+                }
+                index = (index + 2).min(bytes.len());
+            } else if bytes[index..].starts_with(b"//") {
+                index += 2;
+                while index < bytes.len() && bytes[index] != b'\n' {
+                    index += 1;
+                }
+                result.push('\n');
+            } else {
+                result.push(bytes[index] as char);
+                index += 1;
+            }
+        }
+        result
+    }
+
+    fn declared_runtime_surface(
+        declarations: &str,
+    ) -> std::collections::BTreeMap<String, std::collections::BTreeSet<String>> {
+        let declarations = declarations_without_comments(declarations);
+        let declarations = declarations.as_str();
+        let mut surface = std::collections::BTreeMap::new();
+        let globals = declarations
+            .lines()
+            .filter_map(|line| {
+                let line = line.trim();
+                ["declare function ", "declare const "]
+                    .into_iter()
+                    .find_map(|prefix| line.strip_prefix(prefix))
+                    .map(|rest| {
+                        rest.split(|character: char| {
+                            character == '(' || character == ':' || character == '<'
+                        })
+                        .next()
+                        .unwrap()
+                        .trim()
+                        .to_owned()
+                    })
+            })
+            .collect();
+        surface.insert("globalThis".into(), globals);
+
+        let nickel_members = declaration_members(declaration_object_body(
+            declarations,
+            "declare const nickel: Readonly<",
+        ));
+        surface.insert("nickel".into(), nickel_members.keys().cloned().collect());
+        for (name, declaration) in nickel_members {
+            if name == "data" {
+                continue;
+            }
+            let Some(colon) = declaration.find(':') else {
+                continue;
+            };
+            let object_type = declaration[colon + 1..]
+                .chars()
+                .filter(|character| !character.is_whitespace())
+                .collect::<String>();
+            if !object_type.starts_with("Readonly<{") {
+                continue;
+            }
+            let nested = declaration_object_body(&declaration[colon + 1..], "Readonly<{");
+            surface.insert(
+                format!("nickel.{name}"),
+                declaration_members(nested).keys().cloned().collect(),
+            );
+        }
+
+        let stores = declaration_members(declaration_object_body(
+            declarations,
+            "declare const NickelStores:Readonly<",
+        ));
+        surface.insert("NickelStores".into(), stores.keys().cloned().collect());
+        let store_members = declaration_members(declaration_object_body(
+            declarations,
+            "interface NickelExternalStore",
+        ));
+        for name in stores.keys() {
+            surface.insert(
+                format!("NickelStores.{name}"),
+                store_members.keys().cloned().collect(),
+            );
+        }
+        surface
+    }
+
+    fn surface_difference(
+        declared: &std::collections::BTreeSet<String>,
+        runtime: &std::collections::BTreeSet<String>,
+    ) -> (Vec<String>, Vec<String>) {
+        (
+            declared.difference(runtime).cloned().collect(),
+            runtime.difference(declared).cloned().collect(),
+        )
+    }
+
     #[test]
     fn jsx_test_harness_queries_events_batches_and_injects_domain_stores() {
         use super::{JsxTestEvent, JsxTestHarness};
@@ -1197,27 +1363,29 @@ mod tests {
     }
 
     #[test]
-    fn plugin_declarations_match_runtime_globals_and_capability_vocabulary() {
+    fn plugin_declarations_match_the_bidirectional_runtime_surface() {
+        let entrypoint = include_str!("../../../assets/plugin-runtime/index.d.ts");
+        assert!(
+            entrypoint.contains(r#"<reference path="../plugins/nickel-plugin.d.ts" />"#),
+            "plugin-runtime/index.d.ts must route to the canonical ambient declarations"
+        );
         let declarations = include_str!("../../../assets/plugins/nickel-plugin.d.ts");
-        let mut names = std::collections::BTreeSet::new();
-        for line in declarations.lines() {
-            let line = line.trim();
-            for prefix in ["declare function ", "declare const "] {
-                if let Some(rest) = line.strip_prefix(prefix) {
-                    let name = rest
-                        .split(|character: char| {
-                            character == '(' || character == ':' || character == '<'
-                        })
-                        .next()
-                        .unwrap()
-                        .trim();
-                    names.insert(name);
-                }
-            }
-        }
+        let declared = declared_runtime_surface(declarations);
         let mut runtime =
             super::JsxRuntime::new("function App(){return h(Text,null,'ok')}", None).unwrap();
-        for name in names {
+        let runtime_globals = runtime
+            .eval_json::<std::collections::BTreeSet<String>>(
+                "JSON.stringify(__nickelPublicRuntimeGlobals)",
+            )
+            .unwrap();
+        let (declaration_only, runtime_only) =
+            surface_difference(&declared["globalThis"], &runtime_globals);
+        assert!(
+            declaration_only.is_empty() && runtime_only.is_empty(),
+            "public global drift: declaration-only={declaration_only:?}, runtime-only={runtime_only:?}"
+        );
+
+        for name in &runtime_globals {
             let expression = format!("typeof {name} !== 'undefined'");
             let present = runtime
                 .eval_json::<bool>(&format!("JSON.stringify({expression})"))
@@ -1227,6 +1395,36 @@ mod tests {
                 "nickel-plugin.d.ts declares missing runtime global {name}"
             );
         }
+
+        let observed = runtime
+            .eval_json::<std::collections::BTreeMap<String, std::collections::BTreeSet<String>>>(
+                r#"JSON.stringify((()=>{const result={nickel:Object.keys(nickel),NickelStores:Object.keys(NickelStores)};
+                for(const [name,value] of Object.entries(nickel))if(name!=='data'&&value!==null&&typeof value==='object')result['nickel.'+name]=Object.keys(value);
+                for(const [name,value] of Object.entries(NickelStores))result['NickelStores.'+name]=Object.keys(value);return result})())"#,
+            )
+            .unwrap();
+        for (namespace, declared_members) in
+            declared.iter().filter(|(name, _)| *name != "globalThis")
+        {
+            let runtime_members = observed
+                .get(namespace)
+                .unwrap_or_else(|| panic!("declared namespace {namespace} is absent at runtime"));
+            let (declaration_only, runtime_only) =
+                surface_difference(declared_members, runtime_members);
+            assert!(
+                declaration_only.is_empty() && runtime_only.is_empty(),
+                "public namespace drift in {namespace}: declaration-only={declaration_only:?}, runtime-only={runtime_only:?}"
+            );
+        }
+        let unexpected_namespaces = observed
+            .keys()
+            .filter(|name| !declared.contains_key(*name))
+            .cloned()
+            .collect::<Vec<_>>();
+        assert!(
+            unexpected_namespaces.is_empty(),
+            "runtime-only public namespaces: {unexpected_namespaces:?}"
+        );
 
         let declared_capabilities = declarations
             .split("type NickelCapability =")
@@ -1241,6 +1439,15 @@ mod tests {
                 "runtime capability {capability} is absent from nickel-plugin.d.ts"
             );
         }
+    }
+
+    #[test]
+    fn bidirectional_surface_comparison_rejects_both_drift_directions() {
+        let declared = std::collections::BTreeSet::from(["shared".into(), "typedOnly".into()]);
+        let runtime = std::collections::BTreeSet::from(["shared".into(), "runtimeOnly".into()]);
+        let (declaration_only, runtime_only) = surface_difference(&declared, &runtime);
+        assert_eq!(declaration_only, ["typedOnly"]);
+        assert_eq!(runtime_only, ["runtimeOnly"]);
     }
 
     #[test]

@@ -134,7 +134,7 @@ or validation failure leaves the accepted package graph running.
   Failed validation rolls the JavaScript lifecycle back to the last native
   commit.
 
-The authoritative TypeScript surface is
-[`nickel-plugin.d.ts`](../plugins/nickel-plugin.d.ts). The compiler, validation,
+The runtime TypeScript entry point is [`index.d.ts`](index.d.ts), which references the authoritative
+[`nickel-plugin.d.ts`](../plugins/nickel-plugin.d.ts) ambient declarations. The compiler, validation,
 nested-development, and layout-inspection commands are documented in
 [`docs/plugins.md`](../../docs/plugins.md).

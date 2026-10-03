@@ -1,4 +1,19 @@
 const __nickelPublicComponents = new Map();
+// The bounded ambient API intentionally available to package modules. Keep
+// this list synchronized with nickel-plugin.d.ts; __nickel internals are not
+// public merely because package code shares this lexical runtime context.
+const __nickelPublicRuntimeGlobals = Object.freeze([
+    'Window','Fragment','FixedWindow','Panel','Box','Layer','Div','Badge','Row','Column',
+    'ScrollView','Text','Image','ImageButton','Progress','Slider','Switch','Checkbox',
+    'ColorSwatch','Select','Option','TextField','Button','Spacer','Slot','Dialog','Menu',
+    'MenuItem','ErrorBoundary','NickelStores','registerSetting','registerSettingsPage',
+    'readPluginSettings','readSettingsPages','readPluginSettingsPages','nickel','useWindows',
+    'useActiveWindow','useApplications','useNotifications','useWorkspaces','useWorkspace',
+    'useOutputs','useLocale','useSyncExternalStore','memo','useTheme','useReducedMotion',
+    'useCapability','useSurface','useOutput','useScaleFactor','useSurfaceFocus','useState',
+    'useReducer','useRef','useId','createContext','useContext','useMemo','useCallback',
+    'useEffect','h'
+]);
 const __nickelComponentMetadata = new WeakMap();
 let __nickelHotSignatures = null;
 let __nickelHotPrevious = null;
@@ -471,6 +486,17 @@ function __nickelDecideShell(token, revision, confirm) {
             if (typeof revision !== 'string' || revision !== snapshot.revision) throw Error('plugin inventory is stale');
             __effects.push({type:confirm ? 'plugins.confirmShell' : 'plugins.revertShell', token, revision});
 }
+function __nickelWorkspaceEffect(operation,id) {
+    const snapshot = nickel.workspaces.get();
+    if (!snapshot.available || !snapshot.operations[operation]) throw Error('workspace operation unavailable');
+    const effect = {type:'workspaces.'+operation,revision:snapshot.revision};
+    if (operation !== 'create') {
+        id=__nickelIdentity(id);
+        if (!snapshot.workspaces.some(workspace=>workspace.id===id)) throw Error('unknown workspace');
+        effect.id=id;
+    }
+    __effects.push(effect);
+}
 const nickel = Object.freeze({
     shortcuts: Object.freeze({
         get() { return __nickelResource('shortcuts', {available:false,editable:false,shortcuts:[],reason:'Shortcut read capability is unavailable'}); }
@@ -723,16 +749,9 @@ const nickel = Object.freeze({
     openMenu(id) { __effects.push(`open-menu:${id}`); },
     workspaces: Object.freeze({
         get() { return __nickelResource('workspaces',{available:false,workspaces:[],operations:{}}); },
-        switch(id) { this.perform('switch',id); },
-        create() { this.perform('create'); },
-        remove(id) { this.perform('remove',id); },
-        perform(operation,id) {
-            const snapshot = this.get();
-            if (!snapshot.available || !snapshot.operations[operation]) throw Error('workspace operation unavailable');
-            const effect = {type:'workspaces.'+operation,revision:snapshot.revision};
-            if (operation !== 'create') {id=__nickelIdentity(id); if (!snapshot.workspaces.some(workspace=>workspace.id===id)) throw Error('unknown workspace'); effect.id=id;}
-            __effects.push(effect);
-        }
+        switch(id) { __nickelWorkspaceEffect('switch',id); },
+        create() { __nickelWorkspaceEffect('create'); },
+        remove(id) { __nickelWorkspaceEffect('remove',id); }
     }),
     desktop: Object.freeze({
         get() { return __nickelResource('desktop',{available:false,operations:{}}); },
