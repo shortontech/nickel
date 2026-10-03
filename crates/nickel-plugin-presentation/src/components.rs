@@ -5195,7 +5195,7 @@ fn child_text(children: &[Value]) -> Result<String, String> {
 }
 
 #[cfg(test)]
-mod compound_css_tests {
+mod tests {
     use super::*;
     use nickel_ui::{Rect, UiFrame, backend::PaintCommand};
 
