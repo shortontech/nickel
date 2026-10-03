@@ -3197,6 +3197,25 @@ fn diff_native_subtree(
         (Some(before_children), Some(after_children))
             if before_children.len() == after_children.len() =>
         {
+            // Positional children have no structural operation that can change
+            // their native identity in place. Replace the nearest stable
+            // parent boundary instead of emitting an invalid child replacement
+            // whose target names the old node while its payload names the new
+            // one.
+            if before_children
+                .iter()
+                .zip(after_children)
+                .any(|(before, after)| {
+                    before.get("__nativeId") != after.get("__nativeId")
+                        || before.get("kind") != after.get("kind")
+                })
+            {
+                operations.push(NativePatchOperation::ReplaceSubtree {
+                    target: target.to_owned(),
+                    node: after.clone(),
+                });
+                return Ok(());
+            }
             for (before, after) in before_children.iter().zip(after_children) {
                 diff_native_subtree(before, after, operations, visited)?;
             }
@@ -5203,6 +5222,31 @@ mod tests {
         assert!(operations.iter().any(|operation| matches!(operation, NativePatchOperation::ReplaceHandlerSlot { slot, action } if slot == "a::action" && *action == 9)));
         assert!(!operations.iter().any(|operation| matches!(operation, NativePatchOperation::ReplaceSubtree { target, .. } if target == "root")));
         assert!(visited >= 2);
+    }
+
+    #[test]
+    fn native_diff_replaces_stable_parent_when_positional_child_identity_changes() {
+        let before = serde_json::json!({
+            "kind":"Column","__nativeId":"root","children":[
+                {"kind":"Text","__nativeId":"root/old","children":["old"]}
+            ]
+        });
+        let after = serde_json::json!({
+            "kind":"Column","__nativeId":"root","children":[
+                {"kind":"Button","__nativeId":"root/new","children":["new"]}
+            ]
+        });
+        let mut operations = Vec::new();
+        let mut visited = 0;
+        diff_native_subtree(&before, &after, &mut operations, &mut visited).unwrap();
+        assert_eq!(
+            operations,
+            vec![NativePatchOperation::ReplaceSubtree {
+                target: "root".into(),
+                node: after,
+            }]
+        );
+        assert_eq!(visited, 1);
     }
 
     #[test]
