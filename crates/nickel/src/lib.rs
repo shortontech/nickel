@@ -187,12 +187,14 @@ use winit_shell::{
 const NO_DESKTOP_WINDOWS_FLAG: &str = "--no-desktop-windows";
 const PANEL_TOP_FLAG: &str = "--panel-top";
 const SAFE_MODE_FLAG: &str = "--safe-mode";
+const TEST_CONTROL_FLAG: &str = "--test-control";
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct CommandLineOptions {
     no_desktop_windows: bool,
     panel_top: bool,
     safe_mode: bool,
+    test_control: bool,
 }
 
 impl CommandLineOptions {
@@ -207,10 +209,12 @@ impl CommandLineOptions {
                 NO_DESKTOP_WINDOWS_FLAG => options.no_desktop_windows = true,
                 PANEL_TOP_FLAG => options.panel_top = true,
                 SAFE_MODE_FLAG => options.safe_mode = true,
+                TEST_CONTROL_FLAG => options.test_control = true,
                 _ => {
                     return Err(format!(
                         "unknown Nickel shell argument {argument:?}; supported acceptance flags: \
-                         {NO_DESKTOP_WINDOWS_FLAG}, {PANEL_TOP_FLAG}, {SAFE_MODE_FLAG}"
+                         {NO_DESKTOP_WINDOWS_FLAG}, {PANEL_TOP_FLAG}, {SAFE_MODE_FLAG}, \
+                         {TEST_CONTROL_FLAG}"
                     ));
                 }
             }
@@ -291,7 +295,7 @@ mod command_line_tests {
     }
 }
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
 fn p95_u64(samples: &[u64]) -> Option<u64> {
     let mut samples = samples.to_vec();
     if samples.is_empty() {
@@ -2403,6 +2407,88 @@ fn shell_event_ends_process(event: &ShellEvent) -> bool {
     matches!(event, ShellEvent::Quit | ShellEvent::CloseRequested(_)) && !cfg!(target_os = "linux")
 }
 
+#[cfg(target_os = "windows")]
+fn windows_test_readiness(shell: &WinitShell) -> nickel_session_protocol::ShellReadinessSnapshot {
+    let surfaces = shell.surfaces().collect::<Vec<_>>();
+    let outputs = surfaces
+        .iter()
+        .map(|surface| surface.output_name())
+        .collect::<std::collections::BTreeSet<_>>()
+        .len() as u16;
+    let count = |role| {
+        surfaces
+            .iter()
+            .filter(|surface| surface.role() == role)
+            .count() as u16
+    };
+    let desktops = count(SurfaceRole::Desktop);
+    let panels = surfaces
+        .iter()
+        .filter(|surface| surface.is_taskbar_plugin())
+        .count() as u16;
+    let locks = count(SurfaceRole::Lock);
+    let launchers = count(SurfaceRole::Launcher);
+    let output_roles_ready = outputs > 0 && desktops == outputs && panels > 0 && locks == outputs;
+    let required_singletons_ready = launchers == 1;
+    let pid = Some(std::process::id());
+    nickel_session_protocol::ShellReadinessSnapshot {
+        expected_shell_pid: pid,
+        authenticated_shell_pid: pid,
+        outputs,
+        desktops,
+        panels,
+        locks,
+        launchers,
+        required_singletons_ready,
+        output_roles_ready,
+        reserved_ordinary_windows: 0,
+        ready: output_roles_ready && required_singletons_ready,
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_test_layouts(
+    shell: &WinitShell,
+    state: &LiveShell,
+) -> Vec<nickel_session_protocol::UiLayoutSurfaceSnapshot> {
+    shell
+        .surfaces()
+        .map(|surface| {
+            let scale = surface.window().scale_factor();
+            let position = surface
+                .window()
+                .outer_position()
+                .unwrap_or_default()
+                .to_logical::<i32>(scale);
+            let size = surface.window().inner_size().to_logical::<u32>(scale);
+            let layout = state.layout_snapshot(
+                surface.role(),
+                surface.plugin_key(),
+                Some(surface.output_name()),
+            );
+            nickel_session_protocol::UiLayoutSurfaceSnapshot {
+                id: surface.test_identity(),
+                title: format!("{:?}", surface.role()),
+                role: format!("{:?}", surface.role()).to_ascii_lowercase(),
+                visible: surface.is_visible(),
+                geometry: nickel_session_protocol::Geometry {
+                    x: position.x,
+                    y: position.y,
+                    width: i32::try_from(size.width).unwrap_or(i32::MAX),
+                    height: i32::try_from(size.height).unwrap_or(i32::MAX),
+                },
+                node_count: layout.as_deref().map_or(0, |value| value.lines().count()),
+                plugin: surface.plugin_key().map(|key| {
+                    nickel_session_protocol::PluginSurfaceIdentity {
+                        plugin_id: key.plugin_id.clone(),
+                        surface_id: key.surface_id.clone(),
+                    }
+                }),
+            }
+        })
+        .collect()
+}
+
 /// Runs the Nickel desktop shell using process command-line arguments.
 pub fn run() -> Result<(), String> {
     #[cfg(target_os = "windows")]
@@ -2438,6 +2524,11 @@ pub fn run() -> Result<(), String> {
     shell_options.bar_on_all_displays =
         nickel_core::shell_settings::ShellSettings::load_default().bar_on_all_displays;
     let mut shell = WinitShell::new_with_options(started, shell_options)?;
+    #[cfg(target_os = "windows")]
+    let _windows_test_control = platform::windows_test_control::WindowsTestControl::start(
+        command_line.test_control,
+        shell.event_sender(),
+    )?;
     wait_for_initial_display(&mut shell)?;
     shell.set_primary_output_name(platform::configured_primary_output())?;
     shell.create_shell_surfaces()?;
@@ -2741,6 +2832,141 @@ pub fn run() -> Result<(), String> {
             continue;
         }
         match event {
+            #[cfg(target_os = "windows")]
+            Some(ShellEvent::TestControl(platform::ShellTestRequest::Protocol(request))) => {
+                use nickel_session_protocol::{
+                    Command, ErrorCode, Query, Request, ServerEnvelope, ServerMessage, TestInput,
+                };
+                let request_id = request.envelope.request_id;
+                let message = match request.envelope.request {
+                    Request::Query(Query::ShellRuntimeDiagnostics) => {
+                        let runtime = shell.runtime_diagnostics();
+                        let memory = shell.memory_diagnostics();
+                        let (
+                            input_to_message_us,
+                            input_to_frame_us,
+                            layout_us,
+                            paint_list_us,
+                            scheduled_wakeups,
+                        ) = state.host_runtime_samples();
+                        ServerMessage::ShellRuntimeDiagnostics(
+                            nickel_session_protocol::ShellRuntimeDiagnostics {
+                                input_to_message_us,
+                                input_to_frame_us: input_to_frame_us.clone(),
+                                layout_us,
+                                paint_list_us,
+                                warm_present_us: runtime.warm_present_us,
+                                input_to_visible_us: runtime.input_to_present_us,
+                                scheduled_wakeups,
+                                host_phase_samples_available: !input_to_frame_us.is_empty(),
+                                retained_presenter_bytes: memory.presenter_caches.live_bytes as u64,
+                                frame_allocations: if runtime.warm_present_allocations.is_empty() {
+                                    nickel_session_protocol::AllocationMeasurement {
+                                        count: None,
+                                        sample_count: 0,
+                                        scope: nickel_session_protocol::AllocationScope::Process,
+                                        unavailable_reason: Some(
+                                            "no completed warm native presenter frames".into(),
+                                        ),
+                                    }
+                                } else {
+                                    nickel_session_protocol::AllocationMeasurement {
+                                        count: p95_u64(&runtime.warm_present_allocations),
+                                        sample_count: runtime.warm_present_allocations.len(),
+                                        scope: nickel_session_protocol::AllocationScope::Process,
+                                        unavailable_reason: None,
+                                    }
+                                },
+                                executable_prediction_observations: [[0; 2]; 4],
+                                executable_prediction_descendant_windows: 0,
+                            },
+                        )
+                    }
+                    Request::Query(Query::ShellReadiness) => {
+                        ServerMessage::ShellReadiness(windows_test_readiness(&shell))
+                    }
+                    Request::Query(Query::UiLayouts) => {
+                        ServerMessage::UiLayouts(windows_test_layouts(&shell, &state))
+                    }
+                    Request::Query(Query::UiLayout { surface, offset }) => {
+                        let inventory = windows_test_layouts(&shell, &state);
+                        let selected = shell
+                            .surfaces()
+                            .find(|entry| entry.test_identity() == surface);
+                        match (
+                            inventory.into_iter().find(|entry| entry.id == surface),
+                            selected,
+                        ) {
+                            (Some(surface), Some(native)) if offset == 0 => state
+                                .layout_snapshot(
+                                    native.role(),
+                                    native.plugin_key(),
+                                    Some(native.output_name()),
+                                )
+                                .map(|layout| {
+                                    let total_nodes = layout.lines().count();
+                                    ServerMessage::UiLayout(
+                                        nickel_session_protocol::UiLayoutSnapshot {
+                                            surface,
+                                            layout,
+                                            offset: 0,
+                                            total_nodes,
+                                            next_offset: None,
+                                        },
+                                    )
+                                })
+                                .unwrap_or_else(|| ServerMessage::Error {
+                                    code: ErrorCode::InvalidRequest,
+                                    message: "surface has no inspectable retained layout".into(),
+                                }),
+                            _ => ServerMessage::Error {
+                                code: ErrorCode::InvalidRequest,
+                                message: "unknown layout surface or unsupported offset".into(),
+                            },
+                        }
+                    }
+                    Request::Query(Query::ShellSemanticTarget { target }) => {
+                        if matches!(
+                            target,
+                            nickel_session_protocol::ShellSemanticTarget::Screenshot { .. }
+                        ) {
+                            ServerMessage::Error {
+                                code: ErrorCode::InvalidRequest,
+                                message: "screenshot semantic actions are unavailable on the Windows host".into(),
+                            }
+                        } else {
+                            state.resolve_semantic_target(&target).map_or_else(
+                                || ServerMessage::Error {
+                                    code: ErrorCode::InvalidRequest,
+                                    message: "semantic target is unavailable".into(),
+                                },
+                                ServerMessage::ShellSemanticTarget,
+                            )
+                        }
+                    }
+                    Request::Command(Command::TestInput {
+                        input: TestInput::ShellPointer { target },
+                    }) => match shell.inject_test_pointer(&target) {
+                        Ok(()) => ServerMessage::Ack,
+                        Err(message) => ServerMessage::Error {
+                            code: ErrorCode::InvalidRequest,
+                            message,
+                        },
+                    },
+                    Request::Command(Command::LogOut) => {
+                        shell.request_test_shutdown();
+                        ServerMessage::Ack
+                    }
+                    _ => ServerMessage::Error {
+                        code: ErrorCode::InvalidRequest,
+                        message: "request is unavailable on the Windows acceptance endpoint".into(),
+                    },
+                };
+                let _ = request.response.send(ServerEnvelope {
+                    request_id,
+                    message,
+                });
+            }
             #[cfg(target_os = "linux")]
             Some(ShellEvent::TestControl(request)) => match request {
                 platform::ShellTestRequest::SemanticTarget {

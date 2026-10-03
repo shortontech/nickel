@@ -1,4 +1,6 @@
-use std::{ffi::OsString, io::Write};
+use std::ffi::OsString;
+#[cfg(unix)]
+use std::io::Write;
 
 use nickel_session_protocol::{
     InputState, PointerInteraction, PreviewTargetAction, RecoveryTargetAction,
@@ -1368,7 +1370,83 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    use nickel_session_protocol::{
+        ClientEnvelope, Command, Request, ServerEnvelope, ServerMessage, TestInput, decode, encode,
+    };
+    use std::io::{Read, Write};
+
+    fn exchange(
+        request_id: u64,
+        request: Request,
+    ) -> Result<ServerEnvelope, Box<dyn std::error::Error>> {
+        let endpoint = std::env::var_os("NICKEL_SHELL_TEST_CONTROL")
+            .ok_or("NICKEL_SHELL_TEST_CONTROL is not set")?;
+        let token = std::env::var("NICKEL_SESSION_TOKEN")?;
+        let mut stream = uds_windows::UnixStream::connect(endpoint)?;
+        stream.write_all(&encode(&ClientEnvelope {
+            token,
+            request_id,
+            request,
+        })?)?;
+        let mut header = [0_u8; nickel_session_protocol::FRAME_HEADER_BYTES];
+        stream.read_exact(&mut header)?;
+        let payload = u32::from_le_bytes(header[6..10].try_into()?) as usize;
+        let total = nickel_session_protocol::FRAME_HEADER_BYTES + payload;
+        if total > nickel_session_protocol::MAX_FRAME_BYTES {
+            return Err("test-control response exceeds frame limit".into());
+        }
+        let mut frame = Vec::from(header);
+        frame.resize(total, 0);
+        stream.read_exact(&mut frame[nickel_session_protocol::FRAME_HEADER_BYTES..])?;
+        let response = decode::<ServerEnvelope>(&frame)?;
+        if response.request_id != request_id {
+            return Err("test-control response correlation mismatch".into());
+        }
+        Ok(response)
+    }
+
+    let parsed = parse(std::env::args_os().skip(1))?;
+    let request = match parsed {
+        Parsed::Help => {
+            print!("{HELP}");
+            return Ok(());
+        }
+        Parsed::RuntimeDiagnostics => {
+            Request::Query(nickel_session_protocol::Query::ShellRuntimeDiagnostics)
+        }
+        Parsed::Readiness => Request::Query(nickel_session_protocol::Query::ShellReadiness),
+        Parsed::Layouts => Request::Query(nickel_session_protocol::Query::UiLayouts),
+        Parsed::Layout(surface, offset) => {
+            Request::Query(nickel_session_protocol::Query::UiLayout { surface, offset })
+        }
+        Parsed::Semantic(target) => {
+            Request::Query(nickel_session_protocol::Query::ShellSemanticTarget { target })
+        }
+        Parsed::SessionAction(None) => Request::Command(Command::LogOut),
+        _ => return Err("command is unavailable on the Windows acceptance endpoint".into()),
+    };
+    let mut response = exchange(1, request)?;
+    if let ServerMessage::ShellSemanticTarget(target) = response.message {
+        response = exchange(
+            2,
+            Request::Command(Command::TestInput {
+                input: TestInput::ShellPointer { target },
+            }),
+        )?;
+    }
+    match response.message {
+        ServerMessage::Ack => Ok(()),
+        ServerMessage::Error { message, .. } => Err(message.into()),
+        message => {
+            println!("{}", serde_json::to_string(&message)?);
+            Ok(())
+        }
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     match parse(std::env::args_os().skip(1))? {
         Parsed::Help => {

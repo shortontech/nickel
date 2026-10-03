@@ -101,9 +101,10 @@ use nickel_core::{
 use nickel_file::desktop::{DesktopOutput, Point as DesktopPoint};
 use nickel_session_protocol::ShellRole;
 #[cfg(any(target_os = "linux", test))]
+use nickel_session_protocol::{AnchorSide, Geometry, ShellPopoverAnchor};
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
 use nickel_session_protocol::{
-    AnchorSide, Geometry, PointerInteraction, PreviewTargetAction, ResolvedShellTarget,
-    ShellPopoverAnchor, ShellSemanticTarget,
+    PointerInteraction, PreviewTargetAction, ResolvedShellTarget, ShellSemanticTarget,
 };
 use nickel_ui::InternalSurfaceId;
 use nickel_ui::Rect;
@@ -951,7 +952,7 @@ fn render_plugin_host(
 // Windows winit owner calls its own subset and leaves those Linux methods idle.
 #[cfg_attr(target_os = "windows", allow(dead_code))]
 impl LiveShell {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     pub fn host_runtime_samples(&self) -> (Vec<u64>, Vec<u64>, Vec<u64>, Vec<u64>, u64) {
         (
             self.host_runtime_samples
@@ -7152,12 +7153,12 @@ impl LiveShell {
         }
     }
 
-    #[cfg(any(target_os = "linux", test))]
+    #[cfg(any(target_os = "linux", target_os = "windows", test))]
     fn semantic_panel_output(&self, requested: Option<&String>) -> Option<String> {
         requested.cloned().or_else(|| self.panel_output.clone())
     }
 
-    #[cfg(any(target_os = "linux", test))]
+    #[cfg(any(target_os = "linux", target_os = "windows", test))]
     fn semantic_panel_host(
         &self,
         _output: &Option<String>,
@@ -7170,7 +7171,7 @@ impl LiveShell {
     /// Resolves a test/accessibility semantic target from the same live group
     /// and renderer frame records used by pointer hit testing. The caller is
     /// responsible for dispatching the returned point as ordinary input.
-    #[cfg(any(target_os = "linux", test))]
+    #[cfg(any(target_os = "linux", target_os = "windows", test))]
     pub fn resolve_semantic_target(
         &self,
         target: &ShellSemanticTarget,

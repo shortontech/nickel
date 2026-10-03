@@ -259,7 +259,7 @@ pub struct SurfaceId(WindowId);
 #[derive(Debug)]
 pub enum ShellUserEvent {
     GlobalShortcut(crate::platform::GlobalShortcut),
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     TestControl(crate::platform::ShellTestRequest),
 }
 
@@ -394,7 +394,7 @@ pub struct DisplayGeometry {
 #[derive(Clone, Debug, PartialEq)]
 pub enum ShellEvent {
     GlobalShortcut(crate::platform::GlobalShortcut),
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     TestControl(crate::platform::ShellTestRequest),
     Quit,
     /// The native event source can no longer deliver events. Unlike closing an
@@ -563,6 +563,20 @@ impl ShellSurface {
 
     pub fn window(&self) -> &Window {
         &self.window
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(crate) fn test_identity(&self) -> String {
+        format!(
+            "windows:{}:{:?}",
+            self.diagnostic_generation,
+            self.diagnostic_role()
+        )
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(crate) fn is_visible(&self) -> bool {
+        self.visible
     }
 }
 
@@ -2417,6 +2431,127 @@ impl WinitShell {
         self.pending_events.drain(..).collect()
     }
 
+    #[cfg(target_os = "windows")]
+    pub(crate) fn request_test_shutdown(&mut self) {
+        self.pending_events.push_back(ShellEvent::Quit);
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(crate) fn inject_test_pointer(
+        &mut self,
+        target: &nickel_session_protocol::ResolvedShellTarget,
+    ) -> Result<(), String> {
+        use nickel_input::{DeviceId, EventOrder, KeyEdge, Point, PointerButton, PointerEvent};
+        use nickel_session_protocol::{PointerInteraction, ShellRole};
+
+        let role_matches = |surface: &ShellSurface| match target.role {
+            ShellRole::Panel => surface.diagnostic_role() == SurfaceRole::Taskbar,
+            ShellRole::Launcher => surface.role == SurfaceRole::Launcher,
+            ShellRole::ControlCenter => surface.role == SurfaceRole::ControlCenter,
+            ShellRole::Notification => surface.role == SurfaceRole::Notification,
+            ShellRole::VolumeOsd => surface.role == SurfaceRole::VolumeOsd,
+            ShellRole::Preview => surface.role == SurfaceRole::WindowPreview,
+            ShellRole::ContextMenu => surface.role == SurfaceRole::WindowContextMenu,
+            ShellRole::ProjectMenu => surface.role == SurfaceRole::CodexProjectMenu,
+            ShellRole::Lock => surface.role == SurfaceRole::Lock,
+            ShellRole::Screenshot => surface.role == SurfaceRole::Screenshot,
+            ShellRole::OnScreenKeyboard => surface.role == SurfaceRole::OnScreenKeyboard,
+            ShellRole::Desktop => surface.role == SurfaceRole::Desktop,
+            ShellRole::PluginSurface => surface.role == SurfaceRole::Panel,
+            ShellRole::Recovery => false,
+        };
+        let surface = self
+            .surfaces()
+            .find(|surface| {
+                role_matches(surface)
+                    && target
+                        .output
+                        .as_deref()
+                        .is_none_or(|output| surface.output_name == output)
+            })
+            .map(ShellSurface::id)
+            .ok_or_else(|| "semantic test target surface is unavailable".to_owned())?;
+        let device = DeviceId(u64::MAX - 1);
+        let position = Point {
+            x: f64::from(target.x),
+            y: f64::from(target.y),
+        };
+        self.pending_events.push_back(ShellEvent::Input {
+            surface,
+            event: InputEvent::Pointer(PointerEvent::Motion {
+                device,
+                order: EventOrder(1),
+                position,
+                delta: None,
+            }),
+        });
+        let (button, clicks) = match target.interaction {
+            PointerInteraction::Hover => return Ok(()),
+            PointerInteraction::LeftClick => (PointerButton::Primary, 1),
+            PointerInteraction::LeftDoubleClick => (PointerButton::Primary, 2),
+            PointerInteraction::RightClick => (PointerButton::Secondary, 1),
+            PointerInteraction::LeftPress => {
+                self.queue_test_pointer_button(
+                    surface,
+                    device,
+                    position,
+                    PointerButton::Primary,
+                    KeyEdge::Pressed,
+                    2,
+                );
+                return Ok(());
+            }
+            PointerInteraction::LeftRelease => {
+                self.queue_test_pointer_button(
+                    surface,
+                    device,
+                    position,
+                    PointerButton::Primary,
+                    KeyEdge::Released,
+                    2,
+                );
+                return Ok(());
+            }
+        };
+        let mut order = 2;
+        for _ in 0..clicks {
+            for edge in [KeyEdge::Pressed, KeyEdge::Released] {
+                self.queue_test_pointer_button(
+                    surface,
+                    device,
+                    position,
+                    button.clone(),
+                    edge,
+                    order,
+                );
+                order += 1;
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "windows")]
+    fn queue_test_pointer_button(
+        &mut self,
+        surface: SurfaceId,
+        device: nickel_input::DeviceId,
+        position: nickel_input::Point,
+        button: nickel_input::PointerButton,
+        edge: nickel_input::KeyEdge,
+        order: u64,
+    ) {
+        self.pending_events.push_back(ShellEvent::Input {
+            surface,
+            event: InputEvent::Pointer(nickel_input::PointerEvent::Button {
+                device,
+                order: nickel_input::EventOrder(order),
+                button,
+                edge,
+                position: Some(position),
+            }),
+        });
+    }
+
     pub fn wait_event(&mut self) -> Option<ShellEvent> {
         self.wait_event_timeout(Duration::from_secs(24 * 60 * 60))
     }
@@ -2482,7 +2617,7 @@ impl WinitShell {
             ShellUserEvent::GlobalShortcut(shortcut) => self
                 .pending_events
                 .push_back(ShellEvent::GlobalShortcut(shortcut)),
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
             ShellUserEvent::TestControl(request) => {
                 self.pending_events
                     .push_back(ShellEvent::TestControl(request));
@@ -2527,7 +2662,7 @@ impl WinitShell {
                 Event::UserEvent(ShellUserEvent::GlobalShortcut(shortcut)) => {
                     pending.push_back(ShellEvent::GlobalShortcut(shortcut));
                 }
-                #[cfg(target_os = "linux")]
+                #[cfg(any(target_os = "linux", target_os = "windows"))]
                 Event::UserEvent(ShellUserEvent::TestControl(request)) => {
                     pending.push_back(ShellEvent::TestControl(request));
                 }

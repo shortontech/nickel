@@ -10,9 +10,11 @@ pub(crate) use windows::run_packaged_activation_child;
 pub(crate) mod status_mailbox;
 use nickel_input::global::{ShortcutCapability, ShortcutOwnership};
 
-#[cfg(target_os = "linux")]
 #[derive(Clone, Debug, PartialEq)]
 pub enum ShellTestRequest {
+    #[cfg(target_os = "windows")]
+    Protocol(WindowsShellTestRequest),
+    #[cfg(target_os = "linux")]
     SemanticTarget {
         request_id: u64,
         target: nickel_session_protocol::ShellSemanticTarget,
@@ -23,6 +25,23 @@ pub enum ShellTestRequest {
         reply_path: std::path::PathBuf,
     },
 }
+
+#[cfg(target_os = "windows")]
+#[derive(Clone, Debug)]
+pub struct WindowsShellTestRequest {
+    pub envelope: nickel_session_protocol::ClientEnvelope,
+    pub response: std::sync::mpsc::SyncSender<nickel_session_protocol::ServerEnvelope>,
+}
+
+#[cfg(target_os = "windows")]
+impl PartialEq for WindowsShellTestRequest {
+    fn eq(&self, other: &Self) -> bool {
+        self.envelope == other.envelope
+    }
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) mod windows_test_control;
 
 /// Returns the native client-area size when the platform can query it.
 ///
