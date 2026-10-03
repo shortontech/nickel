@@ -4086,6 +4086,8 @@ impl RetainedPanelTree {
                             object.insert(property.clone(), value.clone());
                             if property == "className" && typed.container_children().is_some() {
                                 set_container_class_name(typed, value)?;
+                            } else if matches!(typed, PanelNode::Surface { .. }) {
+                                update_surface_scalars(typed, source)?;
                             } else {
                                 if typed.container_children().is_some() {
                                     return Err(format!(
@@ -4289,6 +4291,68 @@ impl RetainedPanelTree {
             nodes_mutated: patch.operations.len() as u64,
         })
     }
+}
+
+/// Reparse only a Surface's bounded scalar declaration. Its already-admitted
+/// children stay retained, so a root geometry or accessibility update does not
+/// turn into a subtree replacement or walk.
+fn update_surface_scalars(node: &mut PanelNode, source: &Value) -> Result<(), String> {
+    let mut shallow = source.clone();
+    let object = shallow
+        .as_object_mut()
+        .ok_or("patched surface is not an object")?;
+    object.insert("children".into(), Value::Array(Vec::new()));
+    if object.get("id").is_none()
+        && let PanelNode::Surface { id: Some(id), .. } = node
+    {
+        object.insert("id".into(), Value::String(id.clone()));
+    }
+    let PanelNode::Surface {
+        id,
+        window_request,
+        accessibility_label,
+        escape_action,
+        submit_action,
+        focus_action,
+        blur_action,
+        class_name,
+        background,
+        width,
+        height,
+        ..
+    } = PanelNode::parse(&shallow)?
+    else {
+        return Err("patched surface no longer declares a surface root".into());
+    };
+    let PanelNode::Surface {
+        id: current_id,
+        window_request: current_window_request,
+        accessibility_label: current_accessibility_label,
+        escape_action: current_escape_action,
+        submit_action: current_submit_action,
+        focus_action: current_focus_action,
+        blur_action: current_blur_action,
+        class_name: current_class_name,
+        background: current_background,
+        width: current_width,
+        height: current_height,
+        ..
+    } = node
+    else {
+        return Err("surface scalar target is not a surface".into());
+    };
+    *current_id = id;
+    *current_window_request = window_request;
+    *current_accessibility_label = accessibility_label;
+    *current_escape_action = escape_action;
+    *current_submit_action = submit_action;
+    *current_focus_action = focus_action;
+    *current_blur_action = blur_action;
+    *current_class_name = class_name;
+    *current_background = background;
+    *current_width = width;
+    *current_height = height;
+    Ok(())
 }
 
 fn parse_patched_node(source: &Value, previous: &PanelNode) -> Result<PanelNode, String> {

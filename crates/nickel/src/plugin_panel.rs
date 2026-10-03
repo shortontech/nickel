@@ -5575,6 +5575,29 @@ mod tests {
     }
 
     #[test]
+    fn state_update_changes_resolved_window_root_size() {
+        let manifest = PluginManifest::from_json(
+            r#"{"api_version":1,"id":"org.example.window-resize","name":"Resize","entry":"main.js","surfaces":[{"id":"main","kind":"window","width":400,"height":240}]}"#,
+        )
+        .unwrap();
+        let surface = manifest.surfaces[0].clone();
+        let package = PluginPackage {
+            modules: Vec::new(),
+            manifest,
+            images: Default::default(),
+            stylesheet: String::new(),
+            source: "function App(){const [compact,setCompact]=useState(false);return h(Window,{width:compact?300:360,height:220},h(Button,{id:'resize',onClick:()=>setCompact(true)},'Resize'));}".into(),
+        };
+        let mut application =
+            PluginPanelApplication::from_package_surface(&package, &Default::default(), &surface)
+                .unwrap();
+        assert_eq!(application.resolved_surface(&surface).unwrap().width, 360);
+        application.update(application.button_message("resize").unwrap());
+        assert_eq!(application.last_error(), None);
+        assert_eq!(application.resolved_surface(&surface).unwrap().width, 300);
+    }
+
+    #[test]
     fn external_dialog_example_requests_settings_only_with_its_grant() {
         let directory = concat!(
             env!("CARGO_MANIFEST_DIR"),

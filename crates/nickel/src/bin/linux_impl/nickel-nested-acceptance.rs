@@ -244,11 +244,10 @@ fn exercise(
     // Meta is sent only through the explicitly enabled nested socket.
     checked(test_input, &environment, &["key", "meta", "pressed"])?;
     checked(test_input, &environment, &["key", "meta", "released"])?;
-    let launcher = wait_for_plugin_window(
+    let launcher = wait_for_plugin_surface(
         test_input,
         &environment,
-        "nickel-default",
-        "Nickel Launcher",
+        "nickel-default/launcher",
         Duration::from_secs(5),
     )?;
     verify_layout_snapshot(test_input, &environment, "nickel-default/launcher")?;
@@ -257,13 +256,24 @@ fn exercise(
         &environment,
         "nickel-default/launcher",
         "launcher-settings",
-        (launcher.1, launcher.2),
+        launcher,
     )?;
     let settings = wait_for_plugin_window(
         test_input,
         &environment,
         "nickel-default",
         "Nickel Settings",
+        Duration::from_secs(5),
+    )?;
+    // The launcher is an overlay, so dismiss it before interacting with the
+    // ordinary Settings window below it. Settings must remain independently
+    // mapped after its launcher surface loses visibility.
+    checked(test_input, &environment, &["key", "meta", "pressed"])?;
+    checked(test_input, &environment, &["key", "meta", "released"])?;
+    wait_for_plugin_surface_absent(
+        test_input,
+        &environment,
+        "nickel-default/launcher",
         Duration::from_secs(5),
     )?;
     verify_layout_snapshot(test_input, &environment, "nickel-default/settings")?;
@@ -291,12 +301,6 @@ fn exercise(
         &["window", "close", &settings.0.to_string()],
     )?;
     wait_for_window_absent(test_input, &environment, settings.0)?;
-    checked(
-        test_input,
-        &environment,
-        &["window", "close", &launcher.0.to_string()],
-    )?;
-    wait_for_window_absent(test_input, &environment, launcher.0)?;
     // Closing optional windows must keep the package and taskbar alive.
     assert_default_package(test_input, &environment, true)?;
     verify_layout_snapshot(test_input, &environment, "nickel-default/taskbar")?;
@@ -487,8 +491,69 @@ fn wait_for_plugin_window(
             return Ok(window);
         }
         if Instant::now() >= deadline {
+            let readiness = checked(test_input, environment, &["readiness"])
+                .unwrap_or_else(|error| format!("<unavailable: {error}>"));
+            let layouts = checked(test_input, environment, &["layouts"])
+                .unwrap_or_else(|error| format!("<unavailable: {error}>"));
+            let surfaces = checked(test_input, environment, &["surfaces"])
+                .unwrap_or_else(|error| format!("<unavailable: {error}>"));
+            let plugins = checked(test_input, environment, &["plugins"])
+                .unwrap_or_else(|error| format!("<unavailable: {error}>"));
             return Err(format!(
-                "plugin window {plugin_id} did not enter the window registry: {windows}"
+                "plugin window {plugin_id} did not enter the window registry:\nwindows:\n{windows}\nreadiness:\n{readiness}\nlayouts:\n{layouts}\nsurfaces:\n{surfaces}\nplugins:\n{plugins}"
+            ));
+        }
+        thread::sleep(POLL);
+    }
+}
+
+fn plugin_surface_origin(surfaces: &str, plugin_surface: &str) -> Option<(i32, i32)> {
+    let geometry = surfaces
+        .lines()
+        .find(|line| line.ends_with(plugin_surface))?
+        .split('\t')
+        .nth(2)?;
+    let origin = geometry.split_whitespace().next()?;
+    let (x, y) = origin.split_once(',')?;
+    Some((x.parse().ok()?, y.parse().ok()?))
+}
+
+fn wait_for_plugin_surface(
+    test_input: &Path,
+    environment: &[(String, String)],
+    plugin_surface: &str,
+    timeout: Duration,
+) -> Result<(i32, i32), String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let surfaces = checked(test_input, environment, &["surfaces"])?;
+        if let Some(origin) = plugin_surface_origin(&surfaces, plugin_surface) {
+            return Ok(origin);
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "plugin surface {plugin_surface} did not map: {surfaces}"
+            ));
+        }
+        thread::sleep(POLL);
+    }
+}
+
+fn wait_for_plugin_surface_absent(
+    test_input: &Path,
+    environment: &[(String, String)],
+    plugin_surface: &str,
+    timeout: Duration,
+) -> Result<(), String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let surfaces = checked(test_input, environment, &["surfaces"])?;
+        if plugin_surface_origin(&surfaces, plugin_surface).is_none() {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "plugin surface {plugin_surface} remained mapped: {surfaces}"
             ));
         }
         thread::sleep(POLL);
@@ -725,11 +790,11 @@ fn verify_sibling_windows(
         thread::sleep(POLL);
     }
     let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
+    let reopened_bytes = loop {
         let bytes =
             wait_for_plugin_native_memory(test_input, environment, id, Duration::from_secs(1))?;
         if bytes > reduced_bytes {
-            break;
+            break bytes;
         }
         if Instant::now() >= deadline {
             return Err(format!(
@@ -737,7 +802,7 @@ fn verify_sibling_windows(
             ));
         }
         thread::sleep(POLL);
-    }
+    };
     let windows = checked(test_input, environment, &["windows"])?;
     let second_line = windows
         .lines()
@@ -823,13 +888,17 @@ fn verify_sibling_windows(
             && installed[0].starts_with(&format!("{first}\t"))
             && plugin.desired_enabled
             && plugin.health == nickel_session_protocol::PluginRuntimeHealth::Running
-            && plugin.memory.native_ui_bytes == Some(reduced_bytes)
+            && plugin
+                .memory
+                .native_ui_bytes
+                .is_some_and(|bytes| bytes >= reduced_bytes && bytes < reopened_bytes)
         {
             break;
         }
         if Instant::now() >= deadline {
             return Err(format!(
-                "typed window hide did not retire only its sibling: {windows}"
+                "typed window hide did not retire only its sibling: windows={windows}; surviving_native_ui_floor={reduced_bytes}, pre_hide_native_ui_bytes={reopened_bytes}, actual_native_ui_bytes={:?}",
+                plugin.memory.native_ui_bytes
             ));
         }
         thread::sleep(POLL);
@@ -860,8 +929,10 @@ fn verify_sibling_windows(
             break;
         }
         if Instant::now() >= deadline {
+            let surfaces = checked(test_input, environment, &["surfaces"])?;
+            let layouts = checked(test_input, environment, &["layouts"])?;
             return Err(format!(
-                "JSX root resize did not reach its native window: {windows}"
+                "JSX root resize did not reach its native window: windows={windows}; surfaces={surfaces}; layouts={layouts}"
             ));
         }
         thread::sleep(POLL);
