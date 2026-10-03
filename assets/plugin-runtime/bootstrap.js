@@ -1050,18 +1050,33 @@ function __nickelIsHandlerBinding(value) {
     return value !== null && typeof value === 'object' && __handlerBindings.has(value);
 }
 
-function __nickelMaterializeVirtual(value) {
+function __nickelMaterializeVirtual(value, path = 'root') {
     if (__nickelIsHandlerBinding(value)) {
         __handlers.push(value.handler);
         return __handlers.length - 1;
     }
     if (__nickelIsComponentDeclaration(value))
         throw Error('unresolved component declaration reached native materialization');
-    if (Array.isArray(value)) return value.map(__nickelMaterializeVirtual);
+    if (Array.isArray(value)) return value.map((item, index) =>
+        __nickelMaterializeVirtual(item, `${path}/#${index}`));
     if (value && typeof value === 'object') {
         const materialized = {};
-        for (const [key, item] of Object.entries(value))
-            materialized[key] = __nickelMaterializeVirtual(item);
+        const native = __virtualNativeNodes.has(value);
+        const slots = {};
+        for (const [key, item] of Object.entries(value)) {
+            if (native && key === 'children' && Array.isArray(item)) {
+                materialized[key] = item.map((child, index) => {
+                    const identity = child?.key === undefined ? `#${index}`
+                        : `@${encodeURIComponent(String(child.key))}`;
+                    return __nickelMaterializeVirtual(child, `${path}/${identity}`);
+                });
+            } else {
+                materialized[key] = __nickelMaterializeVirtual(item, `${path}/${key}`);
+            }
+            if (native && __nickelIsHandlerBinding(item)) slots[key] = `${path}:${key}`;
+        }
+        if (native) materialized.__nativeId = path;
+        if (Object.keys(slots).length) materialized.__handlerSlots = slots;
         return materialized;
     }
     return value;

@@ -3889,6 +3889,148 @@ impl PanelNode {
     }
 }
 
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct NativeNodeId(String);
+
+impl NativeNodeId {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct HandlerSlotId(String);
+
+impl HandlerSlotId {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// One admitted presentation generation. Patch application is intentionally
+/// not exposed yet: this type first makes typed tree, identity and event-slot
+/// authority transactional under one owner.
+#[derive(Clone, Debug)]
+pub struct RetainedPanelTree {
+    node: PanelNode,
+    source: Value,
+    generation: u64,
+    nodes: BTreeMap<NativeNodeId, String>,
+    handler_slots: BTreeMap<HandlerSlotId, usize>,
+}
+
+impl RetainedPanelTree {
+    pub fn admit(
+        source: &Value,
+        manifest: &PluginManifest,
+        expected_surface_id: Option<&str>,
+        generation: u64,
+    ) -> Result<Self, String> {
+        let node = parse_panel_for_manifest(source, manifest, expected_surface_id)?;
+        let mut nodes = BTreeMap::new();
+        let mut handler_slots = BTreeMap::new();
+        fn index(
+            value: &Value,
+            nodes: &mut BTreeMap<NativeNodeId, String>,
+            slots: &mut BTreeMap<HandlerSlotId, usize>,
+        ) -> Result<(), String> {
+            if let Some(array) = value.as_array() {
+                for child in array {
+                    index(child, nodes, slots)?;
+                }
+                return Ok(());
+            }
+            let Some(object) = value.as_object() else {
+                return Ok(());
+            };
+            if let Some(id) = object.get("__nativeId").and_then(Value::as_str) {
+                let id = NativeNodeId(id.to_owned());
+                let kind = object
+                    .get("kind")
+                    .and_then(Value::as_str)
+                    .ok_or("identified native node has no kind")?;
+                if nodes.insert(id, kind.to_owned()).is_some() {
+                    return Err("duplicate native node identity".into());
+                }
+                if let Some(bindings) = object.get("__handlerSlots") {
+                    let bindings = bindings
+                        .as_object()
+                        .ok_or("native handler slots must be an object")?;
+                    for (event, slot) in bindings {
+                        let slot = HandlerSlotId(
+                            slot.as_str()
+                                .ok_or("native handler slot must be a string")?
+                                .to_owned(),
+                        );
+                        let action = object
+                            .get(event)
+                            .and_then(Value::as_u64)
+                            .and_then(|action| usize::try_from(action).ok())
+                            .ok_or("native handler slot has no bounded action")?;
+                        if slots.insert(slot, action).is_some() {
+                            return Err("duplicate native handler slot".into());
+                        }
+                    }
+                }
+            }
+            if let Some(children) = object.get("children") {
+                index(children, nodes, slots)?;
+            }
+            Ok(())
+        }
+        index(source, &mut nodes, &mut handler_slots)?;
+        Ok(Self {
+            node,
+            source: source.clone(),
+            generation,
+            nodes,
+            handler_slots,
+        })
+    }
+
+    pub fn node(&self) -> &PanelNode {
+        &self.node
+    }
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+    pub fn nodes(&self) -> &BTreeMap<NativeNodeId, String> {
+        &self.nodes
+    }
+    pub fn handler_slots(&self) -> &BTreeMap<HandlerSlotId, usize> {
+        &self.handler_slots
+    }
+    pub fn into_node(self) -> PanelNode {
+        self.node
+    }
+
+    /// Cold-oracle scaffold for a future transactional subtree patch. It
+    /// deliberately revalidates the whole candidate today and does not mutate
+    /// the accepted generation.
+    pub fn validate_candidate(
+        &self,
+        candidate: &Value,
+        manifest: &PluginManifest,
+        expected_surface_id: Option<&str>,
+        stylesheet: &StyleSheet,
+    ) -> Result<PanelNode, String> {
+        let node = parse_panel_for_manifest(candidate, manifest, expected_surface_id)?;
+        if let Some(surface_id) = expected_surface_id {
+            let grant = manifest
+                .surfaces
+                .iter()
+                .find(|surface| surface.id == surface_id)
+                .ok_or("rendered surface is no longer declared")?;
+            node.requested_surface(grant, stylesheet)?;
+        }
+        Ok(node)
+    }
+
+    pub fn source(&self) -> &Value {
+        &self.source
+    }
+}
+
 pub fn parse_panel_for_manifest(
     value: &Value,
     manifest: &PluginManifest,
@@ -4032,7 +4174,20 @@ pub fn render_panel(
     expression: &str,
 ) -> Result<PanelNode, String> {
     runtime.render(expression, |value| {
-        parse_panel_for_manifest(value, manifest, expected_surface_id)
+        RetainedPanelTree::admit(value, manifest, expected_surface_id, 0)
+            .map(RetainedPanelTree::into_node)
+    })
+}
+
+pub fn render_retained_panel(
+    runtime: &mut JsxRuntime,
+    manifest: &PluginManifest,
+    expected_surface_id: Option<&str>,
+    expression: &str,
+    generation: u64,
+) -> Result<RetainedPanelTree, String> {
+    runtime.render(expression, |value| {
+        RetainedPanelTree::admit(value, manifest, expected_surface_id, generation)
     })
 }
 
@@ -4070,8 +4225,49 @@ pub fn render_panel_validated(
 
 #[cfg(test)]
 mod class_lookup_tests {
-    use super::PanelNode;
+    use super::{PanelNode, RetainedPanelTree};
     use serde_json::json;
+
+    #[test]
+    fn retained_admission_indexes_identity_and_preserves_cold_typed_tree() {
+        let source = json!({
+            "kind":"column", "__nativeId":"root", "children":[
+                {"kind":"text", "__nativeId":"root/@label", "key":"label", "children":["hello"]},
+                {"kind":"button", "__nativeId":"root/@go", "key":"go", "label":"Go",
+                 "action":0, "__handlerSlots":{"action":"root/@go:action"}, "children":[]}
+            ]
+        });
+        let manifest = nickel_core::plugins::PluginManifest {
+            composition: None,
+            api_version: 1,
+            id: "test".into(),
+            name: "Test".into(),
+            author: None,
+            version: None,
+            entry: "index.js".into(),
+            stylesheet: None,
+            images: Vec::new(),
+            surfaces: Vec::new(),
+            validation_data: std::collections::BTreeMap::new(),
+            capabilities: Vec::new(),
+            settings: Vec::new(),
+        };
+        let retained = RetainedPanelTree::admit(&source, &manifest, None, 7).unwrap();
+        assert_eq!(retained.generation(), 7);
+        assert_eq!(retained.nodes().len(), 3);
+        assert_eq!(retained.handler_slots().len(), 1);
+        assert_eq!(
+            retained.node(),
+            &super::parse_panel_for_manifest(&source, &manifest, None).unwrap()
+        );
+
+        let invalid = json!({"kind":"column","__nativeId":"root","children":[
+            {"kind":"text","__nativeId":"root","children":["duplicate"]}
+        ]});
+        assert!(RetainedPanelTree::admit(&invalid, &manifest, None, 8).is_err());
+        assert_eq!(retained.generation(), 7);
+        assert_eq!(retained.source(), &source);
+    }
 
     #[test]
     fn retired_projection_nodes_are_not_native_components() {

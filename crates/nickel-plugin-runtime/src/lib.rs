@@ -293,6 +293,39 @@ impl JsxRuntime {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn native_and_handler_slot_ids_survive_keyed_insertion() {
+        let source = r#"
+            function Item({name}) { return h(Button,{key:name,onClick:()=>{}},name); }
+            function App() {
+                const [extra,setExtra]=useState(false);
+                return h(Window,{},h(Button,{key:'toggle',onClick:()=>setExtra(true)},'toggle'),
+                    ...(extra?[h(Item,{key:'left',name:'left'})]:[]),h(Item,{key:'right',name:'right'}));
+            }
+        "#;
+        let mut runtime = super::JsxRuntime::new(source, None).unwrap();
+        let first = runtime
+            .render("__nickelRender()", |node| Ok(node.clone()))
+            .unwrap();
+        let updated = runtime
+            .dispatch_scheduled("__nickelDispatchBatchScheduled([[0,null]])", |node| {
+                Ok(node.clone())
+            })
+            .unwrap();
+        runtime.finish_event(true).unwrap();
+        let super::ScheduledRender::Rendered { value: updated, .. } = updated else {
+            panic!("insertion must render");
+        };
+        let first_right = &first["children"][1];
+        let updated_right = &updated["children"][2];
+        assert_eq!(first_right["__nativeId"], updated_right["__nativeId"]);
+        assert_eq!(
+            first_right["__handlerSlots"]["action"],
+            updated_right["__handlerSlots"]["action"]
+        );
+        assert_ne!(first_right["action"], updated_right["action"]);
+    }
+
+    #[test]
     fn local_leaf_update_executes_only_the_dirty_component() {
         let source = r#"
             globalThis.runs = {app:0, branch:0, leaf:0, sibling:0};

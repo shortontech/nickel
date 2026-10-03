@@ -1268,7 +1268,9 @@ impl ShellCompositionRuntime {
             }
             Value::Object(object) => {
                 for (key, value) in object {
-                    if is_action(key) && !value.is_null() {
+                    if key == "__handlerSlots" {
+                        continue;
+                    } else if is_action(key) && !value.is_null() {
                         let handle = source_events
                             .get(&value.as_u64().ok_or("invalid host event token")?)
                             .ok_or("unknown host event token")?
@@ -1953,7 +1955,9 @@ fn rewrite_events(
         }
         Value::Object(object) => {
             for (key, value) in object {
-                if is_action(key) && !value.is_null() {
+                if key == "__handlerSlots" {
+                    continue;
+                } else if is_action(key) && !value.is_null() {
                     let action = value
                         .as_u64()
                         .filter(|action| *action < MAX_HANDLERS as u64)
