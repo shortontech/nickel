@@ -2058,6 +2058,12 @@ pub struct HostTelemetry {
     pub events_processed: usize,
     pub completions_processed: usize,
     pub rebuilt: bool,
+    pub view_calls: usize,
+    pub nodes_measured: usize,
+    pub nodes_placed: usize,
+    pub paint_commands_emitted: usize,
+    pub semantic_nodes_rebuilt: usize,
+    pub retained_paint_refreshes: usize,
     /// Time from beginning the host step through application message dispatch.
     pub input_to_message_us: u64,
     /// Time from beginning the host step through the resolved frame.
@@ -2143,6 +2149,30 @@ impl HostEventOutcome {
             .completions_processed
             .saturating_add(other.telemetry.completions_processed);
         self.telemetry.rebuilt |= other.telemetry.rebuilt;
+        self.telemetry.view_calls = self
+            .telemetry
+            .view_calls
+            .saturating_add(other.telemetry.view_calls);
+        self.telemetry.nodes_measured = self
+            .telemetry
+            .nodes_measured
+            .saturating_add(other.telemetry.nodes_measured);
+        self.telemetry.nodes_placed = self
+            .telemetry
+            .nodes_placed
+            .saturating_add(other.telemetry.nodes_placed);
+        self.telemetry.paint_commands_emitted = self
+            .telemetry
+            .paint_commands_emitted
+            .saturating_add(other.telemetry.paint_commands_emitted);
+        self.telemetry.semantic_nodes_rebuilt = self
+            .telemetry
+            .semantic_nodes_rebuilt
+            .saturating_add(other.telemetry.semantic_nodes_rebuilt);
+        self.telemetry.retained_paint_refreshes = self
+            .telemetry
+            .retained_paint_refreshes
+            .saturating_add(other.telemetry.retained_paint_refreshes);
         self.telemetry.input_to_message_us = self
             .telemetry
             .input_to_message_us
@@ -3084,6 +3114,7 @@ impl<A: Application> UiHost<A> {
     }
 
     pub fn step(&mut self, batch: HostBatch) -> HostEventOutcome {
+        let prior_view_context = ViewContext::from_host(self.bounds, &self.state, Some(&self.tree));
         let prior_transient = self.state.open_overlay_id().cloned();
         self.state.clipboard_text_limit = batch.clipboard_text_limit;
         let controller_authority = batch.controller_authority;
@@ -3451,11 +3482,25 @@ impl<A: Application> UiHost<A> {
         }
         combined.telemetry.input_to_message_us = elapsed_us(step_started);
         if combined.changed {
-            let (paint_list_us, layout_us, rebuild_outcome) = self.rebuild_timed();
-            combined.merge(rebuild_outcome);
-            combined.telemetry.paint_list_us = paint_list_us;
-            combined.telemetry.layout_us = layout_us;
-            combined.telemetry.rebuilt = true;
+            let view_context_unchanged = prior_view_context
+                == ViewContext::from_host(self.bounds, &self.state, Some(&self.tree));
+            let retained_paint = combined.invalidation == Invalidation::Paint
+                && combined.messages.is_empty()
+                && view_context_unchanged
+                && self.tree.refresh_retained_paint(&mut self.state);
+            if retained_paint {
+                self.frame_generation = self.frame_generation.wrapping_add(1);
+                let resources = self.tree.resource_diagnostics();
+                combined.telemetry.retained_paint_refreshes = 1;
+                combined.telemetry.paint_commands_emitted = resources.paint_primitive_count;
+                combined.telemetry.semantic_nodes_rebuilt = resources.accessibility_node_count;
+            } else {
+                let (paint_list_us, layout_us, rebuild_outcome) = self.rebuild_timed();
+                combined.merge(rebuild_outcome);
+                combined.telemetry.paint_list_us = paint_list_us;
+                combined.telemetry.layout_us = layout_us;
+                combined.telemetry.rebuilt = true;
+            }
         }
         if let Some(id) = self.application.take_transient_dismissal()
             && self.state.open_overlay_id() == Some(&id)
@@ -3923,6 +3968,7 @@ impl<A: Application> UiHost<A> {
     }
 
     fn rebuild_timed(&mut self) -> (u64, u64, HostEventOutcome) {
+        let mut view_calls = 1usize;
         let focused_before = self
             .state
             .window_focused()
@@ -3964,7 +4010,7 @@ impl<A: Application> UiHost<A> {
                     .any(|failure| &failure.overlay == open)
             });
 
-        let cancellation = if blocking_overlay_valid
+        let mut cancellation = if blocking_overlay_valid
             && self.pointer_interaction_active()
             && open_overlay.as_ref().is_none_or(|overlay| {
                 self.touch_owner_target()
@@ -3977,6 +4023,7 @@ impl<A: Application> UiHost<A> {
             let context = ViewContext::from_host(self.bounds, &self.state, Some(&self.tree));
             let overlay_interaction = OverlayInteractionSnapshot::capture(&self.state, &self.tree);
             let view = self.application.view(context.clone());
+            view_calls = view_calls.saturating_add(1);
             let overlays = self.application.frame_overlays(context);
             staged_state = self.state.clone();
             staged_tree = UiFrame::resolve(view, FrameRequest::new(self.bounds, &mut staged_state));
@@ -4000,6 +4047,25 @@ impl<A: Application> UiHost<A> {
             self.finalize_pending_long_press_attachment();
         }
         let layout_us = elapsed_us(layout_started);
+        let resources = self.tree.resource_diagnostics();
+        cancellation.telemetry.view_calls =
+            cancellation.telemetry.view_calls.saturating_add(view_calls);
+        cancellation.telemetry.nodes_measured = cancellation
+            .telemetry
+            .nodes_measured
+            .saturating_add(resources.node_count);
+        cancellation.telemetry.nodes_placed = cancellation
+            .telemetry
+            .nodes_placed
+            .saturating_add(resources.node_count);
+        cancellation.telemetry.paint_commands_emitted = cancellation
+            .telemetry
+            .paint_commands_emitted
+            .saturating_add(resources.paint_primitive_count);
+        cancellation.telemetry.semantic_nodes_rebuilt = cancellation
+            .telemetry
+            .semantic_nodes_rebuilt
+            .saturating_add(resources.accessibility_node_count);
         if focused_before
             .as_ref()
             .is_some_and(|id| self.tree.resolved_layout().find(id).is_none())
@@ -5090,7 +5156,10 @@ mod tests {
         Modifier, ModifierState, NamedKey, PhysicalKey, Point, PointerButton, PointerEvent,
         TextEvent, TouchEvent, TouchId, Vector,
     };
-    use std::time::{Duration, Instant};
+    use std::{
+        cell::Cell,
+        time::{Duration, Instant},
+    };
 
     #[cfg(unix)]
     use super::SessionControllerSource;
@@ -6360,6 +6429,55 @@ mod tests {
         assert_eq!(host.application_mut().submits, 2);
         assert_eq!(host.inspect().frame_generation, 2);
         assert_eq!(host.inspect().resources.retained_build_scratch_bytes, 0);
+    }
+
+    #[test]
+    fn paint_only_hover_reuses_declaration_layout_and_matches_cold_resolution() {
+        struct CountedApplication {
+            views: Cell<usize>,
+        }
+
+        impl Application for CountedApplication {
+            type Message = ();
+
+            fn update(&mut self, (): Self::Message) {}
+
+            fn view(&self, _context: ViewContext) -> impl crate::View<Self::Message> {
+                self.views.set(self.views.get() + 1);
+                Button::new((), "Retained").id("retained")
+            }
+        }
+
+        let app = || CountedApplication {
+            views: Cell::new(0),
+        };
+        let mut retained = UiHost::new(app(), 180, 60);
+        assert!(retained.adopt_input_modality(crate::InputModality::Pointer));
+        retained.application().views.set(0);
+        let target = retained
+            .semantic_nodes()
+            .into_iter()
+            .find(|node| node.name.as_deref() == Some("Retained"))
+            .expect("button semantics")
+            .bounds;
+        let point = crate::Point {
+            x: target.origin.x + target.size.width / 2.0,
+            y: target.origin.y + target.size.height / 2.0,
+        };
+
+        let outcome = retained.handle_event(UiEvent::PointerMoved(point));
+        assert_eq!(retained.application().views.get(), 0);
+        assert_eq!(outcome.telemetry.view_calls, 0);
+        assert_eq!(outcome.telemetry.nodes_measured, 0);
+        assert_eq!(outcome.telemetry.nodes_placed, 0);
+        assert_eq!(outcome.telemetry.retained_paint_refreshes, 1);
+        assert!(!outcome.telemetry.rebuilt);
+
+        let mut cold = UiHost::new(app(), 180, 60);
+        cold.state.set_hovered(Some(UiId::from("root/retained")));
+        cold.rebuild();
+        assert_eq!(retained.commands(), cold.commands());
+        assert_eq!(retained.semantic_nodes(), cold.semantic_nodes());
     }
 
     #[test]

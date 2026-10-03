@@ -473,6 +473,8 @@ impl ResolvedLayout {
 
 #[derive(Clone, Debug)]
 pub struct UiFrame<Message = String> {
+    declaration_root: Option<Element<Message>>,
+    declaration_root_id: Option<UiId>,
     commands: Vec<PaintCommand>,
     overlay_commands: Vec<PaintCommand>,
     hits: Vec<HitRegion<Message>>,
@@ -506,6 +508,8 @@ pub struct UiFrame<Message = String> {
 impl<Message> Default for UiFrame<Message> {
     fn default() -> Self {
         Self {
+            declaration_root: None,
+            declaration_root_id: None,
             commands: Vec::new(),
             overlay_commands: Vec::new(),
             hits: Vec::new(),
@@ -536,6 +540,35 @@ impl<Message> Default for UiFrame<Message> {
             active_overlay_dismiss: None,
         }
     }
+}
+
+fn paint_refresh_preserves_geometry<Message>(element: &Element<Message>) -> bool {
+    // Expanded dropdown options are currently materialized during emission and
+    // therefore do not yet have reusable resolved topology.
+    if matches!(element.kind, Kind::Dropdown { .. })
+        || element.text_mapper.is_some()
+        || element.style.proximity_magnification.is_some()
+    {
+        return false;
+    }
+    let interaction_is_paint_only =
+        element
+            .style
+            .interaction_paints
+            .as_ref()
+            .is_none_or(|paints| {
+                paints.iter().all(|paint| {
+                    paint.width.is_none()
+                        && paint.height.is_none()
+                        && paint.font_size.is_none()
+                        && paint.line_height.is_none()
+                })
+            });
+    interaction_is_paint_only
+        && element
+            .children
+            .iter()
+            .all(paint_refresh_preserves_geometry)
 }
 
 impl<Message: Clone> UiFrame<Message> {
@@ -1603,6 +1636,7 @@ impl<Message: Clone> UiFrame<Message> {
         diagnostics: bool,
     ) -> Self {
         let mut root = root.into_element();
+        let declaration_root = root.clone();
         let root_id = root.id.as_ref().map_or_else(
             || UiId::from("root"),
             |id| UiId::from("root").scoped(id.as_str()),
@@ -1611,6 +1645,8 @@ impl<Message: Clone> UiFrame<Message> {
         state.begin_geometry_animation_frame();
         apply_transient_state(&mut root, &root_id, state);
         let mut tree = Self {
+            declaration_root: Some(declaration_root),
+            declaration_root_id: Some(root_id.clone()),
             diagnostics_enabled: diagnostics,
             viewport: bounds,
             ..Self::default()
@@ -1683,6 +1719,38 @@ impl<Message: Clone> UiFrame<Message> {
         tree.apply_interaction_state(state);
         tree.release_build_scratch();
         tree
+    }
+
+    /// Re-emits state-dependent paint, interaction, and semantic records while
+    /// preserving the resolved measurement and placement produced by the last
+    /// declaration. Callers must first prove that active interaction styles do
+    /// not alter geometry and that no transient layer needs declaration work.
+    pub(crate) fn refresh_retained_paint(&mut self, state: &mut UiStateStore) -> bool {
+        let (Some(mut root), Some(root_id)) = (
+            self.declaration_root.clone(),
+            self.declaration_root_id.clone(),
+        ) else {
+            return false;
+        };
+        if self.active_overlay.is_some() || state.text_context().is_some() {
+            return false;
+        }
+        if !paint_refresh_preserves_geometry(&root) {
+            return false;
+        }
+
+        apply_transient_state(&mut root, &root_id, state);
+        self.apply_interaction_state(state);
+        self.prepare_selection_paints(state);
+        self.reset_emission();
+        emit_element(&root, 0, None, self);
+        self.append_scrollbars(Some(state));
+        self.commands.append(&mut self.overlay_commands);
+        self.hits.append(&mut self.overlay_hits);
+        self.emit_accessibility_geometry();
+        self.validate_clip_commands();
+        self.release_build_scratch();
+        true
     }
 
     fn layout_internal(root: impl Component<Message>, bounds: Rect, diagnostics: bool) -> Self {
@@ -3102,7 +3170,17 @@ impl<Message: Clone> UiFrame<Message> {
                         ((point.x - hit.rect.origin.x) / hit.rect.size.width.max(1.0))
                             .clamp(0.0, 1.0)
                     });
-                let pointer_invalidation = state.set_pointer_position(point, hover_fraction);
+                let pointer_invalidation = match state.set_pointer_position(point, hover_fraction) {
+                    Invalidation::Layout
+                        if self
+                            .declaration_root
+                            .as_ref()
+                            .is_some_and(paint_refresh_preserves_geometry) =>
+                    {
+                        Invalidation::Paint
+                    }
+                    invalidation => invalidation,
+                };
                 let mut invalidation = state.set_hovered(hovered).merge(pointer_invalidation);
                 if let Some(captured) = state.captured()
                     && let Some(message) = self.drag_message(captured, DragPhase::Moved, point)
@@ -5635,6 +5713,8 @@ impl<Message: Clone> UiFrame<Message> {
         self.hits.clear();
         self.overlay_hits.clear();
         self.messages.clear();
+        self.context_messages.clear();
+        self.focus_messages.clear();
         self.text_inputs.clear();
         for node in &mut self.resolved.nodes {
             node.hit_stack = None;
