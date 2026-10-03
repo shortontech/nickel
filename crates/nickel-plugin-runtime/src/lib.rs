@@ -298,6 +298,9 @@ impl JsxRuntime {
         {
             self.set_outputs_store(outputs)?;
         }
+        if let Some(locale) = data.get("locale") {
+            self.set_locale_store(locale)?;
+        }
         // Effective presentation state is globally readable and deliberately
         // separate from the capability-gated appearance configuration client.
         if let Some(appearance) = data.get("appearance") {
@@ -461,6 +464,25 @@ impl JsxRuntime {
         setter
             .as_callable()
             .ok_or("outputs store setter is not callable")?
+            .call(&JsValue::undefined(), &[snapshot], &mut self.context)
+            .map(|changed| changed.to_boolean())
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn set_locale_store(&mut self, snapshot: &Value) -> Result<bool, String> {
+        if self.invalidated {
+            return Err("runtime checkpoint was invalidated".into());
+        }
+        let snapshot =
+            JsValue::from_json(snapshot, &mut self.context).map_err(|error| error.to_string())?;
+        let setter = self
+            .context
+            .global_object()
+            .get(js_string!("__nickelSetLocaleStore"), &mut self.context)
+            .map_err(|error| error.to_string())?;
+        setter
+            .as_callable()
+            .ok_or("locale store setter is not callable")?
             .call(&JsValue::undefined(), &[snapshot], &mut self.context)
             .map(|changed| changed.to_boolean())
             .map_err(|error| error.to_string())
@@ -1358,6 +1380,94 @@ mod tests {
             .unwrap_err();
         rejected
             .set_outputs_store(&serde_json::json!({"available":false,"reason":"none","outputs":[]}))
+            .unwrap();
+        assert!(
+            !rejected
+                .eval_json::<bool>("JSON.parse(__nickelReconciliationRequest()).requested")
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn locale_store_has_stable_fallback_and_normalizes_authoritative_tags() {
+        let mut runtime=super::JsxRuntime::new("globalThis.seen=[];function App(){const locale=useLocale();seen.push(locale);return h(Text,null,locale.tag)}",None).unwrap();
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        assert_eq!(
+            runtime
+                .eval_json::<serde_json::Value>("JSON.stringify(seen[0])")
+                .unwrap(),
+            serde_json::json!({"generation":0,"tag":"und","direction":"ltr","known":false})
+        );
+        assert!(
+            !runtime
+                .set_locale_store(&serde_json::json!({"known":false,"tag":"ar","direction":"rtl"}))
+                .unwrap()
+        );
+        assert!(
+            runtime
+                .set_locale_store(
+                    &serde_json::json!({"known":true,"tag":"ZH-hant-tw","direction":"rtl"})
+                )
+                .unwrap()
+        );
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        assert_eq!(
+            runtime
+                .eval_json::<serde_json::Value>("JSON.stringify(seen[1])")
+                .unwrap(),
+            serde_json::json!({"generation":1,"tag":"zh-Hant-TW","direction":"rtl","known":true})
+        );
+        assert!(
+            runtime
+                .eval_json::<bool>("Object.isFrozen(seen[1])")
+                .unwrap()
+        );
+        assert!(
+            runtime
+                .set_locale_store(
+                    &serde_json::json!({"known":true,"tag":"en-us","direction":"ltr"})
+                )
+                .unwrap()
+        );
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        assert_eq!(
+            runtime
+                .eval_json::<String>("JSON.stringify(seen[2].tag)")
+                .unwrap(),
+            "en-US"
+        );
+        assert!(
+            runtime
+                .set_locale_store(
+                    &serde_json::json!({"known":true,"tag":"bad_tag","direction":"ltr"})
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn locale_updates_are_isolated_and_rejected_subscriptions_roll_back() {
+        let source = "globalThis.runs={app:0,locale:0,windows:0,sibling:0};function Locale(){runs.locale++;return h(Text,null,useLocale().tag)}function Windows(){runs.windows++;return h(Text,null,String(useWindows().length))}function Sibling(){runs.sibling++;return h(Text,null,'stable')}function App(){runs.app++;return h(Window,{},h(Locale),h(Windows),h(Sibling))}";
+        let mut runtime = super::JsxRuntime::new(source, None).unwrap();
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        runtime
+            .set_locale_store(&serde_json::json!({"known":true,"tag":"fr-FR","direction":"ltr"}))
+            .unwrap();
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        assert_eq!(
+            runtime
+                .eval_json::<serde_json::Value>("JSON.stringify(runs)")
+                .unwrap(),
+            serde_json::json!({"app":1,"locale":2,"windows":1,"sibling":1})
+        );
+        let mut rejected =
+            super::JsxRuntime::new("function App(){return h(Text,null,useLocale().tag)}", None)
+                .unwrap();
+        rejected
+            .render("__nickelRender()", |_| Err::<(), _>("reject".into()))
+            .unwrap_err();
+        rejected
+            .set_locale_store(&serde_json::json!({"known":true,"tag":"de-DE","direction":"ltr"}))
             .unwrap();
         assert!(
             !rejected

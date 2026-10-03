@@ -3303,6 +3303,61 @@ mod tests {
     }
 
     #[test]
+    fn composition_host_publishes_authoritative_locale_or_stable_fallback() {
+        let package = package(
+            "locale-shell",
+            "globalThis.localeObservation=null;\nexport function Taskbar(){const value=useLocale();localeObservation=value;return h(Text,null,value.tag+':'+value.direction);}\nexport function QuickSettings(){return h(Text,null,'settings');}\nexport default Taskbar;",
+            None,
+        );
+        let owner = PackageIdentity {
+            id: "locale-shell".into(),
+            version: package
+                .manifest
+                .composition
+                .as_ref()
+                .unwrap()
+                .version
+                .parse()
+                .unwrap(),
+        };
+        let mut host = ShellCompositionRuntime::new(
+            &BTreeMap::from([("locale-shell".into(), package)]),
+            "locale-shell",
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let mount = host
+            .mount(&host.component("shell.taskbar").unwrap())
+            .unwrap();
+        assert!(
+            host.render(&mount, &serde_json::json!({}))
+                .unwrap()
+                .node
+                .to_string()
+                .contains("und:ltr")
+        );
+        host.update_snapshot(
+            &owner,
+            &serde_json::json!({"locale":{"known":true,"tag":"ar-SA","direction":"rtl"}}),
+        )
+        .unwrap();
+        assert!(
+            host.render(&mount, &serde_json::json!({}))
+                .unwrap()
+                .node
+                .to_string()
+                .contains("ar-SA:rtl")
+        );
+        let runtime = host.shared_owner_runtime(&owner).unwrap();
+        assert!(
+            runtime
+                .borrow_mut()
+                .eval_json::<bool>("localeObservation.generation===1&&localeObservation.known")
+                .unwrap()
+        );
+    }
+
+    #[test]
     fn composition_host_publishes_effective_theme_independently_of_other_stores() {
         let package = package(
             "theme-shell",

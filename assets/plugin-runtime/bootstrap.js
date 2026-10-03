@@ -108,6 +108,7 @@ let __workspacesStore = {generation:0, snapshot:Object.freeze({generation:0,avai
     writable:false,revision:null,workspaces:Object.freeze([]),activeWorkspace:null,
     operations:Object.freeze({switch:false,create:false,remove:false})})};
 let __outputsStore = {generation:0,snapshot:Object.freeze({generation:0,available:false,reason:null,revision:null,outputs:Object.freeze([])})};
+let __localeStore = {generation:0,snapshot:Object.freeze({generation:0,tag:'und',direction:'ltr',known:false})};
 let __themeStore = {generation:0, snapshot:Object.freeze({
     generation:0, mode:'unknown', accent:null, accentHue:null, accentIntensity:null,
     reducedMotion:null, reducedTransparency:null, palette:null
@@ -933,6 +934,20 @@ function __nickelSetOutputsStore(value){
 function useOutputs(selector){if(__currentComponent===null)throw Error('useOutputs requires a component');if(selector!==undefined&&typeof selector!=='function')throw TypeError('useOutputs selector must be a function');
     const slot=__hookIndex++,hooks=__componentHooks.get(__currentComponent),normalized=selector??null;let entry=hooks[slot];if(!entry||(entry.kind==='outputs-store'&&entry.selector!==normalized))hooks[slot]=entry={kind:'outputs-store',selector:normalized,value:undefined,generation:0};
     if(entry.kind!=='outputs-store')throw Error('hook order changed');entry.storeError=undefined;entry.value=normalized?normalized(__outputsStore.snapshot):__outputsStore.snapshot;entry.generation=__outputsStore.generation;return entry.value;}
+function __nickelSetLocaleStore(value){
+    if(!value||typeof value!=='object'||Array.isArray(value))throw Error('invalid locale snapshot');
+    const known=value.known===true;
+    let tag=known?value.tag:'und';
+    if(typeof tag!=='string'||tag.length>64||!(/^[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*$/.test(tag)))throw Error('invalid locale tag');
+    const parts=tag.split('-');tag=parts.map((part,index)=>index===0?part.toLowerCase():part.length===2?part.toUpperCase():part.length===4?part[0].toUpperCase()+part.slice(1).toLowerCase():part.toLowerCase()).join('-');
+    const direction=known?(value.direction??'ltr'):'ltr';if(direction!=='ltr'&&direction!=='rtl')throw Error('invalid locale direction');
+    const previous=__localeStore.snapshot;if(previous.tag===tag&&previous.direction===direction&&previous.known===known)return false;
+    if(__pendingRender!==null||__pendingEvent!==null)throw Error('cannot publish changed locale store during a render or event');
+    const generation=__localeStore.generation+1,snapshot=Object.freeze({generation,tag,direction,known});__localeStore={generation,snapshot};
+    __nickelForEachSurfaceHooks((hooks,dirty)=>{for(const [owner,slots] of hooks)for(const entry of slots)if(entry?.kind==='locale-store'&&!Object.is(snapshot,entry.value))dirty.add(owner);});return true;
+}
+function useLocale(){if(__currentComponent===null)throw Error('useLocale requires a component');const slot=__hookIndex++,hooks=__componentHooks.get(__currentComponent);let entry=hooks[slot];
+    if(!entry)hooks[slot]=entry={kind:'locale-store',value:undefined,generation:0};if(entry.kind!=='locale-store')throw Error('hook order changed');entry.value=__localeStore.snapshot;entry.generation=__localeStore.generation;return entry.value;}
 
 const __nickelThemePaletteFields = ['background','panel','surface','surfaceHover','text','muted',
     'accent','accentSoft','complement'];

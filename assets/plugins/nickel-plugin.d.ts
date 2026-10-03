@@ -258,6 +258,8 @@ declare function useWorkspace(): Readonly<{id:string;active:boolean}>|null;
 interface NickelOutputsSnapshot extends NickelAvailability {readonly generation:number;readonly revision:string|null;readonly outputs:NickelDisplaySnapshot["outputs"]}
 declare function useOutputs(): Readonly<NickelOutputsSnapshot>;
 declare function useOutputs<T>(selector:(outputs:Readonly<NickelOutputsSnapshot>)=>T):T;
+interface NickelLocaleSnapshot {readonly generation:number;readonly tag:string;readonly direction:"ltr"|"rtl";readonly known:boolean}
+declare function useLocale():Readonly<NickelLocaleSnapshot>;
 interface NickelThemePalette {
     readonly background:NickelColor; readonly panel:NickelColor; readonly surface:NickelColor;
     readonly surfaceHover:NickelColor; readonly text:NickelColor; readonly muted:NickelColor;
