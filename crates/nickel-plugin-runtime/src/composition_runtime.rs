@@ -1550,6 +1550,10 @@ impl ShellCompositionRuntime {
         let catalog_script = self.contribution_catalog_script();
         let state = &self.mounts[&id];
         let owner = state.reference.owner.clone();
+        let surface_snapshot = state
+            .surface
+            .clone()
+            .unwrap_or_else(|| serde_json::json!({}));
         let previous_generation = state.generation;
         let generation = self
             .next_generation
@@ -1563,6 +1567,7 @@ impl ShellCompositionRuntime {
         let mut runtime = package.runtime.borrow_mut();
         runtime.eval(&catalog_script)?;
         runtime.select_surface(&surface(id))?;
+        runtime.set_surface_store(&surface(id), &surface_snapshot)?;
         let mut data = package.data.clone();
         let object = data
             .as_object_mut()
@@ -1611,6 +1616,10 @@ impl ShellCompositionRuntime {
         let catalog_script = self.contribution_catalog_script();
         let state = &self.mounts[&id];
         let owner = state.reference.owner.clone();
+        let surface_snapshot = state
+            .surface
+            .clone()
+            .unwrap_or_else(|| serde_json::json!({}));
         let previous_generation = state.generation;
         let generation = self
             .next_generation
@@ -1623,6 +1632,7 @@ impl ShellCompositionRuntime {
         let mut runtime = package.runtime.borrow_mut();
         runtime.eval(&catalog_script)?;
         runtime.select_surface(&surface(id))?;
+        runtime.set_surface_store(&surface(id), &surface_snapshot)?;
         let mut data = package.data.clone();
         let object = data
             .as_object_mut()
@@ -2712,5 +2722,55 @@ mod tests {
             1
         );
         assert!(host.dispatch_scheduled(&event, &Value::Null).is_ok());
+    }
+
+    #[test]
+    fn composition_mount_publishes_host_owned_versioned_surface_store() {
+        let package = package(
+            "surface-shell",
+            "globalThis.surfaceObservation=null;\nexport function Taskbar(){const surface=useSurface();surfaceObservation=surface;return h(Text,null,surface.id+':'+surface.logicalSize.width);}\nexport function QuickSettings(){return h(Text,null,'settings');}\nexport default Taskbar;",
+            None,
+        );
+        let owner = PackageIdentity {
+            id: "surface-shell".into(),
+            version: package
+                .manifest
+                .composition
+                .as_ref()
+                .unwrap()
+                .version
+                .parse()
+                .unwrap(),
+        };
+        let mut host = ShellCompositionRuntime::new(
+            &BTreeMap::from([("surface-shell".into(), package)]),
+            "surface-shell",
+            &BTreeMap::from([(
+                owner.clone(),
+                serde_json::json!({
+                    "surface":{"id":"settings","kind":"window","width":720,"height":540}
+                }),
+            )]),
+        )
+        .unwrap();
+        let reference = host.component("shell.taskbar").unwrap();
+        let mount = host.mount(&reference).unwrap();
+        let rendered = host.render(&mount, &serde_json::json!({})).unwrap();
+        assert!(rendered.node.to_string().contains("settings:720"));
+        let runtime = host.shared_owner_runtime(&owner).unwrap();
+        assert!(
+            runtime
+                .borrow_mut()
+                .eval_json::<bool>("surfaceObservation.mountId.startsWith('composition-') && surfaceObservation.generation === 1 && surfaceObservation.scaleFactor === null && surfaceObservation.focused === null")
+                .unwrap()
+        );
+        host.render(&mount, &serde_json::json!({})).unwrap();
+        assert_eq!(
+            runtime
+                .borrow_mut()
+                .eval_json::<u64>("JSON.stringify(surfaceObservation.generation)")
+                .unwrap(),
+            1
+        );
     }
 }

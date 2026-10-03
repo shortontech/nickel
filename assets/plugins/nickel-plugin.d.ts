@@ -241,6 +241,24 @@ declare function useReducer<S, A>(reducer: (state: S, action: A) => S, initialSt
 declare function useReducer<S, A, I>(reducer: (state: S, action: A) => S, initialArg: I, init: (initialArg: I) => S): [S, (action: A) => void];
 declare function useRef<T>(initial: T): { current: T };
 declare function useEffect(setup: () => void | (() => void), dependencies?: ReadonlyArray<unknown>): void;
+interface NickelSurfaceSnapshot {
+    readonly generation:number;
+    /** Opaque host-owned identity for this exact mounted surface. */
+    readonly mountId:string|null;
+    readonly id:string|null;
+    readonly kind:"panel"|"dock"|"desktop"|"window"|"dialog"|"overlay"|null;
+    readonly logicalSize:Readonly<{width:number;height:number}>|null;
+    /** Unavailable until the native output authority is projected to this mount. */
+    readonly output:string|null;
+    readonly availableSize:Readonly<{width:number;height:number}>|null;
+    readonly scaleFactor:number|null;
+    readonly focused:boolean|null;
+    readonly visible:boolean|null;
+}
+declare function useSurface():NickelSurfaceSnapshot;
+declare function useOutput():string|null;
+declare function useScaleFactor():number|null;
+declare function useSurfaceFocus():boolean|null;
 declare function useMemo<T>(factory: () => T, dependencies?: ReadonlyArray<unknown>): T;
 declare function useCallback<T extends (...args: never[]) => unknown>(callback: T, dependencies?: ReadonlyArray<unknown>): T;
 

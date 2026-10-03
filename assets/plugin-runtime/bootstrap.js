@@ -88,6 +88,10 @@ let __listKeyErrors = [];
 let __pendingRender = null;
 let __pendingEvent = null;
 let __dirtyComponents = new Set();
+let __surfaceStore = {generation:0, snapshot:Object.freeze({
+    generation:0, mountId:null, id:null, kind:null, logicalSize:null,
+    output:null, availableSize:null, scaleFactor:null, focused:null, visible:null
+})};
 let __nickelData = Object.freeze({query: '', results: []});
 let __activeSurface = 'default';
 const __surfaceStates = new Map();
@@ -574,6 +578,79 @@ const nickel = Object.freeze({
 
 function __nickelSetData(data) { __nickelData = Object.freeze(data); }
 
+function __nickelSurfaceSelection(name, snapshot) {
+    if (name === 'surface') return snapshot;
+    if (name === 'output') return snapshot.output;
+    if (name === 'scale') return snapshot.scaleFactor;
+    if (name === 'focus') return snapshot.focused;
+    throw Error('unknown surface store selection');
+}
+
+function __nickelSetSurfaceStore(mountId, value) {
+    if (__pendingRender !== null || __pendingEvent !== null)
+        throw Error('cannot publish surface store during a render or event');
+    if (typeof mountId !== 'string' || !mountId.length || mountId.length > 128)
+        throw Error('invalid native surface mount identity');
+    if (!value || typeof value !== 'object' || Array.isArray(value))
+        throw Error('invalid native surface snapshot');
+    const nullableString = field => value[field] === undefined || value[field] === null
+        ? null : typeof value[field] === 'string' ? value[field] : (() => { throw Error(`invalid surface ${field}`); })();
+    const nullableBoolean = field => value[field] === undefined || value[field] === null
+        ? null : typeof value[field] === 'boolean' ? value[field] : (() => { throw Error(`invalid surface ${field}`); })();
+    const size = (width, height) => Number.isFinite(width) && width >= 0 && Number.isFinite(height) && height >= 0
+        ? Object.freeze({width, height}) : null;
+    const next = {
+        mountId,
+        id:nullableString('id'),
+        kind:nullableString('kind'),
+        logicalSize:size(value.width, value.height),
+        output:nullableString('output'),
+        availableSize:size(value.availableWidth, value.availableHeight),
+        scaleFactor:value.scaleFactor === undefined || value.scaleFactor === null ? null
+            : Number.isFinite(value.scaleFactor) && value.scaleFactor > 0 ? value.scaleFactor
+            : (() => { throw Error('invalid surface scaleFactor'); })(),
+        focused:nullableBoolean('focused'),
+        visible:nullableBoolean('visible')
+    };
+    const previous = __surfaceStore.snapshot;
+    const sameSize = (left, right) => left === right || (left !== null && right !== null
+        && left.width === right.width && left.height === right.height);
+    const unchanged = previous.mountId === next.mountId && previous.id === next.id
+        && previous.kind === next.kind && sameSize(previous.logicalSize, next.logicalSize)
+        && previous.output === next.output && sameSize(previous.availableSize, next.availableSize)
+        && Object.is(previous.scaleFactor, next.scaleFactor) && previous.focused === next.focused
+        && previous.visible === next.visible;
+    if (unchanged) return false;
+    const generation = __surfaceStore.generation + 1;
+    const snapshot = Object.freeze({...next, generation});
+    __surfaceStore = {generation, snapshot};
+    for (const [owner, hooks] of __componentHooks) {
+        for (const entry of hooks) {
+            if (entry?.kind !== 'surface-store') continue;
+            const selected = __nickelSurfaceSelection(entry.selection, snapshot);
+            if (!Object.is(selected, entry.value)) __dirtyComponents.add(owner);
+        }
+    }
+    return true;
+}
+
+function __nickelUseSurfaceSelection(selection) {
+    if (__currentComponent === null) throw Error('surface hooks require a component');
+    const slot = __hookIndex++;
+    const hooks = __componentHooks.get(__currentComponent);
+    let entry = hooks[slot];
+    if (!entry) hooks[slot] = entry = {kind:'surface-store', selection, value:undefined, generation:0};
+    if (entry.kind !== 'surface-store' || entry.selection !== selection) throw Error('hook order changed');
+    entry.value = __nickelSurfaceSelection(selection, __surfaceStore.snapshot);
+    entry.generation = __surfaceStore.generation;
+    return entry.value;
+}
+
+function useSurface() { return __nickelUseSurfaceSelection('surface'); }
+function useOutput() { return __nickelUseSurfaceSelection('output'); }
+function useScaleFactor() { return __nickelUseSurfaceSelection('scale'); }
+function useSurfaceFocus() { return __nickelUseSurfaceSelection('focus'); }
+
 function __nickelSelectSurface(id) {
     if (typeof id !== 'string' || !id.length) throw Error('invalid surface identity');
     if (__pendingRender !== null || __pendingEvent !== null)
@@ -585,7 +662,8 @@ function __nickelSelectSurface(id) {
         previousHandlers: __previousHandlers,
         effects: __effects,
         data: __nickelData,
-        dirty: __dirtyComponents
+        dirty: __dirtyComponents,
+        surfaceStore: __surfaceStore
     });
     const state = __surfaceStates.get(id);
     __componentHooks = state?.hooks ?? new Map();
@@ -593,6 +671,10 @@ function __nickelSelectSurface(id) {
     __previousHandlers = state?.previousHandlers ?? [];
     __effects = state?.effects ?? [];
     __dirtyComponents = state?.dirty ?? new Set();
+    __surfaceStore = state?.surfaceStore ?? {generation:0, snapshot:Object.freeze({
+        generation:0, mountId:null, id:null, kind:null, logicalSize:null,
+        output:null, availableSize:null, scaleFactor:null, focused:null, visible:null
+    })};
     __nickelData = state?.data ?? Object.freeze({query: '', results: []});
     __visitedComponents = new Set();
     __componentChildren = new Map();
@@ -615,6 +697,10 @@ function __nickelDropSurface(id) {
     __previousHandlers = [];
     __effects = [];
     __dirtyComponents = new Set();
+    __surfaceStore = {generation:0, snapshot:Object.freeze({
+        generation:0, mountId:null, id:null, kind:null, logicalSize:null,
+        output:null, availableSize:null, scaleFactor:null, focused:null, visible:null
+    })};
     __nickelData = Object.freeze({query: '', results: []});
     __visitedComponents = new Set();
     __componentChildren = new Map();
@@ -1019,15 +1105,15 @@ function __nickelBeginCheckpoint() {
         }
         return result;
     }
-    function state(hooks, handlers, previousHandlers, effects, data, dirty) {
+    function state(hooks, handlers, previousHandlers, effects, data, dirty, surfaceStore) {
         return {hooks:new Map(Array.from(hooks, ([path, slots]) => [path, slots.slice()])),
             values:Array.from(hooks.values(), slots => slots.map(entry => copy(entry.kind === 'ref' ? entry.value.current : entry.value))),
             handlers:handlers.slice(), previousHandlers:previousHandlers.slice(), effects:copy(effects), data,
-            dirty:new Set(dirty)};
+            dirty:new Set(dirty), surfaceStore};
     }
-    const active = state(__componentHooks, __handlers, __previousHandlers, __effects, __nickelData, __dirtyComponents);
+    const active = state(__componentHooks, __handlers, __previousHandlers, __effects, __nickelData, __dirtyComponents, __surfaceStore);
     const surfaces = new Map(Array.from(__surfaceStates, ([id, value]) => [id,
-        state(value.hooks, value.handlers, value.previousHandlers, value.effects, value.data, value.dirty)]));
+        state(value.hooks, value.handlers, value.previousHandlers, value.effects, value.data, value.dirty, value.surfaceStore)]));
     __compositionCheckpoint = {active, surfaces, graph:seen, extensible, apps:new Map(__surfaceApps), activeSurface:__activeSurface,
         settingsValues:copy(__settingsValues), settingsSnapshot:copy(__settingsSnapshot), settingsPagesSnapshot:copy(__settingsPagesSnapshot)};
 }
@@ -1058,7 +1144,8 @@ function __nickelFinishCheckpoint(accepted) {
             slots.forEach((entry, slot) => { if (entry.kind === 'ref') entry.value.current = original(values[slot]); else entry.value = original(values[slot]); });
         }
         return {hooks:state.hooks, handlers:state.handlers, previousHandlers:state.previousHandlers,
-            effects:original(state.effects), data:state.data, dirty:state.dirty};
+            effects:original(state.effects), data:state.data, dirty:state.dirty,
+            surfaceStore:state.surfaceStore};
     }
     __surfaceStates.clear();
     for (const [id, state] of checkpoint.surfaces) __surfaceStates.set(id, restore(state));
@@ -1068,6 +1155,7 @@ function __nickelFinishCheckpoint(accepted) {
     __componentHooks = active.hooks; __handlers = active.handlers; __previousHandlers = active.previousHandlers;
     __effects = active.effects; __nickelData = active.data; __activeSurface = checkpoint.activeSurface;
     __dirtyComponents = active.dirty;
+    __surfaceStore = active.surfaceStore;
     __settingsValues = original(checkpoint.settingsValues); __settingsSnapshot = original(checkpoint.settingsSnapshot); __settingsPagesSnapshot = original(checkpoint.settingsPagesSnapshot);
     __visitedComponents = new Set(); __componentChildren = new Map(); __currentComponent = null; __hookIndex = 0; __listKeyErrors = [];
 }

@@ -1080,6 +1080,14 @@ impl PluginPanelApplication {
             let mut runtime = self.runtime.borrow_mut();
             runtime.select_surface(&self.runtime_surface_id)?;
             runtime.set_data(&serialized)?;
+            let surface = serde_json::from_str::<Value>(&serialized)
+                .ok()
+                .and_then(|data| data.get("surface").cloned())
+                .unwrap_or_else(|| serde_json::json!({}));
+            runtime.set_surface_store(
+                &format!("plugin-surface:{}", self.runtime_surface_id),
+                &surface,
+            )?;
             let result = render_panel_validated(
                 &mut runtime,
                 &self.manifest,
@@ -1153,6 +1161,14 @@ impl PluginPanelApplication {
             runtime_ref.select_surface(runtime_surface_id)?;
             if let Some(data) = data.as_deref() {
                 runtime_ref.set_data(data)?;
+                let snapshot = serde_json::from_str::<Value>(data)
+                    .ok()
+                    .and_then(|data| data.get("surface").cloned())
+                    .unwrap_or_else(|| serde_json::json!({}));
+                runtime_ref.set_surface_store(
+                    &format!("plugin-surface:{runtime_surface_id}"),
+                    &snapshot,
+                )?;
             }
             render_panel(
                 &mut runtime_ref,

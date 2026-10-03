@@ -152,6 +152,29 @@ impl JsxRuntime {
         self.eval(&format!("__nickelSelectSurface({id})"))
     }
 
+    /// Publish one host-owned, mount-scoped surface observation. JavaScript
+    /// retains the previous immutable snapshot when these public fields are
+    /// unchanged and advances its monotonic generation otherwise.
+    pub fn set_surface_store(&mut self, mount_id: &str, snapshot: &Value) -> Result<bool, String> {
+        if self.invalidated {
+            return Err("runtime checkpoint was invalidated".into());
+        }
+        let mount = JsValue::from(js_string!(mount_id));
+        let snapshot =
+            JsValue::from_json(snapshot, &mut self.context).map_err(|error| error.to_string())?;
+        let setter = self
+            .context
+            .global_object()
+            .get(js_string!("__nickelSetSurfaceStore"), &mut self.context)
+            .map_err(|error| error.to_string())?;
+        setter
+            .as_callable()
+            .ok_or("surface store setter is not callable")?
+            .call(&JsValue::undefined(), &[mount, snapshot], &mut self.context)
+            .map(|changed| changed.to_boolean())
+            .map_err(|error| error.to_string())
+    }
+
     pub fn register_surface_entry(&mut self, id: &str, source: &str) -> Result<(), String> {
         let id = serde_json::to_string(id).map_err(|error| error.to_string())?;
         self.eval(&format!(
@@ -394,6 +417,74 @@ mod tests {
                 .eval_json::<super::ReconciliationRequest>("__nickelReconciliationRequest()")
                 .unwrap()
                 .requested
+        );
+    }
+
+    #[test]
+    fn surface_store_is_versioned_stable_and_dirties_only_on_public_change() {
+        let source = r#"
+            globalThis.observed = [];
+            function App() {
+                const surface = useSurface();
+                const output = useOutput();
+                const scale = useScaleFactor();
+                const focused = useSurfaceFocus();
+                const [value, setValue] = useState(0);
+                observed.push({surface, output, scale, focused});
+                return h(Button, {onClick:()=>setValue(current=>current)}, String(surface.logicalSize?.width ?? 0));
+            }
+        "#;
+        let mut runtime = super::JsxRuntime::new(source, None).unwrap();
+        assert!(
+            runtime
+                .set_surface_store(
+                    "native-mount-7",
+                    &serde_json::json!({"id":"settings","kind":"window","width":640,"height":480})
+                )
+                .unwrap()
+        );
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        assert!(
+            !runtime
+                .set_surface_store(
+                    "native-mount-7",
+                    &serde_json::json!({"id":"settings","kind":"window","width":640,"height":480})
+                )
+                .unwrap()
+        );
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        assert!(
+            runtime
+                .eval_json::<bool>("observed[0].surface === observed[1].surface")
+                .unwrap()
+        );
+        let unchanged = runtime
+            .dispatch_scheduled("__nickelDispatchBatchScheduled([[0,null]])", |_| Ok(()))
+            .unwrap();
+        assert_eq!(unchanged, super::ScheduledRender::Unchanged);
+        runtime.finish_event(true).unwrap();
+
+        assert!(
+            runtime
+                .set_surface_store(
+                    "native-mount-7",
+                    &serde_json::json!({"id":"settings","kind":"window","width":800,"height":480})
+                )
+                .unwrap()
+        );
+        let changed = runtime
+            .dispatch_scheduled("__nickelDispatchBatchScheduled([[0,null]])", |node| {
+                Ok(node.clone())
+            })
+            .unwrap();
+        assert!(matches!(changed, super::ScheduledRender::Rendered { .. }));
+        runtime.finish_event(true).unwrap();
+        assert!(
+            runtime
+                .eval_json::<bool>(
+                    "JSON.stringify(observed[0].surface.generation === 1 && observed[2].surface.generation === 2 && observed[2].surface.mountId === 'native-mount-7' && observed[2].surface.logicalSize.width === 800 && observed[2].output === null && observed[2].scale === null && observed[2].focused === null)"
+                )
+                .unwrap()
         );
     }
 
