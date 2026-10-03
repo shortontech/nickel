@@ -4251,9 +4251,12 @@ impl RetainedPanelTree {
                         node = typed;
                         visited = visited.saturating_add(1);
                     } else {
-                        let previous = find_typed_node(&source, &node, target)
-                            .ok_or_else(|| format!("native patch target {target:?} disappeared"))?;
-                        let typed = parse_patched_node(replacement, previous)?;
+                        let typed = if let Some(previous) = find_typed_node(&source, &node, target)
+                        {
+                            parse_patched_node(replacement, previous)?
+                        } else {
+                            PanelNode::parse(replacement)?
+                        };
                         replace_source_and_typed(
                             &mut source,
                             &mut node,
@@ -4778,6 +4781,29 @@ fn replace_source_and_typed(
     replacement_typed: &PanelNode,
     visited: &mut u64,
 ) -> Result<(), String> {
+    fn replace_source_only(
+        source: &mut Value,
+        target: &str,
+        replacement: &Value,
+    ) -> Result<(), String> {
+        if source.get("__nativeId").and_then(Value::as_str) == Some(target) {
+            *source = replacement.clone();
+            return Ok(());
+        }
+        let children = source
+            .get_mut("children")
+            .and_then(Value::as_array_mut)
+            .ok_or_else(|| format!("native patch target {target:?} disappeared"))?;
+        for child in children {
+            if child.get("__nativeId").and_then(Value::as_str) == Some(target)
+                || source_contains_id(child, target)
+            {
+                return replace_source_only(child, target, replacement);
+            }
+        }
+        Err(format!("native patch target {target:?} disappeared"))
+    }
+
     *visited = visited.saturating_add(1);
     if source.get("__nativeId").and_then(Value::as_str) == Some(target) {
         *source = replacement.clone();
@@ -4819,15 +4845,17 @@ fn replace_source_and_typed(
         }
         | PanelNode::MenuItem { children, .. } => children,
         _ => {
-            return Err(format!(
-                "native patch target {target:?} is not below a container"
-            ));
+            replace_source_only(source, target, replacement)?;
+            *typed = PanelNode::parse(source)?;
+            return Ok(());
         }
     };
     if source_children.len() != typed_children.len()
         || source_children.iter().any(|child| !child.is_object())
     {
-        return Err("incremental subtree alignment requires native element children".into());
+        replace_source_only(source, target, replacement)?;
+        *typed = PanelNode::parse(source)?;
+        return Ok(());
     }
     for (child_source, child_typed) in source_children.iter_mut().zip(typed_children) {
         let contains = child_source.get("__nativeId").and_then(Value::as_str) == Some(target)
@@ -5103,6 +5131,41 @@ mod class_lookup_tests {
         .unwrap();
         assert_eq!(source[0]["children"][0], replacement);
         assert_eq!(typed, PanelNode::parse(&source[0]).unwrap());
+    }
+
+    #[test]
+    fn subtree_replacement_rematerializes_the_nearest_misaligned_ancestor() {
+        let target = "root/export:shell.settings::root/#0";
+        let mut source = json!({"kind":"column","__nativeId":"root","children":[
+            {"kind":"text","__nativeId":"root/@title","children":["Settings"]},
+            {"kind":"column","__nativeId":target,"children":[]}
+        ]});
+        // A composed source may retain an ownership wrapper which the typed
+        // presentation flattened. Model that divergence directly.
+        let mut typed = PanelNode::parse(&json!({
+            "kind":"column","__nativeId":"root","children":[
+                {"kind":"column","__nativeId":target,"children":[]}
+            ]
+        }))
+        .unwrap();
+        let replacement = json!({
+            "kind":"column","__nativeId":target,"className":"appearance-page","children":[
+                {"kind":"text","__nativeId":format!("{target}/#0"),"children":["Theme"]}
+            ]
+        });
+        let replacement_typed = PanelNode::parse(&replacement).unwrap();
+        let mut visited = 0;
+        super::replace_source_and_typed(
+            &mut source,
+            &mut typed,
+            target,
+            &replacement,
+            &replacement_typed,
+            &mut visited,
+        )
+        .unwrap();
+        assert_eq!(source["children"][1], replacement);
+        assert_eq!(typed, PanelNode::parse(&source).unwrap());
     }
 
     #[test]

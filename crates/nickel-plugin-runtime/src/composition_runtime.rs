@@ -1421,6 +1421,14 @@ impl ShellCompositionRuntime {
         let mut rejected_native = None;
         let result = (|| {
             self.validate_mount(root)?;
+            let owned_mounts = std::iter::once(root.id)
+                .chain(
+                    self.nested_mounts
+                        .iter()
+                        .filter(|((owner, _), _)| *owner == root.id)
+                        .map(|(_, mount)| mount.id),
+                )
+                .collect::<std::collections::BTreeSet<_>>();
             for (handle, value) in events {
                 bounded_json(value)?;
                 let mount = self
@@ -1428,6 +1436,7 @@ impl ShellCompositionRuntime {
                     .get(&handle.mount)
                     .ok_or("retired component event")?;
                 if handle.runtime != self.id
+                    || !owned_mounts.contains(&handle.mount)
                     || mount.generation != handle.generation
                     || mount.reference.owner != handle.owner
                 {
@@ -1438,6 +1447,7 @@ impl ShellCompositionRuntime {
             let generations_before = self
                 .mounts
                 .iter()
+                .filter(|(id, _)| owned_mounts.contains(id))
                 .map(|(id, mount)| (*id, mount.generation))
                 .collect::<BTreeMap<_, _>>();
             let mut rendered_mounts = BTreeMap::new();
@@ -1445,7 +1455,7 @@ impl ShellCompositionRuntime {
             let mut dirty_components = BTreeMap::new();
             let mut reconciliation_requested = false;
             if events.is_empty() {
-                let mount_ids = self.mounts.keys().copied().collect::<Vec<_>>();
+                let mount_ids = owned_mounts.iter().copied().collect::<Vec<_>>();
                 for mount in mount_ids {
                     if self.patch_authority.contains_key(&mount) {
                         let outcome = self.render_mount_patched(mount, Value::Array(Vec::new()))?;
@@ -1499,6 +1509,7 @@ impl ShellCompositionRuntime {
             let changed = self
                 .mounts
                 .iter()
+                .filter(|(id, _)| owned_mounts.contains(id))
                 .filter(|(id, mount)| generations_before.get(id) != Some(&mount.generation))
                 .map(|(id, _)| *id)
                 .collect::<Vec<_>>();
@@ -1780,13 +1791,25 @@ impl ShellCompositionRuntime {
         ) -> Result<T, String>,
     ) -> Result<ScheduledExpandedBatch<T>, String> {
         let mut requested = false;
-        for (mount_id, mount) in &self.mounts {
+        let owned_mounts = std::iter::once(root.id)
+            .chain(
+                self.nested_mounts
+                    .iter()
+                    .filter(|((owner, _), _)| *owner == root.id)
+                    .map(|(_, mount)| mount.id),
+            )
+            .collect::<std::collections::BTreeSet<_>>();
+        for mount_id in owned_mounts {
+            let mount = self
+                .mounts
+                .get(&mount_id)
+                .ok_or("retired component mount")?;
             let package = self
                 .packages
                 .get(&mount.reference.owner)
                 .ok_or("retired component owner")?;
             let mut runtime = package.runtime.borrow_mut();
-            runtime.select_surface(&surface(*mount_id))?;
+            runtime.select_surface(&surface(mount_id))?;
             requested |= runtime.reconciliation_requested()?;
         }
         if !requested {
@@ -3175,14 +3198,17 @@ fn normalize_atomic_operations(operations: Vec<NativePatchOperation>) -> Vec<Nat
             .strip_prefix(ancestor)
             .is_some_and(|suffix| suffix.starts_with('/') || suffix.starts_with("::"))
     }
+    fn at_or_below(candidate: &str, ancestor: &str) -> bool {
+        candidate == ancestor || below(candidate, ancestor)
+    }
     let mut normalized = Vec::with_capacity(operations.len());
     let mut covered = Vec::<String>::new();
     for operation in operations {
         let operation_target = target(&operation);
-        if covered
-            .iter()
-            .any(|ancestor| below(operation_target, ancestor))
-        {
+        let replaces_subtree = matches!(operation, NativePatchOperation::ReplaceSubtree { .. });
+        if covered.iter().any(|ancestor| {
+            below(operation_target, ancestor) || (!replaces_subtree && operation_target == ancestor)
+        }) {
             continue;
         }
         if let NativePatchOperation::ReplaceSubtree {
@@ -3190,13 +3216,13 @@ fn normalize_atomic_operations(operations: Vec<NativePatchOperation>) -> Vec<Nat
             ..
         } = &operation
         {
-            normalized.retain(|prior| !below(target(prior), replaced_target));
-            covered.retain(|prior| !below(prior, replaced_target));
+            normalized.retain(|prior| !at_or_below(target(prior), replaced_target));
+            covered.retain(|prior| !at_or_below(prior, replaced_target));
             covered.push(replaced_target.clone());
         }
         if let NativePatchOperation::RemoveChild { child_id, .. } = &operation {
-            normalized.retain(|prior| !below(target(prior), child_id));
-            covered.retain(|prior| !below(prior, child_id));
+            normalized.retain(|prior| !at_or_below(target(prior), child_id));
+            covered.retain(|prior| !at_or_below(prior, child_id));
             covered.push(child_id.clone());
         }
         normalized.push(operation);
@@ -4048,6 +4074,79 @@ mod tests {
     }
 
     #[test]
+    fn passive_reconciliation_does_not_consume_an_independent_settings_root() {
+        let base = package(
+            "base",
+            "function SettingsLeaf(){const [count,setCount]=useState(0);useEffect(()=>setCount(1),[]);return h(Text,null,'settings'+count)}\nregisterSettingsPage({id:'details',group:'Plugins',label:'Details',component:SettingsLeaf});\nexport function Taskbar(){return h(Text,null,'taskbar')}\nexport function QuickSettings(){}\nexport default Taskbar;",
+            None,
+        );
+        let mut host = ShellCompositionRuntime::new(
+            &BTreeMap::from([("base".into(), base)]),
+            "base",
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let mut registry = nickel_core::settings_registry::SettingsRegistry::default();
+        for (owner, package) in &host.packages {
+            package
+                .runtime
+                .borrow_mut()
+                .publish_settings(&mut registry, &owner.id)
+                .unwrap();
+        }
+        for package in host.packages.values() {
+            package
+                .runtime
+                .borrow_mut()
+                .set_settings_registry(&registry)
+                .unwrap();
+        }
+        let taskbar = host
+            .mount(&host.component("shell.taskbar").unwrap())
+            .unwrap();
+        let settings = host
+            .mount(&host.registered_page("base", "details").unwrap())
+            .unwrap();
+        let taskbar_tree = host
+            .render_expanded(&taskbar, &serde_json::json!({}), |_| Ok(()))
+            .unwrap();
+        let settings_tree = host
+            .render_expanded(&settings, &serde_json::json!({}), |_| Ok(()))
+            .unwrap();
+        assert!(settings_tree.node.to_string().contains("settings0"));
+
+        let unrelated = host
+            .reconcile_expanded_pending_validated(
+                &taskbar,
+                &taskbar_tree.events,
+                &taskbar_tree.node,
+                |_, _, _| -> Result<(), String> {
+                    panic!("taskbar reconciliation must not consume Settings dirtiness")
+                },
+            )
+            .unwrap();
+        assert!(matches!(unrelated, ScheduledExpandedBatch::Unchanged));
+        host.finish_transaction(true).unwrap();
+
+        let settings_update = host
+            .reconcile_expanded_pending_validated(
+                &settings,
+                &settings_tree.events,
+                &settings_tree.node,
+                |patch, _, _| {
+                    assert!(serde_json::to_string(patch).unwrap().contains("settings1"));
+                    Ok(())
+                },
+            )
+            .unwrap();
+        assert!(matches!(
+            settings_update,
+            ScheduledExpandedBatch::Patched { .. }
+        ));
+        host.finish_transaction(true).unwrap();
+    }
+
+    #[test]
     fn independent_providers_share_context_and_retire_contributions_and_stale_authority() {
         let mut base = package(
             "base",
@@ -4576,6 +4675,36 @@ mod tests {
                 target: "root/owner/@retired".into(),
                 property: "children".into(),
                 value: serde_json::json!(["stale"]),
+            },
+        ]);
+        assert_eq!(
+            operations,
+            vec![NativePatchOperation::ReplaceSubtree {
+                target: "root/owner".into(),
+                node: replacement,
+            }]
+        );
+    }
+
+    #[test]
+    fn atomic_patch_replacement_supersedes_work_on_the_same_target() {
+        let replacement = serde_json::json!({
+            "kind":"Column","__nativeId":"root/owner","className":"fresh","children":[]
+        });
+        let operations = normalize_atomic_operations(vec![
+            NativePatchOperation::SetPrimitive {
+                target: "root/owner".into(),
+                property: "className".into(),
+                value: serde_json::json!("stale"),
+            },
+            NativePatchOperation::ReplaceSubtree {
+                target: "root/owner".into(),
+                node: replacement.clone(),
+            },
+            NativePatchOperation::SetPrimitive {
+                target: "root/owner".into(),
+                property: "className".into(),
+                value: serde_json::json!("also-stale"),
             },
         ]);
         assert_eq!(

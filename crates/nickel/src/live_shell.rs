@@ -3985,6 +3985,16 @@ impl LiveShell {
                 )?;
                 let window_focused = host.inspect().window_focused;
                 let focus_changed = host.application_mut().sync_surface_focus(window_focused)?;
+                // Surface-store dirtiness belongs to this exact native host.
+                // Commit it before publishing package-wide resource stores:
+                // those stores may schedule typed patches immediately, and
+                // must not accidentally fold a still-provisional surface tree
+                // into their own reconciliation batch.
+                let surface_changed = if geometry_changed || focus_changed {
+                    host.application_mut().reconcile_surface_authority()?
+                } else {
+                    false
+                };
                 application_images.extend(preview_images);
                 let fields = [
                     ("viewport", Some(&viewport)),
@@ -4029,7 +4039,6 @@ impl LiveShell {
                     } else {
                         false
                     };
-                let surface_changed = host.application_mut().reconcile_surface_authority()?;
                 if resource_changed || dependency_changed || application_images_changed {
                     tracing::warn!(
                         surface = %key.surface_id,
