@@ -237,7 +237,12 @@ declare function Menu(props: NickelMenuProps): JSX.Element;
 declare function MenuItem(props: NickelMenuItemProps): JSX.Element;
 
 declare function useState<T>(initial: T | (() => T)): [T, (next: T | ((previous: T) => T)) => void];
+declare function useReducer<S, A>(reducer: (state: S, action: A) => S, initialState: S): [S, (action: A) => void];
+declare function useReducer<S, A, I>(reducer: (state: S, action: A) => S, initialArg: I, init: (initialArg: I) => S): [S, (action: A) => void];
 declare function useRef<T>(initial: T): { current: T };
+declare function useEffect(setup: () => void | (() => void), dependencies?: ReadonlyArray<unknown>): void;
+declare function useMemo<T>(factory: () => T, dependencies?: ReadonlyArray<unknown>): T;
+declare function useCallback<T extends (...args: never[]) => unknown>(callback: T, dependencies?: ReadonlyArray<unknown>): T;
 
 type NickelSurfaceRequest = Readonly<
     | { type: "show-plugin-surface"; surfaceId: string }

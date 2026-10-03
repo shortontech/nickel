@@ -602,6 +602,8 @@ function __nickelSelectSurface(id) {
 function __nickelDropSurface(id) {
     if (__pendingRender !== null || __pendingEvent !== null)
         throw Error('cannot retire a surface during a render or event');
+    const retired = id === __activeSurface ? __componentHooks : __surfaceStates.get(id)?.hooks;
+    if (retired) __nickelCleanupHooks(retired);
     __surfaceStates.delete(id);
     __surfaceApps.delete(id);
     if (id !== __activeSurface) return;
@@ -629,16 +631,44 @@ function __nickelTakeEffects() {
 
 function useState(initial) {
     if (__currentComponent === null) throw Error('useState requires a component');
+    const owner = __currentComponent;
     const slot = __hookIndex++;
-    const hooks = __componentHooks.get(__currentComponent);
-    if (!hooks[slot]) hooks[slot] = {kind: 'state', value: typeof initial === 'function' ? initial() : initial};
+    const hooks = __componentHooks.get(owner);
+    if (!hooks[slot]) {
+        const entry = {kind: 'state', value: typeof initial === 'function' ? initial() : initial, set: null};
+        entry.set = next => {
+            if (__componentHooks.get(owner)?.[slot] !== entry) return;
+            const value = typeof next === 'function' ? next(entry.value) : next;
+            if (!Object.is(value, entry.value)) entry.value = value;
+        };
+        hooks[slot] = entry;
+    }
     if (hooks[slot].kind !== 'state') throw Error('hook order changed');
     const entry = hooks[slot];
+    return [entry.value, entry.set];
+}
+
+function useReducer(reducer, initialArg, init) {
+    if (__currentComponent === null) throw Error('useReducer requires a component');
+    if (typeof reducer !== 'function') throw TypeError('useReducer requires a reducer');
+    if (init !== undefined && typeof init !== 'function') throw TypeError('useReducer initializer must be a function');
     const owner = __currentComponent;
-    return [entry.value, next => {
-        if (__componentHooks.get(owner)?.[slot] !== entry) return;
-        entry.value = typeof next === 'function' ? next(entry.value) : next;
-    }];
+    const slot = __hookIndex++;
+    const hooks = __componentHooks.get(owner);
+    if (!hooks[slot]) {
+        const entry = {kind: 'reducer', value: init === undefined ? initialArg : init(initialArg), reducer, dispatch: null};
+        entry.dispatch = action => {
+            if (__componentHooks.get(owner)?.[slot] !== entry) return;
+            const value = entry.reducer(entry.value, action);
+            if (!Object.is(value, entry.value)) entry.value = value;
+        };
+        hooks[slot] = entry;
+    }
+    if (hooks[slot].kind !== 'reducer') throw Error('hook order changed');
+    const entry = hooks[slot];
+    entry.nextReducer = reducer;
+    __pendingRender.reducerEntries.push(entry);
+    return [entry.value, entry.dispatch];
 }
 
 function useRef(initial) {
@@ -648,6 +678,61 @@ function useRef(initial) {
     if (!hooks[slot]) hooks[slot] = {kind: 'ref', value: {current: initial}};
     if (hooks[slot].kind !== 'ref') throw Error('hook order changed');
     return hooks[slot].value;
+}
+
+function __nickelDepsEqual(left, right) {
+    return left !== undefined && right !== undefined && left.length === right.length
+        && left.every((value, index) => Object.is(value, right[index]));
+}
+
+function __nickelDeps(deps, hook) {
+    if (deps !== undefined && !Array.isArray(deps)) throw TypeError(`${hook} dependencies must be an array`);
+    return deps === undefined ? undefined : deps.slice();
+}
+
+function useMemo(factory, deps) {
+    if (__currentComponent === null) throw Error('useMemo requires a component');
+    if (typeof factory !== 'function') throw TypeError('useMemo requires a factory');
+    const slot = __hookIndex++;
+    const hooks = __componentHooks.get(__currentComponent);
+    const nextDeps = __nickelDeps(deps, 'useMemo');
+    const previous = hooks[slot];
+    if (previous && previous.kind !== 'memo') throw Error('hook order changed');
+    if (previous && __nickelDepsEqual(previous.deps, nextDeps)) return previous.value;
+    const value = factory();
+    hooks[slot] = {kind: 'memo', value, deps: nextDeps};
+    return value;
+}
+
+function useCallback(callback, deps) {
+    if (typeof callback !== 'function') throw TypeError('useCallback requires a function');
+    return useMemo(() => callback, deps);
+}
+
+function useEffect(setup, deps) {
+    if (__currentComponent === null) throw Error('useEffect requires a component');
+    if (typeof setup !== 'function') throw TypeError('useEffect requires a setup function');
+    const slot = __hookIndex++;
+    const hooks = __componentHooks.get(__currentComponent);
+    const nextDeps = __nickelDeps(deps, 'useEffect');
+    let entry = hooks[slot];
+    if (!entry) hooks[slot] = entry = {kind: 'effect', deps: undefined, cleanup: undefined};
+    if (entry.kind !== 'effect') throw Error('hook order changed');
+    if (!__nickelDepsEqual(entry.deps, nextDeps))
+        __pendingRender.passiveEffects.push({entry, setup, deps: nextDeps});
+}
+
+function __nickelRunCleanup(entry) {
+    if (typeof entry.cleanup !== 'function') return;
+    const cleanup = entry.cleanup;
+    entry.cleanup = undefined;
+    try { cleanup(); } catch (_) { /* A passive cleanup cannot invalidate an accepted native commit. */ }
+}
+
+function __nickelCleanupHooks(hooks) {
+    for (const slots of hooks.values())
+        for (const entry of slots)
+            if (entry?.kind === 'effect') __nickelRunCleanup(entry);
 }
 
 function h(kind, props, ...children) {
@@ -781,7 +866,23 @@ function __nickelRollbackEvent() {
 }
 
 function __nickelCommitRender() {
+    const pending = __pendingRender;
     __pendingRender = null;
+    if (pending === null) return;
+    for (const entry of pending.reducerEntries) {
+        entry.reducer = entry.nextReducer;
+        delete entry.nextReducer;
+    }
+    for (const entry of pending.removedEffects) __nickelRunCleanup(entry);
+    for (const effect of pending.passiveEffects) {
+        __nickelRunCleanup(effect.entry);
+        effect.entry.deps = effect.deps;
+        try {
+            const cleanup = effect.setup();
+            if (cleanup !== undefined && typeof cleanup !== 'function') continue;
+            effect.entry.cleanup = cleanup;
+        } catch (_) { /* A passive effect cannot invalidate an accepted native commit. */ }
+    }
 }
 
 function __nickelAcceptEvent() {
@@ -800,7 +901,7 @@ function __nickelRender(component = __nickelActiveEntry()) {
     const previousValues = Array.from(__componentHooks.values(), hooks => hooks.map(entry =>
         entry.kind === 'ref' ? entry.value.current : entry.value));
     __pendingRender = {handlers: previousHandlers, previousHandlers: olderHandlers, hooks: previousHooks,
-        values: previousValues, effectsLength: __effects.length};
+        values: previousValues, effectsLength: __effects.length, passiveEffects: [], removedEffects: [], reducerEntries: []};
     __handlers = [];
     __previousHandlers = previousHandlers;
     __listKeyErrors = [];
@@ -812,7 +913,11 @@ function __nickelRender(component = __nickelActiveEntry()) {
         const node = h(component, {});
         if (node?.kind === 'window' && __listKeyErrors.length) throw Error(__listKeyErrors[0]);
         for (const path of __componentHooks.keys()) {
-            if (!__visitedComponents.has(path)) __componentHooks.delete(path);
+            if (!__visitedComponents.has(path)) {
+                for (const entry of __componentHooks.get(path))
+                    if (entry?.kind === 'effect') __pendingRender.removedEffects.push(entry);
+                __componentHooks.delete(path);
+            }
         }
         return JSON.stringify(node);
     } catch (error) {

@@ -211,6 +211,123 @@ impl JsxRuntime {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn react_style_hooks_preserve_identity_and_memoize_with_object_is() {
+        let source = r#"
+            globalThis.observed = [];
+            function App() {
+                const [state, setState] = useState(0);
+                const [reduced, dispatch] = useReducer((value, action) => action === 'same' ? value : value + 1, 0);
+                const memo = useMemo(() => ({state}), [state]);
+                const callback = useCallback(() => state, [state]);
+                observed.push({setState, dispatch, memo, callback, state, reduced});
+                return h(Button, {onClick: () => { setState(value => value); dispatch('same'); }}, String(state + reduced));
+            }
+        "#;
+        let mut runtime = super::JsxRuntime::new(source, None).unwrap();
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        runtime.render("__nickelDispatch(0)", |_| Ok(())).unwrap();
+        runtime.finish_event(true).unwrap();
+        assert!(
+            runtime
+                .eval_json::<bool>("observed[0].setState === observed[1].setState")
+                .unwrap()
+        );
+        assert!(
+            runtime
+                .eval_json::<bool>("observed[0].dispatch === observed[1].dispatch")
+                .unwrap()
+        );
+        assert!(
+            runtime
+                .eval_json::<bool>("observed[0].memo === observed[1].memo")
+                .unwrap()
+        );
+        assert!(
+            runtime
+                .eval_json::<bool>("observed[0].callback === observed[1].callback")
+                .unwrap()
+        );
+        assert_eq!(
+            runtime
+                .eval_json::<u64>("observed[1].state + observed[1].reduced")
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn effects_run_after_accepted_commit_and_cleanup_before_rerun_and_unmount() {
+        let source = r#"
+            globalThis.log = [];
+            function App() {
+                const [value, setValue] = useState(0);
+                useEffect(() => { log.push('setup ' + value); return () => log.push('cleanup ' + value); }, [value]);
+                return h(Button, {onClick: () => setValue(value + 1)}, String(value));
+            }
+        "#;
+        let mut runtime = super::JsxRuntime::new(source, None).unwrap();
+        runtime
+            .render("__nickelRender()", |_| Err::<(), _>("reject".into()))
+            .unwrap_err();
+        assert!(
+            runtime
+                .eval_json::<Vec<String>>("JSON.stringify(log)")
+                .unwrap()
+                .is_empty()
+        );
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        assert_eq!(
+            runtime
+                .eval_json::<Vec<String>>("JSON.stringify(log)")
+                .unwrap(),
+            ["setup 0"]
+        );
+        runtime.render("__nickelDispatch(0)", |_| Ok(())).unwrap();
+        runtime.finish_event(true).unwrap();
+        assert_eq!(
+            runtime
+                .eval_json::<Vec<String>>("JSON.stringify(log)")
+                .unwrap(),
+            ["setup 0", "cleanup 0", "setup 1"]
+        );
+        runtime.drop_surface("default").unwrap();
+        assert_eq!(
+            runtime
+                .eval_json::<Vec<String>>("JSON.stringify(log)")
+                .unwrap(),
+            ["setup 0", "cleanup 0", "setup 1", "cleanup 1"]
+        );
+    }
+
+    #[test]
+    fn removed_component_effect_cleanup_waits_for_accepted_commit() {
+        let source = r#"
+            globalThis.log = [];
+            function Child() { useEffect(() => () => log.push('removed'), []); return h(Text, null, 'child'); }
+            function App() { const [shown, setShown] = useState(true); return h(Button, {onClick: () => setShown(false)}, shown ? h(Child) : 'gone'); }
+        "#;
+        let mut runtime = super::JsxRuntime::new(source, None).unwrap();
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        runtime
+            .render("__nickelDispatch(0)", |_| Err::<(), _>("reject".into()))
+            .unwrap_err();
+        assert!(
+            runtime
+                .eval_json::<Vec<String>>("JSON.stringify(log)")
+                .unwrap()
+                .is_empty()
+        );
+        runtime.render("__nickelDispatch(0)", |_| Ok(())).unwrap();
+        runtime.finish_event(true).unwrap();
+        assert_eq!(
+            runtime
+                .eval_json::<Vec<String>>("JSON.stringify(log)")
+                .unwrap(),
+            ["removed"]
+        );
+    }
+
+    #[test]
     fn checkpoint_discards_consumed_effects_and_restores_supported_hook_objects_in_place() {
         let mut runtime=super::JsxRuntime::new("function App(){const [state]=useState({count:0});return h(Button,{onClick:()=>{state.count++;globalThis.outside=(globalThis.outside||0)+1;nickel.request('show-launcher');}},String(state.count));}",None).unwrap();
         runtime.render("__nickelRender()", |_| Ok(())).unwrap();
