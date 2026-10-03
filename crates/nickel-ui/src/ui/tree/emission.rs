@@ -725,15 +725,14 @@ pub(super) fn emit_element<Message: Clone>(
                 });
             }
             if phases.interaction && !element.inline_messages.is_empty() {
-                let glyphs = shape_selection_glyphs(
+                let glyphs = shape_styled_selection_glyphs(
                     value,
+                    spans,
                     rect,
                     node.clip,
                     *scale,
-                    false,
                     *wrap,
                     *line_height,
-                    None,
                     element.style.text_align,
                 );
                 for (index, (range, message)) in element.inline_messages.iter().enumerate() {

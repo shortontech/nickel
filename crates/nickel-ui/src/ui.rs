@@ -1809,7 +1809,7 @@ struct TextMeasurer {
     font_system: ProcessFontSystem,
     cache_enabled: bool,
     plain: HashMap<TextMeasureKey, Arc<PlainTextLayout>>,
-    styled: HashMap<StyledTextMeasureKey, Size>,
+    styled: HashMap<StyledTextMeasureKey, Arc<PlainTextLayout>>,
     plain_bytes: usize,
     styled_bytes: usize,
     observed_font_generation: u64,
@@ -1986,6 +1986,25 @@ fn styled_measure_key_bytes(key: &StyledTextMeasureKey) -> usize {
         + key.text.len()
         + key.locale.len()
         + key.spans.len() * std::mem::size_of::<StyledTextSpan>()
+        + key
+            .spans
+            .iter()
+            .filter_map(|span| span.font_family.as_ref())
+            .map(|family| family.len())
+            .sum::<usize>()
+}
+
+fn styled_layout_bytes(key: &StyledTextMeasureKey, layout: &PlainTextLayout) -> usize {
+    styled_measure_key_bytes(key)
+        + std::mem::size_of::<PlainTextLayout>()
+        + layout.clusters.len() * std::mem::size_of::<TextClusterPosition>()
+        + layout.line_widths.len() * std::mem::size_of::<f32>()
+        + layout.visual_lines.len() * std::mem::size_of::<TextVisualLine>()
+        + layout
+            .visual_lines
+            .iter()
+            .map(|line| line.carets.len() * std::mem::size_of::<TextCaretPosition>())
+            .sum::<usize>()
 }
 
 thread_local! {
@@ -2048,6 +2067,15 @@ fn build_plain_text_layout(
     }
     buffer.set_text(text, &attrs, Shaping::Advanced, None);
     buffer.shape_until_scroll(&mut font_system, false);
+    build_text_layout_from_buffer(&buffer, text, max_lines, line_height)
+}
+
+fn build_text_layout_from_buffer(
+    buffer: &Buffer,
+    text: &str,
+    max_lines: Option<usize>,
+    line_height: f32,
+) -> Arc<PlainTextLayout> {
     let mut measured = Size::new(0.0, 0.0);
     let mut clusters = Vec::new();
     let mut line_widths: Vec<f32> = Vec::new();
@@ -2060,6 +2088,11 @@ fn build_plain_text_layout(
     if line_bases.is_empty() {
         line_bases.push(0);
     }
+    let grapheme_boundaries = text
+        .grapheme_indices(true)
+        .map(|(offset, _)| offset)
+        .chain(std::iter::once(text.len()))
+        .collect::<Vec<_>>();
     for (visual_line, run) in buffer
         .layout_runs()
         .take(max_lines.unwrap_or(usize::MAX))
@@ -2069,18 +2102,28 @@ fn build_plain_text_layout(
         measured.height += run.line_height;
         line_widths.push(run.line_w);
         let line_base = line_bases.get(run.line_i).copied().unwrap_or(0);
-        clusters.extend(run.glyphs.iter().map(|glyph| TextClusterPosition {
-            line: visual_line,
-            start: line_base + glyph.start,
-            end: line_base + glyph.end,
-            x: glyph.x,
-            y: run.line_top,
-            width: glyph.w.max(1.0),
-            height: run.line_height,
-            rtl: glyph.level.is_rtl(),
+        clusters.extend(run.glyphs.iter().map(|glyph| {
+            let raw_start = (line_base + glyph.start).min(text.len());
+            let raw_end = (line_base + glyph.end).min(text.len());
+            let after_start = grapheme_boundaries.partition_point(|offset| *offset <= raw_start);
+            let start = grapheme_boundaries[after_start.saturating_sub(1)];
+            let at_end = grapheme_boundaries.partition_point(|offset| *offset < raw_end);
+            let end = grapheme_boundaries
+                .get(at_end)
+                .copied()
+                .unwrap_or(text.len());
+            TextClusterPosition {
+                line: visual_line,
+                start,
+                end,
+                x: glyph.x,
+                y: run.line_top,
+                width: glyph.w.max(1.0),
+                height: run.line_height,
+                rtl: glyph.level.is_rtl(),
+            }
         }));
     }
-    drop(font_system);
     if measured.height == 0.0 {
         measured.height = line_height;
     }
@@ -2210,12 +2253,19 @@ pub(crate) fn shape_plain_text(
         );
         let key_bytes = plain_layout_bytes(&key, &layout);
         if measurer.cache_enabled {
-            if measurer.plain.len() >= TEXT_MEASURE_CACHE_CAPACITY
-                || measurer.plain_bytes.saturating_add(key_bytes) > TEXT_MEASURE_CACHE_BYTE_BUDGET
+            if measurer.plain.len().saturating_add(measurer.styled.len())
+                >= TEXT_MEASURE_CACHE_CAPACITY
+                || measurer
+                    .plain_bytes
+                    .saturating_add(measurer.styled_bytes)
+                    .saturating_add(key_bytes)
+                    > TEXT_MEASURE_CACHE_BYTE_BUDGET
             {
                 measurer.diagnostics.evictions = measurer.diagnostics.evictions.saturating_add(1);
                 measurer.plain.clear();
+                measurer.styled.clear();
                 measurer.plain_bytes = 0;
+                measurer.styled_bytes = 0;
             }
             if key_bytes <= TEXT_MEASURE_CACHE_BYTE_BUDGET {
                 measurer.plain_bytes += key_bytes;
@@ -2323,14 +2373,45 @@ fn styled_segments<'a>(text: &'a str, spans: &'a [StyledTextSpan]) -> Vec<(&'a s
     segments
 }
 
-fn measure_styled_text(
+fn build_styled_text_layout(
+    measurer: &mut TextMeasurer,
     text: &str,
     spans: &[StyledTextSpan],
     scale: f32,
     wrap: bool,
     line_height: Option<f32>,
     max_width: f32,
-) -> Size {
+) -> Arc<PlainTextLayout> {
+    let font_size = text_font_size(scale);
+    let line_height = line_height.unwrap_or(font_size * 1.3).max(1.0);
+    let width = if wrap && max_width.is_finite() {
+        max_width.max(1.0)
+    } else {
+        f32::INFINITY
+    };
+    let mut font_system = measurer.font_system.lock();
+    let mut buffer = Buffer::new(&mut font_system, Metrics::new(font_size, line_height));
+    buffer.set_wrap(if wrap { Wrap::WordOrGlyph } else { Wrap::None });
+    buffer.set_size(width.is_finite().then_some(width), None);
+    let defaults = styled_attrs(None);
+    buffer.set_rich_text(
+        styled_segments(text, spans),
+        &defaults,
+        Shaping::Advanced,
+        None,
+    );
+    buffer.shape_until_scroll(&mut font_system, false);
+    build_text_layout_from_buffer(&buffer, text, None, line_height)
+}
+
+fn shape_styled_text(
+    text: &str,
+    spans: &[StyledTextSpan],
+    scale: f32,
+    wrap: bool,
+    line_height: Option<f32>,
+    max_width: f32,
+) -> Arc<PlainTextLayout> {
     if spans.is_empty() {
         return shape_plain_text(
             text,
@@ -2341,8 +2422,7 @@ fn measure_styled_text(
             None,
             max_width,
             TextRetention::Public,
-        )
-        .size;
+        );
     }
     let font_size = text_font_size(scale);
     let line_height = line_height.unwrap_or(font_size * 1.3).max(1.0);
@@ -2368,50 +2448,57 @@ fn measure_styled_text(
             fallback: TextFallbackAuthority::StyledSpans,
         };
         if measurer.cache_enabled
-            && let Some(size) = measurer.styled.get(&key).copied()
+            && let Some(layout) = measurer.styled.get(&key).cloned()
         {
             measurer.diagnostics.hits = measurer.diagnostics.hits.saturating_add(1);
-            return size;
+            return layout;
         }
         measurer.diagnostics.misses = measurer.diagnostics.misses.saturating_add(1);
-        let mut font_system = measurer.font_system.lock();
-        let mut buffer = Buffer::new(&mut font_system, Metrics::new(font_size, line_height));
-        buffer.set_wrap(if wrap { Wrap::WordOrGlyph } else { Wrap::None });
-        buffer.set_size(width.is_finite().then_some(width), None);
-        let defaults = styled_attrs(None);
-        buffer.set_rich_text(
-            styled_segments(text, spans),
-            &defaults,
-            Shaping::Advanced,
-            None,
+        let layout = build_styled_text_layout(
+            &mut measurer,
+            text,
+            spans,
+            scale,
+            wrap,
+            line_height.into(),
+            max_width,
         );
-        buffer.shape_until_scroll(&mut font_system, false);
-        let mut measured = Size::new(0.0, 0.0);
-        for run in buffer.layout_runs() {
-            measured.width = measured.width.max(run.line_w);
-            measured.height += run.line_height;
-        }
-        if measured.height == 0.0 {
-            measured.height = line_height;
-        }
-        let key_bytes = styled_measure_key_bytes(&key);
+        let key_bytes = styled_layout_bytes(&key, &layout);
         if measurer.cache_enabled {
-            if measurer.styled.len() >= TEXT_MEASURE_CACHE_CAPACITY
-                || measurer.styled_bytes.saturating_add(key_bytes) > TEXT_MEASURE_CACHE_BYTE_BUDGET
+            if measurer.plain.len().saturating_add(measurer.styled.len())
+                >= TEXT_MEASURE_CACHE_CAPACITY
+                || measurer
+                    .plain_bytes
+                    .saturating_add(measurer.styled_bytes)
+                    .saturating_add(key_bytes)
+                    > TEXT_MEASURE_CACHE_BYTE_BUDGET
             {
                 measurer.diagnostics.evictions = measurer.diagnostics.evictions.saturating_add(1);
+                measurer.plain.clear();
                 measurer.styled.clear();
+                measurer.plain_bytes = 0;
                 measurer.styled_bytes = 0;
             }
             if key_bytes <= TEXT_MEASURE_CACHE_BYTE_BUDGET {
                 measurer.styled_bytes += key_bytes;
-                measurer.styled.insert(key, measured);
+                measurer.styled.insert(key, Arc::clone(&layout));
             } else {
                 measurer.diagnostics.rejections = measurer.diagnostics.rejections.saturating_add(1);
             }
         }
-        measured
+        layout
     })
+}
+
+fn measure_styled_text(
+    text: &str,
+    spans: &[StyledTextSpan],
+    scale: f32,
+    wrap: bool,
+    line_height: Option<f32>,
+    max_width: f32,
+) -> Size {
+    shape_styled_text(text, spans, scale, wrap, line_height, max_width).size
 }
 
 pub(crate) fn text_font_size(scale: f32) -> f32 {

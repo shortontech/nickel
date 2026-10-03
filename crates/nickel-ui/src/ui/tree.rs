@@ -6754,10 +6754,10 @@ fn collect_selection_regions<Message>(
             && element.style.selectable != Some(false)
             && let Kind::StyledText {
                 value,
+                spans,
                 scale,
                 wrap,
                 line_height,
-                ..
             } = &element.kind
         {
             let run_id = element
@@ -6766,15 +6766,14 @@ fn collect_selection_regions<Message>(
                 .clone()
                 .unwrap_or_else(|| node.id.as_str().to_owned());
             let text = value.clone();
-            let glyphs = shape_selection_glyphs(
+            let glyphs = shape_styled_selection_glyphs(
                 &text,
+                spans,
                 node.content,
                 node.clip,
                 *scale,
-                false,
                 *wrap,
                 *line_height,
-                None,
                 element.style.text_align,
             );
             builders[region_index].logical_runs.push(SelectionRun {
@@ -6830,6 +6829,37 @@ fn shape_selection_glyphs(
         if wrap { rect.size.width } else { f32::INFINITY },
         TextRetention::Public,
     );
+    selection_glyphs_from_layout(&layout, rect, clip, align)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn shape_styled_selection_glyphs(
+    text: &str,
+    spans: &[StyledTextSpan],
+    rect: Rect,
+    clip: Option<Rect>,
+    scale: f32,
+    wrap: bool,
+    line_height: Option<f32>,
+    align: TextAlign,
+) -> Vec<SelectionGlyph> {
+    let layout = shape_styled_text(
+        text,
+        spans,
+        scale,
+        wrap,
+        line_height,
+        if wrap { rect.size.width } else { f32::INFINITY },
+    );
+    selection_glyphs_from_layout(&layout, rect, clip, align)
+}
+
+fn selection_glyphs_from_layout(
+    layout: &PlainTextLayout,
+    rect: Rect,
+    clip: Option<Rect>,
+    align: TextAlign,
+) -> Vec<SelectionGlyph> {
     layout
         .clusters
         .iter()

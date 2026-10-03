@@ -2214,6 +2214,130 @@ fn repeated_styled_text_measurement_reuses_a_bounded_cache_entry() {
 }
 
 #[test]
+fn styled_shaping_reuses_span_aware_clusters_and_matches_a_cold_oracle() {
+    let text = "office e\u{301} שלום 🦀";
+    let spans = vec![
+        StyledTextSpan {
+            range: 0..6,
+            bold: true,
+            italic: false,
+            monospace: false,
+            font_family: None,
+            strikethrough: false,
+            underline: TextUnderlineStyle::None,
+            color: None,
+            background: None,
+        },
+        StyledTextSpan {
+            range: 7..8,
+            bold: false,
+            italic: true,
+            monospace: false,
+            font_family: None,
+            strikethrough: false,
+            underline: TextUnderlineStyle::None,
+            color: None,
+            background: None,
+        },
+        StyledTextSpan {
+            range: 11..19,
+            bold: false,
+            italic: true,
+            monospace: true,
+            font_family: None,
+            strikethrough: false,
+            underline: TextUnderlineStyle::Single,
+            color: Some(0xff00ff),
+            background: None,
+        },
+    ];
+    let cached = with_text_measure_cache_mode(TextMeasureCacheMode::Enabled, || {
+        let first = shape_styled_text(text, &spans, 1.0, true, Some(19.0), 96.0);
+        let second = shape_styled_text(text, &spans, 1.0, true, Some(19.0), 96.0);
+        assert!(Arc::ptr_eq(&first, &second));
+        first
+    });
+    let cold = with_text_measure_cache_mode(TextMeasureCacheMode::BypassDerived, || {
+        shape_styled_text(text, &spans, 1.0, true, Some(19.0), 96.0)
+    });
+    let geometry = |layout: &PlainTextLayout| {
+        layout
+            .clusters
+            .iter()
+            .map(|cluster| {
+                (
+                    cluster.line,
+                    cluster.start,
+                    cluster.end,
+                    cluster.x.to_bits(),
+                    cluster.y.to_bits(),
+                    cluster.width.to_bits(),
+                    cluster.height.to_bits(),
+                    cluster.rtl,
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+
+    assert_eq!(cached.size, cold.size);
+    assert_eq!(cached.line_widths, cold.line_widths);
+    assert_eq!(geometry(&cached), geometry(&cold));
+    for line in &cached.visual_lines {
+        assert!(line.carets.windows(2).all(|pair| pair[0].x <= pair[1].x));
+    }
+    let mut grapheme_boundaries = text
+        .grapheme_indices(true)
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    grapheme_boundaries.push(text.len());
+    assert!(cached.clusters.iter().all(|cluster| {
+        grapheme_boundaries.contains(&cluster.start) && grapheme_boundaries.contains(&cluster.end)
+    }));
+    assert_eq!(
+        cached.clusters.iter().map(|cluster| cluster.end).max(),
+        Some(text.len())
+    );
+}
+
+#[test]
+fn styled_selection_geometry_comes_from_the_cached_span_aware_layout() {
+    let text = "wide office שלום";
+    let spans = vec![StyledTextSpan {
+        range: 0..11,
+        bold: true,
+        italic: true,
+        monospace: true,
+        font_family: None,
+        strikethrough: false,
+        underline: TextUnderlineStyle::None,
+        color: None,
+        background: None,
+    }];
+    let frame = UiFrame::<TestMessage>::layout(
+        SelectionRegion::automatic().child(
+            StyledText::new(text, spans.clone())
+                .scale(1.0)
+                .selection_run_id("styled"),
+        ),
+        Rect::new(0.0, 0.0, 240.0, 80.0),
+    );
+    let actual = &frame.selection_regions[0].runs[0].glyphs;
+    let shaped = shape_styled_text(text, &spans, 1.0, false, None, f32::INFINITY);
+
+    assert_eq!(actual.len(), shaped.clusters.len());
+    for (glyph, cluster) in actual.iter().zip(&shaped.clusters) {
+        assert_eq!(
+            (glyph.start, glyph.end, glyph.rtl),
+            (cluster.start, cluster.end, cluster.rtl)
+        );
+        assert_eq!(glyph.rect.origin.x.to_bits(), cluster.x.to_bits());
+        assert_eq!(glyph.rect.origin.y.to_bits(), cluster.y.to_bits());
+        assert_eq!(glyph.rect.size.width.to_bits(), cluster.width.to_bits());
+        assert_eq!(glyph.rect.size.height.to_bits(), cluster.height.to_bits());
+    }
+}
+
+#[test]
 fn unstyled_rich_text_reuses_the_plain_shaped_layout() {
     with_text_measure_cache_mode(TextMeasureCacheMode::Enabled, || {
         let rich = measure_styled_text("shared clusters", &[], 1.0, false, None, f32::INFINITY);
@@ -3961,9 +4085,20 @@ fn document_selection_crosses_text_runs_and_skips_buttons() {
 
 #[test]
 fn inline_message_ranges_are_clickable_and_use_the_hand_cursor() {
+    let spans = vec![StyledTextSpan {
+        range: 5..9,
+        bold: true,
+        italic: true,
+        monospace: true,
+        font_family: None,
+        strikethrough: false,
+        underline: TextUnderlineStyle::Single,
+        color: Some(0x00aaff),
+        background: None,
+    }];
     let build = |state: &mut UiStateStore| {
         UiFrame::layout_with_state(
-            StyledText::new("open docs", Vec::new())
+            StyledText::new("open docs", spans.clone())
                 .inline_message(5..9, TestMessage::Named("docs")),
             Rect::new(0.0, 0.0, 200.0, 40.0),
             state,
