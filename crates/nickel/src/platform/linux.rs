@@ -1371,6 +1371,7 @@ fn session_request_operation(request: &SessionRequest) -> &'static str {
             SessionCommand::WindowAction { .. } => "window-action",
             SessionCommand::TestInput { .. } => "test-input",
             SessionCommand::TestOutput { .. } => "test-output",
+            SessionCommand::TrimMemory => "trim-memory",
         },
     }
 }

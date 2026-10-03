@@ -2347,6 +2347,7 @@ fn test_control_may_invoke(command: &SessionCommand) -> bool {
             | SessionCommand::SessionAction {
                 action: nickel_session_protocol::SessionAction::Lock
             }
+            | SessionCommand::TrimMemory
     )
 }
 
@@ -2700,6 +2701,7 @@ pub struct NickelSession {
     /// reconciliation owns applying that change after its current pass.
     reconciling_internal_shell_outputs: bool,
     internal_shell_timer: InternalShellTimer,
+    memory_trim_timer: Option<smithay::reexports::calloop::RegistrationToken>,
     internal_system_status_source: Option<smithay::reexports::calloop::RegistrationToken>,
     pub loop_signal: LoopSignal,
 
@@ -5345,6 +5347,21 @@ impl NickelSession {
 
     pub(crate) fn internal_shell_timer_counters(&self) -> InternalShellTimerCounters {
         self.internal_shell_timer.counters
+    }
+
+    fn schedule_memory_trim(&mut self) {
+        if self.memory_trim_timer.is_some() {
+            return;
+        }
+        let timer = Timer::from_duration(Duration::from_millis(250));
+        match self.event_loop_handle.insert_source(timer, |_, _, state| {
+            state.memory_trim_timer = None;
+            crate::process_memory::maybe_trim();
+            TimeoutAction::Drop
+        }) {
+            Ok(token) => self.memory_trim_timer = Some(token),
+            Err(error) => tracing::debug!(?error, "could not schedule allocator trim"),
+        }
     }
 
     fn internal_outputs(&self) -> Vec<(crate::internal_shell::InternalOutput, i32, i32)> {
@@ -8807,6 +8824,7 @@ impl NickelSession {
             internal_file_drag_serial: None,
             internal_file_context_popup: None,
             internal_shell_timer: InternalShellTimer::default(),
+            memory_trim_timer: None,
             internal_system_status_source: None,
             loop_signal,
             socket_name,
@@ -10345,6 +10363,7 @@ impl NickelSession {
         if changed {
             if !visible {
                 self.restore_launcher_focus();
+                self.schedule_memory_trim();
             }
             self.notify_launcher_visibility(visible);
         }
@@ -13252,6 +13271,7 @@ impl NickelSession {
         }
         self.preview_highlight = None;
         self.clear_overlay_preview_interest();
+        self.schedule_memory_trim();
         eprintln!("nickel: transient overlays hidden");
     }
 
@@ -13864,6 +13884,7 @@ impl NickelSession {
                 TaskSwitchEffect::HideFlip { .. } => {
                     self.preview_highlight = None;
                     self.clear_switcher_preview_interest();
+                    self.schedule_memory_trim();
                 }
             }
         }

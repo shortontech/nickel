@@ -273,6 +273,9 @@ pub enum Command {
     TestOutput {
         output: TestOutput,
     },
+    /// Return unused glibc pages to the operating system and report the
+    /// immediate delta. Accepted only by explicitly test-controlled sessions.
+    TrimMemory,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -694,6 +697,7 @@ pub enum ServerMessage {
         surfaces: u16,
     },
     CacheDiagnostics(Box<CacheDiagnostics>),
+    MemoryTrimDiagnostics(MemoryTrimDiagnostics),
     ShellRuntimeDiagnostics(ShellRuntimeDiagnostics),
     Workspaces(WorkspaceState),
     ShellBehavior(ShellBehaviorSnapshot),
@@ -854,8 +858,74 @@ pub struct NativePreviewWorkDiagnostics {
     pub completion_age_us: u64,
 }
 
+/// Process-level memory reconciliation for the largest Nickel-owned resources.
+///
+/// Operating-system measurements and logical resource byte counts are intentionally
+/// separate. In particular, `accounted_gpu_payload_bytes` is not subtracted from
+/// private process memory because graphics drivers expose allocations differently.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProcessMemoryDiagnostics {
+    pub process_rss_bytes: Option<u64>,
+    pub process_pss_bytes: Option<u64>,
+    pub process_private_bytes: Option<u64>,
+    pub process_anonymous_bytes: Option<u64>,
+    pub process_swap_bytes: Option<u64>,
+    /// Total non-mmapped space obtained by glibc's allocator.
+    pub allocator_arena_bytes: Option<u64>,
+    /// Total space in glibc allocations backed directly by `mmap`.
+    pub allocator_mmap_bytes: Option<u64>,
+    /// Bytes currently allocated to callers according to glibc.
+    pub allocator_live_bytes: Option<u64>,
+    /// Free bytes retained inside glibc allocator arenas.
+    pub allocator_free_bytes: Option<u64>,
+    /// Allocator free bytes at the top of the heap that may be releasable.
+    pub allocator_releasable_bytes: Option<u64>,
+    pub allocator_free_chunks: Option<u64>,
+    pub allocator_mmap_regions: Option<u64>,
+    pub automatic_trim_attempts: u64,
+    pub automatic_trim_releases: u64,
+    pub automatic_trim_reclaimed_rss_bytes: u64,
+    pub automatic_trim_last_duration_us: u64,
+    pub automatic_trim_skipped_threshold: u64,
+    pub automatic_trim_skipped_cooldown: u64,
+    pub internal_ui_cpu_bytes: u64,
+    pub shell_image_cpu_bytes: u64,
+    pub preview_cpu_bytes: u64,
+    pub window_metadata_cpu_bytes: u64,
+    pub decoration_cpu_bytes: u64,
+    pub accounted_cpu_bytes: u64,
+    pub accounted_gpu_payload_bytes: u64,
+    /// Private process bytes not explained by the conservative CPU categories above.
+    pub unaccounted_private_bytes: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MemoryTrimSnapshot {
+    pub process_rss_bytes: Option<u64>,
+    pub process_private_bytes: Option<u64>,
+    pub process_anonymous_bytes: Option<u64>,
+    pub allocator_arena_bytes: Option<u64>,
+    pub allocator_mmap_bytes: Option<u64>,
+    pub allocator_live_bytes: Option<u64>,
+    pub allocator_free_bytes: Option<u64>,
+    pub allocator_releasable_bytes: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MemoryTrimDiagnostics {
+    pub supported: bool,
+    pub allocator_reported_release: bool,
+    pub before: MemoryTrimSnapshot,
+    pub after: MemoryTrimSnapshot,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CacheDiagnostics {
+    #[serde(default)]
+    pub memory: ProcessMemoryDiagnostics,
     #[serde(default)]
     pub native_preview_work: NativePreviewWorkDiagnostics,
     #[serde(default)]
@@ -2362,6 +2432,13 @@ mod tests {
     #[test]
     fn presentation_memory_counters_round_trip_and_default_for_older_peers() {
         let counters = CacheDiagnostics {
+            memory: ProcessMemoryDiagnostics {
+                process_rss_bytes: Some(400 * 1024 * 1024),
+                process_private_bytes: Some(350 * 1024 * 1024),
+                accounted_cpu_bytes: 32 * 1024 * 1024,
+                unaccounted_private_bytes: Some(318 * 1024 * 1024),
+                ..Default::default()
+            },
             internal_ui_text_scratch_bytes: 4096,
             internal_ui_text_private_cache_bytes: 8192,
             internal_ui_fallback_buffer_creations: 1,
@@ -2382,6 +2459,7 @@ mod tests {
         );
         let mut legacy = serde_json::to_value(CacheDiagnostics::default()).unwrap();
         let fields = legacy.as_object_mut().unwrap();
+        fields.remove("memory");
         for key in [
             "internal_ui_text_scratch_bytes",
             "internal_ui_text_private_cache_bytes",
@@ -2397,6 +2475,41 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<CacheDiagnostics>(legacy).unwrap(),
             CacheDiagnostics::default()
+        );
+    }
+
+    #[test]
+    fn memory_trim_command_and_result_round_trip() {
+        let command = ClientEnvelope {
+            token: "test-token".into(),
+            request_id: 7,
+            request: Request::Command(Command::TrimMemory),
+        };
+        assert_eq!(
+            decode::<ClientEnvelope>(&encode(&command).unwrap()).unwrap(),
+            command
+        );
+
+        let result = ServerEnvelope {
+            request_id: 7,
+            message: ServerMessage::MemoryTrimDiagnostics(MemoryTrimDiagnostics {
+                supported: true,
+                allocator_reported_release: true,
+                before: MemoryTrimSnapshot {
+                    process_rss_bytes: Some(200),
+                    allocator_free_bytes: Some(100),
+                    ..Default::default()
+                },
+                after: MemoryTrimSnapshot {
+                    process_rss_bytes: Some(150),
+                    allocator_free_bytes: Some(50),
+                    ..Default::default()
+                },
+            }),
+        };
+        assert_eq!(
+            decode::<ServerEnvelope>(&encode(&result).unwrap()).unwrap(),
+            result
         );
     }
 

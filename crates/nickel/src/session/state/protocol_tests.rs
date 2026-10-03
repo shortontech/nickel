@@ -9573,6 +9573,7 @@ fn explicit_nested_test_control_can_cross_lock_and_logout_boundaries() {
     assert!(test_control_may_invoke(&Command::SessionAction {
         action: SessionAction::Lock,
     }));
+    assert!(test_control_may_invoke(&Command::TrimMemory));
     assert!(!test_control_may_invoke(&Command::SessionAction {
         action: SessionAction::PowerOff,
     }));

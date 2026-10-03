@@ -1047,8 +1047,9 @@ impl NickelSession {
                     .map(crate::session::backend::udev::UdevData::identify_badge_diagnostics)
                     .unwrap_or_default();
                 let shell_timer = self.internal_shell_timer_counters();
-                ServerMessage::CacheDiagnostics(Box::new(
-                    nickel_session_protocol::CacheDiagnostics {
+                ServerMessage::CacheDiagnostics(Box::new({
+                    let mut diagnostics = nickel_session_protocol::CacheDiagnostics {
+                        memory: Default::default(),
                         internal_ui_surfaces: u16::try_from(internal_ui.surfaces)
                             .unwrap_or(u16::MAX),
                         internal_ui_gpu_frames: internal_ui.gpu_frames,
@@ -1185,8 +1186,10 @@ impl NickelSession {
                         identify_renderer_bytes: identify.renderer_bytes.map(|bytes| bytes as u64),
                         #[cfg(not(feature = "backend-udev"))]
                         identify_renderer_bytes: None,
-                    },
-                ))
+                    };
+                    diagnostics.memory = crate::process_memory::diagnostics(&diagnostics);
+                    diagnostics
+                }))
             }
             Query::Workspaces => ServerMessage::Workspaces(self.protocol_workspaces()),
             Query::ShellBehavior => {
@@ -2071,6 +2074,17 @@ impl NickelSession {
                 if let Err(error) = self.apply_test_output(output) {
                     return protocol_error(ErrorCode::InvalidRequest, error);
                 }
+            }
+            SessionCommand::TrimMemory => {
+                if !self.test_control_enabled {
+                    return protocol_error(
+                        ErrorCode::Unauthorized,
+                        "memory trimming is not enabled for this session",
+                    );
+                }
+                return ServerMessage::MemoryTrimDiagnostics(
+                    crate::process_memory::trim_diagnostics(),
+                );
             }
         }
         ServerMessage::Ack

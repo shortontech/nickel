@@ -81,6 +81,8 @@ use std::{
 
 #[doc(hidden)]
 pub mod allocation_counter;
+#[cfg(target_os = "linux")]
+mod process_memory;
 
 /// Linux compositor and login-session runtime.
 ///
