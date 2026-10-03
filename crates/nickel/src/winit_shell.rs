@@ -348,6 +348,54 @@ pub struct ShellRuntimeDiagnostics {
     pub warm_present_allocations: Vec<u64>,
     /// Payload-free JSX admission identities joined to their native present.
     pub correlated_presents: Vec<NativePresentSample>,
+    pub surfaces: Vec<nickel_session_protocol::SurfaceRuntimeDiagnostics>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct SurfaceRuntimeSamples {
+    present_us: VecDeque<u64>,
+    input_to_visible_us: VecDeque<u64>,
+    coalesced_present_requests: u64,
+}
+
+fn surface_runtime_diagnostics(
+    identity: &str,
+    samples: &SurfaceRuntimeSamples,
+    retained_gpu_bytes: Option<u64>,
+) -> nickel_session_protocol::SurfaceRuntimeDiagnostics {
+    let present_samples = samples.present_us.iter().copied().collect::<Vec<_>>();
+    let input_samples = samples
+        .input_to_visible_us
+        .iter()
+        .copied()
+        .collect::<Vec<_>>();
+    nickel_session_protocol::SurfaceRuntimeDiagnostics {
+        surface: identity.to_owned(),
+        present_us: nickel_session_protocol::RuntimeDistribution::from_samples(&present_samples),
+        input_to_visible_us: nickel_session_protocol::RuntimeDistribution::from_samples(
+            &input_samples,
+        ),
+        coalesced_present_requests: nickel_session_protocol::RuntimeMeasurement::available(
+            samples.coalesced_present_requests,
+        ),
+        missed_deadlines: nickel_session_protocol::RuntimeMeasurement::unavailable(
+            "native presenter does not currently measure deadline lateness",
+        ),
+        retained_cpu_bytes: nickel_session_protocol::RuntimeMeasurement::unavailable(
+            "shared presenter CPU caches are not attributable to one surface",
+        ),
+        retained_gpu_bytes: retained_gpu_bytes.map_or_else(
+            || {
+                nickel_session_protocol::RuntimeMeasurement::unavailable(
+                    "surface has no active GPU retained framebuffer",
+                )
+            },
+            nickel_session_protocol::RuntimeMeasurement::available,
+        ),
+        in_flight_bytes: nickel_session_protocol::RuntimeMeasurement::unavailable(
+            "graphics backend does not expose per-surface in-flight allocation bytes",
+        ),
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -589,6 +637,20 @@ impl ShellSurface {
     }
 }
 
+fn surface_runtime_identity(surface: &ShellSurface) -> String {
+    let owner = surface.plugin.as_ref().map_or_else(
+        || "native".to_owned(),
+        |key| format!("{}/{}", key.plugin_id, key.surface_id),
+    );
+    format!(
+        "{:?}:{}:{}:{}",
+        surface.diagnostic_role(),
+        surface.output_name,
+        owner,
+        surface.diagnostic_generation
+    )
+}
+
 #[cfg(target_os = "windows")]
 impl Drop for ShellSurface {
     fn drop(&mut self) {
@@ -638,6 +700,7 @@ pub struct WinitShell {
     input_to_present_us: VecDeque<u64>,
     warm_present_allocations: VecDeque<u64>,
     correlated_presents: VecDeque<NativePresentSample>,
+    surface_runtime_samples: std::collections::BTreeMap<String, SurfaceRuntimeSamples>,
     presenter_cache_peak_bytes: Cell<usize>,
     presenter_cache_generation: u64,
     output_retirements: OutputRetirementTracker,
@@ -705,6 +768,7 @@ impl WinitShell {
             input_to_present_us: VecDeque::with_capacity(RUNTIME_SAMPLE_CAPACITY),
             warm_present_allocations: VecDeque::with_capacity(RUNTIME_SAMPLE_CAPACITY),
             correlated_presents: VecDeque::with_capacity(RUNTIME_SAMPLE_CAPACITY),
+            surface_runtime_samples: std::collections::BTreeMap::new(),
             presenter_cache_peak_bytes: Cell::new(0),
             presenter_cache_generation: 0,
             output_retirements: OutputRetirementTracker::default(),
@@ -2031,12 +2095,36 @@ impl WinitShell {
     }
 
     pub fn runtime_diagnostics(&self) -> ShellRuntimeDiagnostics {
+        let surfaces = self
+            .surface_runtime_samples
+            .iter()
+            .map(|(identity, samples)| {
+                let gpu_bytes = self
+                    .surfaces
+                    .iter()
+                    .find(|surface| surface_runtime_identity(surface) == *identity)
+                    .and_then(|surface| surface.presenter.as_ref())
+                    .and_then(SoftbufferPresenter::retained_gpu_bytes);
+                surface_runtime_diagnostics(identity, samples, gpu_bytes)
+            })
+            .collect();
         ShellRuntimeDiagnostics {
             warm_present_us: self.warm_present_us.iter().copied().collect(),
             input_to_present_us: self.input_to_present_us.iter().copied().collect(),
             warm_present_allocations: self.warm_present_allocations.iter().copied().collect(),
             correlated_presents: self.correlated_presents.iter().copied().collect(),
+            surfaces,
         }
+    }
+
+    fn surface_runtime_samples_mut(&mut self, identity: String) -> &mut SurfaceRuntimeSamples {
+        if !self.surface_runtime_samples.contains_key(&identity)
+            && self.surface_runtime_samples.len() == 64
+            && let Some(evicted) = self.surface_runtime_samples.keys().next().cloned()
+        {
+            self.surface_runtime_samples.remove(&evicted);
+        }
+        self.surface_runtime_samples.entry(identity).or_default()
     }
 
     /// Starts a bounded input-to-visible observation. Call `finish_input_observation`
@@ -2086,6 +2174,7 @@ impl WinitShell {
             .surface_indices
             .get(&id.0)
             .ok_or_else(|| "unknown winit shell surface".to_owned())?;
+        let surface_runtime_identity = surface_runtime_identity(&self.surfaces[index]);
         if self.graphics.is_none() {
             let display = self.surfaces[index]
                 .window()
@@ -2192,6 +2281,13 @@ impl WinitShell {
                 },
             );
         }
+        let surface_samples = self.surface_runtime_samples_mut(surface_runtime_identity);
+        if warm {
+            push_bounded(&mut surface_samples.present_us, elapsed_us);
+        }
+        if let Some(input_us) = input_to_present_us {
+            push_bounded(&mut surface_samples.input_to_visible_us, input_us);
+        }
         Ok(damage)
     }
 
@@ -2219,6 +2315,10 @@ impl WinitShell {
             .get(&id.0)
             .ok_or_else(|| "unknown winit shell surface".to_owned())?;
         if self.surfaces[index].last_host_change_token == Some(token) {
+            let identity = surface_runtime_identity(&self.surfaces[index]);
+            let samples = self.surface_runtime_samples_mut(identity);
+            samples.coalesced_present_requests =
+                samples.coalesced_present_requests.saturating_add(1);
             return Ok(None);
         }
         let damage = self.present_with_damage(id, commands, damage)?;
@@ -3404,7 +3504,9 @@ fn output_role_is_retired(role: SurfaceRole, output_name: &str, retired: &[Strin
 
 #[cfg(test)]
 mod runtime_diagnostics_tests {
-    use super::{RUNTIME_SAMPLE_CAPACITY, push_bounded};
+    use super::{
+        RUNTIME_SAMPLE_CAPACITY, SurfaceRuntimeSamples, push_bounded, surface_runtime_diagnostics,
+    };
     use std::collections::VecDeque;
 
     #[test]
@@ -3416,6 +3518,25 @@ mod runtime_diagnostics_tests {
         assert_eq!(samples.len(), RUNTIME_SAMPLE_CAPACITY);
         assert_eq!(samples.front(), Some(&7));
         assert_eq!(samples.back(), Some(&(RUNTIME_SAMPLE_CAPACITY as u64 + 6)));
+    }
+
+    #[test]
+    fn surface_runtime_summary_is_deterministic_and_marks_missing_evidence() {
+        let samples = SurfaceRuntimeSamples {
+            present_us: VecDeque::from([9, 1, 5, 3]),
+            input_to_visible_us: VecDeque::from([20, 10]),
+            coalesced_present_requests: 4,
+        };
+        let diagnostics = surface_runtime_diagnostics("Launcher:DP-1:launcher:7", &samples, None);
+        assert_eq!(diagnostics.present_us.p50_us, Some(3));
+        assert_eq!(diagnostics.present_us.p95_us, Some(9));
+        assert_eq!(diagnostics.present_us.p99_us, Some(9));
+        assert_eq!(diagnostics.present_us.max_us, Some(9));
+        assert_eq!(diagnostics.coalesced_present_requests.value, Some(4));
+        assert_eq!(diagnostics.missed_deadlines.value, None);
+        assert!(diagnostics.missed_deadlines.unavailable_reason.is_some());
+        assert_eq!(diagnostics.retained_gpu_bytes.value, None);
+        assert!(diagnostics.in_flight_bytes.unavailable_reason.is_some());
     }
 }
 

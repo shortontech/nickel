@@ -102,6 +102,10 @@ pub struct SoftbufferPresenter {
 }
 
 impl SoftbufferPresenter {
+    pub fn retained_gpu_bytes(&self) -> Option<u64> {
+        None
+    }
+
     /// Creates a surface for `window`.
     ///
     /// # Safety

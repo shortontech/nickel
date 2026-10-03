@@ -329,6 +329,11 @@ pub struct SoftbufferPresenter {
 }
 
 impl SoftbufferPresenter {
+    pub fn retained_gpu_bytes(&self) -> Option<u64> {
+        self.retained_framebuffer_diagnostics()
+            .map(|diagnostics| diagnostics.live_bytes as u64)
+    }
+
     /// # Safety
     /// The native window remains valid until this presenter is dropped.
     pub unsafe fn new(window: WindowHandle<'_>, graphics: &SharedGraphics) -> Result<Self, String> {

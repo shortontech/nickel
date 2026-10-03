@@ -2849,6 +2849,15 @@ pub fn run() -> Result<(), String> {
                             paint_list_us,
                             scheduled_wakeups,
                         ) = state.host_runtime_samples();
+                        let host_phases =
+                            nickel_session_protocol::HostPhaseDistributions::from_samples(
+                                &input_to_message_us,
+                                &input_to_frame_us,
+                                &layout_us,
+                                &paint_list_us,
+                                &runtime.warm_present_us,
+                                &runtime.input_to_present_us,
+                            );
                         ServerMessage::ShellRuntimeDiagnostics(
                             nickel_session_protocol::ShellRuntimeDiagnostics {
                                 input_to_message_us,
@@ -2859,6 +2868,8 @@ pub fn run() -> Result<(), String> {
                                 input_to_visible_us: runtime.input_to_present_us,
                                 scheduled_wakeups,
                                 host_phase_samples_available: !input_to_frame_us.is_empty(),
+                                host_phases,
+                                surfaces: runtime.surfaces,
                                 retained_presenter_bytes: memory.presenter_caches.live_bytes as u64,
                                 frame_allocations: if runtime.warm_present_allocations.is_empty() {
                                     nickel_session_protocol::AllocationMeasurement {
@@ -2998,6 +3009,14 @@ pub fn run() -> Result<(), String> {
                         scheduled_wakeups,
                     ) = state.host_runtime_samples();
                     let host_phase_samples_available = !input_to_frame_us.is_empty();
+                    let host_phases = nickel_session_protocol::HostPhaseDistributions::from_samples(
+                        &input_to_message_us,
+                        &input_to_frame_us,
+                        &layout_us,
+                        &paint_list_us,
+                        &runtime.warm_present_us,
+                        &runtime.input_to_present_us,
+                    );
                     let executable_predictions = executable_index::prediction_metrics();
                     platform::respond_runtime_diagnostics(
                         request_id,
@@ -3011,6 +3030,8 @@ pub fn run() -> Result<(), String> {
                             input_to_visible_us: runtime.input_to_present_us,
                             scheduled_wakeups,
                             host_phase_samples_available,
+                            host_phases,
+                            surfaces: runtime.surfaces,
                             retained_presenter_bytes: memory.presenter_caches.live_bytes as u64,
                             frame_allocations: if runtime.warm_present_allocations.is_empty() {
                                 nickel_session_protocol::AllocationMeasurement {

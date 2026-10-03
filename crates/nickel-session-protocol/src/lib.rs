@@ -1108,6 +1108,12 @@ pub struct ShellRuntimeDiagnostics {
     pub scheduled_wakeups: u64,
     #[serde(default)]
     pub host_phase_samples_available: bool,
+    #[serde(default)]
+    pub host_phases: HostPhaseDistributions,
+    /// Per-native-surface timing, coalescing, and resource evidence. Entries
+    /// are bounded by the number of live/recent shell surfaces.
+    #[serde(default)]
+    pub surfaces: Vec<SurfaceRuntimeDiagnostics>,
     pub retained_presenter_bytes: u64,
     pub frame_allocations: AllocationMeasurement,
     /// Rows are likely-graphical, likely-terminal, unknown, and unavailable;
@@ -1119,8 +1125,120 @@ pub struct ShellRuntimeDiagnostics {
     pub executable_prediction_descendant_windows: u64,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeDistribution {
+    pub sample_count: usize,
+    pub p50_us: Option<u64>,
+    pub p95_us: Option<u64>,
+    pub p99_us: Option<u64>,
+    pub max_us: Option<u64>,
+    pub unavailable_reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostPhaseDistributions {
+    pub input_to_message_us: RuntimeDistribution,
+    pub input_to_frame_us: RuntimeDistribution,
+    pub layout_us: RuntimeDistribution,
+    pub paint_list_us: RuntimeDistribution,
+    pub present_us: RuntimeDistribution,
+    pub input_to_visible_us: RuntimeDistribution,
+}
+
+impl HostPhaseDistributions {
+    pub fn from_samples(
+        input_to_message_us: &[u64],
+        input_to_frame_us: &[u64],
+        layout_us: &[u64],
+        paint_list_us: &[u64],
+        present_us: &[u64],
+        input_to_visible_us: &[u64],
+    ) -> Self {
+        Self {
+            input_to_message_us: RuntimeDistribution::from_samples(input_to_message_us),
+            input_to_frame_us: RuntimeDistribution::from_samples(input_to_frame_us),
+            layout_us: RuntimeDistribution::from_samples(layout_us),
+            paint_list_us: RuntimeDistribution::from_samples(paint_list_us),
+            present_us: RuntimeDistribution::from_samples(present_us),
+            input_to_visible_us: RuntimeDistribution::from_samples(input_to_visible_us),
+        }
+    }
+}
+
+impl RuntimeDistribution {
+    pub fn from_samples(samples: &[u64]) -> Self {
+        if samples.is_empty() {
+            return Self {
+                unavailable_reason: Some("no production samples recorded".into()),
+                ..Self::default()
+            };
+        }
+        let mut sorted = samples.to_vec();
+        sorted.sort_unstable();
+        let percentile = |value: usize| {
+            let index = (sorted.len() * value).div_ceil(100).saturating_sub(1);
+            sorted[index]
+        };
+        Self {
+            sample_count: sorted.len(),
+            p50_us: Some(percentile(50)),
+            p95_us: Some(percentile(95)),
+            p99_us: Some(percentile(99)),
+            max_us: sorted.last().copied(),
+            unavailable_reason: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeMeasurement {
+    pub value: Option<u64>,
+    pub unavailable_reason: Option<String>,
+}
+
+impl RuntimeMeasurement {
+    pub fn available(value: u64) -> Self {
+        Self {
+            value: Some(value),
+            unavailable_reason: None,
+        }
+    }
+
+    pub fn unavailable(reason: impl Into<String>) -> Self {
+        Self {
+            value: None,
+            unavailable_reason: Some(reason.into()),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SurfaceRuntimeDiagnostics {
+    pub surface: String,
+    pub present_us: RuntimeDistribution,
+    pub input_to_visible_us: RuntimeDistribution,
+    pub coalesced_present_requests: RuntimeMeasurement,
+    pub missed_deadlines: RuntimeMeasurement,
+    pub retained_cpu_bytes: RuntimeMeasurement,
+    pub retained_gpu_bytes: RuntimeMeasurement,
+    pub in_flight_bytes: RuntimeMeasurement,
+}
+
 impl ShellRuntimeDiagnostics {
     pub fn validate(&self) -> Result<(), FrameError> {
+        let distribution_is_too_large = |distribution: &RuntimeDistribution| {
+            distribution.sample_count > MAX_RUNTIME_PERFORMANCE_SAMPLES
+                || distribution
+                    .unavailable_reason
+                    .as_ref()
+                    .is_some_and(|reason| reason.len() > 256)
+        };
+        let measurement_is_too_large = |measurement: &RuntimeMeasurement| {
+            measurement
+                .unavailable_reason
+                .as_ref()
+                .is_some_and(|reason| reason.len() > 256)
+        };
         if [
             &self.input_to_message_us,
             &self.input_to_frame_us,
@@ -1131,6 +1249,30 @@ impl ShellRuntimeDiagnostics {
         ]
         .into_iter()
         .any(|samples| samples.len() > MAX_RUNTIME_PERFORMANCE_SAMPLES)
+        {
+            return Err(FrameError::TooLarge);
+        }
+        if self.surfaces.len() > 64
+            || self.surfaces.iter().any(|surface| {
+                surface.surface.len() > 256
+                    || distribution_is_too_large(&surface.present_us)
+                    || distribution_is_too_large(&surface.input_to_visible_us)
+                    || measurement_is_too_large(&surface.coalesced_present_requests)
+                    || measurement_is_too_large(&surface.missed_deadlines)
+                    || measurement_is_too_large(&surface.retained_cpu_bytes)
+                    || measurement_is_too_large(&surface.retained_gpu_bytes)
+                    || measurement_is_too_large(&surface.in_flight_bytes)
+            })
+            || [
+                &self.host_phases.input_to_message_us,
+                &self.host_phases.input_to_frame_us,
+                &self.host_phases.layout_us,
+                &self.host_phases.paint_list_us,
+                &self.host_phases.present_us,
+                &self.host_phases.input_to_visible_us,
+            ]
+            .into_iter()
+            .any(distribution_is_too_large)
         {
             return Err(FrameError::TooLarge);
         }
@@ -2842,6 +2984,24 @@ mod tests {
             input_to_visible_us: vec![2_400; MAX_RUNTIME_PERFORMANCE_SAMPLES],
             scheduled_wakeups: 3,
             host_phase_samples_available: true,
+            host_phases: HostPhaseDistributions::from_samples(
+                &[120],
+                &[480],
+                &[210],
+                &[90],
+                &[950],
+                &[2_400],
+            ),
+            surfaces: vec![SurfaceRuntimeDiagnostics {
+                surface: "Launcher:primary:nickel-default/launcher:1".into(),
+                present_us: RuntimeDistribution::from_samples(&[4, 1, 3, 2]),
+                input_to_visible_us: RuntimeDistribution::from_samples(&[8, 5]),
+                coalesced_present_requests: RuntimeMeasurement::available(7),
+                missed_deadlines: RuntimeMeasurement::unavailable("not measured"),
+                retained_cpu_bytes: RuntimeMeasurement::unavailable("shared cache"),
+                retained_gpu_bytes: RuntimeMeasurement::available(1024),
+                in_flight_bytes: RuntimeMeasurement::unavailable("backend unavailable"),
+            }],
             retained_presenter_bytes: 1_048_576,
             frame_allocations: AllocationMeasurement {
                 count: Some(0),
@@ -2857,6 +3017,14 @@ mod tests {
         assert_eq!(json["warm_present_us"][0], 950);
         assert_eq!(json["input_to_frame_us"][0], 480);
         assert_eq!(json["frame_allocations"]["scope"], "process");
+        assert_eq!(json["surfaces"][0]["present_us"]["p50_us"], 2);
+        assert_eq!(json["surfaces"][0]["present_us"]["p95_us"], 4);
+        assert_eq!(json["surfaces"][0]["present_us"]["p99_us"], 4);
+        assert_eq!(json["surfaces"][0]["present_us"]["max_us"], 4);
+        assert_eq!(
+            json["surfaces"][0]["missed_deadlines"]["value"],
+            serde_json::Value::Null
+        );
         assert_eq!(json["executable_prediction_observations"][0][1], 2);
         assert_eq!(json["executable_prediction_descendant_windows"], 9);
         let response = ServerEnvelope {
