@@ -2063,6 +2063,7 @@ pub struct HostTelemetry {
     pub nodes_placed: usize,
     pub paint_commands_emitted: usize,
     pub semantic_nodes_rebuilt: usize,
+    pub semantic_nodes_reused: usize,
     pub retained_paint_refreshes: usize,
     /// Time from beginning the host step through application message dispatch.
     pub input_to_message_us: u64,
@@ -2169,6 +2170,10 @@ impl HostEventOutcome {
             .telemetry
             .semantic_nodes_rebuilt
             .saturating_add(other.telemetry.semantic_nodes_rebuilt);
+        self.telemetry.semantic_nodes_reused = self
+            .telemetry
+            .semantic_nodes_reused
+            .saturating_add(other.telemetry.semantic_nodes_reused);
         self.telemetry.retained_paint_refreshes = self
             .telemetry
             .retained_paint_refreshes
@@ -3493,7 +3498,7 @@ impl<A: Application> UiHost<A> {
                 let resources = self.tree.resource_diagnostics();
                 combined.telemetry.retained_paint_refreshes = 1;
                 combined.telemetry.paint_commands_emitted = resources.paint_primitive_count;
-                combined.telemetry.semantic_nodes_rebuilt = resources.accessibility_node_count;
+                combined.telemetry.semantic_nodes_reused = resources.accessibility_node_count;
             } else {
                 let (paint_list_us, layout_us, rebuild_outcome) = self.rebuild_timed();
                 combined.merge(rebuild_outcome);
@@ -6512,6 +6517,11 @@ mod tests {
         assert_eq!(outcome.telemetry.view_calls, 0);
         assert_eq!(outcome.telemetry.nodes_measured, 0);
         assert_eq!(outcome.telemetry.nodes_placed, 0);
+        assert_eq!(outcome.telemetry.semantic_nodes_rebuilt, 0);
+        assert_eq!(
+            outcome.telemetry.semantic_nodes_reused,
+            retained.inspect().resources.accessibility_node_count
+        );
         assert_eq!(outcome.telemetry.retained_paint_refreshes, 1);
         assert!(!outcome.telemetry.rebuilt);
 
@@ -6551,9 +6561,9 @@ mod tests {
         let transition_count = transitions.len();
         let resource_bound = retained.inspect().resources;
         let mut emitted = 0usize;
-        let mut semantics = 0usize;
 
         for event in transitions {
+            let semantics_before = retained.semantic_nodes();
             let retained_outcome = retained.handle_event(event.clone());
             cold.handle_event(event);
             cold.rebuild();
@@ -6562,23 +6572,23 @@ mod tests {
             assert_eq!(retained_outcome.telemetry.nodes_measured, 0);
             assert_eq!(retained_outcome.telemetry.nodes_placed, 0);
             assert_eq!(retained_outcome.telemetry.retained_paint_refreshes, 1);
+            assert_eq!(retained_outcome.telemetry.semantic_nodes_rebuilt, 0);
+            assert_eq!(
+                retained_outcome.telemetry.semantic_nodes_reused,
+                resource_bound.accessibility_node_count
+            );
             assert!(!retained_outcome.telemetry.rebuilt);
             assert!(
                 retained_outcome.telemetry.paint_commands_emitted
                     <= resource_bound.paint_primitive_count
             );
-            assert!(
-                retained_outcome.telemetry.semantic_nodes_rebuilt
-                    <= resource_bound.accessibility_node_count
-            );
             emitted = emitted.saturating_add(retained_outcome.telemetry.paint_commands_emitted);
-            semantics = semantics.saturating_add(retained_outcome.telemetry.semantic_nodes_rebuilt);
+            assert_eq!(retained.semantic_nodes(), semantics_before);
             assert_cold_equivalent(&retained, &cold);
         }
 
         assert_eq!(retained.application().views.get(), 0);
         assert!(emitted <= transition_count * resource_bound.paint_primitive_count);
-        assert!(semantics <= transition_count * resource_bound.accessibility_node_count);
     }
 
     #[test]
@@ -6595,6 +6605,7 @@ mod tests {
 
         assert!(outcome.telemetry.rebuilt);
         assert_eq!(outcome.telemetry.retained_paint_refreshes, 0);
+        assert_eq!(outcome.telemetry.semantic_nodes_reused, 0);
         assert_eq!(outcome.telemetry.view_calls, 1);
         assert!(outcome.telemetry.nodes_measured > 0);
         assert!(outcome.telemetry.nodes_placed > 0);
@@ -6611,6 +6622,7 @@ mod tests {
 
         assert!(outcome.telemetry.rebuilt);
         assert_eq!(outcome.telemetry.retained_paint_refreshes, 0);
+        assert_eq!(outcome.telemetry.semantic_nodes_reused, 0);
         assert_eq!(outcome.telemetry.view_calls, 1);
         assert!(outcome.telemetry.nodes_measured > 0);
         assert_eq!(host.application().views.get(), 1);
@@ -6643,6 +6655,11 @@ mod tests {
             assert_eq!(outcome.telemetry.view_calls, 0);
             assert_eq!(outcome.telemetry.nodes_measured, 0);
             assert_eq!(outcome.telemetry.nodes_placed, 0);
+            assert_eq!(outcome.telemetry.semantic_nodes_rebuilt, 0);
+            assert_eq!(
+                outcome.telemetry.semantic_nodes_reused,
+                retained.inspect().resources.accessibility_node_count
+            );
             assert_eq!(outcome.telemetry.retained_paint_refreshes, 1);
         }
 
@@ -6656,6 +6673,11 @@ mod tests {
                 assert_eq!(outcome.telemetry.view_calls, 0);
                 assert_eq!(outcome.telemetry.nodes_measured, 0);
                 assert_eq!(outcome.telemetry.nodes_placed, 0);
+                assert_eq!(outcome.telemetry.semantic_nodes_rebuilt, 0);
+                assert_eq!(
+                    outcome.telemetry.semantic_nodes_reused,
+                    retained.inspect().resources.accessibility_node_count
+                );
                 assert_eq!(outcome.telemetry.retained_paint_refreshes, 1);
                 std::hint::black_box(retained.commands());
             }

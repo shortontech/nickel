@@ -1721,10 +1721,11 @@ impl<Message: Clone> UiFrame<Message> {
         tree
     }
 
-    /// Re-emits state-dependent paint, interaction, and semantic records while
-    /// preserving the resolved measurement and placement produced by the last
-    /// declaration. Callers must first prove that active interaction styles do
-    /// not alter geometry and that no transient layer needs declaration work.
+    /// Re-emits state-dependent paint and interaction records while preserving
+    /// resolved measurement, placement, and semantics from the last declaration.
+    /// Callers must first prove that active interaction styles do not alter
+    /// geometry or semantic state and that no transient layer needs declaration
+    /// work.
     pub(crate) fn refresh_retained_paint(&mut self, state: &mut UiStateStore) -> bool {
         let (Some(mut root), Some(root_id)) = (
             self.declaration_root.clone(),
@@ -1747,7 +1748,6 @@ impl<Message: Clone> UiFrame<Message> {
         self.append_scrollbars(Some(state));
         self.commands.append(&mut self.overlay_commands);
         self.hits.append(&mut self.overlay_hits);
-        self.emit_accessibility_geometry();
         self.validate_clip_commands();
         self.release_build_scratch();
         true
