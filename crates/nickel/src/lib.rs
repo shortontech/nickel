@@ -554,6 +554,10 @@ impl<A: Application> EmbeddedUiSurface<A> {
         self.host.commands()
     }
 
+    fn retained_paint_damage(&self) -> Option<&[nickel_ui::Rect]> {
+        self.host.retained_paint_damage()
+    }
+
     #[cfg(test)]
     fn accessibility_nodes(&self) -> &[nickel_ui::AccessibilityNode] {
         self.host.accessibility_nodes()
@@ -914,7 +918,7 @@ impl CodexSurfaces {
         }
         if let Some(host) = self.host_mut(surface) {
             shell
-                .present(surface, host.commands())
+                .present_with_damage(surface, host.commands(), host.retained_paint_damage())
                 .map_err(|detail| HostFailure {
                     surface: format!("{surface:?}"),
                     stage: HostFailureStage::Presenter,
@@ -1193,9 +1197,13 @@ fn scene_for_native_surface(
     id: SurfaceId,
     width: u32,
     height: u32,
-) -> Option<Vec<nickel_ui::backend::PaintCommand>> {
+) -> Option<(
+    Vec<nickel_ui::backend::PaintCommand>,
+    Option<Vec<nickel_ui::Rect>>,
+)> {
     let surface = shell.surface(id)?;
-    let commands = if let Some(key) = surface.plugin_key() {
+    let plugin_key = surface.plugin_key().cloned();
+    let commands = if let Some(key) = plugin_key.as_ref() {
         state.plugin_surface_scene_for_output(key, Some(surface.output_name()), width, height)
     } else if surface.role() == SurfaceRole::Panel {
         return None;
@@ -1209,7 +1217,12 @@ fn scene_for_native_surface(
     {
         shell.set_surface_title(id, title);
     }
-    commands
+    let damage = plugin_key.as_ref().and_then(|key| {
+        state
+            .plugin_surface_retained_paint_damage(key)
+            .map(<[_]>::to_vec)
+    });
+    commands.map(|commands| (commands, damage))
 }
 
 fn scene_change_token_for_native_surface(
@@ -1258,15 +1271,15 @@ fn render_all(shell: &mut WinitShell, state: &mut LiveShell) -> Result<(), Strin
         {
             state.set_desktop_output(output, origin.x, origin.y, scale);
         }
-        let Some(commands) =
+        let Some((commands, damage)) =
             scene_for_native_surface(shell, state, id, logical_width, logical_height)
         else {
             continue;
         };
         if let Some(token) = scene_change_token_for_native_surface(shell, state, id, role) {
-            shell.present_host_frame(id, token, &commands)?;
+            shell.present_host_frame_with_damage(id, token, &commands, damage.as_deref())?;
         } else {
-            shell.present(id, &commands)?;
+            shell.present_with_damage(id, &commands, damage.as_deref())?;
         }
     }
     shell.set_plugin_surfaces(
@@ -1319,15 +1332,15 @@ fn render_role(
         {
             state.set_desktop_output(output, origin.x, origin.y, scale);
         }
-        let Some(commands) =
+        let Some((commands, damage)) =
             scene_for_native_surface(shell, state, id, logical_width, logical_height)
         else {
             continue;
         };
         if let Some(token) = scene_change_token_for_native_surface(shell, state, id, role) {
-            shell.present_host_frame(id, token, &commands)?;
+            shell.present_host_frame_with_damage(id, token, &commands, damage.as_deref())?;
         } else {
-            shell.present(id, &commands)?;
+            shell.present_with_damage(id, &commands, damage.as_deref())?;
         }
     }
     if wanted == SurfaceRole::Panel {
@@ -1498,15 +1511,15 @@ fn prewarm_role(
         })
         .collect::<Vec<_>>();
     for (id, logical_width, logical_height) in surfaces {
-        let Some(commands) =
+        let Some((commands, damage)) =
             scene_for_native_surface(shell, state, id, logical_width, logical_height)
         else {
             continue;
         };
         if let Some(token) = scene_change_token_for_native_surface(shell, state, id, wanted) {
-            shell.present_host_frame(id, token, &commands)?;
+            shell.present_host_frame_with_damage(id, token, &commands, damage.as_deref())?;
         } else {
-            shell.present(id, &commands)?;
+            shell.present_with_damage(id, &commands, damage.as_deref())?;
         }
     }
     Ok(())
@@ -3001,14 +3014,14 @@ pub fn run() -> Result<(), String> {
                     .surface(surface)
                     .map(|entry| entry.window().size())
                     .unwrap_or_default();
-                if let Some(commands) = scene_for_native_surface(
+                if let Some((commands, damage)) = scene_for_native_surface(
                     &shell,
                     &mut state,
                     surface,
                     logical_width,
                     logical_height,
                 ) {
-                    shell.present(surface, &commands)?;
+                    shell.present_with_damage(surface, &commands, damage.as_deref())?;
                 }
             }
             Some(ShellEvent::Shown(surface)) => {
@@ -3037,14 +3050,14 @@ pub fn run() -> Result<(), String> {
                 let (logical_width, logical_height) = entry.window().size();
                 let role = entry.role();
                 if state.surface_visible(role) {
-                    if let Some(commands) = scene_for_native_surface(
+                    if let Some((commands, damage)) = scene_for_native_surface(
                         &shell,
                         &mut state,
                         surface,
                         logical_width,
                         logical_height,
                     ) {
-                        shell.present(surface, &commands)?;
+                        shell.present_with_damage(surface, &commands, damage.as_deref())?;
                     }
                 }
             }

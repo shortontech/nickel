@@ -3,7 +3,7 @@
 use std::{cell::RefCell, num::NonZeroU32};
 
 use nickel_ui::backend::PaintCommand;
-use nickel_ui::{DamageRegion, PresenterCacheDiagnostics, SoftwareRenderer};
+use nickel_ui::{DamageRegion, PresenterCacheDiagnostics, Rect, SoftwareRenderer};
 use raw_window_handle::{
     DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawDisplayHandle,
     RawWindowHandle, WindowHandle,
@@ -113,6 +113,20 @@ impl SoftbufferPresenter {
             softbuffer::Surface::new(&graphics.context, WindowHandleSource(window.as_raw()))
                 .map_err(|error| error.to_string())?;
         Ok(Self { surface })
+    }
+
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
+    pub fn present_with_damage(
+        &mut self,
+        geometry: PresentationGeometry,
+        graphics: &SharedGraphics,
+        commands: &[PaintCommand],
+        _damage: Option<&[Rect]>,
+    ) -> Result<DamageRegion, String> {
+        // This renderer is shared across surfaces and therefore invalidates
+        // its backing store before every draw. It cannot consume retained
+        // damage, but accepts the common presentation contract explicitly.
+        self.present(geometry, graphics, commands)
     }
 
     pub fn present(

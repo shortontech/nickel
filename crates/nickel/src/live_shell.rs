@@ -3092,6 +3092,13 @@ impl LiveShell {
         self.plugin_panel_change_token(key)
     }
 
+    pub(crate) fn plugin_surface_retained_paint_damage(
+        &self,
+        key: &nickel_core::plugins::PluginSurfaceKey,
+    ) -> Option<&[nickel_ui::Rect]> {
+        self.plugin_panel_host_ref(key)?.retained_paint_damage()
+    }
+
     fn external_plugin_windows(&self, plugin_id: &str) -> Option<serde_json::Value> {
         let package = self.external_plugin_packages.get(plugin_id)?;
         if !package

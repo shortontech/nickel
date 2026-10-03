@@ -2415,6 +2415,13 @@ impl<A: Application> UiHost<A> {
         self.tree.commands()
     }
 
+    /// Returns authoritative logical damage for the current retained paint
+    /// update. `None` means the frame was rebuilt through a path that cannot
+    /// prove bounded damage; `Some([])` means paint was proven unchanged.
+    pub fn retained_paint_damage(&self) -> Option<&[Rect]> {
+        self.tree.paint_damage()
+    }
+
     /// Exports the current resolved display list without copying commands or
     /// shared image pixels. This is the presentation boundary used by native
     /// compositor and software backends alike.
@@ -2434,7 +2441,7 @@ impl<A: Application> UiHost<A> {
         &self,
         renderer: &mut R,
     ) -> Result<DamageRegion, R::Error> {
-        renderer.render_frame_with_damage(self.render_frame(), self.tree.paint_damage())
+        renderer.render_frame_with_damage(self.render_frame(), self.retained_paint_damage())
     }
 
     pub fn render_software(&self, renderer: &mut SoftwareRenderer) -> DamageRegion {

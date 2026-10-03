@@ -9011,10 +9011,11 @@ impl WindowsRemoteControl {
                     return Ok(());
                 }
             }
-            shell.present_host_frame(
+            shell.present_host_frame_with_damage(
                 indicator.id,
                 indicator.host.change_token,
                 indicator.host.commands(),
+                indicator.host.retained_paint_damage(),
             )?;
             shell.expose_trusted_control_surface(indicator.id)?;
         }
@@ -9081,10 +9082,21 @@ impl WindowsRemoteControl {
             return true;
         }
         let result = if matches!(event, ShellEvent::Redraw(_)) {
-            shell.present(id, indicator.host.commands()).map(|_| ())
+            shell
+                .present_with_damage(
+                    id,
+                    indicator.host.commands(),
+                    indicator.host.retained_paint_damage(),
+                )
+                .map(|_| ())
         } else {
             shell
-                .present_host_frame(id, indicator.host.change_token, indicator.host.commands())
+                .present_host_frame_with_damage(
+                    id,
+                    indicator.host.change_token,
+                    indicator.host.commands(),
+                    indicator.host.retained_paint_damage(),
+                )
                 .map(|_| ())
         };
         if result.is_err() || shell.trusted_control_capture_affinity(id).is_err() {

@@ -346,14 +346,15 @@ impl SoftbufferPresenter {
         Ok(Self { gpu, software })
     }
 
-    pub fn present(
+    pub fn present_with_damage(
         &mut self,
         geometry: PresentationGeometry,
         graphics: &SharedGraphics,
         commands: &[PaintCommand],
+        damage: Option<&[Rect]>,
     ) -> Result<DamageRegion, String> {
         if let (Some(gpu), Some(shared)) = (&mut self.gpu, &graphics.gpu) {
-            match gpu.present(geometry, shared, commands) {
+            match gpu.present(geometry, shared, commands, damage) {
                 Ok(damage) => return Ok(damage),
                 Err(error) => {
                     tracing::warn!(%error, "GPU shell presentation failed; switching surface to shared memory");
@@ -382,7 +383,6 @@ struct GpuPresenter {
     retained_diagnostics: RetainedFramebufferDiagnostics,
     vertex_buffer: Option<wgpu::Buffer>,
     vertex_capacity: usize,
-    previous_commands: Vec<PaintCommand>,
 }
 
 struct RetainedFramebuffer {
@@ -414,25 +414,6 @@ enum OffscreenRedraw {
     Reuse,
 }
 
-fn command_bounds(command: &PaintCommand) -> Option<Rect> {
-    match command {
-        PaintCommand::Fill { rect, .. }
-        | PaintCommand::TopRoundedFill { rect, .. }
-        | PaintCommand::RoundedFill { rect, .. }
-        | PaintCommand::Gradient { rect, .. }
-        | PaintCommand::RoundedStroke { rect, .. }
-        | PaintCommand::Stroke { rect, .. }
-        | PaintCommand::OverlayFill { rect, .. }
-        | PaintCommand::OverlayStroke { rect, .. } => Some(*rect),
-        PaintCommand::Text { bounds, .. }
-        | PaintCommand::StyledText { bounds, .. }
-        | PaintCommand::Image { bounds, .. } => Some(*bounds),
-        PaintCommand::BackdropBlur { .. } | PaintCommand::PushClip(_) | PaintCommand::PopClip => {
-            None
-        }
-    }
-}
-
 fn union_rect(left: Rect, right: Rect) -> Rect {
     let x = left.origin.x.min(right.origin.x);
     let y = left.origin.y.min(right.origin.y);
@@ -442,33 +423,25 @@ fn union_rect(left: Rect, right: Rect) -> Rect {
 }
 
 fn offscreen_redraw(
-    previous: &[PaintCommand],
     commands: &[PaintCommand],
+    damage: Option<&[Rect]>,
     valid: bool,
 ) -> OffscreenRedraw {
     if !valid
-        || previous
+        || commands
             .iter()
-            .chain(commands)
             .any(|command| matches!(command, PaintCommand::BackdropBlur { .. }))
     {
         return OffscreenRedraw::Full;
     }
-    let mut damage = None;
-    for index in 0..previous.len().max(commands.len()) {
-        let old = previous.get(index);
-        let new = commands.get(index);
-        if old == new {
-            continue;
-        }
-        for command in [old, new].into_iter().flatten() {
-            let Some(bounds) = command_bounds(command) else {
-                return OffscreenRedraw::Full;
-            };
-            damage = Some(damage.map_or(bounds, |current| union_rect(current, bounds)));
-        }
-    }
-    damage.map_or(OffscreenRedraw::Reuse, OffscreenRedraw::Partial)
+    let Some(damage) = damage else {
+        return OffscreenRedraw::Full;
+    };
+    damage
+        .iter()
+        .copied()
+        .reduce(union_rect)
+        .map_or(OffscreenRedraw::Reuse, OffscreenRedraw::Partial)
 }
 
 fn physical_scissor(
@@ -614,7 +587,6 @@ impl GpuPresenter {
             retained_diagnostics: RetainedFramebufferDiagnostics::default(),
             vertex_buffer: None,
             vertex_capacity: 0,
-            previous_commands: Vec::new(),
         })
     }
 
@@ -699,6 +671,7 @@ impl GpuPresenter {
         geometry: PresentationGeometry,
         graphics: &GpuGraphics,
         commands: &[PaintCommand],
+        damage: Option<&[Rect]>,
     ) -> Result<DamageRegion, String> {
         if geometry.pixel_width == 0 || geometry.pixel_height == 0 {
             self.release_retained_framebuffer();
@@ -718,7 +691,7 @@ impl GpuPresenter {
         let retained = self.ensure_retained_framebuffer(graphics, width, height, scale);
         let retained_valid = self.retained.as_ref().is_some_and(|target| target.valid);
         let mut redraw = if retained {
-            offscreen_redraw(&self.previous_commands, commands, retained_valid)
+            offscreen_redraw(commands, damage, retained_valid)
         } else {
             OffscreenRedraw::Full
         };
@@ -886,12 +859,6 @@ impl GpuPresenter {
                 self.retained_diagnostics.unchanged_reuses =
                     self.retained_diagnostics.unchanged_reuses.saturating_add(1);
             }
-        }
-        if self.previous_commands.len() == commands.len() {
-            self.previous_commands.clone_from_slice(commands);
-        } else {
-            self.previous_commands.clear();
-            self.previous_commands.extend_from_slice(commands);
         }
         if let Some(retained) = self.retained.as_mut().filter(|_| retained)
             && !retained.valid
@@ -1311,51 +1278,47 @@ mod tests {
     }
 
     #[test]
-    fn offscreen_damage_admission_is_local_and_conservative() {
-        let left = PaintCommand::Fill {
-            rect: Rect::new(0.0, 0.0, 20.0, 20.0),
-            color: 0xff0000,
-        };
-        let old_right = PaintCommand::Fill {
-            rect: Rect::new(100.0, 0.0, 20.0, 20.0),
-            color: 0x00ff00,
-        };
-        let new_right = PaintCommand::Fill {
-            rect: Rect::new(100.0, 0.0, 20.0, 20.0),
-            color: 0x0000ff,
-        };
+    fn keyed_front_insertion_uses_identity_damage_without_invalidating_trailing_work() {
+        let previous = (0..64)
+            .map(|index| PaintCommand::Fill {
+                rect: Rect::new(index as f32 * 10.0, 40.0, 8.0, 8.0),
+                color: index,
+            })
+            .collect::<Vec<_>>();
+        let inserted_bounds = Rect::new(4.0, 4.0, 20.0, 20.0);
+        let mut commands = vec![PaintCommand::Fill {
+            rect: inserted_bounds,
+            color: 0xff00ff,
+        }];
+        commands.extend(previous.iter().cloned());
+        assert_eq!(&commands[1..], previous);
 
         assert_eq!(
-            offscreen_redraw(&[left.clone(), old_right], &[left, new_right], true),
-            OffscreenRedraw::Partial(Rect::new(100.0, 0.0, 20.0, 20.0))
+            offscreen_redraw(&commands, Some(&[inserted_bounds]), true),
+            OffscreenRedraw::Partial(inserted_bounds)
         );
-        assert_eq!(offscreen_redraw(&[], &[], true), OffscreenRedraw::Reuse);
-        assert_eq!(offscreen_redraw(&[], &[], false), OffscreenRedraw::Full);
+        assert_eq!(
+            offscreen_redraw(&commands, Some(&[]), true),
+            OffscreenRedraw::Reuse
+        );
     }
 
     #[test]
-    fn clips_and_backdrop_effects_force_full_offscreen_redraw() {
+    fn missing_damage_invalid_storage_and_backdrop_effects_force_full_redraw() {
         let fill = PaintCommand::Fill {
             rect: Rect::new(0.0, 0.0, 20.0, 20.0),
             color: 0xff0000,
         };
         assert_eq!(
-            offscreen_redraw(
-                &[
-                    PaintCommand::PushClip(Rect::new(0.0, 0.0, 10.0, 10.0)),
-                    fill.clone()
-                ],
-                &[
-                    PaintCommand::PushClip(Rect::new(1.0, 0.0, 10.0, 10.0)),
-                    fill.clone()
-                ],
-                true,
-            ),
+            offscreen_redraw(&[fill.clone()], None, true),
+            OffscreenRedraw::Full
+        );
+        assert_eq!(
+            offscreen_redraw(&[fill.clone()], Some(&[]), false),
             OffscreenRedraw::Full
         );
         assert_eq!(
             offscreen_redraw(
-                &[fill.clone()],
                 &[
                     PaintCommand::BackdropBlur {
                         rect: Rect::new(0.0, 0.0, 20.0, 20.0),
@@ -1364,6 +1327,7 @@ mod tests {
                     },
                     fill,
                 ],
+                Some(&[Rect::new(0.0, 0.0, 20.0, 20.0)]),
                 true,
             ),
             OffscreenRedraw::Full

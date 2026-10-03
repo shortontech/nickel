@@ -2047,6 +2047,15 @@ impl WinitShell {
         id: SurfaceId,
         commands: &[PaintCommand],
     ) -> Result<DamageRegion, String> {
+        self.present_with_damage(id, commands, None)
+    }
+
+    pub fn present_with_damage(
+        &mut self,
+        id: SurfaceId,
+        commands: &[PaintCommand],
+        damage: Option<&[nickel_ui::Rect]>,
+    ) -> Result<DamageRegion, String> {
         let index = *self
             .surface_indices
             .get(&id.0)
@@ -2097,7 +2106,7 @@ impl WinitShell {
             .presenter
             .as_mut()
             .expect("shell presenter initialized")
-            .present(geometry, graphics, commands);
+            .present_with_damage(geometry, graphics, commands, damage);
         self.presenter_cache_generation = self.presenter_cache_generation.saturating_add(1);
         #[cfg(target_os = "windows")]
         if result.is_err() {
@@ -2152,6 +2161,18 @@ impl WinitShell {
         token: HostChangeToken,
         commands: &[PaintCommand],
     ) -> Result<Option<DamageRegion>, String> {
+        self.present_host_frame_with_damage(id, token, commands, None)
+    }
+
+    /// Presents a canonical UI host frame with its authoritative retained
+    /// paint damage when one was produced by the frame lifecycle.
+    pub fn present_host_frame_with_damage(
+        &mut self,
+        id: SurfaceId,
+        token: HostChangeToken,
+        commands: &[PaintCommand],
+        damage: Option<&[nickel_ui::Rect]>,
+    ) -> Result<Option<DamageRegion>, String> {
         let index = *self
             .surface_indices
             .get(&id.0)
@@ -2159,7 +2180,7 @@ impl WinitShell {
         if self.surfaces[index].last_host_change_token == Some(token) {
             return Ok(None);
         }
-        let damage = self.present(id, commands)?;
+        let damage = self.present_with_damage(id, commands, damage)?;
         self.surfaces[index].last_host_change_token = Some(token);
         Ok(Some(damage))
     }
