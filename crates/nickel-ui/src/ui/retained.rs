@@ -476,21 +476,6 @@ impl RetainedNodeArena {
             .map(|node| node.subtree_nodes)
     }
 
-    pub(crate) fn subtree_postorder_range(
-        &self,
-        id: &UiId,
-    ) -> Option<std::ops::RangeInclusive<usize>> {
-        let node = self
-            .by_ui_id
-            .get(id)
-            .and_then(|node| self.nodes.get(node))?;
-        let start = node
-            .postorder_index
-            .checked_add(1)?
-            .checked_sub(node.subtree_nodes)?;
-        Some(start..=node.postorder_index)
-    }
-
     pub(crate) fn is_descendant_or_self(&self, ancestor: &UiId, candidate: &UiId) -> bool {
         let (Some(&ancestor), Some(mut candidate)) = (
             self.by_ui_id.get(ancestor),
@@ -858,6 +843,53 @@ mod tests {
         assert_eq!(next.resolved_layout(), cold.resolved_layout());
         assert_eq!(next.commands(), cold.commands());
         assert_eq!(next.semantic_nodes(), cold.semantic_nodes());
+    }
+
+    #[test]
+    fn moved_keyed_subtrees_translate_paint_and_interaction_records() {
+        fn view(order: [&str; 2]) -> Element<&'static str> {
+            Column::new()
+                .children(order.map(|id| {
+                    Text::new(id)
+                        .id(id)
+                        .content_revision(if id == "a" { 1 } else { 2 })
+                        .width(80.0)
+                        .height(20.0)
+                        .message(if id == "a" { "a" } else { "b" })
+                }))
+                .into_element()
+        }
+
+        let bounds = Rect::new(0.0, 0.0, 80.0, 40.0);
+        let mut retained_state = UiStateStore::default();
+        let first = UiFrame::resolve(
+            view(["a", "b"]),
+            FrameRequest::new(bounds, &mut retained_state),
+        );
+        let moved = UiFrame::resolve_against(
+            view(["b", "a"]),
+            FrameRequest::new(bounds, &mut retained_state),
+            &first,
+        );
+        let work = moved.resource_diagnostics();
+        assert_eq!(work.nodes_measured, 1);
+        assert_eq!(work.nodes_placed, 1);
+        assert_eq!(work.paint_nodes_executed, 1);
+        assert_eq!(work.paint_nodes_reused, 2);
+        assert_eq!(work.interaction_nodes_executed, 1);
+        assert_eq!(work.interaction_nodes_reused, 2);
+        assert_eq!(
+            moved.message_at(crate::Point { x: 10.0, y: 10.0 }),
+            Some(&"b")
+        );
+        assert_eq!(
+            moved.message_at(crate::Point { x: 10.0, y: 30.0 }),
+            Some(&"a")
+        );
+
+        let mut cold_state = UiStateStore::default();
+        let cold = UiFrame::resolve(view(["b", "a"]), FrameRequest::new(bounds, &mut cold_state));
+        assert_frame_oracle(&moved, &cold);
     }
 
     #[test]

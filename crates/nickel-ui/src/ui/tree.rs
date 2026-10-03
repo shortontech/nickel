@@ -1649,13 +1649,18 @@ impl<Message: Clone> UiFrame<Message> {
         )
     }
 
-    fn reusable_geometry(&self, id: &UiId, bounds: Rect) -> Option<&ResolvedNode> {
+    fn reusable_geometry(
+        &self,
+        id: &UiId,
+        bounds: Rect,
+        inherited_clip: Option<Rect>,
+    ) -> Option<&ResolvedNode> {
         if !self.retained_nodes.subtree_layout_is_clean(id) {
             return None;
         }
-        self.retained_layout
-            .get(id)
-            .filter(|node| approximately_same_rect(node.allocated, bounds))
+        self.retained_layout.get(id).filter(|node| {
+            approximately_same_size(node.allocated.size, bounds.size) && node.clip == inherited_clip
+        })
     }
 
     fn selection_hit_at(
@@ -1993,30 +1998,47 @@ impl<Message: Clone> UiFrame<Message> {
             return;
         }
         let id = self.resolved.nodes[node_index].id.clone();
-        let safe = previous.is_some()
-            && independent_output_reuse_safe(element)
-            && self
-                .retained_layout
-                .get(&id)
-                .is_some_and(|node| node.allocated == self.resolved.nodes[node_index].allocated);
+        let translation = (previous.is_some() && independent_output_reuse_safe(element))
+            .then(|| {
+                self.retained_layout
+                    .get(&id)
+                    .filter(|node| {
+                        node.clip == self.resolved.nodes[node_index].clip
+                            && approximately_same_size(
+                                node.allocated.size,
+                                self.resolved.nodes[node_index].allocated.size,
+                            )
+                    })
+                    .map(|node| Point {
+                        x: self.resolved.nodes[node_index].allocated.origin.x
+                            - node.allocated.origin.x,
+                        y: self.resolved.nodes[node_index].allocated.origin.y
+                            - node.allocated.origin.y,
+                    })
+            })
+            .flatten();
         let count = self.retained_nodes.subtree_node_count(&id).unwrap_or(1);
         let mut execute = requested;
         if requested.paint
-            && safe
+            && translation.is_some()
             && self
                 .retained_nodes
                 .subtree_phase_is_clean(&id, super::retained::DirtyPhases::PAINT)
-            && previous.is_some_and(|previous| self.reuse_paint_subtree(previous, &id))
+            && previous.is_some_and(|previous| {
+                self.reuse_paint_subtree(previous, &id, translation.unwrap_or_default())
+            })
         {
             self.paint_nodes_reused = self.paint_nodes_reused.saturating_add(count);
             execute.paint = false;
         }
         if requested.interaction
-            && safe
+            && translation.is_some()
             && self
                 .retained_nodes
                 .subtree_phase_is_clean(&id, super::retained::DirtyPhases::INTERACTION)
-            && previous.is_some_and(|previous| self.reuse_interaction_subtree(previous, &id))
+            && previous.is_some_and(|previous| {
+                self.reuse_interaction_subtree(previous, &id, translation.unwrap_or_default())
+            })
         {
             self.interaction_nodes_reused = self.interaction_nodes_reused.saturating_add(count);
             execute.interaction = false;
@@ -2045,11 +2067,22 @@ impl<Message: Clone> UiFrame<Message> {
         );
     }
 
-    fn reuse_paint_subtree(&mut self, previous: &Self, id: &UiId) -> bool {
-        let Some(fragment_range) = self.retained_nodes.subtree_postorder_range(id) else {
+    fn reuse_paint_subtree(&mut self, previous: &Self, id: &UiId, translation: Point) -> bool {
+        let Some(root_index) = previous
+            .paint_fragments
+            .iter()
+            .position(|fragment| &fragment.id == id)
+        else {
             return false;
         };
-        let root_index = *fragment_range.end();
+        let subtree_nodes = self.retained_nodes.subtree_node_count(id).unwrap_or(1);
+        let Some(fragment_start) = root_index
+            .checked_add(1)
+            .and_then(|end| end.checked_sub(subtree_nodes))
+        else {
+            return false;
+        };
+        let fragment_range = fragment_start..=root_index;
         let Some(root_fragment) = previous.paint_fragments.get(root_index) else {
             return false;
         };
@@ -2057,7 +2090,12 @@ impl<Message: Clone> UiFrame<Message> {
             return false;
         };
         let command_offset = self.commands.len();
-        self.commands.extend_from_slice(commands);
+        self.commands.extend(
+            commands
+                .iter()
+                .cloned()
+                .map(|command| translate_paint_command(command, translation)),
+        );
         let Some(fragments) = previous.paint_fragments.get(fragment_range) else {
             return false;
         };
@@ -2083,22 +2121,34 @@ impl<Message: Clone> UiFrame<Message> {
                             .commands
                             .end
                             .saturating_sub(root_fragment.commands.start)),
-                bounds: fragment.bounds,
+                bounds: translate_rect(fragment.bounds, translation),
             });
         }
 
         true
     }
 
-    fn reuse_interaction_subtree(&mut self, previous: &Self, id: &UiId) -> bool {
+    fn reuse_interaction_subtree(
+        &mut self,
+        previous: &Self,
+        id: &UiId,
+        translation: Point,
+    ) -> bool {
         if !self.retained_layout.contains_key(id) {
             return false;
         }
         for hit in &previous.hits {
             if previous.is_descendant_or_self(id, &hit.id) {
                 let current_index = self.hits.len();
-                self.hits.push(hit.clone());
-                if let Some(node) = self.resolved.find_mut(&hit.id) {
+                let mut hit = hit.clone();
+                hit.rect = translate_rect(hit.rect, translation);
+                hit.target_bounds = translate_rect(hit.target_bounds, translation);
+                hit.value_bounds = hit
+                    .value_bounds
+                    .map(|bounds| translate_rect(bounds, translation));
+                let hit_id = hit.id.clone();
+                self.hits.push(hit);
+                if let Some(node) = self.resolved.find_mut(&hit_id) {
                     node.hit_stack = Some(current_index);
                 }
             }
@@ -2108,14 +2158,22 @@ impl<Message: Clone> UiFrame<Message> {
                 .messages
                 .iter()
                 .filter(|region| previous.is_descendant_or_self(id, &region.id))
-                .cloned(),
+                .cloned()
+                .map(|mut region| {
+                    region.rect = translate_rect(region.rect, translation);
+                    region
+                }),
         );
         self.context_messages.extend(
             previous
                 .context_messages
                 .iter()
                 .filter(|region| previous.is_descendant_or_self(id, &region.id))
-                .cloned(),
+                .cloned()
+                .map(|mut region| {
+                    region.rect = translate_rect(region.rect, translation);
+                    region
+                }),
         );
         self.focus_messages.extend(
             previous
@@ -2129,7 +2187,11 @@ impl<Message: Clone> UiFrame<Message> {
                 .text_inputs
                 .iter()
                 .filter(|region| previous.is_descendant_or_self(id, &region.id))
-                .cloned(),
+                .cloned()
+                .map(|mut region| {
+                    region.content = translate_rect(region.content, translation);
+                    region
+                }),
         );
         self.text_commands.extend(
             previous
@@ -6366,6 +6428,37 @@ fn approximately_same_rect(left: Rect, right: Rect) -> bool {
         && (left.origin.y - right.origin.y).abs() <= EPSILON
         && (left.size.width - right.size.width).abs() <= EPSILON
         && (left.size.height - right.size.height).abs() <= EPSILON
+}
+
+fn approximately_same_size(left: Size, right: Size) -> bool {
+    const EPSILON: f32 = 0.01;
+    (left.width - right.width).abs() <= EPSILON && (left.height - right.height).abs() <= EPSILON
+}
+
+fn translate_rect(mut rect: Rect, translation: Point) -> Rect {
+    rect.origin.x += translation.x;
+    rect.origin.y += translation.y;
+    rect
+}
+
+fn translate_paint_command(mut command: PaintCommand, translation: Point) -> PaintCommand {
+    match &mut command {
+        PaintCommand::BackdropBlur { rect, .. }
+        | PaintCommand::Fill { rect, .. }
+        | PaintCommand::TopRoundedFill { rect, .. }
+        | PaintCommand::RoundedFill { rect, .. }
+        | PaintCommand::RoundedStroke { rect, .. }
+        | PaintCommand::Gradient { rect, .. }
+        | PaintCommand::Stroke { rect, .. }
+        | PaintCommand::OverlayFill { rect, .. }
+        | PaintCommand::OverlayStroke { rect, .. }
+        | PaintCommand::PushClip(rect) => *rect = translate_rect(*rect, translation),
+        PaintCommand::Text { bounds, .. }
+        | PaintCommand::StyledText { bounds, .. }
+        | PaintCommand::Image { bounds, .. } => *bounds = translate_rect(*bounds, translation),
+        PaintCommand::PopClip => {}
+    }
+    command
 }
 
 pub(super) fn measure_element<Message>(

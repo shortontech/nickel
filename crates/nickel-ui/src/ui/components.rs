@@ -92,6 +92,73 @@ pub struct VirtualWindow {
 }
 
 impl VirtualWindow {
+    /// Resolves a fixed-extent window without allocating or walking one entry
+    /// per logical item.
+    pub fn from_uniform(
+        count: usize,
+        height: f32,
+        gap: f32,
+        offset: f32,
+        viewport: f32,
+        overscan: f32,
+    ) -> Self {
+        let height = height.max(0.0);
+        let gap = gap.max(0.0);
+        let viewport = viewport.max(0.0);
+        let overscan = overscan.max(0.0);
+        let stride = height + gap;
+        let total = if count == 0 {
+            0.0
+        } else {
+            height + stride * count.saturating_sub(1) as f32
+        };
+        let offset = offset.clamp(0.0, (total - viewport).max(0.0));
+        let minimum = (offset - overscan).max(0.0);
+        let maximum = (offset + viewport + overscan).min(total);
+
+        let mut low = 0usize;
+        let mut high = count;
+        while low < high {
+            let middle = low + (high - low) / 2;
+            let end = middle as f32 * stride + height;
+            if end < minimum {
+                low = middle + 1;
+            } else {
+                high = middle;
+            }
+        }
+        let first = low;
+
+        let mut end_low = first;
+        high = count;
+        while end_low < high {
+            let middle = end_low + (high - end_low) / 2;
+            let start = middle as f32 * stride;
+            if start <= maximum {
+                end_low = middle + 1;
+            } else {
+                high = middle;
+            }
+        }
+        let end = end_low.max(first);
+        let leading = if first < count {
+            first as f32 * stride
+        } else {
+            total
+        };
+        let visible_end = if end > first {
+            (end - 1) as f32 * stride + height
+        } else {
+            leading
+        };
+        Self {
+            range: first..end,
+            leading,
+            trailing: (total - visible_end).max(0.0),
+            total,
+        }
+    }
+
     pub fn from_heights(
         heights: &[f32],
         gap: f32,

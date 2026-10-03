@@ -62,6 +62,7 @@ pub enum CollectionError<K> {
 type CollectionAction<K, Message> = Box<dyn Fn(&K) -> Message>;
 type CollectionPredicate<K> = Box<dyn Fn(&K) -> bool>;
 type CollectionItemLabel<T> = Box<dyn Fn(&T) -> String>;
+type CollectionItemRevision<T> = Box<dyn Fn(&T) -> u64>;
 type CollectionErrorView<Message> = Box<dyn Fn(&str) -> Element<Message>>;
 
 struct CollectionInteractions<K, Message> {
@@ -129,6 +130,7 @@ pub struct Collection<T, K, Message, Render, View> {
     controller_scope_background: Option<Background>,
     interactions: CollectionInteractions<K, Message>,
     item_label: Option<CollectionItemLabel<T>>,
+    item_revision: Option<CollectionItemRevision<T>>,
     reveal: Option<K>,
     reveal_target: Option<UiId>,
     direction: ReadingDirection,
@@ -198,6 +200,7 @@ where
             controller_scope_background: None,
             interactions: CollectionInteractions::default(),
             item_label: None,
+            item_revision: None,
             reveal: None,
             reveal_target: None,
             direction: ReadingDirection::LeftToRight,
@@ -289,6 +292,14 @@ where
 
     pub fn item_label(mut self, label: impl Fn(&T) -> String + 'static) -> Self {
         self.item_label = Some(Box::new(label));
+        self
+    }
+
+    /// Declares the exact source-owned revision for each keyed item's visual,
+    /// interactive, and semantic content. The revision must change whenever
+    /// any declaration produced for that item changes.
+    pub fn item_revision(mut self, revision: impl Fn(&T) -> u64 + 'static) -> Self {
+        self.item_revision = Some(Box::new(revision));
         self
     }
 
@@ -413,9 +424,15 @@ where
             overscan,
         } = self.presentation
         {
-            let heights = vec![item_height.max(1.0); total];
-            let mut resolved =
-                VirtualWindow::from_heights(&heights, self.gap, offset, viewport_height, overscan);
+            let item_height = item_height.max(1.0);
+            let mut resolved = VirtualWindow::from_uniform(
+                total,
+                item_height,
+                self.gap,
+                offset,
+                viewport_height,
+                overscan,
+            );
             let reveal_index = self
                 .reveal
                 .as_ref()
@@ -433,9 +450,10 @@ where
             if let Some(index) = reveal_index
                 && !resolved.range.contains(&index)
             {
-                let stride = item_height.max(1.0) + self.gap;
-                resolved = VirtualWindow::from_heights(
-                    &heights,
+                let stride = item_height + self.gap;
+                resolved = VirtualWindow::from_uniform(
+                    total,
+                    item_height,
                     self.gap,
                     index as f32 * stride,
                     viewport_height,
@@ -460,9 +478,15 @@ where
                 .max(1)
                 .min(total.max(1));
             let rows = total.div_ceil(columns);
-            let heights = vec![row_height.max(1.0); rows];
-            let mut resolved =
-                VirtualWindow::from_heights(&heights, gap, offset, viewport_height, overscan);
+            let row_height = row_height.max(1.0);
+            let mut resolved = VirtualWindow::from_uniform(
+                rows,
+                row_height,
+                gap,
+                offset,
+                viewport_height,
+                overscan,
+            );
             let reveal_index = self
                 .reveal
                 .as_ref()
@@ -480,10 +504,11 @@ where
             if let Some(index) = reveal_index {
                 let row = index / columns;
                 if !resolved.range.contains(&row) {
-                    resolved = VirtualWindow::from_heights(
-                        &heights,
+                    resolved = VirtualWindow::from_uniform(
+                        rows,
+                        row_height,
                         gap,
-                        row as f32 * (row_height.max(1.0) + gap),
+                        row as f32 * (row_height + gap),
                         viewport_height,
                         overscan,
                     );
@@ -497,6 +522,7 @@ where
         let selected = &self.interactions.selected;
         let disabled = &self.interactions.disabled;
         let item_label = &self.item_label;
+        let item_revision = &self.item_revision;
         let columns = match self.presentation {
             CollectionPresentation::UniformGrid { columns } => Some(columns.max(1)),
             CollectionPresentation::VirtualGrid { .. } => virtual_grid_columns,
@@ -513,6 +539,7 @@ where
             .enumerate()
             .filter(|(index, _)| window.contains(index))
             .map(|(index, (key, item))| {
+                let content_revision = item_revision.as_ref().map(|revision| revision(&item));
                 let accessible_name = item_label
                     .as_ref()
                     .map_or_else(|| key.to_string(), |label| label(&item));
@@ -558,6 +585,9 @@ where
                     item_container = item_container.background(background);
                 }
                 let mut element = item_container.into_element();
+                if let Some(revision) = content_revision {
+                    element = element.content_revision(revision);
+                }
                 if !is_disabled && let Some(action) = &self.interactions.activate {
                     element = element.message(action(&key));
                 }
@@ -1006,6 +1036,7 @@ mod tests {
             )
             .expect("10,000 stable integer keys are unique")
             .id("virtual-admission")
+            .item_revision(|item| *item as u64)
             .presentation(CollectionPresentation::VirtualList {
                 item_height: ITEM_HEIGHT,
                 offset,
@@ -1100,11 +1131,14 @@ mod tests {
         assert_eq!(work.retained_nodes_created, 2);
         assert_eq!(work.retained_nodes_removed, 2);
         assert_eq!(work.retained_nodes_moved, 25);
-        assert_eq!(work.nodes_measured, 56);
-        assert_eq!(work.nodes_placed, 56);
-        assert_eq!(work.paint_nodes_executed, 56);
-        assert_eq!(work.interaction_nodes_executed, 56);
+        assert_eq!(work.nodes_measured, 6);
+        assert_eq!(work.nodes_placed, 6);
+        assert_eq!(work.paint_nodes_executed, 6);
+        assert_eq!(work.paint_nodes_reused, 50);
+        assert_eq!(work.interaction_nodes_executed, 6);
+        assert_eq!(work.interaction_nodes_reused, 50);
         assert_eq!(work.semantic_nodes_executed, 56);
+        assert_eq!(work.semantic_nodes_reused, 0);
         AdmissionReport::new("retained_virtual_list", "10000_item_one_row_scroll")
             .metadata("items", ITEMS)
             .metadata("visible_items", expected_rendered.expect("rendered sample"))

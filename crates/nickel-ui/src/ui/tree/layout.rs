@@ -9,10 +9,10 @@ pub(super) fn layout_element<Message: Clone>(
     tree: &mut UiFrame<Message>,
 ) -> usize {
     let reusable = geometry_reuse_safe(element)
-        .then(|| tree.reusable_geometry(id, bounds))
+        .then(|| tree.reusable_geometry(id, bounds, inherited_clip))
         .flatten()
         .cloned();
-    let rect = reusable.as_ref().map_or(bounds, |node| node.allocated);
+    let rect = bounds;
     let cached_measurement = tree.retained_nodes.measured_for(id, bounds.size);
     let preferred = reusable.as_ref().map_or_else(
         || {
@@ -266,13 +266,17 @@ pub(super) fn layout_element<Message: Clone>(
     } else {
         inherited_clip
     };
-    if reusable.is_some() {
+    if let Some(previous) = &reusable {
+        let translation = Point {
+            x: bounds.origin.x - previous.allocated.origin.x,
+            y: bounds.origin.y - previous.allocated.origin.y,
+        };
         for (index, child) in element.children.iter().enumerate() {
             let child_id = resolved_child_id(id, child, index);
-            let Some((allocated, clip)) = tree
+            let Some(allocated) = tree
                 .retained_layout
                 .get(&child_id)
-                .map(|node| (node.allocated, node.clip))
+                .map(|node| translate_rect(node.allocated, translation))
             else {
                 // The arena's clean-subtree proof requires every child to have
                 // a phase record, so an absent resolved node is corruption.
@@ -280,7 +284,12 @@ pub(super) fn layout_element<Message: Clone>(
                 continue;
             };
             child_indices.push(layout_element(
-                child, &child_id, allocated, foreground, clip, tree,
+                child,
+                &child_id,
+                allocated,
+                foreground,
+                descendant_clip,
+                tree,
             ));
         }
         tree.resolved.nodes[node_index].children = child_indices;

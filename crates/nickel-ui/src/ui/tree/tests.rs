@@ -5456,6 +5456,23 @@ fn virtual_window_bounds_variable_height_work_at_start_middle_and_end() {
 }
 
 #[test]
+fn uniform_virtual_window_matches_explicit_fixed_extents() {
+    for count in [0usize, 1, 2, 31, 10_000] {
+        for height in [1.0f32, 24.0, 31.5] {
+            for gap in [0.0f32, 3.0] {
+                let heights = vec![height; count];
+                for offset in [0.0f32, 1.0, 48.0, 96_000.0, f32::MAX] {
+                    let explicit = VirtualWindow::from_heights(&heights, gap, offset, 480.0, 48.0);
+                    let uniform =
+                        VirtualWindow::from_uniform(count, height, gap, offset, 480.0, 48.0);
+                    assert_eq!(uniform, explicit);
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn vertical_scroll_emits_the_resulting_offset() {
     fn scrolled(offset: f32) -> TestMessage {
         TestMessage::Volume(offset.round() as u8)
