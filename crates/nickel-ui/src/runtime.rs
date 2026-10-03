@@ -2434,7 +2434,7 @@ impl<A: Application> UiHost<A> {
         &self,
         renderer: &mut R,
     ) -> Result<DamageRegion, R::Error> {
-        renderer.render_frame(self.render_frame())
+        renderer.render_frame_with_damage(self.render_frame(), self.tree.paint_damage())
     }
 
     pub fn render_software(&self, renderer: &mut SoftwareRenderer) -> DamageRegion {
@@ -6534,6 +6534,22 @@ mod tests {
         );
     }
 
+    fn rect_contains_pixel(rect: crate::Rect, x: u32, y: u32) -> bool {
+        let x = x as f32 + 0.5;
+        let y = y as f32 + 0.5;
+        x >= rect.origin.x
+            && y >= rect.origin.y
+            && x < rect.origin.x + rect.size.width
+            && y < rect.origin.y + rect.size.height
+    }
+
+    fn rects_intersect(left: crate::Rect, right: crate::Rect) -> bool {
+        left.origin.x < right.origin.x + right.size.width
+            && right.origin.x < left.origin.x + left.size.width
+            && left.origin.y < right.origin.y + right.size.height
+            && right.origin.y < left.origin.y + left.size.height
+    }
+
     #[test]
     fn paint_only_hover_reuses_declaration_layout_and_matches_cold_resolution() {
         let mut retained = UiHost::new(RetainedPaintFixture::new(1), 180, 60);
@@ -6590,8 +6606,12 @@ mod tests {
         let transition_count = transitions.len();
         let resource_bound = retained.inspect().resources;
         let mut emitted = 0usize;
+        let (width, height) = retained.render_frame().logical_size;
+        let mut retained_raster = crate::SoftwareRenderer::new(width, height, 1.0);
+        retained.render_software(&mut retained_raster);
 
         for event in transitions {
+            let pixels_before = retained_raster.pixels().to_vec();
             let semantics_before = retained.semantic_nodes();
             let stable_sibling_before = retained
                 .tree
@@ -6628,6 +6648,48 @@ mod tests {
                     <= resource_bound.paint_primitive_count
             );
             emitted = emitted.saturating_add(retained_outcome.telemetry.paint_commands_emitted);
+            let damage = retained.render_software(&mut retained_raster);
+            let mut cold_raster = crate::SoftwareRenderer::new(width, height, 1.0);
+            cold.render_software(&mut cold_raster);
+            assert_eq!(
+                retained_raster.pixels(),
+                cold_raster.pixels(),
+                "retained damage raster diverged from a cold frame"
+            );
+            assert_eq!(
+                damage.rects.len(),
+                retained_outcome.telemetry.paint_damage_rects
+            );
+            for (index, (before, after)) in pixels_before
+                .iter()
+                .zip(retained_raster.pixels())
+                .enumerate()
+            {
+                if before != after {
+                    let x = index as u32 % width;
+                    let y = index as u32 / width;
+                    assert!(
+                        damage
+                            .rects
+                            .iter()
+                            .any(|rect| rect_contains_pixel(*rect, x, y)),
+                        "changed pixel ({x}, {y}) escaped retained damage {damage:?}"
+                    );
+                }
+            }
+            let stable_sibling_bounds = retained
+                .semantic_nodes()
+                .into_iter()
+                .find(|node| node.name.as_deref() == Some("Item 2"))
+                .expect("stable sibling semantic node")
+                .bounds;
+            assert!(
+                damage
+                    .rects
+                    .iter()
+                    .all(|rect| !rects_intersect(*rect, stable_sibling_bounds)),
+                "retained damage included unchanged sibling: {damage:?}"
+            );
             assert_eq!(retained.semantic_nodes(), semantics_before);
             assert_eq!(
                 retained
@@ -6661,6 +6723,7 @@ mod tests {
         assert_eq!(outcome.telemetry.view_calls, 1);
         assert!(outcome.telemetry.nodes_measured > 0);
         assert!(outcome.telemetry.nodes_placed > 0);
+        assert!(host.tree.paint_damage().is_none());
         assert_eq!(host.application().views.get(), 1);
     }
 

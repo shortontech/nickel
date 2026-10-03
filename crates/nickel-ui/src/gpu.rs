@@ -123,6 +123,7 @@ pub struct SoftwareRenderer {
     scale: f32,
     pixels: Vec<Pixel>,
     previous_commands: Vec<PaintCommand>,
+    presented_generation: Option<u64>,
     framebuffer_valid: bool,
     clips: Vec<Rect>,
     text_rasters: Vec<Option<CachedSoftwareText>>,
@@ -276,6 +277,7 @@ impl SoftwareRenderer {
             scale: scale.max(0.25),
             pixels: vec![Pixel::TRANSPARENT; (width * height) as usize],
             previous_commands: Vec::new(),
+            presented_generation: None,
             framebuffer_valid: false,
             clips: Vec::new(),
             text_rasters: Vec::new(),
@@ -301,6 +303,7 @@ impl SoftwareRenderer {
             self.text_rasters.clear();
             self.rejected_text_rasters.clear();
             self.previous_commands.clear();
+            self.presented_generation = None;
             self.framebuffer_valid = false;
             self.reset_glyph_cache();
         }
@@ -311,6 +314,7 @@ impl SoftwareRenderer {
             self.pixels
                 .resize((self.width * self.height) as usize, Pixel::TRANSPARENT);
             self.previous_commands.clear();
+            self.presented_generation = None;
             self.framebuffer_valid = false;
         }
     }
@@ -374,6 +378,7 @@ impl SoftwareRenderer {
         self.height = 1;
         self.pixels = vec![Pixel::TRANSPARENT];
         self.previous_commands = Vec::new();
+        self.presented_generation = None;
         self.framebuffer_valid = false;
         self.clips = Vec::new();
         self.text_rasters = Vec::new();
@@ -383,7 +388,42 @@ impl SoftwareRenderer {
 
     /// Rasterize a component display list and return its conservative damage.
     pub fn render(&mut self, commands: &[PaintCommand]) -> DamageRegion {
-        let damage = self.damage(commands);
+        self.render_with_damage_hint(commands, None)
+    }
+
+    pub(crate) fn render_frame_with_damage_hint(
+        &mut self,
+        commands: &[PaintCommand],
+        generation: u64,
+        damage_hint: Option<&[Rect]>,
+    ) -> DamageRegion {
+        let damage_hint = (self.presented_generation != Some(generation))
+            .then_some(damage_hint)
+            .flatten();
+        let damage = self.render_with_damage_hint(commands, damage_hint);
+        self.presented_generation = Some(generation);
+        damage
+    }
+
+    fn render_with_damage_hint(
+        &mut self,
+        commands: &[PaintCommand],
+        damage_hint: Option<&[Rect]>,
+    ) -> DamageRegion {
+        let damage = if self.framebuffer_valid {
+            damage_hint.map_or_else(
+                || self.damage(commands),
+                |rects| DamageRegion {
+                    rects: rects
+                        .iter()
+                        .copied()
+                        .map(|rect| physical_rect(rect, self.scale))
+                        .collect(),
+                },
+            )
+        } else {
+            self.damage(commands)
+        };
         if damage.is_empty() {
             return damage;
         }
@@ -1190,7 +1230,7 @@ fn bilinear_sample(image: &image::RgbaImage, x: f32, y: f32) -> [u8; 4] {
     result
 }
 
-fn command_bounds(command: &PaintCommand) -> Option<Rect> {
+pub(crate) fn command_bounds(command: &PaintCommand) -> Option<Rect> {
     match command {
         PaintCommand::Fill { rect, .. }
         | PaintCommand::TopRoundedFill { rect, .. }
@@ -1233,7 +1273,7 @@ fn intersection(left: Rect, right: Rect) -> Option<Rect> {
     (right_edge > x && bottom_edge > y).then(|| Rect::new(x, y, right_edge - x, bottom_edge - y))
 }
 
-fn union_rect(left: Rect, right: Rect) -> Rect {
+pub(crate) fn union_rect(left: Rect, right: Rect) -> Rect {
     let x = left.origin.x.min(right.origin.x);
     let y = left.origin.y.min(right.origin.y);
     let right_edge = (left.origin.x + left.size.width).max(right.origin.x + right.size.width);

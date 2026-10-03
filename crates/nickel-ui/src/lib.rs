@@ -131,7 +131,7 @@ pub mod backend {
 
     use image::RgbaImage;
 
-    use crate::{DamageRegion, SoftwareRenderer};
+    use crate::{DamageRegion, Rect, SoftwareRenderer};
 
     /// Borrowed display list and presentation metadata for one resolved UI frame.
     ///
@@ -188,6 +188,17 @@ pub mod backend {
         type Error;
 
         fn render_frame(&mut self, frame: RenderFrame<'_>) -> Result<DamageRegion, Self::Error>;
+
+        /// Present a frame with authoritative logical damage from a retained
+        /// paint update. Renderers that cannot safely consume partial damage
+        /// retain the conservative full/display-list-derived behavior.
+        fn render_frame_with_damage(
+            &mut self,
+            frame: RenderFrame<'_>,
+            _damage: Option<&[Rect]>,
+        ) -> Result<DamageRegion, Self::Error> {
+            self.render_frame(frame)
+        }
     }
 
     impl FrameRenderer for SoftwareRenderer {
@@ -195,6 +206,14 @@ pub mod backend {
 
         fn render_frame(&mut self, frame: RenderFrame<'_>) -> Result<DamageRegion, Self::Error> {
             Ok(self.render(frame.commands))
+        }
+
+        fn render_frame_with_damage(
+            &mut self,
+            frame: RenderFrame<'_>,
+            damage: Option<&[Rect]>,
+        ) -> Result<DamageRegion, Self::Error> {
+            Ok(self.render_frame_with_damage_hint(frame.commands, frame.generation, damage))
         }
     }
 

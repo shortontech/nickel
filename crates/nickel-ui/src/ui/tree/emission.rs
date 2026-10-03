@@ -1,5 +1,13 @@
 use super::*;
 
+fn paint_bounds(commands: &[PaintCommand], fallback: Rect) -> Rect {
+    commands
+        .iter()
+        .filter_map(crate::gpu::command_bounds)
+        .reduce(crate::gpu::union_rect)
+        .unwrap_or(fallback)
+}
+
 pub(super) fn paint_dropdown_part(
     commands: &mut Vec<PaintCommand>,
     rect: Rect,
@@ -205,7 +213,7 @@ pub(super) fn emit_element<Message: Clone>(
         tree.paint_fragments.push(PaintFragment {
             id: node.id,
             commands: fragment_start..tree.commands.len(),
-            bounds: node.border_box,
+            bounds: paint_bounds(&tree.commands[fragment_start..], node.border_box),
         });
         return;
     }
@@ -1181,6 +1189,6 @@ pub(super) fn emit_element<Message: Clone>(
     tree.paint_fragments.push(PaintFragment {
         id: node.id,
         commands: fragment_start..tree.commands.len(),
-        bounds: node.border_box,
+        bounds: paint_bounds(&tree.commands[fragment_start..], node.border_box),
     });
 }

@@ -493,6 +493,10 @@ pub struct UiFrame<Message = String> {
     declaration_root_id: Option<UiId>,
     commands: Vec<PaintCommand>,
     paint_fragments: Vec<PaintFragment>,
+    /// Logical old/new paint bounds for a proven-safe retained update. `None`
+    /// means the presenter must derive damage conservatively from the complete
+    /// display list.
+    paint_damage: Option<Vec<Rect>>,
     overlay_commands: Vec<PaintCommand>,
     hits: Vec<HitRegion<Message>>,
     overlay_hits: Vec<HitRegion<Message>>,
@@ -529,6 +533,7 @@ impl<Message> Default for UiFrame<Message> {
             declaration_root_id: None,
             commands: Vec::new(),
             paint_fragments: Vec::new(),
+            paint_damage: None,
             overlay_commands: Vec::new(),
             hits: Vec::new(),
             overlay_hits: Vec::new(),
@@ -1813,7 +1818,7 @@ impl<Message: Clone> UiFrame<Message> {
         let total_fragments = self.paint_fragments.len();
         let mut rebuilt_fragments = 0usize;
         let mut emitted_commands = 0usize;
-        let mut damage_rects = 0usize;
+        let mut damage = Vec::new();
         for id in changed {
             let Some((element, inherited_foreground)) =
                 find_declared_element(&root, &root_id, &id, None)
@@ -1830,11 +1835,15 @@ impl<Message: Clone> UiFrame<Message> {
             };
             rebuilt_fragments = rebuilt_fragments.saturating_add(fragments.len());
             emitted_commands = emitted_commands.saturating_add(commands.len());
-            damage_rects = damage_rects.saturating_add(1);
-            if !self.splice_paint_fragment(&id, commands, fragments) {
-                return None;
+            let (old_bounds, new_bounds) = self.splice_paint_fragment(&id, commands, fragments)?;
+            for bounds in [old_bounds, new_bounds] {
+                if !damage.contains(&bounds) {
+                    damage.push(bounds);
+                }
             }
         }
+        let damage_rects = damage.len();
+        self.paint_damage = Some(damage);
         self.validate_clip_commands();
         self.release_build_scratch();
         Some(RetainedPaintWork {
@@ -1888,15 +1897,32 @@ impl<Message: Clone> UiFrame<Message> {
         id: &UiId,
         commands: Vec<PaintCommand>,
         mut replacements: Vec<PaintFragment>,
-    ) -> bool {
+    ) -> Option<(Rect, Rect)> {
         let Some(old) = self
             .paint_fragments
             .iter()
             .find(|fragment| &fragment.id == id)
             .cloned()
         else {
-            return false;
+            return None;
         };
+        let replacement_index = replacements
+            .iter()
+            .position(|fragment| &fragment.id == id)?;
+        let replacement_commands =
+            commands.get(replacements[replacement_index].commands.clone())?;
+        if replacement_commands
+            .iter()
+            .any(|command| matches!(command, PaintCommand::BackdropBlur { .. }))
+        {
+            return None;
+        }
+        let new_bounds = replacement_commands
+            .iter()
+            .filter_map(crate::gpu::command_bounds)
+            .reduce(crate::gpu::union_rect)
+            .unwrap_or(replacements[replacement_index].bounds);
+        replacements[replacement_index].bounds = new_bounds;
         let old_len = old.commands.end.saturating_sub(old.commands.start);
         let new_len = commands.len();
         let delta = new_len as isize - old_len as isize;
@@ -1921,7 +1947,11 @@ impl<Message: Clone> UiFrame<Message> {
             fragment.commands.end = fragment.commands.end.saturating_add(old.commands.start);
         }
         self.paint_fragments.extend(replacements);
-        true
+        Some((old.bounds, new_bounds))
+    }
+
+    pub(crate) fn paint_damage(&self) -> Option<&[Rect]> {
+        self.paint_damage.as_deref()
     }
 
     fn layout_internal(root: impl Component<Message>, bounds: Rect, diagnostics: bool) -> Self {
@@ -5892,6 +5922,7 @@ impl<Message: Clone> UiFrame<Message> {
     fn reset_emission(&mut self) {
         self.commands.clear();
         self.paint_fragments.clear();
+        self.paint_damage = None;
         self.overlay_commands.clear();
         self.hits.clear();
         self.overlay_hits.clear();
