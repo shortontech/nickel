@@ -1911,8 +1911,10 @@ impl<Message: Clone> UiFrame<Message> {
             .position(|fragment| &fragment.id == id)?;
         let replacement_commands =
             commands.get(replacements[replacement_index].commands.clone())?;
-        if replacement_commands
+        let old_commands = self.commands.get(old.commands.clone())?;
+        if old_commands
             .iter()
+            .chain(replacement_commands.iter())
             .any(|command| matches!(command, PaintCommand::BackdropBlur { .. }))
         {
             return None;
