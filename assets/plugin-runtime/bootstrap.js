@@ -107,6 +107,7 @@ let __notificationsStore = {generation:0, snapshot:Object.freeze({notification:n
 let __workspacesStore = {generation:0, snapshot:Object.freeze({generation:0,available:false,reason:null,
     writable:false,revision:null,workspaces:Object.freeze([]),activeWorkspace:null,
     operations:Object.freeze({switch:false,create:false,remove:false})})};
+let __outputsStore = {generation:0,snapshot:Object.freeze({generation:0,available:false,reason:null,revision:null,outputs:Object.freeze([])})};
 let __themeStore = {generation:0, snapshot:Object.freeze({
     generation:0, mode:'unknown', accent:null, accentHue:null, accentIntensity:null,
     reducedMotion:null, reducedTransparency:null, palette:null
@@ -902,6 +903,37 @@ function useWorkspaces(selector) {
 const __nickelSelectWorkspace=snapshot=>snapshot.workspaces.find(workspace=>workspace.id===snapshot.activeWorkspace)??null;
 function useWorkspace(){return useWorkspaces(__nickelSelectWorkspace);}
 
+function __nickelFreezeOutput(value) {
+    if(!value||typeof value!=='object'||Array.isArray(value)||typeof value.name!=='string'||!value.name.length||value.name.length>256
+        ||!Array.isArray(value.modes)||value.modes.length>128)throw Error('invalid public output');
+    const number=(field,input=value)=>Number.isFinite(input[field])?input[field]:(()=>{throw Error(`invalid output ${field}`)})();
+    const rect=field=>{const rect=value[field];if(!rect||typeof rect!=='object'||Array.isArray(rect))throw Error(`invalid output ${field}`);
+        return Object.freeze({x:number('x',rect),y:number('y',rect),width:number('width',rect),height:number('height',rect)});};
+    const mode=input=>input===null?null:Object.freeze({width:number('width',input),height:number('height',input),refresh_millihz:number('refresh_millihz',input)});
+    const transforms=['normal','rotate90','rotate180','rotate270','flipped','flipped90','flipped180','flipped270'];
+    if(!transforms.includes(value.transform))throw Error('invalid output transform');
+    return Object.freeze({name:value.name,model:typeof value.model==='string'?value.model.slice(0,480):'',geometry:rect('geometry'),work_area:rect('work_area'),
+        scale_120:number('scale_120'),transform:value.transform,physical_width_mm:number('physical_width_mm'),physical_height_mm:number('physical_height_mm'),
+        primary:value.primary===true,enabled:value.enabled===true,modes:Object.freeze(value.modes.map(mode)),current_mode:mode(value.current_mode??null)});
+}
+function __nickelOutputEqual(left,right){return JSON.stringify(left)===JSON.stringify(right);}
+function __nickelSetOutputsStore(value){
+    if(!value||typeof value!=='object'||Array.isArray(value)||!Array.isArray(value.outputs)||value.outputs.length>32)throw Error('invalid bounded outputs snapshot');
+    const previous=__outputsStore.snapshot,byName=new Map(previous.outputs.map(output=>[output.name,output])),seen=new Set();
+    const outputs=Object.freeze(value.outputs.map(source=>{const copy=__nickelFreezeOutput(source);if(seen.has(copy.name))throw Error('duplicate output');seen.add(copy.name);
+        const prior=byName.get(copy.name);return prior&&__nickelOutputEqual(prior,copy)?prior:copy;}));
+    const available=value.available===true,reason=value.reason==null?null:typeof value.reason==='string'&&value.reason.length<=480?value.reason:(()=>{throw Error('invalid output reason')})();
+    const revision=value.revision==null?null:typeof value.revision==='string'&&value.revision.length<=128?value.revision:(()=>{throw Error('invalid output revision')})();
+    if(previous.available===available&&previous.reason===reason&&previous.revision===revision&&previous.outputs.length===outputs.length&&previous.outputs.every((output,index)=>output===outputs[index]))return false;
+    if(__pendingRender!==null||__pendingEvent!==null)throw Error('cannot publish changed outputs store during a render or event');
+    const generation=__outputsStore.generation+1,snapshot=Object.freeze({generation,available,reason,revision,outputs});__outputsStore={generation,snapshot};
+    __nickelForEachSurfaceHooks((hooks,dirty)=>{for(const [owner,slots] of hooks)for(const entry of slots){if(entry?.kind!=='outputs-store')continue;
+        try{const selected=entry.selector?entry.selector(snapshot):snapshot;entry.storeError=undefined;if(!Object.is(selected,entry.value))dirty.add(owner);}catch(error){entry.storeError=error;dirty.add(owner);}}});return true;
+}
+function useOutputs(selector){if(__currentComponent===null)throw Error('useOutputs requires a component');if(selector!==undefined&&typeof selector!=='function')throw TypeError('useOutputs selector must be a function');
+    const slot=__hookIndex++,hooks=__componentHooks.get(__currentComponent),normalized=selector??null;let entry=hooks[slot];if(!entry||(entry.kind==='outputs-store'&&entry.selector!==normalized))hooks[slot]=entry={kind:'outputs-store',selector:normalized,value:undefined,generation:0};
+    if(entry.kind!=='outputs-store')throw Error('hook order changed');entry.storeError=undefined;entry.value=normalized?normalized(__outputsStore.snapshot):__outputsStore.snapshot;entry.generation=__outputsStore.generation;return entry.value;}
+
 const __nickelThemePaletteFields = ['background','panel','surface','surfaceHover','text','muted',
     'accent','accentSoft','complement'];
 function __nickelThemeColor(value, field) {
@@ -1116,7 +1148,7 @@ function __nickelUseSurfaceSelection(selection) {
 }
 
 function useSurface() { return __nickelUseSurfaceSelection('surface'); }
-function useOutput() { return __nickelUseSurfaceSelection('output'); }
+function useOutput() { const name=__nickelUseSurfaceSelection('output'); const topology=useOutputs(); return name===null?null:topology.outputs.find(output=>output.name===name)??null; }
 function useScaleFactor() { return __nickelUseSurfaceSelection('scale'); }
 function useSurfaceFocus() { return __nickelUseSurfaceSelection('focus'); }
 

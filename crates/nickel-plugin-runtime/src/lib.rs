@@ -284,6 +284,20 @@ impl JsxRuntime {
         if let Some(workspaces) = data.get("workspaces") {
             self.set_workspaces_store(workspaces)?;
         }
+        if let Some(outputs) = data.get("outputs").or_else(|| data.get("displays"))
+            && outputs
+                .get("outputs")
+                .and_then(Value::as_array)
+                .is_some_and(|items| {
+                    items.first().is_none_or(|output| {
+                        output.get("geometry").is_some()
+                            && output.get("work_area").is_some()
+                            && output.get("modes").is_some()
+                    })
+                })
+        {
+            self.set_outputs_store(outputs)?;
+        }
         // Effective presentation state is globally readable and deliberately
         // separate from the capability-gated appearance configuration client.
         if let Some(appearance) = data.get("appearance") {
@@ -428,6 +442,25 @@ impl JsxRuntime {
         setter
             .as_callable()
             .ok_or("workspaces store setter is not callable")?
+            .call(&JsValue::undefined(), &[snapshot], &mut self.context)
+            .map(|changed| changed.to_boolean())
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn set_outputs_store(&mut self, snapshot: &Value) -> Result<bool, String> {
+        if self.invalidated {
+            return Err("runtime checkpoint was invalidated".into());
+        }
+        let snapshot =
+            JsValue::from_json(snapshot, &mut self.context).map_err(|error| error.to_string())?;
+        let setter = self
+            .context
+            .global_object()
+            .get(js_string!("__nickelSetOutputsStore"), &mut self.context)
+            .map_err(|error| error.to_string())?;
+        setter
+            .as_callable()
+            .ok_or("outputs store setter is not callable")?
             .call(&JsValue::undefined(), &[snapshot], &mut self.context)
             .map(|changed| changed.to_boolean())
             .map_err(|error| error.to_string())
@@ -1275,6 +1308,57 @@ mod tests {
             .render("__nickelRender()", |_| Err::<(), _>("reject".into()))
             .unwrap_err();
         rejected.set_workspaces_store(&serde_json::json!({"available":false,"reason":"absent","workspaces":[],"operations":{}})).unwrap();
+        assert!(
+            !rejected
+                .eval_json::<bool>("JSON.parse(__nickelReconciliationRequest()).requested")
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn outputs_store_versions_unavailable_transitions_and_resolves_surface_output() {
+        let output = serde_json::json!({"name":"DP-1","model":"Panel","geometry":{"x":0,"y":0,"width":1920,"height":1080},"work_area":{"x":0,"y":0,"width":1920,"height":1040},"scale_120":120,"transform":"normal","physical_width_mm":500,"physical_height_mm":300,"primary":true,"enabled":true,"modes":[{"width":1920,"height":1080,"refresh_millihz":60000}],"current_mode":{"width":1920,"height":1080,"refresh_millihz":60000}});
+        let mut runtime=super::JsxRuntime::new("globalThis.seen=[];function App(){const all=useOutputs();const current=useOutput();seen.push({all,current});return h(Text,null,current?.name??'none')}",None).unwrap();
+        runtime
+            .set_surface_store("mount", &serde_json::json!({"output":"DP-1"}))
+            .unwrap();
+        let first = serde_json::json!({"available":true,"revision":"layout-1","outputs":[output]});
+        assert!(runtime.set_outputs_store(&first).unwrap());
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        assert!(!runtime.set_outputs_store(&first).unwrap());
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        assert!(runtime.eval_json::<bool>("seen[0].all===seen[1].all && seen[0].current===seen[1].current && seen[0].current.name==='DP-1' && Object.isFrozen(seen[0].current)").unwrap());
+        runtime.set_outputs_store(&serde_json::json!({"available":false,"reason":"backend gone","revision":"layout-1","outputs":[]})).unwrap();
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        assert!(runtime.eval_json::<bool>("seen[2].current===null && seen[2].all.generation===2 && seen[2].all.revision==='layout-1'").unwrap());
+    }
+
+    #[test]
+    fn output_updates_are_isolated_and_rejected_subscriptions_roll_back() {
+        let source = "globalThis.runs={app:0,outputs:0,windows:0,sibling:0};function Outputs(){runs.outputs++;return h(Text,null,String(useOutputs().available))}function Windows(){runs.windows++;return h(Text,null,String(useWindows().length))}function Sibling(){runs.sibling++;return h(Text,null,'stable')}function App(){runs.app++;return h(Window,{},h(Outputs),h(Windows),h(Sibling))}";
+        let mut runtime = super::JsxRuntime::new(source, None).unwrap();
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        runtime
+            .set_outputs_store(&serde_json::json!({"available":false,"reason":"none","outputs":[]}))
+            .unwrap();
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        assert_eq!(
+            runtime
+                .eval_json::<serde_json::Value>("JSON.stringify(runs)")
+                .unwrap(),
+            serde_json::json!({"app":1,"outputs":2,"windows":1,"sibling":1})
+        );
+        let mut rejected = super::JsxRuntime::new(
+            "function App(){return h(Text,null,String(useOutputs().available))}",
+            None,
+        )
+        .unwrap();
+        rejected
+            .render("__nickelRender()", |_| Err::<(), _>("reject".into()))
+            .unwrap_err();
+        rejected
+            .set_outputs_store(&serde_json::json!({"available":false,"reason":"none","outputs":[]}))
+            .unwrap();
         assert!(
             !rejected
                 .eval_json::<bool>("JSON.parse(__nickelReconciliationRequest()).requested")

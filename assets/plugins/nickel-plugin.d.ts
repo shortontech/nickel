@@ -255,6 +255,9 @@ declare function useNotifications<T>(selector: (notifications: Readonly<NickelNo
 declare function useWorkspaces(): Readonly<NickelWorkspaceSnapshot>;
 declare function useWorkspaces<T>(selector: (workspaces: Readonly<NickelWorkspaceSnapshot>) => T): T;
 declare function useWorkspace(): Readonly<{id:string;active:boolean}>|null;
+interface NickelOutputsSnapshot extends NickelAvailability {readonly generation:number;readonly revision:string|null;readonly outputs:NickelDisplaySnapshot["outputs"]}
+declare function useOutputs(): Readonly<NickelOutputsSnapshot>;
+declare function useOutputs<T>(selector:(outputs:Readonly<NickelOutputsSnapshot>)=>T):T;
 interface NickelThemePalette {
     readonly background:NickelColor; readonly panel:NickelColor; readonly surface:NickelColor;
     readonly surfaceHover:NickelColor; readonly text:NickelColor; readonly muted:NickelColor;
@@ -315,7 +318,7 @@ interface NickelSurfaceSnapshot {
     readonly visible:boolean|null;
 }
 declare function useSurface():NickelSurfaceSnapshot;
-declare function useOutput():string|null;
+declare function useOutput():NickelDisplaySnapshot["outputs"][number]|null;
 declare function useScaleFactor():number|null;
 declare function useSurfaceFocus():boolean|null;
 declare function useMemo<T>(factory: () => T, dependencies?: ReadonlyArray<unknown>): T;

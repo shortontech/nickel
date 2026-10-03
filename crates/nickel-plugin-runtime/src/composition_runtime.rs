@@ -3248,6 +3248,61 @@ mod tests {
     }
 
     #[test]
+    fn composition_host_publishes_read_only_output_availability() {
+        let package = package(
+            "outputs-shell",
+            "globalThis.outputObservation=null;\nexport function Taskbar(){const value=useOutputs();outputObservation=value;return h(Text,null,String(value.available)+':'+String(value.outputs.length));}\nexport function QuickSettings(){return h(Text,null,'settings');}\nexport default Taskbar;",
+            None,
+        );
+        let owner = PackageIdentity {
+            id: "outputs-shell".into(),
+            version: package
+                .manifest
+                .composition
+                .as_ref()
+                .unwrap()
+                .version
+                .parse()
+                .unwrap(),
+        };
+        let first =
+            serde_json::json!({"outputs":{"available":false,"reason":"not observed","outputs":[]}});
+        let mut host = ShellCompositionRuntime::new(
+            &BTreeMap::from([("outputs-shell".into(), package)]),
+            "outputs-shell",
+            &BTreeMap::from([(owner.clone(), first)]),
+        )
+        .unwrap();
+        let mount = host
+            .mount(&host.component("shell.taskbar").unwrap())
+            .unwrap();
+        assert!(
+            host.render(&mount, &serde_json::json!({}))
+                .unwrap()
+                .node
+                .to_string()
+                .contains("false:0")
+        );
+        host.update_snapshot(&owner,&serde_json::json!({"outputs":{"available":true,"revision":"read-only-1","outputs":[]}})).unwrap();
+        assert!(
+            host.render(&mount, &serde_json::json!({}))
+                .unwrap()
+                .node
+                .to_string()
+                .contains("true:0")
+        );
+        let runtime = host.shared_owner_runtime(&owner).unwrap();
+        assert!(
+            runtime
+                .borrow_mut()
+                .eval_json::<bool>(
+                    "outputObservation.generation===2 && outputObservation.revision==='read-only-1'"
+                )
+                .unwrap()
+        );
+    }
+
+    #[test]
     fn composition_host_publishes_effective_theme_independently_of_other_stores() {
         let package = package(
             "theme-shell",
