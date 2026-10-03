@@ -1,3 +1,11 @@
+    fn isolate_live_desktop_fixture(shell: &mut LiveShell) {
+        let application = shell.desktop_host.application_mut();
+        application.browser = None;
+        application.watch = None;
+        application.persist_layout = false;
+        application.layout.set_icons_visible(true);
+    }
+
     #[test]
     fn desktop_overflow_plane_is_scrollable_hittable_and_focus_revealable() {
         use std::{ffi::OsString, path::PathBuf};
@@ -166,6 +174,7 @@
     fn desktop_live_input_rebuilds_selection_and_keyboard_navigation() {
         use std::{ffi::OsString, path::PathBuf};
         let mut shell = LiveShell::new().unwrap();
+        isolate_live_desktop_fixture(&mut shell);
         let artwork = Arc::new(image::RgbaImage::from_pixel(
             3,
             3,
@@ -277,6 +286,7 @@
         use std::{ffi::OsString, path::PathBuf};
 
         let mut shell = LiveShell::new().unwrap();
+        isolate_live_desktop_fixture(&mut shell);
         let path = PathBuf::from("/desktop/visible-through-selection.txt");
         let entry = nickel_file::FileEntry {
             display_name_override: None,
@@ -293,8 +303,6 @@
             image::Rgba([24, 96, 220, 255]),
         ));
         let application = shell.desktop_host.application_mut();
-        application.browser = None;
-        application.watch = None;
         application.set_outputs(vec![nickel_file::desktop::DesktopOutput {
             id: "primary".into(),
             primary: true,
@@ -424,6 +432,7 @@
     #[test]
     fn desktop_secondary_press_opens_overlay_without_hiding_items_on_release_or_motion() {
         let mut shell = LiveShell::new().unwrap();
+        isolate_live_desktop_fixture(&mut shell);
         shell.set_file_clipboard_available(true);
         shell
             .desktop_host
@@ -792,6 +801,7 @@
         use std::{ffi::OsString, path::PathBuf};
 
         let mut shell = LiveShell::new().unwrap();
+        isolate_live_desktop_fixture(&mut shell);
         let application = shell.desktop_host.application_mut();
         application.set_outputs(vec![nickel_file::desktop::DesktopOutput {
             id: "primary".into(),

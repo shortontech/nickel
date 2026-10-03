@@ -287,8 +287,8 @@
     }
 
     #[test]
-    fn tray_source_keeps_only_four_items_without_discarding_source_quality() {
-        let items = (0..7)
+    fn tray_source_keeps_only_sixty_four_items_without_discarding_source_quality() {
+        let items = (0..67)
             .map(|index| TrayItem {
                 id: index.to_string(),
                 title: format!("Item {index}"),
@@ -302,7 +302,7 @@
                 .iter()
                 .map(|item| item.id.as_str())
                 .collect::<Vec<_>>(),
-            ["3", "4", "5", "6"]
+            (3..67).map(|index| index.to_string()).collect::<Vec<_>>()
         );
         assert!(
             normalized
@@ -314,7 +314,7 @@
                 .iter()
                 .map(|item| item.icon.as_raw().len())
                 .sum::<usize>(),
-            131_072
+            2_097_152
         );
     }
 
