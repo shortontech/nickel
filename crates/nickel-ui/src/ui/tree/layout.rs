@@ -1134,8 +1134,17 @@ fn apply_transient_state_with_parent<Message>(
                             || editor.text()[..end].to_owned(),
                             |mask| mask_text(&editor.text()[..end], mask),
                         );
-                        measure_text(&visible, *scale, *bold, false, None, Some(1), f32::INFINITY)
-                            .width
+                        measure_text_with_retention(
+                            &visible,
+                            *scale,
+                            *bold,
+                            false,
+                            None,
+                            Some(1),
+                            f32::INFINITY,
+                            input_mask.map_or(TextRetention::Public, TextRetention::Masked),
+                        )
+                        .width
                     };
                     (width(selection.start), width(selection.end))
                 });
@@ -1153,8 +1162,17 @@ fn apply_transient_state_with_parent<Message>(
                                 line,
                             )
                         });
-                let x =
-                    measure_text(line, *scale, *bold, false, None, Some(1), f32::INFINITY).width;
+                let x = measure_text_with_retention(
+                    line,
+                    *scale,
+                    *bold,
+                    false,
+                    None,
+                    Some(1),
+                    f32::INFINITY,
+                    input_mask.map_or(TextRetention::Public, TextRetention::Masked),
+                )
+                .width;
                 let height = line_height.unwrap_or_else(|| text_font_size(*scale) * 1.3);
                 Point {
                     x,

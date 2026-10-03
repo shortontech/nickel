@@ -2214,16 +2214,65 @@ fn repeated_styled_text_measurement_reuses_a_bounded_cache_entry() {
 }
 
 #[test]
+fn unstyled_rich_text_reuses_the_plain_shaped_layout() {
+    with_text_measure_cache_mode(TextMeasureCacheMode::Enabled, || {
+        let rich = measure_styled_text("shared clusters", &[], 1.0, false, None, f32::INFINITY);
+        let plain = measure_text(
+            "shared clusters",
+            1.0,
+            false,
+            false,
+            None,
+            None,
+            f32::INFINITY,
+        );
+        assert_eq!(rich, plain);
+        TEXT_MEASURER.with(|measurer| {
+            let measurer = measurer.borrow();
+            assert_eq!(measurer.plain.len(), 1);
+            assert!(measurer.styled.is_empty());
+        });
+    });
+}
+
+#[test]
 fn shaped_plain_text_reuses_clusters_and_matches_a_cold_unicode_layout() {
     let text = "office e\u{301} שלום 🦀";
     let cached = with_text_measure_cache_mode(TextMeasureCacheMode::Enabled, || {
-        let first = shape_plain_text(text, 1.0, false, false, None, Some(1), f32::INFINITY, true);
-        let second = shape_plain_text(text, 1.0, false, false, None, Some(1), f32::INFINITY, true);
+        let first = shape_plain_text(
+            text,
+            1.0,
+            false,
+            false,
+            None,
+            Some(1),
+            f32::INFINITY,
+            TextRetention::Public,
+        );
+        let second = shape_plain_text(
+            text,
+            1.0,
+            false,
+            false,
+            None,
+            Some(1),
+            f32::INFINITY,
+            TextRetention::Public,
+        );
         assert!(Arc::ptr_eq(&first, &second));
         first
     });
     let cold = with_text_measure_cache_mode(TextMeasureCacheMode::BypassDerived, || {
-        shape_plain_text(text, 1.0, false, false, None, Some(1), f32::INFINITY, true)
+        shape_plain_text(
+            text,
+            1.0,
+            false,
+            false,
+            None,
+            Some(1),
+            f32::INFINITY,
+            TextRetention::Public,
+        )
     });
 
     assert_eq!(cached.size, cold.size);
@@ -2301,6 +2350,7 @@ fn shaped_plain_text_cache_is_bounded_and_can_exclude_protected_text() {
             let mut measurer = measurer.borrow_mut();
             measurer.plain.clear();
             measurer.plain_bytes = 0;
+            measurer.diagnostics = TextLayoutCacheDiagnostics::default();
         });
         let protected = "correct horse battery staple";
         let _ = shape_plain_text(
@@ -2311,21 +2361,265 @@ fn shaped_plain_text_cache_is_bounded_and_can_exclude_protected_text() {
             None,
             Some(1),
             f32::INFINITY,
-            false,
+            TextRetention::Protected,
         );
         TEXT_MEASURER.with(|measurer| assert!(measurer.borrow().plain.is_empty()));
 
         for index in 0..=TEXT_MEASURE_CACHE_CAPACITY {
             let text = format!("entry-{index}");
-            let _ = shape_plain_text(&text, 1.0, false, false, None, Some(1), f32::INFINITY, true);
+            let _ = shape_plain_text(
+                &text,
+                1.0,
+                false,
+                false,
+                None,
+                Some(1),
+                f32::INFINITY,
+                TextRetention::Public,
+            );
         }
+        let _ = shape_plain_text(
+            &format!("entry-{}", TEXT_MEASURE_CACHE_CAPACITY),
+            1.0,
+            false,
+            false,
+            None,
+            Some(1),
+            f32::INFINITY,
+            TextRetention::Public,
+        );
         TEXT_MEASURER.with(|measurer| {
             let measurer = measurer.borrow();
             assert!(measurer.plain.len() <= TEXT_MEASURE_CACHE_CAPACITY);
             assert!(measurer.plain_bytes <= TEXT_MEASURE_CACHE_BYTE_BUDGET);
             assert!(measurer.plain.keys().all(|key| key.text != protected));
         });
+        let diagnostics = text_layout_cache_diagnostics();
+        assert_eq!(diagnostics.hits, 1);
+        assert!(diagnostics.misses > TEXT_MEASURE_CACHE_CAPACITY as u64);
+        assert!(diagnostics.evictions >= 1);
+        assert!(diagnostics.rejections >= 1);
     });
+}
+
+#[test]
+fn visual_caret_index_matches_a_linear_unicode_oracle() {
+    for text in [
+        "office affinity",
+        "e\u{301}cole",
+        "👩🏽‍💻🦀 family 👨‍👩‍👧‍👦",
+        "abc שלום 123 العربية",
+    ] {
+        let layout = with_text_measure_cache_mode(TextMeasureCacheMode::BypassDerived, || {
+            shape_plain_text(
+                text,
+                1.0,
+                false,
+                false,
+                None,
+                Some(1),
+                f32::INFINITY,
+                TextRetention::Public,
+            )
+        });
+        let carets = &layout.visual_lines[0].carets;
+        assert!(carets.windows(2).all(|pair| pair[0].x <= pair[1].x));
+        let expected_boundaries = text
+            .grapheme_indices(true)
+            .map(|(offset, _)| offset)
+            .chain(std::iter::once(text.len()))
+            .collect::<Vec<_>>();
+        assert!(
+            expected_boundaries
+                .iter()
+                .all(|expected| { carets.iter().any(|caret| caret.offset == *expected) })
+        );
+
+        let cold = |x: f32| {
+            let after = carets.iter().position(|caret| caret.x >= x);
+            match after {
+                Some(0) => carets.first().map(|caret| caret.offset),
+                Some(after) => {
+                    let previous = carets[after - 1];
+                    let next = carets[after];
+                    Some(if x - previous.x <= next.x - x {
+                        previous.offset
+                    } else {
+                        next.offset
+                    })
+                }
+                None => carets.last().map(|caret| caret.offset),
+            }
+        };
+        let width = layout.line_widths[0].ceil() as usize;
+        for sample in 0..=width.saturating_mul(4) {
+            let x = sample as f32 / 4.0;
+            assert_eq!(layout.offset_at_x(0, x), cold(x), "{text:?} at {x}");
+        }
+    }
+}
+
+#[test]
+fn layout_keys_isolate_masking_scale_and_font_generation() {
+    with_text_measure_cache_mode(TextMeasureCacheMode::Enabled, || {
+        TEXT_MEASURER.with(|measurer| {
+            let mut measurer = measurer.borrow_mut();
+            measurer.diagnostics = TextLayoutCacheDiagnostics::default();
+        });
+        let public = shape_plain_text(
+            "••••",
+            1.0,
+            false,
+            false,
+            None,
+            Some(1),
+            f32::INFINITY,
+            TextRetention::Public,
+        );
+        let masked = shape_plain_text(
+            "••••",
+            1.0,
+            false,
+            false,
+            None,
+            Some(1),
+            f32::INFINITY,
+            TextRetention::Masked('•'),
+        );
+        let scaled = shape_plain_text(
+            "••••",
+            2.0,
+            false,
+            false,
+            None,
+            Some(1),
+            f32::INFINITY,
+            TextRetention::Masked('•'),
+        );
+        assert!(!Arc::ptr_eq(&public, &masked));
+        assert!(!Arc::ptr_eq(&masked, &scaled));
+
+        let before = text_layout_cache_diagnostics();
+        ProcessFontSystem::new().invalidate_resolution();
+        let regenerated = shape_plain_text(
+            "••••",
+            2.0,
+            false,
+            false,
+            None,
+            Some(1),
+            f32::INFINITY,
+            TextRetention::Masked('•'),
+        );
+        let after = text_layout_cache_diagnostics();
+        assert!(!Arc::ptr_eq(&scaled, &regenerated));
+        assert_eq!(
+            after.generation_invalidations,
+            before.generation_invalidations + 1
+        );
+        assert_eq!(after.entries, 1);
+    });
+}
+
+#[test]
+fn protected_layouts_are_rejected_without_retaining_plaintext() {
+    with_text_measure_cache_mode(TextMeasureCacheMode::Enabled, || {
+        TEXT_MEASURER.with(|measurer| {
+            let mut measurer = measurer.borrow_mut();
+            measurer.diagnostics = TextLayoutCacheDiagnostics::default();
+        });
+        let secret = "hunter2 👩🏽‍💻";
+        let first = shape_plain_text(
+            secret,
+            1.0,
+            false,
+            false,
+            None,
+            Some(1),
+            f32::INFINITY,
+            TextRetention::Protected,
+        );
+        let second = shape_plain_text(
+            secret,
+            1.0,
+            false,
+            false,
+            None,
+            Some(1),
+            f32::INFINITY,
+            TextRetention::Protected,
+        );
+        assert!(!Arc::ptr_eq(&first, &second));
+        let diagnostics = text_layout_cache_diagnostics();
+        assert_eq!(diagnostics.entries, 0);
+        assert_eq!(diagnostics.retained_bytes, 0);
+        assert_eq!(diagnostics.rejections, 2);
+        TEXT_MEASURER.with(|measurer| {
+            assert!(measurer.borrow().plain.keys().all(|key| key.text != secret));
+        });
+    });
+}
+
+#[test]
+#[ignore = "release-mode visual caret lookup workload"]
+fn visual_caret_index_release_workload_is_materially_faster_than_linear_lookup() {
+    use std::time::Instant;
+
+    let text = "office שלום 👩🏽‍💻 ".repeat(512);
+    let layout = shape_plain_text(
+        &text,
+        1.0,
+        false,
+        false,
+        None,
+        Some(1),
+        f32::INFINITY,
+        TextRetention::Public,
+    );
+    let carets = &layout.visual_lines[0].carets;
+    let width = layout.line_widths[0].max(1.0);
+    let samples = (0..20_000)
+        .map(|sample| (sample as f32 * 17.0) % width)
+        .collect::<Vec<_>>();
+
+    let indexed_started = Instant::now();
+    let mut indexed_checksum = 0_usize;
+    for x in &samples {
+        indexed_checksum ^= std::hint::black_box(layout.offset_at_x(0, *x).unwrap_or(0));
+    }
+    let indexed = indexed_started.elapsed();
+
+    let linear_started = Instant::now();
+    let mut linear_checksum = 0_usize;
+    for x in &samples {
+        let after = carets.iter().position(|caret| caret.x >= *x);
+        let offset = match after {
+            Some(0) => carets[0].offset,
+            Some(after) => {
+                let previous = carets[after - 1];
+                let next = carets[after];
+                if *x - previous.x <= next.x - *x {
+                    previous.offset
+                } else {
+                    next.offset
+                }
+            }
+            None => carets.last().map_or(0, |caret| caret.offset),
+        };
+        linear_checksum ^= std::hint::black_box(offset);
+    }
+    let linear = linear_started.elapsed();
+
+    assert_eq!(indexed_checksum, linear_checksum);
+    eprintln!(
+        "visual caret lookup: carets={} samples={} indexed={indexed:?} linear={linear:?}",
+        carets.len(),
+        samples.len()
+    );
+    assert!(
+        indexed.as_nanos().saturating_mul(4) < linear.as_nanos(),
+        "indexed lookup must be at least 4x faster: indexed={indexed:?}, linear={linear:?}"
+    );
 }
 
 #[test]

@@ -8,7 +8,10 @@
 use std::{
     collections::{HashMap, VecDeque},
     hash::{Hash, Hasher},
-    sync::{Arc, Mutex, MutexGuard, OnceLock},
+    sync::{
+        Arc, Mutex, MutexGuard, OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Instant,
 };
 
@@ -24,9 +27,18 @@ pub use nickel_core::resource_owner::{
 struct ProcessFontSystemOwner {
     _owner: DependencyOwnerToken,
     font_system: Mutex<FontSystem>,
+    generation: AtomicU64,
 }
 
 static PROCESS_FONT_SYSTEM: OnceLock<ProcessFontSystemOwner> = OnceLock::new();
+
+fn process_font_system_owner() -> &'static ProcessFontSystemOwner {
+    PROCESS_FONT_SYSTEM.get_or_init(|| ProcessFontSystemOwner {
+        _owner: DependencyOwnerToken::new_cosmic_text_font_system(),
+        font_system: Mutex::new(FontSystem::new()),
+        generation: AtomicU64::new(1),
+    })
+}
 
 /// A handle to Nickel's single process-wide cosmic-text font system.
 ///
@@ -43,14 +55,30 @@ impl ProcessFontSystem {
     }
 
     pub fn lock(self) -> MutexGuard<'static, FontSystem> {
-        PROCESS_FONT_SYSTEM
-            .get_or_init(|| ProcessFontSystemOwner {
-                _owner: DependencyOwnerToken::new_cosmic_text_font_system(),
-                font_system: Mutex::new(FontSystem::new()),
-            })
+        process_font_system_owner()
             .font_system
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Generation of installed-font and fallback resolution authority.
+    ///
+    /// Font registration code must call [`Self::invalidate_resolution`] after
+    /// mutating the shared database so derived layout caches cannot reuse
+    /// entries shaped against an obsolete fallback chain.
+    #[must_use]
+    pub fn generation(self) -> u64 {
+        process_font_system_owner()
+            .generation
+            .load(Ordering::Acquire)
+    }
+
+    /// Invalidates every generation-aware derived font/layout cache.
+    pub fn invalidate_resolution(self) -> u64 {
+        process_font_system_owner()
+            .generation
+            .fetch_add(1, Ordering::AcqRel)
+            .saturating_add(1)
     }
 }
 

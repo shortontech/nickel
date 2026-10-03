@@ -190,26 +190,13 @@ fn text_offset_at<Message>(input: &TextInputRegion<Message>, point: Point) -> us
         None,
         Some(1),
         f32::INFINITY,
-        !input.secure,
+        if input.secure {
+            TextRetention::Protected
+        } else {
+            TextRetention::Public
+        },
     );
-    let nearest = layout.clusters.iter().min_by(|left, right| {
-        let distance = |cluster: &TextClusterPosition| {
-            if target < cluster.x {
-                cluster.x - target
-            } else if target > cluster.x + cluster.width {
-                target - (cluster.x + cluster.width)
-            } else {
-                0.0
-            }
-        };
-        distance(left).total_cmp(&distance(right))
-    });
-    if let Some(cluster) = nearest {
-        let before = target < cluster.x + cluster.width * 0.5;
-        let offset = match (cluster.rtl, before) {
-            (false, true) | (true, false) => cluster.start,
-            _ => cluster.end,
-        };
+    if let Some(offset) = layout.offset_at_x(0, target) {
         return line_start + grapheme_boundary_at_or_before(line, offset);
     }
     line_start + line.len()
@@ -6841,7 +6828,7 @@ fn shape_selection_glyphs(
         line_height,
         max_lines,
         if wrap { rect.size.width } else { f32::INFINITY },
-        true,
+        TextRetention::Public,
     );
     layout
         .clusters
