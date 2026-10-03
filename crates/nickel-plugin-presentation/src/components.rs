@@ -4463,13 +4463,11 @@ fn find_handler_slot(value: &Value, requested: &str) -> Option<(String, String)>
         if let (Some(id), Some(slots)) = (
             object.get("__nativeId").and_then(Value::as_str),
             object.get("__handlerSlots").and_then(Value::as_object),
-        ) {
-            if let Some((event, _)) = slots
-                .iter()
-                .find(|(_, slot)| slot.as_str() == Some(requested))
-            {
-                return Some((id.to_owned(), event.clone()));
-            }
+        ) && let Some((event, _)) = slots
+            .iter()
+            .find(|(_, slot)| slot.as_str() == Some(requested))
+        {
+            return Some((id.to_owned(), event.clone()));
         }
         if let Some(found) = object
             .get("children")
@@ -4537,15 +4535,12 @@ fn typed_children_mut(node: &mut PanelNode) -> Result<&mut Vec<PanelNode>, Strin
     }
 }
 
-fn index_native_source(
-    source: &Value,
-) -> Result<
-    (
-        BTreeMap<NativeNodeId, String>,
-        BTreeMap<HandlerSlotId, usize>,
-    ),
-    String,
-> {
+type NativeSourceIndex = (
+    BTreeMap<NativeNodeId, String>,
+    BTreeMap<HandlerSlotId, usize>,
+);
+
+fn index_native_source(source: &Value) -> Result<NativeSourceIndex, String> {
     fn visit(
         value: &Value,
         nodes: &mut BTreeMap<NativeNodeId, String>,
@@ -4862,10 +4857,7 @@ pub fn render_retained_panel_validated(
 ) -> Result<RetainedPanelTree, String> {
     runtime.render(expression, |value| {
         let retained = RetainedPanelTree::admit(value, manifest, expected_surface_id, generation)
-            .map_err(|error| {
-            *validation_rejected = true;
-            error
-        })?;
+            .inspect_err(|_| *validation_rejected = true)?;
         if let Some(surface_id) = expected_surface_id {
             let grant = manifest
                 .surfaces
@@ -4878,10 +4870,7 @@ pub fn render_retained_panel_validated(
             retained
                 .node()
                 .requested_surface(grant, stylesheet)
-                .map_err(|error| {
-                    *validation_rejected = true;
-                    error
-                })?;
+                .inspect_err(|_| *validation_rejected = true)?;
         }
         Ok(retained)
     })

@@ -1,4 +1,7 @@
-use std::time::{Duration, Instant};
+use std::time::Instant;
+
+#[cfg(target_os = "windows")]
+use std::time::Duration;
 
 use nickel_input::{
     AggregateModifier, InputEvent, KeyCode, KeyEdge, PhysicalKey, PointerButton, PointerEvent,

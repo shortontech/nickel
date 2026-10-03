@@ -816,7 +816,9 @@ impl ShellCompositionRuntime {
             self.retire(&owner);
         }
         for owner in owners {
-            if !self.packages.contains_key(&owner) {
+            if let std::collections::btree_map::Entry::Vacant(entry) =
+                self.packages.entry(owner.clone())
+            {
                 let context = &contexts[&owner];
                 if context.owner != owner
                     || context.package.source_digest != catalog[&owner.id].source_digest()
@@ -824,7 +826,7 @@ impl ShellCompositionRuntime {
                 {
                     return Err("provider context identity mismatch".into());
                 }
-                self.packages.insert(owner, context.package.clone());
+                entry.insert(context.package.clone());
             }
         }
         self.resolution = next;
@@ -1916,6 +1918,7 @@ impl ShellCompositionRuntime {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn expand_node(
         &mut self,
         path: &str,
@@ -2362,14 +2365,13 @@ impl ShellCompositionRuntime {
             return Err("foreign or retired component mount".into());
         }
         let reference = &self.mounts[&mount.id].reference;
-        if let Some(id) = reference.implementation.strip_prefix("@settings-page/") {
-            if self
+        if let Some(id) = reference.implementation.strip_prefix("@settings-page/")
+            && self
                 .packages
                 .get(&reference.owner)
                 .is_none_or(|package| !package.runtime.borrow().has_registered_page(id))
-            {
-                return Err("Settings page is no longer published by its owner".into());
-            }
+        {
+            return Err("Settings page is no longer published by its owner".into());
         }
         Ok(())
     }
@@ -3380,6 +3382,7 @@ fn validate_native_metadata(
     }
     Ok(())
 }
+#[allow(clippy::too_many_arguments)]
 fn rewrite_events(
     value: &mut Value,
     runtime: u64,

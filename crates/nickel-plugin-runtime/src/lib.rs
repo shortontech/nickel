@@ -3306,11 +3306,10 @@ mod tests {
     fn plugins_clients_copy_inventory_and_emit_guarded_lifecycle_requests() {
         let mut runtime = super::JsxRuntime::new("", Some(r#"{"plugins":{"available":true,"writable":true,"revision":"9007199254740993","plugins":[{"id":"example","enabled":true,"memory":{"jsHeapBytes":null}}]}}"#)).unwrap();
         runtime.eval("nickel.plugins.list()[0].enabled=false; nickel.plugins.disable('example','9007199254740993');").unwrap();
-        assert_eq!(
+        assert!(
             runtime
                 .eval_json::<bool>("JSON.stringify(nickel.plugins.list()[0].enabled)")
-                .unwrap(),
-            true
+                .unwrap()
         );
         let effects = runtime.take_effects().unwrap();
         assert_eq!(
@@ -3334,11 +3333,10 @@ mod tests {
         );
         let mut denied = super::JsxRuntime::new("", None).unwrap();
         assert!(denied.eval("nickel.plugins.enable('example','1')").is_err());
-        assert_eq!(
-            denied
+        assert!(
+            !denied
                 .eval_json::<bool>("JSON.stringify(nickel.plugins.get().available)")
-                .unwrap(),
-            false
+                .unwrap()
         );
     }
 
@@ -3461,11 +3459,10 @@ mod tests {
                 .eval("nickel.wifi.connect('stable-profile')")
                 .is_err()
         );
-        assert_eq!(
-            denied
+        assert!(
+            !denied
                 .eval_json::<bool>("nickel.bluetooth.get().available")
-                .unwrap(),
-            false
+                .unwrap()
         );
     }
 
@@ -3652,11 +3649,10 @@ mod tests {
     #[test]
     fn displays_facade_reads_latest_host_snapshot_and_emits_layout_effect() {
         let mut runtime = JsxRuntime::new("", None).unwrap();
-        assert_eq!(
+        assert!(
             runtime
                 .eval_json::<bool>("nickel.displays.get() === undefined")
-                .unwrap(),
-            true
+                .unwrap()
         );
         runtime
             .set_data(r#"{"displays":{"generation":1,"outputs":[{"name":"HDMI-A-1"}]}}"#)

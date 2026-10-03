@@ -152,10 +152,10 @@ impl JsxPage {
 
 impl Drop for JsxPage {
     fn drop(&mut self) {
-        if let Some(scope) = &self.runtime_scope {
-            if let Ok(mut runtime) = self.runtime.try_borrow_mut() {
-                let _ = runtime.drop_surface(scope);
-            }
+        if let Some(scope) = &self.runtime_scope
+            && let Ok(mut runtime) = self.runtime.try_borrow_mut()
+        {
+            let _ = runtime.drop_surface(scope);
         }
     }
 }

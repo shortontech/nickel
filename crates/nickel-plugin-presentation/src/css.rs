@@ -1141,8 +1141,10 @@ impl StyleSheet {
         if let Some(style) = self.resolved.borrow().get(&key) {
             return style.clone();
         }
-        let mut style = ControlStyle::default();
-        style.ancestors = ancestors.to_vec();
+        let mut style = ControlStyle {
+            ancestors: ancestors.to_vec(),
+            ..ControlStyle::default()
+        };
         style.ancestors.push((
             kind.into(),
             id.map(str::to_owned),
