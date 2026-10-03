@@ -4162,11 +4162,19 @@ impl<A: Application> UiHost<A> {
         cancellation.telemetry.paint_fragments_rebuilt = cancellation
             .telemetry
             .paint_fragments_rebuilt
-            .saturating_add(resources.paint_fragment_count);
+            .saturating_add(resources.paint_nodes_executed);
+        cancellation.telemetry.paint_fragments_reused = cancellation
+            .telemetry
+            .paint_fragments_reused
+            .saturating_add(resources.paint_nodes_reused);
         cancellation.telemetry.semantic_nodes_rebuilt = cancellation
             .telemetry
             .semantic_nodes_rebuilt
-            .saturating_add(resources.accessibility_node_count);
+            .saturating_add(resources.semantic_nodes_executed);
+        cancellation.telemetry.semantic_nodes_reused = cancellation
+            .telemetry
+            .semantic_nodes_reused
+            .saturating_add(resources.semantic_nodes_reused);
         if focused_before
             .as_ref()
             .is_some_and(|id| self.tree.resolved_layout().find(id).is_none())
@@ -6537,6 +6545,7 @@ mod tests {
         nodes: usize,
         pointer_geometry: bool,
         ambiguous_effect: bool,
+        label_revision: u64,
     }
 
     impl RetainedPaintFixture {
@@ -6546,6 +6555,7 @@ mod tests {
                 nodes,
                 pointer_geometry: false,
                 ambiguous_effect: false,
+                label_revision: 0,
             }
         }
 
@@ -6569,9 +6579,21 @@ mod tests {
             self.views.set(self.views.get() + 1);
             let children = (0..self.nodes)
                 .map(|index| {
+                    let changed_label = index == self.nodes / 2 && self.label_revision % 2 == 1;
+                    let label_index = if changed_label {
+                        index.saturating_add(1)
+                    } else {
+                        index
+                    };
+                    let content_revision = (index as u64) << 32
+                        | if index == self.nodes / 2 {
+                            self.label_revision
+                        } else {
+                            0
+                        };
                     let item = crate::Component::into_element(
-                        Button::new((), format!("Item {index}"))
-                            .content_revision(index as u64)
+                        Button::new((), format!("Item {label_index}"))
+                            .content_revision(content_revision)
                             .id(format!("item-{index}")),
                     );
                     if self.ambiguous_effect {
@@ -6593,7 +6615,7 @@ mod tests {
         }
     }
 
-    fn semantic_center(host: &UiHost<RetainedPaintFixture>, name: &str) -> crate::Point {
+    fn semantic_center<A: Application>(host: &UiHost<A>, name: &str) -> crate::Point {
         let bounds = host
             .semantic_nodes()
             .into_iter()
@@ -6604,6 +6626,24 @@ mod tests {
             x: bounds.origin.x + bounds.size.width / 2.0,
             y: bounds.origin.y + bounds.size.height / 2.0,
         }
+    }
+
+    #[test]
+    fn declarative_rebuild_telemetry_reports_localized_retained_phase_work() {
+        const NODES: usize = 20;
+        let mut host = UiHost::new(RetainedPaintFixture::new(NODES), 900, 800);
+        host.application_mut().label_revision = 1;
+        let outcome = host.step(HostBatch {
+            application_changed: true,
+            ..HostBatch::default()
+        });
+
+        assert_eq!(outcome.telemetry.nodes_measured, 3);
+        assert_eq!(outcome.telemetry.nodes_placed, 3);
+        assert!(outcome.telemetry.paint_fragments_rebuilt < NODES);
+        assert!(outcome.telemetry.paint_fragments_reused >= NODES);
+        assert!(outcome.telemetry.semantic_nodes_rebuilt < NODES);
+        assert!(outcome.telemetry.semantic_nodes_reused >= NODES);
     }
 
     #[test]
@@ -6644,10 +6684,7 @@ mod tests {
         assert_eq!(diagnostics.clean_frames, 256);
     }
 
-    fn assert_cold_equivalent(
-        retained: &UiHost<RetainedPaintFixture>,
-        cold: &UiHost<RetainedPaintFixture>,
-    ) {
+    fn assert_cold_equivalent<A: Application>(retained: &UiHost<A>, cold: &UiHost<A>) {
         assert_eq!(retained.layout_snapshot(), cold.layout_snapshot());
         assert_eq!(retained.commands(), cold.commands());
         assert_eq!(retained.semantic_nodes(), cold.semantic_nodes());
@@ -6664,12 +6701,13 @@ mod tests {
     }
 
     fn rect_contains_pixel(rect: crate::Rect, x: u32, y: u32) -> bool {
-        let x = x as f32 + 0.5;
-        let y = y as f32 + 0.5;
-        x >= rect.origin.x
-            && y >= rect.origin.y
-            && x < rect.origin.x + rect.size.width
-            && y < rect.origin.y + rect.size.height
+        let left = rect.origin.x.floor();
+        let top = rect.origin.y.floor();
+        let right = (rect.origin.x + rect.size.width).ceil();
+        let bottom = (rect.origin.y + rect.size.height).ceil();
+        let x = x as f32;
+        let y = y as f32;
+        x >= left && y >= top && x < right && y < bottom
     }
 
     fn rects_intersect(left: crate::Rect, right: crate::Rect) -> bool {
@@ -6848,7 +6886,8 @@ mod tests {
 
         assert!(outcome.telemetry.rebuilt);
         assert_eq!(outcome.telemetry.retained_paint_refreshes, 0);
-        assert_eq!(outcome.telemetry.semantic_nodes_reused, 0);
+        assert_eq!(outcome.telemetry.semantic_nodes_reused, 1);
+        assert!(outcome.telemetry.semantic_nodes_rebuilt > 0);
         assert_eq!(outcome.telemetry.view_calls, 1);
         assert!(outcome.telemetry.nodes_measured > 0);
         assert!(outcome.telemetry.nodes_placed > 0);
@@ -6885,7 +6924,8 @@ mod tests {
 
         assert!(outcome.telemetry.rebuilt);
         assert_eq!(outcome.telemetry.retained_paint_refreshes, 0);
-        assert_eq!(outcome.telemetry.semantic_nodes_reused, 0);
+        assert_eq!(outcome.telemetry.semantic_nodes_reused, 2);
+        assert_eq!(outcome.telemetry.semantic_nodes_rebuilt, 1);
         assert_eq!(outcome.telemetry.view_calls, 1);
         // The changed view context still requires declarative reconciliation,
         // but unchanged fixed geometry is retained across that rebuild.
@@ -6899,89 +6939,405 @@ mod tests {
     #[test]
     #[ignore = "release-profile retained-paint admission benchmark"]
     fn retained_paint_release_admission_avoids_cold_work_and_is_materially_faster() {
-        use crate::release_admission::{AdmissionReport, DurationDistribution};
+        use crate::release_admission::AdmissionReport;
 
-        const NODES: usize = 800;
-        const ITERATIONS: usize = 1;
-        const SAMPLES: usize = 5;
+        const NODES: usize = 2_000;
+        const LEAVES: usize = NODES - 1;
+        const CHANGED_LABEL: usize = LEAVES / 2;
+        const SAMPLES: usize = 31;
 
-        let mut retained = UiHost::new(RetainedPaintFixture::new(NODES), 900, 800);
+        struct AdmissionFixture {
+            label_revision: u64,
+        }
+
+        impl Application for AdmissionFixture {
+            type Message = ();
+
+            fn update(&mut self, (): Self::Message) {}
+
+            fn view(&self, _context: ViewContext) -> impl crate::View<Self::Message> {
+                crate::Column::new().children((0..LEAVES).map(|index| {
+                    if index == CHANGED_LABEL {
+                        let label = if self.label_revision % 2 == 0 {
+                            "Mutable label A"
+                        } else {
+                            "Mutable label B"
+                        };
+                        crate::Text::new(label)
+                            .id(format!("item-{index}"))
+                            .content_revision(self.label_revision)
+                            .height(1.0)
+                            .message(())
+                            .accessibility_label(label)
+                            .semantic_role(crate::SemanticRole::Button)
+                    } else {
+                        Container::new()
+                            .id(format!("item-{index}"))
+                            .height(1.0)
+                            .background(0xff20_2630)
+                            .interaction_backgrounds(0xff35_4250, 0xff4a_5a6a)
+                            .message(())
+                            .accessibility_label(format!("Item {index}"))
+                            .semantic_role(crate::SemanticRole::Button)
+                            .content_revision(index as u64)
+                    }
+                }))
+            }
+        }
+
+        #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+        struct Work {
+            view_calls: usize,
+            nodes_measured: usize,
+            nodes_placed: usize,
+            paint_commands_emitted: usize,
+            paint_fragments_rebuilt: usize,
+            paint_fragments_reused: usize,
+            paint_damage_rects: usize,
+            semantic_nodes_rebuilt: usize,
+            semantic_nodes_reused: usize,
+            retained_paint_refreshes: usize,
+        }
+
+        impl From<crate::HostTelemetry> for Work {
+            fn from(value: crate::HostTelemetry) -> Self {
+                Self {
+                    view_calls: value.view_calls,
+                    nodes_measured: value.nodes_measured,
+                    nodes_placed: value.nodes_placed,
+                    paint_commands_emitted: value.paint_commands_emitted,
+                    paint_fragments_rebuilt: value.paint_fragments_rebuilt,
+                    paint_fragments_reused: value.paint_fragments_reused,
+                    paint_damage_rects: value.paint_damage_rects,
+                    semantic_nodes_rebuilt: value.semantic_nodes_rebuilt,
+                    semantic_nodes_reused: value.semantic_nodes_reused,
+                    retained_paint_refreshes: value.retained_paint_refreshes,
+                }
+            }
+        }
+
+        fn assert_damage_covers_changes<Pixel: PartialEq>(
+            before: &[Pixel],
+            after: &[Pixel],
+            damage: &crate::DamageRegion,
+            width: u32,
+        ) {
+            for (index, (before, after)) in before.iter().zip(after).enumerate() {
+                if before != after {
+                    let x = index as u32 % width;
+                    let y = index as u32 / width;
+                    assert!(
+                        damage
+                            .rects
+                            .iter()
+                            .any(|rect| rect_contains_pixel(*rect, x, y)),
+                        "changed pixel ({x}, {y}) escaped retained damage {damage:?}"
+                    );
+                }
+            }
+        }
+
+        fn assert_stable_work(
+            slot: &mut Option<Work>,
+            work: crate::HostTelemetry,
+            phase: &str,
+        ) -> Work {
+            let work = Work::from(work);
+            if let Some(expected) = slot {
+                assert_eq!(
+                    *expected, work,
+                    "{phase} native work changed between samples"
+                );
+            } else {
+                *slot = Some(work);
+            }
+            work
+        }
+
+        fn cold_host(label_revision: u64, width: u32, height: u32) -> UiHost<AdmissionFixture> {
+            let mut cold = UiHost::new(AdmissionFixture { label_revision }, width, height);
+            assert!(cold.adopt_input_modality(InputModality::Pointer));
+            cold.request_focus(UiId::from("root/item-0"));
+            cold.rebuild();
+            cold
+        }
+
+        let mut retained = UiHost::new(AdmissionFixture { label_revision: 0 }, 900, 800);
         assert!(retained.adopt_input_modality(InputModality::Pointer));
         let inside = semantic_center(&retained, "Item 0");
         let outside = crate::Point { x: -1.0, y: -1.0 };
+        let (width, height) = retained.render_frame().logical_size;
+        let mut retained_raster = crate::SoftwareRenderer::new(width, height, 1.0);
+        retained.render_software(&mut retained_raster);
 
-        for index in 0..8 {
-            let point = if index % 2 == 0 { inside } else { outside };
-            let outcome = retained.handle_event(UiEvent::PointerMoved(point));
-            assert_eq!(outcome.telemetry.view_calls, 0);
-            assert_eq!(outcome.telemetry.nodes_measured, 0);
-            assert_eq!(outcome.telemetry.nodes_placed, 0);
-            assert_eq!(outcome.telemetry.semantic_nodes_rebuilt, 0);
-            assert_eq!(
-                outcome.telemetry.semantic_nodes_reused,
-                retained.inspect().resources.accessibility_node_count
-            );
-            assert!(outcome.telemetry.paint_fragments_rebuilt > 0);
-            assert!(outcome.telemetry.paint_fragments_reused > 0);
-            assert_eq!(outcome.telemetry.retained_paint_refreshes, 1);
+        // Warm every transition and leave stable focus authority in place before
+        // measuring. This excludes one-time renderer, focus, and cache admission.
+        for point in [inside, outside, inside] {
+            retained.handle_event(UiEvent::PointerMoved(point));
+            retained.render_software(&mut retained_raster);
         }
+        retained.handle_event(UiEvent::PointerPressed(inside));
+        retained.render_software(&mut retained_raster);
+        retained.handle_event(UiEvent::PointerCancelled);
+        retained.handle_event(UiEvent::PointerMoved(outside));
+        retained.render_software(&mut retained_raster);
+        for revision in [1, 0] {
+            retained.application_mut().label_revision = revision;
+            retained.step(HostBatch {
+                application_changed: true,
+                ..HostBatch::default()
+            });
+            retained.render_software(&mut retained_raster);
+        }
+        let mut unchanged_samples = Vec::with_capacity(SAMPLES);
+        let mut hover_samples = Vec::with_capacity(SAMPLES);
+        let mut press_samples = Vec::with_capacity(SAMPLES);
+        let mut one_label_samples = Vec::with_capacity(SAMPLES);
+        let mut unchanged_work = None;
+        let mut hover_work = None;
+        let mut press_work = None;
+        let mut label_work = None;
+        let mut label_damage_rects = None;
+        let mut label_revision = 0_u64;
 
-        let mut retained_samples = Vec::with_capacity(SAMPLES);
-        let mut cold_samples = Vec::with_capacity(SAMPLES);
         for sample in 0..SAMPLES {
-            let retained_started = Instant::now();
-            for index in 0..ITERATIONS {
-                let point = if (sample * ITERATIONS + index) % 2 == 0 {
-                    inside
-                } else {
-                    outside
-                };
-                let outcome = retained.handle_event(UiEvent::PointerMoved(point));
-                assert_eq!(outcome.telemetry.view_calls, 0);
-                assert_eq!(outcome.telemetry.nodes_measured, 0);
-                assert_eq!(outcome.telemetry.nodes_placed, 0);
-                assert_eq!(outcome.telemetry.semantic_nodes_rebuilt, 0);
-                assert_eq!(
-                    outcome.telemetry.semantic_nodes_reused,
-                    retained.inspect().resources.accessibility_node_count
-                );
-                assert!(outcome.telemetry.paint_fragments_rebuilt > 0);
-                assert!(outcome.telemetry.paint_fragments_reused > 0);
-                assert_eq!(outcome.telemetry.retained_paint_refreshes, 1);
-                std::hint::black_box(retained.commands());
+            let before = (sample == 0).then(|| retained_raster.pixels().to_vec());
+            let started = Instant::now();
+            let outcome = retained.step(HostBatch::default());
+            unchanged_samples.push(started.elapsed());
+            let work = assert_stable_work(&mut unchanged_work, outcome.telemetry, "unchanged");
+            assert_eq!(
+                work,
+                Work {
+                    view_calls: 0,
+                    nodes_measured: 0,
+                    nodes_placed: 0,
+                    paint_commands_emitted: 0,
+                    paint_fragments_rebuilt: 0,
+                    paint_fragments_reused: 0,
+                    paint_damage_rects: 0,
+                    semantic_nodes_rebuilt: 0,
+                    semantic_nodes_reused: 0,
+                    retained_paint_refreshes: 0,
+                }
+            );
+            if let Some(before) = before {
+                let damage = retained.render_software(&mut retained_raster);
+                assert!(damage.is_empty());
+                assert_eq!(before, retained_raster.pixels());
+                let cold = cold_host(label_revision, width, height);
+                assert_cold_equivalent(&retained, &cold);
             }
-            retained_samples.push(retained_started.elapsed());
 
-            let cold_started = Instant::now();
-            for _ in 0..ITERATIONS {
-                let cold = UiHost::new(RetainedPaintFixture::new(NODES), 900, 800);
-                let resources = cold.inspect().resources;
-                assert!(resources.nodes_measured >= NODES);
-                assert!(resources.nodes_placed >= NODES);
+            let point = inside;
+            let before = (sample == 0).then(|| retained_raster.pixels().to_vec());
+            let started = Instant::now();
+            let outcome = retained.handle_event(UiEvent::PointerMoved(point));
+            hover_samples.push(started.elapsed());
+            let work = assert_stable_work(&mut hover_work, outcome.telemetry, "hover");
+            assert_eq!(work.view_calls, 0);
+            assert_eq!(work.nodes_measured, 0);
+            assert_eq!(work.nodes_placed, 0);
+            assert_eq!(work.semantic_nodes_rebuilt, 0);
+            assert_eq!(work.retained_paint_refreshes, 1);
+            assert!(work.paint_fragments_rebuilt > 0);
+            assert!(work.paint_fragments_reused > 0);
+            if let Some(before) = before {
+                let damage = retained.render_software(&mut retained_raster);
+                assert_eq!(damage.rects.len(), work.paint_damage_rects);
+                assert_damage_covers_changes(&before, retained_raster.pixels(), &damage, width);
+                let mut cold = cold_host(label_revision, width, height);
+                cold.handle_event(UiEvent::PointerMoved(point));
+                cold.rebuild();
+                assert_cold_equivalent(&retained, &cold);
+            }
+
+            // Press always begins over the same target. Moving there is setup,
+            // not part of the measured press transition.
+            let before = (sample == 0).then(|| retained_raster.pixels().to_vec());
+            let started = Instant::now();
+            let outcome = retained.handle_event(UiEvent::PointerPressed(inside));
+            press_samples.push(started.elapsed());
+            let work = assert_stable_work(&mut press_work, outcome.telemetry, "press");
+            assert_eq!(work.nodes_measured, 0);
+            assert_eq!(work.nodes_placed, 0);
+            assert_eq!(work.semantic_nodes_rebuilt, 0);
+            assert_eq!(work.retained_paint_refreshes, 1);
+            assert!(work.paint_fragments_rebuilt > 0);
+            assert!(work.paint_fragments_reused > 0);
+            if let Some(before) = before {
+                let damage = retained.render_software(&mut retained_raster);
+                assert_eq!(damage.rects.len(), work.paint_damage_rects);
+                assert_damage_covers_changes(&before, retained_raster.pixels(), &damage, width);
+                let mut cold = cold_host(label_revision, width, height);
+                cold.handle_event(UiEvent::PointerMoved(inside));
+                cold.handle_event(UiEvent::PointerPressed(inside));
+                cold.rebuild();
+                assert_cold_equivalent(&retained, &cold);
+            }
+            retained.handle_event(UiEvent::PointerCancelled);
+            retained.handle_event(UiEvent::PointerMoved(outside));
+            if sample == 0 {
+                retained.render_software(&mut retained_raster);
+            }
+
+            label_revision ^= 1;
+            let before = (sample == 0).then(|| retained_raster.pixels().to_vec());
+            retained.application_mut().label_revision = label_revision;
+            let started = Instant::now();
+            let outcome = retained.step(HostBatch {
+                application_changed: true,
+                ..HostBatch::default()
+            });
+            one_label_samples.push(started.elapsed());
+            let work = assert_stable_work(&mut label_work, outcome.telemetry, "one label");
+            assert_eq!(work.nodes_measured, 2);
+            assert_eq!(work.nodes_placed, 2);
+            assert_eq!(work.paint_fragments_rebuilt, 2);
+            assert_eq!(work.paint_fragments_reused, NODES - 2);
+            assert_eq!(work.semantic_nodes_rebuilt, 2);
+            assert_eq!(work.semantic_nodes_reused, NODES - 2);
+            if let Some(before) = before {
+                let damage = retained.render_software(&mut retained_raster);
+                assert!(!damage.is_empty());
+                if let Some(expected) = label_damage_rects {
+                    assert_eq!(expected, damage.rects.len());
+                } else {
+                    label_damage_rects = Some(damage.rects.len());
+                }
+                assert_damage_covers_changes(&before, retained_raster.pixels(), &damage, width);
+            }
+            if sample == 0 {
+                let cold = cold_host(label_revision, width, height);
+                assert_cold_equivalent(&retained, &cold);
                 std::hint::black_box(cold.commands());
             }
-            cold_samples.push(cold_started.elapsed());
         }
 
-        AdmissionReport::new("retained_paint", "800_node_hover")
-            .metadata("nodes", NODES)
-            .metadata("iterations_per_sample", ITERATIONS)
-            .metadata("samples", SAMPLES)
-            .work("retained_view_calls", 0)
-            .work("retained_nodes_measured", 0)
-            .work("retained_nodes_placed", 0)
-            .work("retained_semantic_nodes_rebuilt", 0)
-            .work("retained_paint_refreshes", 1)
-            .work("cold_view_calls", 1)
-            .timings("retained_batch", &retained_samples)
-            .timings("cold_batch", &cold_samples)
-            .emit();
-        let retained_p95 = DurationDistribution::from_samples(&retained_samples).p95;
-        let cold_p95 = DurationDistribution::from_samples(&cold_samples).p95;
-        assert!(
-            retained_p95.as_nanos().saturating_mul(5) <= cold_p95.as_nanos().saturating_mul(4),
-            "retained paint p95 must be at least 20% faster: retained={retained_p95:?}, cold={cold_p95:?}"
-        );
+        let unchanged_work = unchanged_work.expect("unchanged work sample");
+        let hover_work = hover_work.expect("hover work sample");
+        let press_work = press_work.expect("press work sample");
+        let label_work = label_work.expect("label work sample");
+        let label_damage_rects = label_damage_rects.expect("label damage sample");
+        AdmissionReport::new(
+            "retained_paint",
+            "2000_node_unchanged_hover_press_and_one_label",
+        )
+        .metadata("nodes", NODES)
+        .metadata("samples", SAMPLES)
+        .work("unchanged_view_calls", unchanged_work.view_calls)
+        .work("unchanged_nodes_measured", unchanged_work.nodes_measured)
+        .work("unchanged_nodes_placed", unchanged_work.nodes_placed)
+        .work(
+            "unchanged_paint_commands_emitted",
+            unchanged_work.paint_commands_emitted,
+        )
+        .work(
+            "unchanged_paint_fragments_rebuilt",
+            unchanged_work.paint_fragments_rebuilt,
+        )
+        .work(
+            "unchanged_semantic_nodes_rebuilt",
+            unchanged_work.semantic_nodes_rebuilt,
+        )
+        .work(
+            "unchanged_semantic_nodes_reused",
+            unchanged_work.semantic_nodes_reused,
+        )
+        .work(
+            "unchanged_retained_paint_refreshes",
+            unchanged_work.retained_paint_refreshes,
+        )
+        .work("unchanged_damage_rects", unchanged_work.paint_damage_rects)
+        .work("hover_view_calls", hover_work.view_calls)
+        .work("hover_nodes_measured", hover_work.nodes_measured)
+        .work("hover_nodes_placed", hover_work.nodes_placed)
+        .work(
+            "hover_paint_commands_emitted",
+            hover_work.paint_commands_emitted,
+        )
+        .work(
+            "hover_paint_fragments_rebuilt",
+            hover_work.paint_fragments_rebuilt,
+        )
+        .work(
+            "hover_paint_fragments_reused",
+            hover_work.paint_fragments_reused,
+        )
+        .work(
+            "hover_semantic_nodes_rebuilt",
+            hover_work.semantic_nodes_rebuilt,
+        )
+        .work(
+            "hover_semantic_nodes_reused",
+            hover_work.semantic_nodes_reused,
+        )
+        .work(
+            "hover_retained_paint_refreshes",
+            hover_work.retained_paint_refreshes,
+        )
+        .work("hover_damage_rects", hover_work.paint_damage_rects)
+        .work("press_view_calls", press_work.view_calls)
+        .work("press_nodes_measured", press_work.nodes_measured)
+        .work("press_nodes_placed", press_work.nodes_placed)
+        .work(
+            "press_paint_commands_emitted",
+            press_work.paint_commands_emitted,
+        )
+        .work(
+            "press_paint_fragments_rebuilt",
+            press_work.paint_fragments_rebuilt,
+        )
+        .work(
+            "press_paint_fragments_reused",
+            press_work.paint_fragments_reused,
+        )
+        .work(
+            "press_semantic_nodes_rebuilt",
+            press_work.semantic_nodes_rebuilt,
+        )
+        .work(
+            "press_semantic_nodes_reused",
+            press_work.semantic_nodes_reused,
+        )
+        .work(
+            "press_retained_paint_refreshes",
+            press_work.retained_paint_refreshes,
+        )
+        .work("press_damage_rects", press_work.paint_damage_rects)
+        .work("one_label_view_calls", label_work.view_calls)
+        .work("one_label_nodes_measured", label_work.nodes_measured)
+        .work("one_label_nodes_placed", label_work.nodes_placed)
+        .work(
+            "one_label_paint_commands_emitted",
+            label_work.paint_commands_emitted,
+        )
+        .work(
+            "one_label_paint_fragments_rebuilt",
+            label_work.paint_fragments_rebuilt,
+        )
+        .work(
+            "one_label_paint_fragments_reused",
+            label_work.paint_fragments_reused,
+        )
+        .work(
+            "one_label_semantic_nodes_rebuilt",
+            label_work.semantic_nodes_rebuilt,
+        )
+        .work(
+            "one_label_semantic_nodes_reused",
+            label_work.semantic_nodes_reused,
+        )
+        .work(
+            "one_label_retained_paint_refreshes",
+            label_work.retained_paint_refreshes,
+        )
+        .work("one_label_damage_rects", label_damage_rects)
+        .timings("unchanged", &unchanged_samples)
+        .timings("hover", &hover_samples)
+        .timings("press", &press_samples)
+        .timings("one_label", &one_label_samples)
+        .emit();
     }
 
     #[test]

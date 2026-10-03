@@ -544,6 +544,7 @@ pub struct UiFrame<Message = String> {
     hits: Vec<HitRegion<Message>>,
     overlay_hits: Vec<HitRegion<Message>>,
     messages: Vec<MessageRegion<Message>>,
+    message_indices: HashMap<UiId, Vec<usize>>,
     context_messages: Vec<MessageRegion<Message>>,
     focus_messages: Vec<(UiId, Option<Message>, Option<Message>)>,
     text_inputs: Vec<TextInputRegion<Message>>,
@@ -553,8 +554,11 @@ pub struct UiFrame<Message = String> {
     scrolls: Vec<ScrollRegion<Message>>,
     grids: Vec<ResolvedGrid>,
     accessibility: Vec<AccessibilityNode>,
+    accessibility_indices: HashMap<UiId, usize>,
     semantic_role_name_index: HashMap<(SemanticRole, String), Vec<usize>>,
     semantic_parents: Vec<Option<usize>>,
+    resolved_indices: HashMap<UiId, usize>,
+    navigation_owners: HashMap<UiId, UiId>,
     navigation_depths: Vec<usize>,
     resolved: ResolvedLayout,
     diagnostics: Vec<LayoutDiagnostic>,
@@ -592,6 +596,7 @@ impl<Message> Default for UiFrame<Message> {
             hits: Vec::new(),
             overlay_hits: Vec::new(),
             messages: Vec::new(),
+            message_indices: HashMap::new(),
             context_messages: Vec::new(),
             focus_messages: Vec::new(),
             text_inputs: Vec::new(),
@@ -601,8 +606,11 @@ impl<Message> Default for UiFrame<Message> {
             scrolls: Vec::new(),
             grids: Vec::new(),
             accessibility: Vec::new(),
+            accessibility_indices: HashMap::new(),
             semantic_role_name_index: HashMap::new(),
             semantic_parents: Vec::new(),
+            resolved_indices: HashMap::new(),
+            navigation_owners: HashMap::new(),
             navigation_depths: Vec::new(),
             resolved: ResolvedLayout::default(),
             diagnostics: Vec::new(),
@@ -960,8 +968,15 @@ impl<Message: Clone> UiFrame<Message> {
     }
 
     pub(crate) fn finalize_transient_layers(&mut self, state: &UiStateStore) {
+        let semantic_interaction_changed = self.resolved.nodes.iter().any(|node| {
+            node.interaction.focused != (state.focused() == Some(&node.id))
+                || node.interaction.controller_selected
+                    != (state.navigation().controller_selected() == Some(&node.id))
+        });
         self.apply_interaction_state(state);
-        self.emit_accessibility_geometry(None);
+        if semantic_interaction_changed || self.active_overlay_kind.is_some() {
+            self.emit_accessibility_geometry(None);
+        }
         self.validate_clip_commands();
     }
 
@@ -1837,6 +1852,15 @@ impl<Message: Clone> UiFrame<Message> {
                         .collect()
                 })
                 .unwrap_or_default(),
+            semantic_parents: previous
+                .map(|previous| previous.semantic_parents.clone())
+                .unwrap_or_default(),
+            resolved_indices: previous
+                .map(|previous| previous.resolved_indices.clone())
+                .unwrap_or_default(),
+            navigation_owners: previous
+                .map(|previous| previous.navigation_owners.clone())
+                .unwrap_or_default(),
             ..Self::default()
         };
         tree.retained_nodes.reconcile(&root);
@@ -1891,7 +1915,6 @@ impl<Message: Clone> UiFrame<Message> {
         {
             tree.move_controller(state, 1, true);
         }
-        tree.emit_accessibility_geometry(previous);
         tree.validate_clip_commands();
         for scroll in &tree.scrolls {
             let transient = state.touch(scroll.id.clone());
@@ -1906,6 +1929,7 @@ impl<Message: Clone> UiFrame<Message> {
         state.end_frame();
         state.reconcile_live_targets();
         tree.apply_interaction_state(state);
+        tree.emit_accessibility_geometry(previous);
         for node in tree.resolved.nodes() {
             tree.retained_nodes
                 .capture_layout(&node.id, node.preferred, node.allocated);
@@ -2145,8 +2169,15 @@ impl<Message: Clone> UiFrame<Message> {
         if !self.retained_layout.contains_key(id) {
             return false;
         }
-        for hit in &previous.hits {
-            if previous.is_descendant_or_self(id, &hit.id) {
+        let subtree_nodes = self.retained_nodes.subtree_node_count(id).unwrap_or(1);
+        if subtree_nodes == 1 {
+            if let Some(hit) = previous
+                .resolved_indices
+                .get(id)
+                .and_then(|index| previous.resolved.nodes.get(*index))
+                .and_then(|node| node.hit_stack)
+                .and_then(|index| previous.hits.get(index))
+            {
                 let current_index = self.hits.len();
                 let mut hit = hit.clone();
                 hit.rect = translate_rect(hit.rect, translation);
@@ -2160,18 +2191,42 @@ impl<Message: Clone> UiFrame<Message> {
                     node.hit_stack = Some(current_index);
                 }
             }
-        }
-        self.messages.extend(
-            previous
-                .messages
-                .iter()
-                .filter(|region| previous.is_descendant_or_self(id, &region.id))
-                .cloned()
-                .map(|mut region| {
+            if let Some(indices) = previous.message_indices.get(id) {
+                self.messages.extend(indices.iter().filter_map(|index| {
+                    let mut region = previous.messages.get(*index)?.clone();
                     region.rect = translate_rect(region.rect, translation);
-                    region
-                }),
-        );
+                    Some(region)
+                }));
+            }
+        } else {
+            for hit in &previous.hits {
+                if previous.is_descendant_or_self(id, &hit.id) {
+                    let current_index = self.hits.len();
+                    let mut hit = hit.clone();
+                    hit.rect = translate_rect(hit.rect, translation);
+                    hit.target_bounds = translate_rect(hit.target_bounds, translation);
+                    hit.value_bounds = hit
+                        .value_bounds
+                        .map(|bounds| translate_rect(bounds, translation));
+                    let hit_id = hit.id.clone();
+                    self.hits.push(hit);
+                    if let Some(node) = self.resolved.find_mut(&hit_id) {
+                        node.hit_stack = Some(current_index);
+                    }
+                }
+            }
+            self.messages.extend(
+                previous
+                    .messages
+                    .iter()
+                    .filter(|region| previous.is_descendant_or_self(id, &region.id))
+                    .cloned()
+                    .map(|mut region| {
+                        region.rect = translate_rect(region.rect, translation);
+                        region
+                    }),
+            );
+        }
         self.context_messages.extend(
             previous
                 .context_messages
@@ -2288,6 +2343,11 @@ impl<Message: Clone> UiFrame<Message> {
             .filter_map(crate::gpu::command_bounds)
             .reduce(crate::gpu::union_rect)
             .unwrap_or(replacements[replacement_index].bounds);
+        let old_bounds = old_commands
+            .iter()
+            .filter_map(crate::gpu::command_bounds)
+            .reduce(crate::gpu::union_rect)
+            .unwrap_or(old.bounds);
         replacements[replacement_index].bounds = new_bounds;
         let old_len = old.commands.end.saturating_sub(old.commands.start);
         let new_len = commands.len();
@@ -2330,7 +2390,7 @@ impl<Message: Clone> UiFrame<Message> {
         }
         self.paint_fragments
             .splice(removed_start..=removed_end, replacements);
-        Some((old.bounds, new_bounds))
+        Some((old_bounds, new_bounds))
     }
 
     pub(crate) fn paint_damage(&self) -> Option<&[Rect]> {
@@ -5624,14 +5684,53 @@ impl<Message: Clone> UiFrame<Message> {
     }
 
     pub(crate) fn is_descendant_or_self(&self, ancestor: &UiId, candidate: &UiId) -> bool {
-        self.node_index(ancestor)
-            .is_some_and(|index| self.subtree_contains_id(index, candidate))
-            || self.messages.iter().any(|region| {
-                region.id == *candidate
-                    && region.navigation_owner.as_ref().is_some_and(|owner| {
-                        owner == ancestor || self.is_descendant_or_self(ancestor, owner)
-                    })
-            })
+        let indexed = if let (Some(&ancestor_index), Some(&candidate_index)) = (
+            self.resolved_indices.get(ancestor),
+            self.resolved_indices.get(candidate),
+        ) && self
+            .resolved
+            .nodes
+            .get(ancestor_index)
+            .is_some_and(|node| node.id == *ancestor)
+            && self
+                .resolved
+                .nodes
+                .get(candidate_index)
+                .is_some_and(|node| node.id == *candidate)
+            && self.semantic_parents.get(candidate_index).is_some()
+        {
+            let ancestor = ancestor_index;
+            let mut candidate = candidate_index;
+            loop {
+                if candidate == ancestor {
+                    break Some(true);
+                }
+                let Some(parent) = self.semantic_parents[candidate] else {
+                    break Some(false);
+                };
+                candidate = parent;
+            }
+        } else {
+            None
+        };
+        let physical = indexed.unwrap_or_else(|| {
+            self.node_index(ancestor)
+                .is_some_and(|index| self.subtree_contains_id(index, candidate))
+        });
+        if physical {
+            return true;
+        }
+        if indexed.is_some() {
+            return self.navigation_owners.get(candidate).is_some_and(|owner| {
+                owner == ancestor || self.is_descendant_or_self(ancestor, owner)
+            });
+        }
+        self.messages.iter().any(|region| {
+            region.id == *candidate
+                && region.navigation_owner.as_ref().is_some_and(|owner| {
+                    owner == ancestor || self.is_descendant_or_self(ancestor, owner)
+                })
+        })
     }
 
     fn navigation_owner(&self, id: &UiId) -> Option<&UiId> {
@@ -5654,6 +5753,27 @@ impl<Message: Clone> UiFrame<Message> {
             return Some(node);
         }
         let candidate = direct_owner.unwrap_or(candidate);
+        if let Some(&candidate_index) = self.resolved_indices.get(candidate)
+            && self
+                .resolved
+                .nodes
+                .get(candidate_index)
+                .is_some_and(|node| node.id == *candidate)
+        {
+            let mut parent = self
+                .semantic_parents
+                .get(candidate_index)
+                .copied()
+                .flatten();
+            while let Some(index) = parent {
+                let node = &self.resolved.nodes[index];
+                if include(node) {
+                    return Some(node);
+                }
+                parent = self.semantic_parents.get(index).copied().flatten();
+            }
+            return None;
+        }
         self.resolved
             .nodes
             .iter()
@@ -6262,7 +6382,25 @@ impl<Message: Clone> UiFrame<Message> {
 
     fn emit_accessibility_geometry(&mut self, previous: Option<&Self>) {
         self.semantic_parents = vec![None; self.resolved.nodes.len()];
+        self.resolved_indices.clear();
+        self.resolved_indices.reserve(self.resolved.nodes.len());
+        self.navigation_owners.clear();
+        self.navigation_owners
+            .extend(self.messages.iter().filter_map(|region| {
+                region
+                    .navigation_owner
+                    .as_ref()
+                    .map(|owner| (region.id.clone(), owner.clone()))
+            }));
+        self.message_indices.clear();
+        for (index, region) in self.messages.iter().enumerate() {
+            self.message_indices
+                .entry(region.id.clone())
+                .or_default()
+                .push(index);
+        }
         for (index, node) in self.resolved.nodes.iter().enumerate() {
+            self.resolved_indices.insert(node.id.clone(), index);
             for child in &node.children {
                 self.semantic_parents[*child] = Some(index);
             }
@@ -6295,17 +6433,22 @@ impl<Message: Clone> UiFrame<Message> {
                     .retained_nodes
                     .phase_is_clean(&node.id, super::retained::DirtyPhases::SEMANTICS)
                     && previous.is_some_and(|previous| {
-                        previous.resolved.find(&node.id).is_some_and(|old| {
-                            old.interaction == node.interaction
-                                && old.allocated == node.allocated
-                                && old.clip == node.clip
-                        })
+                        previous
+                            .resolved_indices
+                            .get(&node.id)
+                            .and_then(|index| previous.resolved.nodes.get(*index))
+                            .is_some_and(|old| {
+                                old.interaction == node.interaction
+                                    && old.allocated == node.allocated
+                                    && old.clip == node.clip
+                            })
                     })
                     && let Some(cached) = previous.and_then(|previous| {
                         previous
-                            .accessibility
-                            .iter()
-                            .find(|cached| cached.id == node.id && cached.parent == parent)
+                            .accessibility_indices
+                            .get(&node.id)
+                            .and_then(|index| previous.accessibility.get(*index))
+                            .filter(|cached| cached.id == node.id && cached.parent == parent)
                     })
                 {
                     reused = reused.saturating_add(1);
@@ -6348,6 +6491,13 @@ impl<Message: Clone> UiFrame<Message> {
                 .collect::<BTreeSet<_>>();
             self.accessibility.retain(|node| scoped.contains(&node.id));
         }
+        self.accessibility_indices.clear();
+        self.accessibility_indices.extend(
+            self.accessibility
+                .iter()
+                .enumerate()
+                .map(|(index, node)| (node.id.clone(), index)),
+        );
         self.semantic_role_name_index.clear();
         for (index, node) in self.resolved.nodes.iter().enumerate() {
             if self.target_is_in_active_overlay(&node.id)

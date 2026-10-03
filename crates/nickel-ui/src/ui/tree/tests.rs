@@ -1,5 +1,67 @@
 use super::*;
 
+fn legacy_is_descendant_or_self<Message: Clone>(
+    frame: &UiFrame<Message>,
+    ancestor: &UiId,
+    candidate: &UiId,
+) -> bool {
+    frame
+        .node_index(ancestor)
+        .is_some_and(|index| frame.subtree_contains_id(index, candidate))
+        || frame.messages.iter().any(|region| {
+            region.id == *candidate
+                && region.navigation_owner.as_ref().is_some_and(|owner| {
+                    owner == ancestor || legacy_is_descendant_or_self(frame, ancestor, owner)
+                })
+        })
+}
+
+#[test]
+fn retained_ancestry_matches_tree_walk_for_normal_nodes() {
+    let mut state = UiStateStore::default();
+    let frame = UiFrame::resolve(
+        Column::<()>::new().children((0..32).map(|index| {
+            Container::<()>::new()
+                .id(format!("item-{index}"))
+                .height(1.0)
+        })),
+        FrameRequest::new(Rect::new(0.0, 0.0, 100.0, 32.0), &mut state),
+    );
+    let root = UiId::from("root");
+    for index in 0..32 {
+        let candidate = root.scoped(format!("item-{index}"));
+        assert_eq!(
+            frame.is_descendant_or_self(&root, &candidate),
+            legacy_is_descendant_or_self(&frame, &root, &candidate)
+        );
+        assert_eq!(
+            frame.is_descendant_or_self(&candidate, &root),
+            legacy_is_descendant_or_self(&frame, &candidate, &root)
+        );
+    }
+}
+
+#[test]
+fn retained_ancestry_scales_across_two_thousand_siblings() {
+    const NODES: usize = 2_000;
+    let mut state = UiStateStore::default();
+    let frame = UiFrame::resolve(
+        Column::<()>::new().children((0..NODES - 1).map(|index| {
+            Container::<()>::new()
+                .id(format!("item-{index}"))
+                .height(1.0)
+        })),
+        FrameRequest::new(Rect::new(0.0, 0.0, 100.0, NODES as f32), &mut state),
+    );
+    let root = UiId::from("root");
+    assert_eq!(frame.retained_nodes.nodes().count(), NODES);
+    for index in 0..NODES - 1 {
+        let candidate = root.scoped(format!("item-{index}"));
+        assert!(frame.is_descendant_or_self(&root, &candidate));
+        assert!(!frame.is_descendant_or_self(&candidate, &root));
+    }
+}
+
 #[test]
 fn selection_marquee_is_frame_owned_and_rejects_empty_geometry() {
     let mut frame = UiFrame::<()>::default();

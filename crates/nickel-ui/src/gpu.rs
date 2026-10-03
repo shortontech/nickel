@@ -1275,9 +1275,27 @@ pub(crate) fn command_bounds(command: &PaintCommand) -> Option<Rect> {
         | PaintCommand::Stroke { rect, .. }
         | PaintCommand::OverlayFill { rect, .. }
         | PaintCommand::OverlayStroke { rect, .. } => Some(*rect),
-        PaintCommand::Text { bounds, .. }
-        | PaintCommand::StyledText { bounds, .. }
-        | PaintCommand::Image { bounds, .. } => Some(*bounds),
+        PaintCommand::Text { bounds, scale, .. } => Some(Rect::new(
+            bounds.origin.x,
+            bounds.origin.y,
+            bounds.size.width.max(1.0),
+            bounds.size.height.max(text_size(*scale) * 1.4),
+        )),
+        PaintCommand::StyledText {
+            bounds,
+            scale,
+            font_size,
+            ..
+        } => {
+            let font_size = font_size.unwrap_or_else(|| text_size(*scale));
+            Some(Rect::new(
+                bounds.origin.x,
+                bounds.origin.y,
+                bounds.size.width.max(1.0),
+                bounds.size.height.max(font_size * 1.4),
+            ))
+        }
+        PaintCommand::Image { bounds, .. } => Some(*bounds),
         PaintCommand::BackdropBlur { .. } | PaintCommand::PushClip(_) | PaintCommand::PopClip => {
             None
         }
@@ -1581,6 +1599,36 @@ mod tests {
         renderer.invalidate();
         assert!(!renderer.render(&[]).is_empty());
         assert!(renderer.render(&[]).is_empty());
+    }
+
+    #[test]
+    fn zero_height_text_damage_covers_its_minimum_raster_height() {
+        let mut renderer = SoftwareRenderer::new(160, 40, 1.0);
+        let command = |text: &str| PaintCommand::Text {
+            bounds: Rect::new(4.0, 6.0, 150.0, 0.0),
+            text: text.into(),
+            scale: 1.0,
+            color: 0xffff_ffff,
+            align: TextAlign::Start,
+            bold: false,
+            wrap: false,
+        };
+        renderer.render(&[command("Before")]);
+        let before = renderer.pixels().to_vec();
+        let damage = renderer.render(&[command("After")]);
+
+        for (index, (before, after)) in before.iter().zip(renderer.pixels()).enumerate() {
+            if before != after {
+                let x = index as u32 % 160;
+                let y = index as u32 / 160;
+                assert!(damage.rects.iter().any(|rect| {
+                    x as f32 + 0.5 >= rect.origin.x
+                        && x as f32 + 0.5 < rect.origin.x + rect.size.width
+                        && y as f32 + 0.5 >= rect.origin.y
+                        && y as f32 + 0.5 < rect.origin.y + rect.size.height
+                }));
+            }
+        }
     }
 
     #[test]

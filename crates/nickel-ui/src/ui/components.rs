@@ -2723,6 +2723,17 @@ impl<Message> Button<Message> {
         self
     }
 
+    /// Declares one source-owned revision for both the semantic button label
+    /// and its nested text payload, allowing retained phases to prove that
+    /// unchanged sibling labels are reusable.
+    pub fn content_revision(mut self, revision: u64) -> Self {
+        self.0.0.content_revision = Some(revision);
+        if let Some(label) = self.0.0.children.first_mut() {
+            label.content_revision = Some(revision);
+        }
+        self
+    }
+
     pub fn accessibility_label(mut self, label: impl Into<String>) -> Self {
         self.0 = self.0.accessibility_label(label);
         self
