@@ -1236,6 +1236,13 @@ pub trait Application: Sized {
         Vec::new()
     }
 
+    /// Drains the identity of a newly admitted incremental declaration that
+    /// the next native frame resolves. The token is deliberately payload-free:
+    /// applications must not attach declarations, messages, or private data.
+    fn take_frame_correlation(&mut self) -> Option<NativeFrameCorrelation> {
+        None
+    }
+
     /// Drains a semantic focus request produced by a domain update.
     ///
     /// The host resolves the stable application id against the rebuilt tree,
@@ -1403,6 +1410,7 @@ pub struct UiHost<A: Application> {
     scale_factor: f32,
     input_dispatcher: FocusedInputDispatcher,
     frame_generation: u64,
+    native_correlation: Option<NativeFrameCorrelation>,
     pointer_icon: PointerIcon,
     overlay_failures: Vec<OverlayDeclarationFailure>,
     next_application_deadline: Option<Instant>,
@@ -1427,6 +1435,7 @@ pub struct UiHostViewport<Message> {
     scale_factor: f32,
     input_dispatcher: FocusedInputDispatcher,
     frame_generation: u64,
+    native_correlation: Option<NativeFrameCorrelation>,
     pointer_icon: PointerIcon,
     overlay_failures: Vec<OverlayDeclarationFailure>,
     next_application_deadline: Option<Instant>,
@@ -1954,6 +1963,7 @@ pub enum CompletionFailureKind {
 pub struct HostInspection {
     pub frame_generation: u64,
     pub semantic_generation: u64,
+    pub native_correlation: Option<NativeFrameCorrelation>,
     pub input: InputContext,
     pub window_focused: bool,
     pub scale_factor: f32,
@@ -2011,6 +2021,18 @@ pub struct HostFailure {
 pub struct HostChangeToken {
     pub frame_generation: u64,
     pub semantic_generation: u64,
+    /// Incremental declaration that produced this frame, when one was
+    /// admitted during the host step. Presenters carry this unchanged so
+    /// native phase and presentation evidence share one stable join key.
+    pub native_correlation: Option<NativeFrameCorrelation>,
+}
+
+/// Opaque, payload-free identity joining one retained application mount and
+/// its admitted declaration generation to native frame diagnostics.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct NativeFrameCorrelation {
+    pub mount: u64,
+    pub generation: u64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -2139,6 +2161,9 @@ impl HostEventOutcome {
             .change_token
             .semantic_generation
             .max(other.change_token.semantic_generation);
+        if other.change_token.native_correlation.is_some() {
+            self.change_token.native_correlation = other.change_token.native_correlation;
+        }
         self.next_deadline = match (self.next_deadline, other.next_deadline) {
             (Some(left), Some(right)) => Some(left.min(right)),
             (deadline @ Some(_), None) | (None, deadline @ Some(_)) => deadline,
@@ -2266,6 +2291,7 @@ impl<A: Application> UiHost<A> {
             scale_factor: 1.0,
             input_dispatcher: FocusedInputDispatcher::default(),
             frame_generation: 1,
+            native_correlation: None,
             pointer_icon: PointerIcon::Default,
             overlay_failures,
             next_application_deadline: self
@@ -2301,6 +2327,10 @@ impl<A: Application> UiHost<A> {
             frame_generation: std::mem::replace(
                 &mut self.frame_generation,
                 viewport.frame_generation,
+            ),
+            native_correlation: std::mem::replace(
+                &mut self.native_correlation,
+                viewport.native_correlation,
             ),
             pointer_icon: std::mem::replace(&mut self.pointer_icon, viewport.pointer_icon),
             overlay_failures: std::mem::replace(
@@ -2392,6 +2422,7 @@ impl<A: Application> UiHost<A> {
             scale_factor: 1.0,
             input_dispatcher: FocusedInputDispatcher::default(),
             frame_generation: 1,
+            native_correlation: None,
             pointer_icon: PointerIcon::Default,
             overlay_failures,
             next_application_deadline,
@@ -2812,6 +2843,7 @@ impl<A: Application> UiHost<A> {
         outcome.change_token = HostChangeToken {
             frame_generation: self.frame_generation,
             semantic_generation: self.frame_generation,
+            native_correlation: self.native_correlation,
         };
         outcome
     }
@@ -2854,6 +2886,7 @@ impl<A: Application> UiHost<A> {
         arbitration.change_token = HostChangeToken {
             frame_generation: self.frame_generation,
             semantic_generation: self.frame_generation,
+            native_correlation: self.native_correlation,
         };
         arbitration
     }
@@ -2872,6 +2905,7 @@ impl<A: Application> UiHost<A> {
         HostInspection {
             frame_generation: self.frame_generation,
             semantic_generation: self.frame_generation,
+            native_correlation: self.native_correlation,
             input: self.input_context(),
             window_focused: self.state.window_focused(),
             scale_factor: self.scale_factor,
@@ -3640,9 +3674,13 @@ impl<A: Application> UiHost<A> {
         combined.pointer_icon = self.pointer_icon;
         combined.text_input_active = self.input_context().text_focused;
         combined.accessibility_generation = self.frame_generation;
+        if let Some(correlation) = self.application.take_frame_correlation() {
+            self.native_correlation = Some(correlation);
+        }
         combined.change_token = HostChangeToken {
             frame_generation: self.frame_generation,
             semantic_generation: self.frame_generation,
+            native_correlation: self.native_correlation,
         };
         combined.next_deadline = [
             self.next_application_deadline,

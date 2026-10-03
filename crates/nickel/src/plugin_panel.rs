@@ -3,7 +3,10 @@
 
 use std::{
     borrow::Cow,
-    sync::{Arc, OnceLock},
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Instant,
 };
 
@@ -41,6 +44,7 @@ use nickel_plugin_presentation::css::StyleSheet;
 use crate::window_preview::PreviewAction;
 
 const MAX_EFFECT_RECONCILIATIONS: usize = 16;
+static NEXT_DIAGNOSTIC_MOUNT: AtomicU64 = AtomicU64::new(1);
 
 pub fn manifest() -> &'static PluginManifest {
     static MANIFEST: OnceLock<PluginManifest> = OnceLock::new();
@@ -151,6 +155,8 @@ pub struct PluginPanelApplication {
     stylesheet: StyleSheet,
     composition: Option<CompositionPanelState>,
     surface_snapshot: Value,
+    diagnostic_mount: u64,
+    pending_frame_correlation: Option<nickel_ui::NativeFrameCorrelation>,
 }
 
 pub(crate) fn package_images(package: &PluginPackage) -> Result<PluginImages, String> {
@@ -893,6 +899,8 @@ impl PluginPanelApplication {
                 snapshots,
             }),
             surface_snapshot,
+            diagnostic_mount: NEXT_DIAGNOSTIC_MOUNT.fetch_add(1, Ordering::Relaxed),
+            pending_frame_correlation: None,
         };
         application.reconcile_passive_effects()?;
         Ok(application)
@@ -1371,6 +1379,8 @@ impl PluginPanelApplication {
             stylesheet: StyleSheet::default(),
             composition: None,
             surface_snapshot,
+            diagnostic_mount: NEXT_DIAGNOSTIC_MOUNT.fetch_add(1, Ordering::Relaxed),
+            pending_frame_correlation: None,
         };
         application.reconcile_passive_effects()?;
         Ok(application)
@@ -3176,6 +3186,8 @@ impl PluginPanelApplication {
             stylesheet: StyleSheet::compile("")?,
             composition: None,
             surface_snapshot: serde_json::json!({}),
+            diagnostic_mount: NEXT_DIAGNOSTIC_MOUNT.fetch_add(1, Ordering::Relaxed),
+            pending_frame_correlation: None,
         };
         scope.apply_rendered_effects(
             Ok(Some(accepted)),
@@ -3222,6 +3234,16 @@ impl PluginPanelApplication {
 
     pub fn take_runtime_failure(&mut self) -> Option<String> {
         self.runtime_failure.take()
+    }
+
+    fn mark_frame_correlation(&mut self, previous_generation: u64) {
+        let generation = self.accepted.generation();
+        if generation != previous_generation && self.last_error.is_none() {
+            self.pending_frame_correlation = Some(nickel_ui::NativeFrameCorrelation {
+                mount: self.diagnostic_mount,
+                generation,
+            });
+        }
     }
 }
 
@@ -3311,6 +3333,7 @@ impl nickel_ui::Application for PluginPanelApplication {
         if events.is_empty() {
             return;
         }
+        let previous_generation = self.accepted.generation();
         let previous_accepted = self.accepted.clone();
         let previous_effects_len = self.effects.len();
         let previous_transient = self.pending_transient.clone();
@@ -3502,6 +3525,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                 self.runtime_failure = Some(error.clone());
                 self.last_error = Some(error);
             }
+            self.mark_frame_correlation(previous_generation);
             return;
         }
 
@@ -3545,6 +3569,11 @@ impl nickel_ui::Application for PluginPanelApplication {
                 self.last_error = Some(error);
             }
         }
+        self.mark_frame_correlation(previous_generation);
+    }
+
+    fn take_frame_correlation(&mut self) -> Option<nickel_ui::NativeFrameCorrelation> {
+        self.pending_frame_correlation.take()
     }
 
     fn view(&self, context: ViewContext) -> impl nickel_ui::View<Self::Message> {
@@ -7660,6 +7689,18 @@ mod tests {
         let restored = format!("{:?}", panel.accepted.node());
         assert!(restored.contains("first:0"));
         assert!(restored.contains("second:1"));
+    }
+
+    #[test]
+    fn typed_patch_exposes_only_mount_and_generation_correlation() {
+        let source = "function App(){const [count,setCount]=useState(0);return h(Panel,null,h(Button,{id:'next',onClick:()=>setCount(count+1)},String(count)));}";
+        let mut panel = PluginPanelApplication::new(source).unwrap();
+        let mount = panel.diagnostic_mount;
+        panel.update(PluginMessage::Click(0));
+        let correlation = nickel_ui::Application::take_frame_correlation(&mut panel).unwrap();
+        assert_eq!(correlation.mount, mount);
+        assert_eq!(correlation.generation, panel.accepted.generation());
+        assert!(nickel_ui::Application::take_frame_correlation(&mut panel).is_none());
     }
 
     #[test]

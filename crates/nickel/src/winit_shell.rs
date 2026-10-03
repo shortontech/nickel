@@ -153,7 +153,7 @@ impl OutputRetirementTracker {
     }
 }
 
-fn push_bounded(samples: &mut VecDeque<u64>, sample: u64) {
+fn push_bounded<T>(samples: &mut VecDeque<T>, sample: T) {
     if samples.len() == RUNTIME_SAMPLE_CAPACITY {
         samples.pop_front();
     }
@@ -346,6 +346,15 @@ pub struct ShellRuntimeDiagnostics {
     pub input_to_present_us: Vec<u64>,
     /// Process-wide allocation operations observed during each warm present.
     pub warm_present_allocations: Vec<u64>,
+    /// Payload-free JSX admission identities joined to their native present.
+    pub correlated_presents: Vec<NativePresentSample>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NativePresentSample {
+    pub correlation: nickel_ui::NativeFrameCorrelation,
+    pub present_us: u64,
+    pub input_to_present_us: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -628,6 +637,7 @@ pub struct WinitShell {
     warm_present_us: VecDeque<u64>,
     input_to_present_us: VecDeque<u64>,
     warm_present_allocations: VecDeque<u64>,
+    correlated_presents: VecDeque<NativePresentSample>,
     presenter_cache_peak_bytes: Cell<usize>,
     presenter_cache_generation: u64,
     output_retirements: OutputRetirementTracker,
@@ -694,6 +704,7 @@ impl WinitShell {
             warm_present_us: VecDeque::with_capacity(RUNTIME_SAMPLE_CAPACITY),
             input_to_present_us: VecDeque::with_capacity(RUNTIME_SAMPLE_CAPACITY),
             warm_present_allocations: VecDeque::with_capacity(RUNTIME_SAMPLE_CAPACITY),
+            correlated_presents: VecDeque::with_capacity(RUNTIME_SAMPLE_CAPACITY),
             presenter_cache_peak_bytes: Cell::new(0),
             presenter_cache_generation: 0,
             output_retirements: OutputRetirementTracker::default(),
@@ -2024,6 +2035,7 @@ impl WinitShell {
             warm_present_us: self.warm_present_us.iter().copied().collect(),
             input_to_present_us: self.input_to_present_us.iter().copied().collect(),
             warm_present_allocations: self.warm_present_allocations.iter().copied().collect(),
+            correlated_presents: self.correlated_presents.iter().copied().collect(),
         }
     }
 
@@ -2158,12 +2170,27 @@ impl WinitShell {
                 );
             }
         }
-        if let Some(input_started) = self.pending_input_started.take() {
-            let input_us = input_started
+        let input_to_present_us = self.pending_input_started.take().map(|input_started| {
+            input_started
                 .elapsed()
                 .as_micros()
-                .min(u128::from(u64::MAX)) as u64;
+                .min(u128::from(u64::MAX)) as u64
+        });
+        if let Some(input_us) = input_to_present_us {
             push_bounded(&mut self.input_to_present_us, input_us);
+        }
+        if let Some(correlation) = entry
+            .last_host_change_token
+            .and_then(|token| token.native_correlation)
+        {
+            push_bounded(
+                &mut self.correlated_presents,
+                NativePresentSample {
+                    correlation,
+                    present_us: elapsed_us,
+                    input_to_present_us,
+                },
+            );
         }
         Ok(damage)
     }

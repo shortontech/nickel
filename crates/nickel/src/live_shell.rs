@@ -3065,6 +3065,7 @@ impl LiveShell {
             semantic_generation: inspection
                 .semantic_generation
                 .wrapping_add(self.plugin_activation_generation.rotate_left(32)),
+            native_correlation: inspection.native_correlation,
         })
     }
 
@@ -5537,6 +5538,7 @@ impl LiveShell {
         let host_token = |inspection: nickel_ui::HostInspection| HostChangeToken {
             frame_generation: inspection.frame_generation,
             semantic_generation: inspection.semantic_generation,
+            native_correlation: inspection.native_correlation,
         };
         match role {
             SurfaceRole::Desktop => Some(self.desktop_change_token),

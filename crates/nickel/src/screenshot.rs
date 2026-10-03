@@ -398,6 +398,7 @@ impl ScreenshotTool {
         nickel_ui::HostChangeToken {
             frame_generation: inspection.frame_generation,
             semantic_generation: inspection.semantic_generation,
+            native_correlation: inspection.native_correlation,
         }
     }
 
