@@ -41,12 +41,52 @@ pub enum ScheduledRender<T> {
     },
 }
 
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct NativePatchEnvelope {
+    pub version: u8,
+    pub operations: Vec<NativePatchOperation>,
+    pub counters: NativePatchCounters,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(tag = "op", rename_all = "camelCase")]
+pub enum NativePatchOperation {
+    ReplaceSubtree { target: String, node: Value },
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NativePatchCounters {
+    pub nodes_visited: u64,
+    pub nodes_mutated: u64,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum ScheduledPatch {
+    Unchanged,
+    Patched {
+        patch: NativePatchEnvelope,
+        dirty_components: Vec<String>,
+        transport_bytes: usize,
+        reconciliation_requested: bool,
+    },
+}
+
 #[derive(Deserialize)]
 struct ScheduledRenderWire {
     rendered: bool,
     #[serde(default)]
     dirty: Vec<String>,
     node: Option<Value>,
+}
+
+#[derive(Deserialize)]
+struct ScheduledPatchWire {
+    rendered: bool,
+    #[serde(default)]
+    dirty: Vec<String>,
+    patch: Option<NativePatchEnvelope>,
 }
 
 #[derive(Deserialize)]
@@ -240,6 +280,45 @@ impl JsxRuntime {
         })
     }
 
+    /// Dispatch a same-package event and transport only native subtrees that
+    /// differ from the last host-accepted render.
+    pub fn dispatch_patched(&mut self, expression: &str) -> Result<ScheduledPatch, String> {
+        let wire_value = self.eval_json::<Value>(expression)?;
+        let transport_bytes = serde_json::to_vec(&wire_value)
+            .map_err(|error| error.to_string())?
+            .len();
+        let outcome: ScheduledPatchWire =
+            serde_json::from_value(wire_value).map_err(|error| error.to_string())?;
+        if !outcome.rendered {
+            if outcome.patch.is_some() || !outcome.dirty.is_empty() {
+                return Err("invalid unchanged patch scheduler outcome".into());
+            }
+            return Ok(ScheduledPatch::Unchanged);
+        }
+        let patch = outcome.patch.ok_or("scheduled render omitted its patch")?;
+        if patch.version != 1 || patch.operations.len() > 256 {
+            return Err("unsupported or oversized native patch envelope".into());
+        }
+        let reconciliation_requested = self
+            .eval_json::<ReconciliationRequest>("__nickelReconciliationRequest()")?
+            .requested;
+        Ok(ScheduledPatch::Patched {
+            patch,
+            dirty_components: outcome.dirty,
+            transport_bytes,
+            reconciliation_requested,
+        })
+    }
+
+    pub fn finish_patch_render(&mut self, accepted: bool) -> Result<(), String> {
+        self.eval(if accepted {
+            "__nickelCommitRender()"
+        } else {
+            "__nickelRollbackRender()"
+        })
+        .map_err(|error| format!("could not finalize native patch render: {error}"))
+    }
+
     /// Checkpoint bootstrap-owned hooks, surface handlers and queued effects.
     /// Plain object/array hook values preserve identity on rollback. Unsupported
     /// or irreversible restoration invalidates execution. Package globals and
@@ -292,6 +371,40 @@ impl JsxRuntime {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn patched_dispatch_transports_only_the_changed_leaf() {
+        let source = r#"
+            function Leaf() { const [value,setValue]=useState(0); return h(Button,{onClick:()=>setValue(value+1)},String(value)); }
+            function App() { return h(Window,{},h(Text,{},'stable'.repeat(200)),h(Leaf)); }
+        "#;
+        let mut runtime = super::JsxRuntime::new(source, None).unwrap();
+        let initial = runtime
+            .render("__nickelRender()", |node| Ok(node.clone()))
+            .unwrap();
+        let action = initial["children"][1]["action"].as_u64().unwrap();
+        let outcome = runtime
+            .dispatch_patched(&format!("__nickelDispatchBatchPatched([[{action},null]])"))
+            .unwrap();
+        let super::ScheduledPatch::Patched {
+            patch,
+            transport_bytes,
+            ..
+        } = outcome
+        else {
+            panic!("leaf update must patch");
+        };
+        assert_eq!(patch.operations.len(), 1);
+        let super::NativePatchOperation::ReplaceSubtree { target, node } = &patch.operations[0];
+        assert_eq!(
+            target,
+            initial["children"][1]["__nativeId"].as_str().unwrap()
+        );
+        assert_eq!(node["children"][0], "1");
+        assert!(transport_bytes < serde_json::to_vec(&initial).unwrap().len());
+        runtime.finish_patch_render(true).unwrap();
+        runtime.finish_event(true).unwrap();
+    }
+
     #[test]
     fn native_and_handler_slot_ids_survive_keyed_insertion() {
         let source = r#"

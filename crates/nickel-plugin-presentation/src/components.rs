@@ -6,7 +6,7 @@ use std::{
 };
 
 use nickel_core::plugins::{PluginManifest, PluginSurface, PluginSurfaceKind};
-use nickel_plugin_runtime::JsxRuntime;
+use nickel_plugin_runtime::{JsxRuntime, NativePatchEnvelope, NativePatchOperation};
 use nickel_ui::{
     AnyView, Column, ComponentBuilderExt, Container, DragGesture, DropGesture, Dropdown,
     DropdownPartStyle, Grid, Image, ImageFit, Layer, Length, OverlayMenuItem, Point, Row,
@@ -3919,6 +3919,13 @@ pub struct RetainedPanelTree {
     handler_slots: BTreeMap<HandlerSlotId, usize>,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NativePatchApplyCounters {
+    pub transport_bytes: usize,
+    pub nodes_visited: u64,
+    pub nodes_mutated: u64,
+}
+
 impl RetainedPanelTree {
     pub fn admit(
         source: &Value,
@@ -4029,6 +4036,212 @@ impl RetainedPanelTree {
     pub fn source(&self) -> &Value {
         &self.source
     }
+
+    /// Apply a bounded native delta to clones of the accepted source and typed
+    /// presentation. The receiver is changed only after every operation and
+    /// root/style invariant succeeds.
+    pub fn apply_patch(
+        &mut self,
+        patch: &NativePatchEnvelope,
+        manifest: &PluginManifest,
+        expected_surface_id: Option<&str>,
+        stylesheet: &StyleSheet,
+        generation: u64,
+        transport_bytes: usize,
+    ) -> Result<NativePatchApplyCounters, String> {
+        if patch.version != 1 || patch.operations.len() > 256 {
+            return Err("unsupported or oversized native patch envelope".into());
+        }
+        let mut source = self.source.clone();
+        let mut node = self.node.clone();
+        let mut visited = 0_u64;
+        for operation in &patch.operations {
+            match operation {
+                NativePatchOperation::ReplaceSubtree {
+                    target,
+                    node: replacement,
+                } => {
+                    if !self.nodes.contains_key(&NativeNodeId(target.clone())) {
+                        return Err(format!("native patch targets unknown node {target:?}"));
+                    }
+                    let replacement_id = replacement
+                        .get("__nativeId")
+                        .and_then(Value::as_str)
+                        .ok_or("replacement subtree has no native identity")?;
+                    if replacement_id != target {
+                        return Err("replacement subtree identity differs from its target".into());
+                    }
+                    let typed = PanelNode::parse(replacement)?;
+                    replace_source_and_typed(
+                        &mut source,
+                        &mut node,
+                        target,
+                        replacement,
+                        &typed,
+                        &mut visited,
+                    )?;
+                }
+            }
+        }
+        // Re-admission builds authoritative identity/handler indexes and
+        // validates manifest/root constraints, but retain the incrementally
+        // mutated typed tree rather than reparsing the complete candidate.
+        let (nodes, handler_slots) = index_native_source(&source)?;
+        if let Some(surface_id) = expected_surface_id {
+            let grant = manifest
+                .surfaces
+                .iter()
+                .find(|surface| surface.id == surface_id)
+                .ok_or("rendered surface is no longer declared")?;
+            node.requested_surface(grant, stylesheet)?;
+        }
+        *self = Self {
+            node,
+            source,
+            generation,
+            nodes,
+            handler_slots,
+        };
+        Ok(NativePatchApplyCounters {
+            transport_bytes,
+            nodes_visited: visited,
+            nodes_mutated: patch.operations.len() as u64,
+        })
+    }
+}
+
+fn index_native_source(
+    source: &Value,
+) -> Result<
+    (
+        BTreeMap<NativeNodeId, String>,
+        BTreeMap<HandlerSlotId, usize>,
+    ),
+    String,
+> {
+    fn visit(
+        value: &Value,
+        nodes: &mut BTreeMap<NativeNodeId, String>,
+        slots: &mut BTreeMap<HandlerSlotId, usize>,
+    ) -> Result<(), String> {
+        if let Some(values) = value.as_array() {
+            for value in values {
+                visit(value, nodes, slots)?;
+            }
+            return Ok(());
+        }
+        let Some(object) = value.as_object() else {
+            return Ok(());
+        };
+        if let Some(id) = object.get("__nativeId").and_then(Value::as_str) {
+            let kind = object
+                .get("kind")
+                .and_then(Value::as_str)
+                .ok_or("identified native node has no kind")?;
+            if nodes.insert(NativeNodeId(id.into()), kind.into()).is_some() {
+                return Err("duplicate native node identity".into());
+            }
+            if let Some(bindings) = object.get("__handlerSlots") {
+                for (event, slot) in bindings
+                    .as_object()
+                    .ok_or("native handler slots must be an object")?
+                {
+                    let slot = HandlerSlotId(
+                        slot.as_str()
+                            .ok_or("native handler slot must be a string")?
+                            .into(),
+                    );
+                    let action = object
+                        .get(event)
+                        .and_then(Value::as_u64)
+                        .and_then(|value| usize::try_from(value).ok())
+                        .ok_or("native handler slot has no bounded action")?;
+                    if slots.insert(slot, action).is_some() {
+                        return Err("duplicate native handler slot".into());
+                    }
+                }
+            }
+        }
+        if let Some(children) = object.get("children") {
+            visit(children, nodes, slots)?;
+        }
+        Ok(())
+    }
+    let mut nodes = BTreeMap::new();
+    let mut slots = BTreeMap::new();
+    visit(source, &mut nodes, &mut slots)?;
+    Ok((nodes, slots))
+}
+
+fn replace_source_and_typed(
+    source: &mut Value,
+    typed: &mut PanelNode,
+    target: &str,
+    replacement: &Value,
+    replacement_typed: &PanelNode,
+    visited: &mut u64,
+) -> Result<(), String> {
+    *visited = visited.saturating_add(1);
+    if source.get("__nativeId").and_then(Value::as_str) == Some(target) {
+        *source = replacement.clone();
+        *typed = replacement_typed.clone();
+        return Ok(());
+    }
+    let source_children = source
+        .get_mut("children")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| format!("native patch target {target:?} is not below its indexed node"))?;
+    let typed_children = match typed {
+        PanelNode::Box { children, .. }
+        | PanelNode::Layer { children, .. }
+        | PanelNode::Div { children, .. }
+        | PanelNode::Surface { children, .. }
+        | PanelNode::Row { children, .. }
+        | PanelNode::Column { children, .. }
+        | PanelNode::ScrollView { children, .. }
+        | PanelNode::Dialog { children, .. }
+        | PanelNode::Menu {
+            items: children, ..
+        }
+        | PanelNode::MenuItem { children, .. } => children,
+        _ => {
+            return Err(format!(
+                "native patch target {target:?} is not below a container"
+            ));
+        }
+    };
+    if source_children.len() != typed_children.len()
+        || source_children.iter().any(|child| !child.is_object())
+    {
+        return Err("incremental subtree alignment requires native element children".into());
+    }
+    for (child_source, child_typed) in source_children.iter_mut().zip(typed_children) {
+        let contains = child_source.get("__nativeId").and_then(Value::as_str) == Some(target)
+            || source_contains_id(child_source, target);
+        if contains {
+            return replace_source_and_typed(
+                child_source,
+                child_typed,
+                target,
+                replacement,
+                replacement_typed,
+                visited,
+            );
+        }
+    }
+    Err(format!("native patch target {target:?} disappeared"))
+}
+
+fn source_contains_id(value: &Value, target: &str) -> bool {
+    value
+        .get("children")
+        .and_then(Value::as_array)
+        .is_some_and(|children| {
+            children.iter().any(|child| {
+                child.get("__nativeId").and_then(Value::as_str) == Some(target)
+                    || source_contains_id(child, target)
+            })
+        })
 }
 
 pub fn parse_panel_for_manifest(

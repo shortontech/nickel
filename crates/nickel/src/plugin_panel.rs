@@ -18,7 +18,7 @@ pub use nickel_plugin_presentation::components::{PluginImages, PluginMessage};
 use nickel_plugin_runtime::composition_runtime::{
     ComponentEventHandle, ComponentMount, ScheduledExpandedBatch, ShellCompositionRuntime,
 };
-use nickel_plugin_runtime::{JsxModuleGraph, JsxRuntime, ModuleSource};
+use nickel_plugin_runtime::{JsxModuleGraph, JsxRuntime, ModuleSource, ScheduledPatch};
 
 struct CompositionPanelState {
     host: std::rc::Rc<std::cell::RefCell<ShellCompositionRuntime>>,
@@ -3102,14 +3102,6 @@ impl nickel_ui::Application for PluginPanelApplication {
         } else {
             let generation = self.next_generation;
             self.next_generation = self.next_generation.saturating_add(1);
-            let expression = if self.dispatch_removed_focus {
-                format!("__nickelDispatchRemovedFocus({})", events[0][0])
-            } else {
-                format!(
-                    "__nickelDispatchBatch({})",
-                    serde_json::Value::Array(events)
-                )
-            };
             {
                 let mut runtime = self.runtime.borrow_mut();
                 if let Err(error) = runtime.select_surface(&self.runtime_surface_id) {
@@ -3117,18 +3109,41 @@ impl nickel_ui::Application for PluginPanelApplication {
                     self.last_error = Some(error);
                     return;
                 }
-                let rendered = render_retained_panel_validated(
-                    &mut runtime,
-                    &self.manifest,
-                    self.expected_surface_id.as_deref(),
-                    &expression,
-                    &self.stylesheet,
-                    generation,
-                    &mut validation_rejected,
+                let expression = format!(
+                    "__nickelDispatchBatchPatched({}, {})",
+                    serde_json::Value::Array(events),
+                    self.dispatch_removed_focus
                 );
+                let rendered =
+                    runtime
+                        .dispatch_patched(&expression)
+                        .and_then(|outcome| match outcome {
+                            ScheduledPatch::Unchanged => Ok(None),
+                            ScheduledPatch::Patched {
+                                patch,
+                                transport_bytes,
+                                ..
+                            } => {
+                                let mut candidate = self.accepted.clone();
+                                candidate
+                                    .apply_patch(
+                                        &patch,
+                                        &self.manifest,
+                                        self.expected_surface_id.as_deref(),
+                                        &self.stylesheet,
+                                        generation,
+                                        transport_bytes,
+                                    )
+                                    .map_err(|error| {
+                                        validation_rejected = true;
+                                        error
+                                    })?;
+                                Ok(Some(candidate))
+                            }
+                        });
                 let effects = runtime.take_effects();
                 (
-                    rendered.map(Some),
+                    rendered,
                     effects.map(|effects| {
                         effects
                             .into_iter()
@@ -3172,11 +3187,14 @@ impl nickel_ui::Application for PluginPanelApplication {
             return;
         }
 
-        if let Err(error) = self
-            .runtime
-            .borrow_mut()
-            .finish_event(self.last_error.is_none())
-        {
+        let accepted = self.last_error.is_none();
+        let finalize = {
+            let mut runtime = self.runtime.borrow_mut();
+            runtime
+                .finish_patch_render(accepted)
+                .and_then(|()| runtime.finish_event(accepted))
+        };
+        if let Err(error) = finalize {
             self.runtime_failure = Some(error.clone());
             self.last_error = Some(error);
         } else if self.last_error.is_none() {

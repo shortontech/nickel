@@ -93,6 +93,7 @@ let __listKeyErrors = [];
 let __pendingRender = null;
 let __pendingEvent = null;
 let __dirtyComponents = new Set();
+let __acceptedNativeTree = null;
 const __contexts = new WeakSet();
 const __contextProviders = new WeakMap();
 const __contextValues = new Map();
@@ -1192,6 +1193,7 @@ function __nickelCommitRender() {
     const pending = __pendingRender;
     __pendingRender = null;
     if (pending === null) return;
+    if (pending.candidateNode !== undefined) __acceptedNativeTree = pending.candidateNode;
     __dirtyComponents.clear();
     for (const entry of pending.reducerEntries) {
         entry.reducer = entry.nextReducer;
@@ -1240,6 +1242,7 @@ function __nickelRender(component = __nickelActiveEntry()) {
     try {
         const virtual = __nickelResolveVirtual(h(component, {}));
         const node = __nickelMaterializeVirtual(virtual);
+        __pendingRender.candidateNode = node;
         if (node?.kind === 'window' && __listKeyErrors.length) throw Error(__listKeyErrors[0]);
         for (const path of __componentHooks.keys()) {
             if (!__visitedComponents.has(path)) {
@@ -1254,6 +1257,52 @@ function __nickelRender(component = __nickelActiveEntry()) {
         __nickelRollbackRender();
         throw error;
     }
+}
+
+// Produce a bounded transport delta against the last host-accepted native
+// tree. A structural children change replaces the containing native node;
+// otherwise the walk descends and ships only changed native subtrees.
+function __nickelNativePatch(previous, next) {
+    const operations = [];
+    let visited = 0;
+    function differentOutsideChildren(left, right) {
+        const keys = new Set([...Object.keys(left), ...Object.keys(right)]);
+        keys.delete('children');
+        for (const key of keys)
+            if (JSON.stringify(left[key]) !== JSON.stringify(right[key])) return true;
+        return false;
+    }
+    function walk(left, right) {
+        visited++;
+        if (!left || !right || typeof left !== 'object' || typeof right !== 'object'
+            || Array.isArray(left) || Array.isArray(right)
+            || left.__nativeId !== right.__nativeId || left.kind !== right.kind) {
+            if (right?.__nativeId) operations.push({op:'replaceSubtree', target:right.__nativeId, node:right});
+            return;
+        }
+        if (differentOutsideChildren(left, right)) {
+            operations.push({op:'replaceSubtree', target:right.__nativeId, node:right});
+            return;
+        }
+        const before = left.children ?? [];
+        const after = right.children ?? [];
+        if (!Array.isArray(before) || !Array.isArray(after) || before.length !== after.length) {
+            operations.push({op:'replaceSubtree', target:right.__nativeId, node:right});
+            return;
+        }
+        for (let index = 0; index < after.length; index++) {
+            const a = before[index], b = after[index];
+            if (JSON.stringify(a) === JSON.stringify(b)) { visited++; continue; }
+            if (a?.__nativeId && b?.__nativeId && a.__nativeId === b.__nativeId) walk(a, b);
+            else {
+                operations.push({op:'replaceSubtree', target:right.__nativeId, node:right});
+                return;
+            }
+        }
+    }
+    if (__acceptedNativeTree === null || previous === null) throw Error('native patch has no accepted base');
+    walk(previous, next);
+    return {version:1, operations, counters:{nodesVisited:visited, nodesMutated:operations.length}};
 }
 
 function __nickelDispatch(action, value) {
@@ -1304,6 +1353,31 @@ function __nickelDispatchBatchScheduled(events, previous = false) {
         const dirty = Array.from(__dirtyComponents);
         if (!dirty.length) return JSON.stringify({rendered:false, dirty});
         return JSON.stringify({rendered:true, dirty, node:JSON.parse(__nickelRender())});
+    } catch (error) {
+        __nickelRollbackEvent();
+        throw error;
+    }
+}
+
+function __nickelDispatchBatchPatched(events, previous = false) {
+    if (!events.length) return JSON.stringify({rendered:false, dirty:[]});
+    const hooks = new Map(Array.from(__componentHooks, ([path, slots]) => [path, slots.slice()]));
+    const values = Array.from(__componentHooks.values(), slots => slots.map(entry =>
+        entry.kind === 'ref' ? entry.value.current : entry.value));
+    const effectsLength = __effects.length;
+    __pendingEvent = {handlers:__handlers, previousHandlers:__previousHandlers, hooks,
+        records:__componentRecords, values,
+        effectsLength, effects:__effects.slice(), dirty:new Set(__dirtyComponents)};
+    try {
+        for (const [action, value] of events) {
+            const handler = (previous ? __previousHandlers : __handlers)[action];
+            if (handler) handler(value);
+        }
+        const dirty = Array.from(__dirtyComponents);
+        if (!dirty.length) return JSON.stringify({rendered:false, dirty});
+        const accepted = __acceptedNativeTree;
+        const node = JSON.parse(__nickelRender());
+        return JSON.stringify({rendered:true, dirty, patch:__nickelNativePatch(accepted, node)});
     } catch (error) {
         __nickelRollbackEvent();
         throw error;
