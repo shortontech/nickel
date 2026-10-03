@@ -154,7 +154,16 @@ struct PatchExpansion {
 
 struct PatchedMountDispatch {
     patch: Option<NativePatchEnvelope>,
+    dirty_components: Vec<String>,
     reconciliation_requested: bool,
+}
+
+type NativePatchValidator<'a, T> = dyn FnMut(&NativePatchEnvelope, &BTreeMap<u64, ComponentEventHandle>, u64) -> Result<T, String>
+    + 'a;
+
+struct NativeRejection {
+    owners: Vec<(u64, Vec<String>)>,
+    message: String,
 }
 
 #[derive(Clone)]
@@ -1385,13 +1394,31 @@ impl ShellCompositionRuntime {
         events: &[(ComponentEventHandle, Value)],
         accepted_events: &BTreeMap<u64, ComponentEventHandle>,
         accepted_source: &Value,
-        validate: impl FnOnce(
+        mut validate: impl FnMut(
             &NativePatchEnvelope,
             &BTreeMap<u64, ComponentEventHandle>,
             u64,
         ) -> Result<T, String>,
     ) -> Result<ScheduledExpandedBatch<T>, String> {
+        self.dispatch_expanded_batch_scheduled_pending_with_validator(
+            root,
+            events,
+            accepted_events,
+            accepted_source,
+            &mut validate,
+        )
+    }
+
+    fn dispatch_expanded_batch_scheduled_pending_with_validator<T>(
+        &mut self,
+        root: &ComponentMount,
+        events: &[(ComponentEventHandle, Value)],
+        accepted_events: &BTreeMap<u64, ComponentEventHandle>,
+        accepted_source: &Value,
+        validate: &mut NativePatchValidator<'_, T>,
+    ) -> Result<ScheduledExpandedBatch<T>, String> {
         self.begin_transaction()?;
+        let mut rejected_native = None;
         let result = (|| {
             self.validate_mount(root)?;
             for (handle, value) in events {
@@ -1415,12 +1442,14 @@ impl ShellCompositionRuntime {
                 .collect::<BTreeMap<_, _>>();
             let mut rendered_mounts = BTreeMap::new();
             let mut patched_mounts = BTreeMap::new();
+            let mut dirty_components = BTreeMap::new();
             let mut reconciliation_requested = false;
             if events.is_empty() {
                 let mount_ids = self.mounts.keys().copied().collect::<Vec<_>>();
                 for mount in mount_ids {
                     if self.patch_authority.contains_key(&mount) {
                         let outcome = self.render_mount_patched(mount, Value::Array(Vec::new()))?;
+                        dirty_components.insert(mount, outcome.dirty_components);
                         if let Some(patch) = outcome.patch {
                             patched_mounts.insert(mount, patch);
                         }
@@ -1449,6 +1478,7 @@ impl ShellCompositionRuntime {
                     .collect::<Vec<_>>();
                 if self.patch_authority.contains_key(&mount) {
                     let outcome = self.render_mount_patched(mount, Value::Array(batch))?;
+                    dirty_components.insert(mount, outcome.dirty_components);
                     if let Some(patch) = outcome.patch {
                         patched_mounts.insert(mount, patch);
                     }
@@ -1650,7 +1680,31 @@ impl ShellCompositionRuntime {
                     tree_bytes,
                 },
             };
-            let validated = validate(&patch, &expansion.events, generation)?;
+            // Expanding a dirty parent may re-render an owned child after the
+            // initial dirty-generation scan (for example, transported native
+            // children or callback props). Stable handler tokens remain native
+            // authority, but their host handles must follow the mount's newly
+            // provisional generation before this batch can be admitted.
+            for handle in expansion.events.values_mut() {
+                if let Some(mount) = self.mounts.get(&handle.mount) {
+                    handle.generation = mount.generation;
+                }
+            }
+            let validated = match validate(&patch, &expansion.events, generation) {
+                Ok(validated) => validated,
+                Err(error) => {
+                    rejected_native = Some(NativeRejection {
+                        owners: boundaries
+                            .iter()
+                            .map(|(_, mount, _)| {
+                                (*mount, dirty_components.remove(mount).unwrap_or_default())
+                            })
+                            .collect(),
+                        message: error.clone(),
+                    });
+                    return Err(error);
+                }
+            };
             let removed = self
                 .nested_mounts
                 .keys()
@@ -1680,6 +1734,32 @@ impl ShellCompositionRuntime {
         })();
         if result.is_err() {
             self.finish_transaction(false)?;
+            if let Some(rejection) = rejected_native {
+                let mut captured = false;
+                for (mount, component_owners) in rejection.owners {
+                    let Some(state) = self.mounts.get(&mount) else {
+                        continue;
+                    };
+                    let package = self
+                        .packages
+                        .get_mut(&state.reference.owner)
+                        .ok_or("retired component owner")?;
+                    let mut runtime = package.runtime.borrow_mut();
+                    runtime.select_surface(&surface(mount))?;
+                    captured |= !runtime
+                        .capture_native_failure(&component_owners, &rejection.message)?
+                        .is_empty();
+                }
+                if captured {
+                    return self.dispatch_expanded_batch_scheduled_pending_with_validator(
+                        root,
+                        &[],
+                        accepted_events,
+                        accepted_source,
+                        validate,
+                    );
+                }
+            }
         }
         result
     }
@@ -1693,7 +1773,7 @@ impl ShellCompositionRuntime {
         root: &ComponentMount,
         accepted_events: &BTreeMap<u64, ComponentEventHandle>,
         accepted_source: &Value,
-        validate: impl FnOnce(
+        validate: impl FnMut(
             &NativePatchEnvelope,
             &BTreeMap<u64, ComponentEventHandle>,
             u64,
@@ -2123,6 +2203,11 @@ impl ShellCompositionRuntime {
                 }
             }
             Value::Object(object) => {
+                let retained_slots = object
+                    .get("__handlerSlots")
+                    .and_then(Value::as_object)
+                    .cloned()
+                    .unwrap_or_default();
                 for (key, value) in object {
                     if key == "__handlerSlots" {
                         continue;
@@ -2131,11 +2216,20 @@ impl ShellCompositionRuntime {
                             .get(&value.as_u64().ok_or("invalid host event token")?)
                             .ok_or("unknown host event token")?
                             .clone();
-                        let token = expansion.next_event;
-                        expansion.next_event = expansion
-                            .next_event
-                            .checked_add(1)
-                            .ok_or("expanded event identity exhausted")?;
+                        let retained_token = retained_slots
+                            .get(key)
+                            .and_then(Value::as_str)
+                            .and_then(|slot| {
+                                self.patch_authority.get(&source_mount)?.slots.get(slot)
+                            })
+                            .copied()
+                            .filter(|token| !expansion.events.contains_key(token));
+                        let token = retained_token.unwrap_or(expansion.next_event);
+                        expansion.next_event = expansion.next_event.max(
+                            token
+                                .checked_add(1)
+                                .ok_or("expanded event identity exhausted")?,
+                        );
                         expansion.events.insert(token, handle);
                         *value = Value::from(token);
                     } else {
@@ -2614,16 +2708,17 @@ impl ShellCompositionRuntime {
         runtime.finish_event(outcome.is_ok())?;
         let outcome = outcome?;
         drop(runtime);
-        let (patch, reconciliation_requested) = match outcome {
-            ScheduledPatch::Unchanged => (None, false),
+        let (patch, dirty_components, reconciliation_requested) = match outcome {
+            ScheduledPatch::Unchanged => (None, Vec::new(), false),
             ScheduledPatch::Patched {
                 patch,
+                dirty_components,
                 reconciliation_requested,
                 ..
             } => {
                 self.next_generation = generation;
                 self.mounts.get_mut(&id).unwrap().generation = generation;
-                (Some(patch), reconciliation_requested)
+                (Some(patch), dirty_components, reconciliation_requested)
             }
         };
         self.drain_effects(&owner, id, previous_generation, true)?;
@@ -2641,6 +2736,7 @@ impl ShellCompositionRuntime {
         }
         Ok(PatchedMountDispatch {
             patch,
+            dirty_components,
             reconciliation_requested,
         })
     }
@@ -3879,6 +3975,79 @@ mod tests {
     }
 
     #[test]
+    fn rejected_settings_patch_does_not_retire_taskbar_surface_or_handlers() {
+        let base = package(
+            "base",
+            "function SettingsLeaf(){const [count,setCount]=useState(0);return h(Button,{onClick:()=>setCount(count+1)},'settings'+count)}\nregisterSettingsPage({id:'details',group:'Plugins',label:'Details',component:()=>h(ErrorBoundary,{fallback:h(Text,null,'settings fallback')},h(SettingsLeaf))});\nexport function Taskbar(){const [count,setCount]=useState(0);return h(Button,{onClick:()=>setCount(count+1)},'taskbar'+count)}\nexport function QuickSettings(){}\nexport default Taskbar;",
+            None,
+        );
+        let mut host = ShellCompositionRuntime::new(
+            &BTreeMap::from([("base".into(), base)]),
+            "base",
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let mut registry = nickel_core::settings_registry::SettingsRegistry::default();
+        for (owner, package) in &host.packages {
+            package
+                .runtime
+                .borrow_mut()
+                .publish_settings(&mut registry, &owner.id)
+                .unwrap();
+        }
+        for package in host.packages.values() {
+            package
+                .runtime
+                .borrow_mut()
+                .set_settings_registry(&registry)
+                .unwrap();
+        }
+        let taskbar = host
+            .mount(&host.component("shell.taskbar").unwrap())
+            .unwrap();
+        let settings = host
+            .mount(&host.registered_page("base", "details").unwrap())
+            .unwrap();
+        let taskbar_tree = host
+            .render_expanded(&taskbar, &serde_json::json!({}), |_| Ok(()))
+            .unwrap();
+        let settings_tree = host
+            .render_expanded(&settings, &serde_json::json!({}), |_| Ok(()))
+            .unwrap();
+        let settings_event = settings_tree.events[&0].clone();
+        let mut attempts = 0;
+        let outcome = host
+            .dispatch_expanded_batch_scheduled_pending_validated(
+                &settings,
+                &[(settings_event, Value::Null)],
+                &settings_tree.events,
+                &settings_tree.node,
+                |patch, _, _| {
+                    attempts += 1;
+                    if attempts == 1 {
+                        Err("settings native rejection".into())
+                    } else {
+                        assert!(
+                            serde_json::to_string(patch)
+                                .unwrap()
+                                .contains("settings fallback")
+                        );
+                        Ok(())
+                    }
+                },
+            )
+            .unwrap();
+        assert!(matches!(outcome, ScheduledExpandedBatch::Patched { .. }));
+        host.finish_transaction(true).unwrap();
+
+        let taskbar_after = host
+            .dispatch_expanded(&taskbar, &taskbar_tree.events[&0], &Value::Null, |_| Ok(()))
+            .unwrap();
+        assert!(taskbar_after.node.to_string().contains("taskbar1"));
+        assert!(!taskbar_after.node.to_string().contains("settings fallback"));
+    }
+
+    #[test]
     fn independent_providers_share_context_and_retire_contributions_and_stale_authority() {
         let mut base = package(
             "base",
@@ -4126,6 +4295,92 @@ mod tests {
         assert_eq!(patch.counters.tree_bytes, 0);
         assert_eq!(events.len(), 1);
         host.finish_transaction(true).unwrap();
+    }
+
+    #[test]
+    fn rejected_derived_shell_patch_commits_nearest_boundary_fallback_only() {
+        let mut base = package(
+            "base",
+            "export function Shell(){return h(Column,null,h(Text,{key:'clean'},'clean sibling'),h(nickel.component('shell.taskbar')));}\nexport function Taskbar(){}\nexport function QuickSettings(){}\nexport default Shell;",
+            None,
+        );
+        base.manifest
+            .composition
+            .as_mut()
+            .unwrap()
+            .exports
+            .insert("shell".into(), "./main.js#Shell".into());
+        let child = package(
+            "child",
+            "function Leaf(){const [count,setCount]=useState(0);return h(Button,{onClick:()=>{setCount(count+1);nickel.windows.activate('provisional')}},'leaf'+count)}\nexport function Taskbar(){return h(ErrorBoundary,{fallback:(error,reset)=>h(Button,{onClick:reset},'taskbar failed:'+error.message)},h(Leaf));}\nexport default Taskbar;",
+            Some("base"),
+        );
+        let mut host = ShellCompositionRuntime::new(
+            &BTreeMap::from([("base".into(), base), ("child".into(), child)]),
+            "child",
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let root = host.mount(&host.component("shell").unwrap()).unwrap();
+        let initial = host
+            .render_expanded(&root, &serde_json::json!({}), |_| Ok(()))
+            .unwrap();
+        let accepted_source = initial.node.clone();
+        let accepted_events = initial.events.clone();
+        let event = accepted_events[&0].clone();
+        let mut attempts = 0;
+        let outcome = host
+            .dispatch_expanded_batch_scheduled_pending_validated(
+                &root,
+                &[(event, Value::Null)],
+                &accepted_events,
+                &accepted_source,
+                |patch, events, _| {
+                    attempts += 1;
+                    if attempts == 1 {
+                        assert!(patch.operations.iter().any(|operation| matches!(
+                            operation,
+                            NativePatchOperation::SetPrimitive { value, .. }
+                                if value.to_string().contains("leaf1")
+                        )));
+                        return Err("native widget contract rejected leaf".into());
+                    }
+                    assert_eq!(events.len(), 1, "fallback owns one reset handler");
+                    assert!(patch.operations.iter().any(|operation| {
+                        serde_json::to_string(operation)
+                            .unwrap()
+                            .contains("taskbar failed:native widget contract rejected leaf")
+                    }));
+                    assert!(!patch.operations.iter().any(|operation| {
+                        serde_json::to_string(operation)
+                            .unwrap()
+                            .contains("clean sibling")
+                    }));
+                    Ok(())
+                },
+            )
+            .unwrap();
+        assert_eq!(attempts, 2);
+        let ScheduledExpandedBatch::Patched { events, .. } = outcome else {
+            panic!("boundary fallback must reconcile as a typed patch")
+        };
+        host.finish_transaction(true).unwrap();
+        assert!(
+            host.take_effects().is_empty(),
+            "rejected effects stay discarded"
+        );
+        assert!(host.dispatch(&accepted_events[&0], &Value::Null).is_err());
+        assert!(host.dispatch(&events[&0], &Value::Null).is_ok());
+        let diagnostics = host
+            .packages
+            .values_mut()
+            .find(|package| package.manifest.id == "child")
+            .unwrap()
+            .runtime
+            .borrow_mut()
+            .boundary_diagnostics()
+            .unwrap();
+        assert_eq!(diagnostics.last().unwrap()["phase"], "native-validation");
     }
 
     #[test]

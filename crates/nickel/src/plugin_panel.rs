@@ -11,8 +11,7 @@ use nickel_core::plugins::{
     PluginCapability, PluginManifest, PluginPackage, PluginSurface, PluginSurfaceKind,
 };
 use nickel_plugin_presentation::components::{
-    PanelNode, RetainedPanelTree, parse_panel_for_manifest, render_retained_panel,
-    render_retained_panel_validated,
+    PanelNode, RetainedPanelTree, render_retained_panel, render_retained_panel_validated,
 };
 pub use nickel_plugin_presentation::components::{PluginImages, PluginMessage};
 use nickel_plugin_runtime::composition_runtime::{
@@ -3016,7 +3015,7 @@ impl PluginPanelApplication {
                     &state.events,
                     &accepted_source,
                     |patch, _, generation| {
-                        let mut candidate = accepted_tree;
+                        let mut candidate = accepted_tree.clone();
                         let transport_bytes = serde_json::to_vec(patch)
                             .map_err(|error| error.to_string())?
                             .len();
@@ -3082,6 +3081,7 @@ impl PluginPanelApplication {
                     }
                     Ok(ScheduledPatch::Patched {
                         patch,
+                        dirty_components,
                         transport_bytes,
                         ..
                     }) => {
@@ -3104,8 +3104,14 @@ impl PluginPanelApplication {
                                 Some(candidate)
                             }
                             Err(error) => {
-                                self.last_error = Some(error);
-                                return Ok(changed);
+                                let captured =
+                                    runtime.capture_native_failure(&dirty_components, &error)?;
+                                if captured.is_empty() {
+                                    self.last_error = Some(error);
+                                    return Ok(changed);
+                                }
+                                self.last_error = None;
+                                continue;
                             }
                         }
                     }
@@ -3310,6 +3316,7 @@ impl nickel_ui::Application for PluginPanelApplication {
             )
         });
         let mut validation_rejected = false;
+        let mut native_failure = None;
         let (rendered, effects) = if let Some(state) = &mut self.composition {
             let result = (|| {
                 let events = events
@@ -3324,26 +3331,48 @@ impl nickel_ui::Application for PluginPanelApplication {
                     })
                     .collect::<Result<Vec<_>, String>>()?;
                 let mut host = state.host.borrow_mut();
-                let (rendered, ()) = host.dispatch_expanded_batch_pending_validated(
+                let accepted_tree = self.accepted.clone();
+                let accepted_source = accepted_tree.source().clone();
+                let outcome = host.dispatch_expanded_batch_scheduled_pending_validated(
                     &state.mount,
                     &events,
-                    |value| {
-                        parse_panel_for_manifest(
-                            value,
+                    &state.events,
+                    &accepted_source,
+                    |patch, _, generation| {
+                        let mut candidate = accepted_tree.clone();
+                        let transport_bytes = serde_json::to_vec(patch)
+                            .map_err(|error| error.to_string())?
+                            .len();
+                        candidate.apply_patch(
+                            patch,
                             &self.manifest,
                             self.expected_surface_id.as_deref(),
+                            &self.stylesheet,
+                            generation,
+                            transport_bytes,
                         )?;
-                        Ok(())
+                        Ok(candidate)
                     },
                 )?;
-                let generation = rendered.generation();
-                state.events = rendered.events;
-                let accepted = Some(RetainedPanelTree::admit(
-                    &rendered.node,
-                    &self.manifest,
-                    self.expected_surface_id.as_deref(),
-                    generation,
-                )?);
+                let accepted = match outcome {
+                    ScheduledExpandedBatch::Unchanged => None,
+                    ScheduledExpandedBatch::Rendered { rendered, .. } => {
+                        let generation = rendered.generation();
+                        state.events = rendered.events;
+                        Some(RetainedPanelTree::admit(
+                            &rendered.node,
+                            &self.manifest,
+                            self.expected_surface_id.as_deref(),
+                            generation,
+                        )?)
+                    }
+                    ScheduledExpandedBatch::Patched {
+                        events, validated, ..
+                    } => {
+                        state.events = events;
+                        Some(validated)
+                    }
+                };
                 let effects = host
                     .take_effects()
                     .into_iter()
@@ -3385,6 +3414,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                             ScheduledPatch::Unchanged => Ok(None),
                             ScheduledPatch::Patched {
                                 patch,
+                                dirty_components,
                                 transport_bytes,
                                 ..
                             } => {
@@ -3400,6 +3430,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                                     )
                                     .map_err(|error| {
                                         validation_rejected = true;
+                                        native_failure = Some((dirty_components, error.clone()));
                                         error
                                     })?;
                                 Ok(Some(candidate))
@@ -3468,6 +3499,27 @@ impl nickel_ui::Application for PluginPanelApplication {
         if let Err(error) = finalize {
             self.runtime_failure = Some(error.clone());
             self.last_error = Some(error);
+        } else if let Some((owners, error)) = native_failure {
+            let captured = {
+                let mut runtime = self.runtime.borrow_mut();
+                runtime
+                    .select_surface(&self.runtime_surface_id)
+                    .and_then(|()| runtime.capture_native_failure(&owners, &error))
+            };
+            match captured {
+                Ok(boundaries) if !boundaries.is_empty() => {
+                    self.last_error = None;
+                    if let Err(error) = self.reconcile_passive_effects() {
+                        self.runtime_failure = Some(error.clone());
+                        self.last_error = Some(error);
+                    }
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    self.runtime_failure = Some(error.clone());
+                    self.last_error = Some(error);
+                }
+            }
         } else if self.last_error.is_none() {
             self.accepted = candidate_accepted;
             self.effects.extend(candidate_effects);

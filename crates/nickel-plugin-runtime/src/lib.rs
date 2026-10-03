@@ -1080,6 +1080,33 @@ impl JsxRuntime {
         self.eval_json("__nickelBoundaryDiagnostics()")
     }
 
+    /// Translate a rejected native candidate into the nearest JSX boundary.
+    /// Callers must roll back the candidate transaction first. The returned
+    /// paths are dirtied for a fresh, commit-gated fallback reconciliation.
+    pub fn capture_native_failure(
+        &mut self,
+        owners: &[String],
+        message: &str,
+    ) -> Result<Vec<String>, String> {
+        if owners.len() > 256 {
+            return Err("too many native failure owners".into());
+        }
+        let expression = format!(
+            "__nickelCaptureNativeFailure({}, {})",
+            serde_json::to_string(owners).map_err(|error| error.to_string())?,
+            serde_json::to_string(&message.chars().take(512).collect::<String>())
+                .map_err(|error| error.to_string())?,
+        );
+        let value: Value = self.eval_json(&expression)?;
+        serde_json::from_value(
+            value
+                .get("captured")
+                .cloned()
+                .ok_or("native failure capture omitted boundary paths")?,
+        )
+        .map_err(|error| error.to_string())
+    }
+
     /// Bounded retained-render reasons and cumulative execution/effect counts.
     pub fn runtime_diagnostics(&mut self) -> Result<Value, String> {
         self.eval_json("__nickelRuntimeDiagnostics()")
@@ -1293,6 +1320,53 @@ mod tests {
 
         runtime.eval("for(let i=0;i<80;i++)__nickelRecordBoundaryFailure('root/'+i,'render',Error('failure '+i))").unwrap();
         assert_eq!(runtime.boundary_diagnostics().unwrap().len(), 32);
+    }
+
+    #[test]
+    fn native_rejection_activates_nearest_boundary_after_rollback() {
+        let mut runtime = super::JsxRuntime::new(
+            r#"
+            function Leaf(){const [count,setCount]=useState(0);return h(Button,{onClick:()=>{setCount(count+1);nickel.windows.activate('provisional')}},'leaf:'+count)}
+            function Inner(){return h(ErrorBoundary,{fallback:(error,reset)=>h(Button,{onClick:reset},'inner:'+error.message)},h(Leaf))}
+            function App(){return h(ErrorBoundary,{fallback:h(Text,null,'outer')},h(Column,null,h(Inner),h(Text,null,'sibling')))}
+            "#,
+            None,
+        )
+        .unwrap();
+        let initial: Value = runtime.eval_json("__nickelRender()").unwrap();
+        runtime.eval("__nickelCommitRender()").unwrap();
+        runtime.begin_transaction().unwrap();
+        let candidate = runtime
+            .dispatch_patched("__nickelDispatchBatchPatched([[0,null]])")
+            .unwrap();
+        assert!(matches!(candidate, super::ScheduledPatch::Patched { .. }));
+        assert_eq!(runtime.take_effects().unwrap().len(), 1);
+        runtime.finish_patch_render(true).unwrap();
+        runtime.finish_event(true).unwrap();
+        runtime.finish_transaction(false).unwrap();
+
+        let owner = runtime
+            .eval_json::<String>("JSON.stringify(Array.from(__componentRecords).find(([,record])=>record.kind.name==='Leaf')[0])")
+            .unwrap();
+        let captured = runtime
+            .capture_native_failure(&[owner], "native shape rejected")
+            .unwrap();
+        assert_eq!(captured.len(), 1);
+        let fallback: Value = runtime.eval_json("__nickelRender()").unwrap();
+        runtime.eval("__nickelCommitRender()").unwrap();
+        assert!(fallback.to_string().contains("inner:native shape rejected"));
+        assert!(fallback.to_string().contains("sibling"));
+        assert!(!fallback.to_string().contains("leaf:1"));
+        assert_eq!(runtime.take_effects().unwrap(), Vec::<Value>::new());
+        let diagnostics = runtime.boundary_diagnostics().unwrap();
+        assert_eq!(diagnostics.last().unwrap()["phase"], "native-validation");
+        assert_eq!(
+            diagnostics.last().unwrap()["message"],
+            "native shape rejected"
+        );
+        // The previously admitted tree remains the native authority until the
+        // fallback patch is independently accepted.
+        assert!(initial.to_string().contains("leaf:0"));
     }
 
     #[test]

@@ -185,6 +185,31 @@ function __nickelCaptureFailure(owner, error, phase) {
     __nickelRecordBoundaryFailure(boundary, phase, error);
     return true;
 }
+// Native validation happens after JavaScript has produced a candidate patch.
+// The host first rolls that candidate back, then reports the component owners
+// whose admitted native boundaries were involved.  Capturing after rollback is
+// important: the fallback becomes a fresh transaction based on the last
+// committed tree and cannot inherit provisional handlers, hooks, or effects.
+function __nickelCaptureNativeFailure(owners, message) {
+    if (__pendingRender !== null || __pendingEvent !== null || __compositionCheckpoint !== null)
+        throw Error('cannot capture native failure during a pending transaction');
+    if (!Array.isArray(owners) || owners.length > 256)
+        throw TypeError('native failure owners must be a bounded array');
+    const error = Error(String(message).slice(0, 512));
+    const captured = new Set();
+    for (const owner of owners) {
+        const boundary = __nickelNearestBoundary(owner);
+        if (boundary === null || captured.has(boundary)) continue;
+        const record = __componentRecords.get(boundary);
+        // A fallback rejected by native validation must not spin forever.
+        if (record?.boundaryError !== undefined) continue;
+        __componentRecords.set(boundary, {...record, boundaryError:error});
+        __dirtyComponents.add(boundary);
+        __nickelRecordBoundaryFailure(boundary, 'native-validation', error);
+        captured.add(boundary);
+    }
+    return JSON.stringify({captured:Array.from(captured)});
+}
 function __nickelBoundaryDiagnostics() { return JSON.stringify(__boundaryDiagnostics); }
 function __nickelBoundedDiagnosticPush(target, value) {
     if (target.length === __MAX_RUNTIME_CHANGES) target.shift();
