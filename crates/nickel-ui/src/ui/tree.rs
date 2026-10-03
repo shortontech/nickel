@@ -409,6 +409,13 @@ pub struct FrameResourceDiagnostics {
     /// or resource cache and are intentionally not guessed here.
     pub estimated_retained_bytes: usize,
     pub retained_build_scratch_bytes: usize,
+    /// Stable native nodes retained across declarative frame reconciliation.
+    pub retained_node_count: usize,
+    pub retained_nodes_reused: usize,
+    pub retained_nodes_created: usize,
+    pub retained_nodes_removed: usize,
+    pub retained_nodes_moved: usize,
+    pub retained_nodes_replaced: usize,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -515,6 +522,7 @@ impl ResolvedLayout {
 
 #[derive(Clone, Debug)]
 pub struct UiFrame<Message = String> {
+    retained_nodes: super::retained::RetainedNodeArena,
     declaration_root: Option<Element<Message>>,
     declaration_root_id: Option<UiId>,
     commands: Vec<PaintCommand>,
@@ -555,6 +563,7 @@ pub struct UiFrame<Message = String> {
 impl<Message> Default for UiFrame<Message> {
     fn default() -> Self {
         Self {
+            retained_nodes: super::retained::RetainedNodeArena::default(),
             declaration_root: None,
             declaration_root_id: None,
             commands: Vec::new(),
@@ -1587,12 +1596,46 @@ impl<Message: Clone> UiFrame<Message> {
     }
     /// Resolves a declarative view into the canonical retained frame.
     pub fn resolve(root: impl Component<Message>, request: FrameRequest<'_>) -> Self {
-        Self::layout_with_state_and_diagnostics(
+        let mut tree = Self::layout_with_state_and_diagnostics(
             root,
             request.viewport,
             request.state,
             request.diagnostics == DiagnosticMode::Collect,
-        )
+        );
+        tree.reconcile_retained_nodes(None);
+        tree
+    }
+
+    /// Resolve a fresh declaration while carrying stable native node identity
+    /// and phase records forward from the previously published frame.
+    pub(crate) fn resolve_against(
+        root: impl Component<Message>,
+        request: FrameRequest<'_>,
+        previous: &Self,
+    ) -> Self {
+        let mut tree = Self::layout_with_state_and_diagnostics(
+            root,
+            request.viewport,
+            request.state,
+            request.diagnostics == DiagnosticMode::Collect,
+        );
+        tree.reconcile_retained_nodes(Some(previous));
+        tree
+    }
+
+    fn reconcile_retained_nodes(&mut self, previous: Option<&Self>) {
+        let Some(root) = self.declaration_root.as_ref() else {
+            return;
+        };
+        let mut arena = previous
+            .map(|previous| previous.retained_nodes.clone())
+            .unwrap_or_default();
+        arena.reconcile(root);
+        self.retained_nodes = arena;
+        for node in self.resolved.nodes() {
+            self.retained_nodes
+                .capture_layout(&node.id, node.preferred, node.allocated);
+        }
     }
 
     fn selection_hit_at(
@@ -2845,6 +2888,7 @@ impl<Message: Clone> UiFrame<Message> {
             + self.selection_paints.capacity() * std::mem::size_of::<(usize, Vec<Rect>)>()
             + self.diagnostic_keys.capacity() * std::mem::size_of::<(DiagnosticKind, UiId)>()
             + self.seen_ids.capacity() * std::mem::size_of::<UiId>();
+        let retained = self.retained_nodes.last();
         FrameResourceDiagnostics {
             node_count: self.resolved.nodes.len(),
             paint_fragment_count: self.paint_fragments.len(),
@@ -2852,8 +2896,17 @@ impl<Message: Clone> UiFrame<Message> {
             hit_target_count: self.hits.len(),
             message_binding_count: self.messages.len() + self.context_messages.len(),
             accessibility_node_count: self.accessibility.len(),
-            estimated_retained_bytes: vector_bytes + node_children + accessibility_strings,
+            estimated_retained_bytes: vector_bytes
+                + node_children
+                + accessibility_strings
+                + self.retained_nodes.estimated_bytes(),
             retained_build_scratch_bytes,
+            retained_node_count: self.retained_nodes.node_count(),
+            retained_nodes_reused: retained.reused,
+            retained_nodes_created: retained.created,
+            retained_nodes_removed: retained.removed,
+            retained_nodes_moved: retained.moved,
+            retained_nodes_replaced: retained.replaced,
         }
     }
 

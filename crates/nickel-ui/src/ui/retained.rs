@@ -1,0 +1,819 @@
+use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
+
+use crate::{Rect, Size, UiId};
+
+use super::{Element, Kind, Length, PaintCommand, Style};
+
+/// Stable native identity assigned independently of a node's current arena slot.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub(crate) struct RetainedNodeId(u64);
+
+/// Independent work classes dirtied by declarative reconciliation.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct DirtyPhases(u8);
+
+impl DirtyPhases {
+    pub(crate) const CHILDREN: Self = Self(1 << 0);
+    pub(crate) const MEASURE: Self = Self(1 << 1);
+    pub(crate) const PLACE: Self = Self(1 << 2);
+    pub(crate) const PAINT: Self = Self(1 << 3);
+    pub(crate) const INTERACTION: Self = Self(1 << 4);
+    pub(crate) const SEMANTICS: Self = Self(1 << 5);
+    pub(crate) const ALL: Self = Self((1 << 6) - 1);
+
+    pub(crate) const fn contains(self, phase: Self) -> bool {
+        self.0 & phase.0 == phase.0
+    }
+
+    const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    fn insert(&mut self, other: Self) {
+        *self = self.union(other);
+    }
+
+    const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct RetainedPhaseData {
+    pub(crate) measured: Option<Size>,
+    pub(crate) allocated: Option<Rect>,
+    pub(crate) paint: Vec<PaintCommand>,
+    pub(crate) interaction_revision: u64,
+    pub(crate) semantics_revision: u64,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct ReconcileStats {
+    pub(crate) visited: usize,
+    pub(crate) reused: usize,
+    pub(crate) created: usize,
+    pub(crate) removed: usize,
+    pub(crate) moved: usize,
+    pub(crate) replaced: usize,
+    pub(crate) clean: usize,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct RetainedNode {
+    id: RetainedNodeId,
+    parent: Option<RetainedNodeId>,
+    identity: ChildIdentity,
+    ui_id: UiId,
+    kind: KindTag,
+    signatures: PhaseSignatures,
+    dirty: DirtyPhases,
+    children: Vec<RetainedNodeId>,
+    pub(crate) phases: RetainedPhaseData,
+}
+
+impl RetainedNode {
+    #[cfg(test)]
+    pub(crate) const fn id(&self) -> RetainedNodeId {
+        self.id
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn dirty(&self) -> DirtyPhases {
+        self.dirty
+    }
+
+    pub(crate) const fn parent(&self) -> Option<RetainedNodeId> {
+        self.parent
+    }
+
+    fn invalidate_dirty_phases(&mut self) {
+        if self.dirty.contains(DirtyPhases::MEASURE) {
+            self.phases.measured = None;
+        }
+        if self.dirty.contains(DirtyPhases::PLACE) {
+            self.phases.allocated = None;
+        }
+        if self.dirty.contains(DirtyPhases::PAINT) {
+            self.phases.paint.clear();
+        }
+        if self.dirty.contains(DirtyPhases::INTERACTION) {
+            self.phases.interaction_revision = 0;
+        }
+        if self.dirty.contains(DirtyPhases::SEMANTICS) {
+            self.phases.semantics_revision = 0;
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct RetainedNodeArena {
+    next_id: u64,
+    root: Option<RetainedNodeId>,
+    nodes: HashMap<RetainedNodeId, RetainedNode>,
+    last: ReconcileStats,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+enum ChildIdentity {
+    Root,
+    Key(UiId),
+    Position(usize),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum KindTag {
+    Row,
+    Column,
+    Layer,
+    Scroll,
+    Grid,
+    CustomPaint,
+    Text,
+    StyledText,
+    Image,
+    Slider,
+    Dropdown,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct PhaseSignatures {
+    measure: u64,
+    place: u64,
+    paint: u64,
+    interaction: u64,
+    semantics: u64,
+}
+
+#[derive(Default)]
+struct CompactHasher(std::collections::hash_map::DefaultHasher);
+
+impl CompactHasher {
+    fn add<T: Hash>(&mut self, value: &T) {
+        value.hash(&mut self.0);
+    }
+
+    fn text(&mut self, value: &str) {
+        // Reconciliation metadata stays bounded for document-scale values. The
+        // cold oracle remains authoritative; these signatures never establish
+        // equality of user content by themselves.
+        self.add(&value.len());
+        let bytes = value.as_bytes();
+        let prefix = &bytes[..bytes.len().min(64)];
+        let suffix = &bytes[bytes.len().saturating_sub(64)..];
+        self.add(&prefix);
+        self.add(&suffix);
+    }
+
+    fn finish(self) -> u64 {
+        self.0.finish()
+    }
+}
+
+fn bits(value: f32) -> u32 {
+    value.to_bits()
+}
+
+fn length(hasher: &mut CompactHasher, value: Length) {
+    std::mem::discriminant(&value).hash(&mut hasher.0);
+    match value {
+        Length::Px(value) | Length::Percent(value) | Length::Fraction(value) => {
+            hasher.add(&bits(value));
+        }
+        Length::Auto | Length::Fill | Length::MinContent | Length::MaxContent => {}
+    }
+}
+
+fn hash_layout_style(style: &Style) -> (u64, u64) {
+    let mut measure = CompactHasher::default();
+    for value in [
+        style.padding.top,
+        style.padding.right,
+        style.padding.bottom,
+        style.padding.left,
+    ] {
+        measure.add(&bits(value));
+    }
+    measure.add(&bits(style.gap));
+    length(&mut measure, style.width);
+    length(&mut measure, style.height);
+    length(&mut measure, style.basis);
+    for value in [
+        style.min_width,
+        style.min_height,
+        style.max_width,
+        style.max_height,
+    ] {
+        measure.add(&bits(value));
+    }
+    measure.add(&bits(style.grow));
+    measure.add(&bits(style.shrink));
+    measure.add(&format!(
+        "{:?}{:?}{:?}",
+        style.align_self, style.align_items, style.justify_content
+    ));
+
+    let mut place = CompactHasher::default();
+    place.add(&format!("{:?}{:?}", style.overflow_x, style.overflow_y));
+    if let Some(position) = style.absolute_position {
+        place.add(&bits(position.x));
+        place.add(&bits(position.y));
+    }
+    place.add(&style.follow_scroll_end);
+    (measure.finish(), place.finish())
+}
+
+fn kind_tag(kind: &Kind) -> KindTag {
+    match kind {
+        Kind::Flex(super::Axis::Horizontal) => KindTag::Row,
+        Kind::Flex(super::Axis::Vertical) => KindTag::Column,
+        Kind::Layer => KindTag::Layer,
+        Kind::VerticalScroll { .. } => KindTag::Scroll,
+        Kind::Grid { .. } => KindTag::Grid,
+        Kind::CustomPaint { .. } | Kind::CustomPaintCommands { .. } => KindTag::CustomPaint,
+        Kind::Text { .. } => KindTag::Text,
+        Kind::StyledText { .. } => KindTag::StyledText,
+        Kind::Image { .. } => KindTag::Image,
+        Kind::Slider { .. } => KindTag::Slider,
+        Kind::Dropdown { .. } => KindTag::Dropdown,
+    }
+}
+
+fn signatures<Message>(element: &Element<Message>) -> PhaseSignatures {
+    let (style_measure, place) = hash_layout_style(&element.style);
+    let mut content_measure = CompactHasher::default();
+    let mut paint = CompactHasher::default();
+    let mut semantics = CompactHasher::default();
+    std::mem::discriminant(&element.kind).hash(&mut content_measure.0);
+    std::mem::discriminant(&element.kind).hash(&mut paint.0);
+
+    match &element.kind {
+        Kind::Text {
+            value,
+            scale,
+            bold,
+            wrap,
+            line_height,
+            max_lines,
+            ellipsis,
+            outline,
+            input_value,
+            input_placeholder,
+            input_mask,
+            ..
+        } => {
+            content_measure.text(value);
+            content_measure.add(&bits(*scale));
+            content_measure.add(bold);
+            content_measure.add(wrap);
+            content_measure.add(&line_height.map(bits));
+            content_measure.add(max_lines);
+            paint.text(value);
+            paint.add(ellipsis);
+            paint.add(&format!(
+                "{outline:?}{input_value:?}{input_placeholder:?}{input_mask:?}"
+            ));
+            semantics.text(value);
+        }
+        Kind::StyledText {
+            value,
+            spans,
+            scale,
+            wrap,
+            line_height,
+        } => {
+            content_measure.text(value);
+            content_measure.add(&spans.len());
+            content_measure.add(&bits(*scale));
+            content_measure.add(wrap);
+            content_measure.add(&line_height.map(bits));
+            paint.text(value);
+            paint.add(&spans.len());
+            semantics.text(value);
+        }
+        Kind::Image {
+            id,
+            generation,
+            presentation,
+            ..
+        } => {
+            content_measure.add(id);
+            content_measure.add(generation);
+            content_measure.add(&format!("{presentation:?}"));
+            paint.add(id);
+            paint.add(generation);
+            paint.add(&format!("{presentation:?}"));
+        }
+        Kind::VerticalScroll { offset, controlled } => {
+            paint.add(&bits(*offset));
+            paint.add(controlled);
+        }
+        Kind::Grid { columns } => content_measure.add(&format!("{columns:?}")),
+        Kind::CustomPaint { paint: callback } => paint.add(&(*callback as usize)),
+        Kind::CustomPaintCommands { commands } => {
+            paint.add(&commands.len());
+            paint.add(&format!("{:?}{:?}", commands.first(), commands.last()));
+        }
+        Kind::Slider {
+            value,
+            track,
+            fill,
+            thumb,
+            thumb_border,
+            geometry,
+            presentation,
+        } => {
+            paint.add(&bits(*value));
+            paint.add(&format!(
+                "{track:?}{fill:?}{thumb:?}{thumb_border:?}{geometry:?}{presentation:?}"
+            ));
+        }
+        Kind::Dropdown {
+            selected,
+            options,
+            expanded,
+            open_generation,
+            overlay,
+            background,
+            option_background,
+            foreground,
+            presentation,
+            option_presentations,
+            resolved_options,
+        } => {
+            content_measure.text(selected);
+            content_measure.add(&options.len());
+            paint.text(selected);
+            paint.add(expanded);
+            paint.add(open_generation);
+            paint.add(overlay);
+            paint.add(&format!(
+                "{background:?}{option_background:?}{foreground:?}{presentation:?}"
+            ));
+            paint.add(&option_presentations.len());
+            paint.add(&resolved_options.len());
+            semantics.text(selected);
+            semantics.add(&options.len());
+        }
+        Kind::Flex(_) | Kind::Layer => {}
+    }
+
+    let fixed_leaf = element.children.is_empty()
+        && matches!(element.style.width, Length::Px(_))
+        && matches!(element.style.height, Length::Px(_));
+    let measure = if fixed_leaf {
+        style_measure
+    } else {
+        style_measure ^ content_measure.finish()
+    };
+    paint.add(&format!(
+        "{:?}{:?}{:?}{:?}{:?}{:?}{:?}",
+        element.style.background,
+        element.style.border,
+        element.style.foreground,
+        element.style.box_shadow,
+        element.style.corner_radius,
+        element.style.top_corner_radius,
+        element.style.interaction_paints
+    ));
+
+    let mut interaction = CompactHasher::default();
+    interaction.add(&element.message.is_some());
+    interaction.add(&element.context_message.is_some());
+    interaction.add(&element.focus_message.is_some());
+    interaction.add(&element.blur_message.is_some());
+    interaction.add(&element.message_mapper.map(|callback| callback as usize));
+    interaction.add(
+        &element
+            .seeded_value_mapper
+            .map(|callback| callback as usize),
+    );
+    interaction.add(
+        &element
+            .scroll_extent_mapper
+            .map(|callback| callback as usize),
+    );
+    interaction.add(&element.drag_mapper.map(|callback| callback as usize));
+    interaction.add(&element.drop_mapper.map(|callback| callback as usize));
+    interaction.add(&element.text_mapper.is_some());
+    interaction.add(&element.option_messages.len());
+    interaction.add(&element.inline_messages.len());
+
+    semantics.add(&format!(
+        "{:?}{:?}{:?}{:?}{:?}{:?}{:?}",
+        element.style.accessibility_label,
+        element.style.accessibility_description,
+        element.style.accessibility_role,
+        element.style.accessibility_state,
+        element.style.semantic_role,
+        element.style.accessibility_hidden,
+        element.style.semantic_decorative
+    ));
+
+    PhaseSignatures {
+        measure,
+        place,
+        paint: paint.finish(),
+        interaction: interaction.finish(),
+        semantics: semantics.finish(),
+    }
+}
+
+impl RetainedNodeArena {
+    pub(crate) fn reconcile<Message>(&mut self, root: &Element<Message>) -> ReconcileStats {
+        let old_nodes = std::mem::take(&mut self.nodes);
+        let old_root = self.root.take();
+        self.last = ReconcileStats::default();
+        let mut consumed = HashSet::new();
+        let root_id = self.reconcile_node(
+            root,
+            None,
+            ChildIdentity::Root,
+            root.id.as_ref().map_or_else(
+                || UiId::from("root"),
+                |id| UiId::from("root").scoped(id.as_str()),
+            ),
+            0,
+            old_root,
+            &old_nodes,
+            &mut consumed,
+        );
+        self.root = Some(root_id);
+        self.last.removed = old_nodes.len().saturating_sub(consumed.len());
+        self.propagate_descendant_work(root_id);
+        for node in self.nodes.values_mut() {
+            node.invalidate_dirty_phases();
+        }
+        self.last.clean = self
+            .nodes
+            .values()
+            .filter(|node| node.dirty.is_empty())
+            .count();
+        self.last.clone()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn reconcile_node<Message>(
+        &mut self,
+        element: &Element<Message>,
+        parent: Option<RetainedNodeId>,
+        identity: ChildIdentity,
+        ui_id: UiId,
+        position: usize,
+        candidate: Option<RetainedNodeId>,
+        old_nodes: &HashMap<RetainedNodeId, RetainedNode>,
+        consumed: &mut HashSet<RetainedNodeId>,
+    ) -> RetainedNodeId {
+        self.last.visited += 1;
+        let kind = kind_tag(&element.kind);
+        let old = candidate.and_then(|id| old_nodes.get(&id));
+        let reusable = old.filter(|node| node.kind == kind && node.identity == identity);
+        let (id, phases, mut dirty) = if let Some(old) = reusable {
+            consumed.insert(old.id);
+            self.last.reused += 1;
+            let current = signatures(element);
+            let mut dirty = DirtyPhases::default();
+            if current.measure != old.signatures.measure {
+                dirty.insert(DirtyPhases::MEASURE.union(DirtyPhases::PLACE));
+            }
+            if current.place != old.signatures.place {
+                dirty.insert(DirtyPhases::PLACE);
+            }
+            if current.paint != old.signatures.paint {
+                dirty.insert(DirtyPhases::PAINT);
+            }
+            if current.interaction != old.signatures.interaction {
+                dirty.insert(DirtyPhases::INTERACTION);
+            }
+            if current.semantics != old.signatures.semantics {
+                dirty.insert(DirtyPhases::SEMANTICS);
+            }
+            (old.id, old.phases.clone(), dirty)
+        } else {
+            if old.is_some() {
+                self.last.replaced += 1;
+            }
+            self.next_id = self.next_id.max(1);
+            let id = RetainedNodeId(self.next_id);
+            self.next_id += 1;
+            self.last.created += 1;
+            (id, RetainedPhaseData::default(), DirtyPhases::ALL)
+        };
+
+        let old_children = reusable.map_or(&[][..], |node| node.children.as_slice());
+        let mut keyed = HashMap::new();
+        for child_id in old_children {
+            let child = &old_nodes[child_id];
+            keyed.insert(child.identity.clone(), *child_id);
+        }
+        let mut children = Vec::with_capacity(element.children.len());
+        for (index, child) in element.children.iter().enumerate() {
+            let child_identity = child
+                .id
+                .clone()
+                .map_or(ChildIdentity::Position(index), ChildIdentity::Key);
+            let child_ui_id = child.id.as_ref().map_or_else(
+                || ui_id.scoped(format!("#{index}")),
+                |id| ui_id.scoped(id.as_str()),
+            );
+            let old_child = keyed
+                .get(&child_identity)
+                .copied()
+                .filter(|candidate| !consumed.contains(candidate));
+            if let Some(old_child) = old_child
+                && old_children.get(index).copied() != Some(old_child)
+            {
+                self.last.moved += 1;
+            }
+            children.push(self.reconcile_node(
+                child,
+                Some(id),
+                child_identity,
+                child_ui_id,
+                index,
+                old_child,
+                old_nodes,
+                consumed,
+            ));
+        }
+        if reusable.is_some_and(|old| old.children != children) {
+            dirty.insert(DirtyPhases::CHILDREN);
+        }
+        let node = RetainedNode {
+            id,
+            parent,
+            identity,
+            ui_id,
+            kind,
+            signatures: signatures(element),
+            dirty,
+            children,
+            phases,
+        };
+        let _ = position;
+        self.nodes.insert(id, node);
+        id
+    }
+
+    fn propagate_descendant_work(&mut self, root: RetainedNodeId) -> DirtyPhases {
+        let children = self.nodes[&root].children.clone();
+        let mut descendants = DirtyPhases::default();
+        for child in children {
+            descendants.insert(self.propagate_descendant_work(child));
+        }
+        let node = self.nodes.get_mut(&root).expect("retained node exists");
+        if node.dirty.contains(DirtyPhases::CHILDREN) || descendants.contains(DirtyPhases::MEASURE)
+        {
+            node.dirty.insert(
+                DirtyPhases::MEASURE
+                    .union(DirtyPhases::PLACE)
+                    .union(DirtyPhases::PAINT)
+                    .union(DirtyPhases::INTERACTION)
+                    .union(DirtyPhases::SEMANTICS),
+            );
+        } else if descendants.contains(DirtyPhases::PLACE) {
+            node.dirty.insert(
+                DirtyPhases::PLACE
+                    .union(DirtyPhases::PAINT)
+                    .union(DirtyPhases::INTERACTION)
+                    .union(DirtyPhases::SEMANTICS),
+            );
+        }
+        node.dirty
+    }
+
+    #[cfg(test)]
+    pub(crate) fn nodes(&self) -> impl Iterator<Item = &RetainedNode> {
+        self.nodes.values()
+    }
+
+    pub(crate) fn capture_layout(&mut self, id: &UiId, measured: Size, allocated: Rect) {
+        if let Some(node) = self.nodes.values_mut().find(|node| &node.ui_id == id) {
+            node.phases.measured = Some(measured);
+            node.phases.allocated = Some(allocated);
+        }
+    }
+
+    pub(crate) fn node_count(&self) -> usize {
+        self.nodes.len()
+    }
+
+    pub(crate) fn last(&self) -> ReconcileStats {
+        self.last.clone()
+    }
+
+    pub(crate) fn estimated_bytes(&self) -> usize {
+        self.nodes.capacity()
+            * (std::mem::size_of::<RetainedNodeId>() + std::mem::size_of::<RetainedNode>())
+            + self
+                .nodes
+                .values()
+                .map(|node| {
+                    let _parent = node.parent();
+                    node.children.capacity() * std::mem::size_of::<RetainedNodeId>()
+                        + node.phases.paint.capacity() * std::mem::size_of::<PaintCommand>()
+                })
+                .sum::<usize>()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        Column, Component, ComponentBuilderExt, FrameRequest, Rect, Row, Text, UiFrame,
+        UiStateStore,
+    };
+    use proptest::prelude::*;
+
+    fn keyed_text(id: &str, value: &str) -> Element<()> {
+        Text::new(value)
+            .id(id)
+            .width(80.0)
+            .height(20.0)
+            .into_element()
+    }
+
+    fn ids(arena: &RetainedNodeArena) -> HashMap<UiId, RetainedNodeId> {
+        arena
+            .nodes()
+            .filter_map(|node| match &node.identity {
+                ChildIdentity::Key(key) => Some((key.clone(), node.id)),
+                ChildIdentity::Root | ChildIdentity::Position(_) => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn unchanged_declaration_reuses_every_node_and_phase() {
+        let view = Column::new()
+            .child(keyed_text("a", "A"))
+            .child(keyed_text("b", "B"))
+            .into_element();
+        let mut arena = RetainedNodeArena::default();
+        assert_eq!(arena.reconcile(&view).created, 3);
+        let before = ids(&arena);
+        let stats = arena.reconcile(&view);
+        assert_eq!(stats.reused, 3);
+        assert_eq!(stats.clean, 3);
+        assert_eq!(ids(&arena), before);
+        assert!(arena.nodes().all(|node| node.dirty().is_empty()));
+    }
+
+    #[test]
+    fn paint_only_change_does_not_dirty_layout_or_semantics() {
+        let mut arena = RetainedNodeArena::default();
+        arena.reconcile(
+            &Text::<()>::new("same")
+                .id("leaf")
+                .foreground(0xff01_0203)
+                .into_element(),
+        );
+        arena.reconcile(
+            &Text::<()>::new("same")
+                .id("leaf")
+                .foreground(0xff03_0201)
+                .into_element(),
+        );
+        let leaf = arena
+            .nodes()
+            .find(|node| matches!(node.identity, ChildIdentity::Root))
+            .unwrap();
+        assert!(leaf.dirty().contains(DirtyPhases::PAINT));
+        assert!(!leaf.dirty().contains(DirtyPhases::MEASURE));
+        assert!(!leaf.dirty().contains(DirtyPhases::PLACE));
+        assert!(!leaf.dirty().contains(DirtyPhases::SEMANTICS));
+    }
+
+    #[test]
+    fn fixed_size_leaf_content_reuses_measurement_and_placement() {
+        let mut arena = RetainedNodeArena::default();
+        arena.reconcile(&keyed_text("leaf", "short"));
+        let cached_size = Size::new(80.0, 20.0);
+        let cached_bounds = Rect::new(4.0, 8.0, 80.0, 20.0);
+        let leaf = arena.nodes.values_mut().next().unwrap();
+        leaf.phases.measured = Some(cached_size);
+        leaf.phases.allocated = Some(cached_bounds);
+        leaf.phases.paint.push(PaintCommand::Fill {
+            rect: cached_bounds,
+            color: 0xff12_3456,
+        });
+        arena.reconcile(&keyed_text("leaf", "a much longer label"));
+        let leaf = arena.nodes().next().unwrap();
+        assert!(!leaf.dirty().contains(DirtyPhases::MEASURE));
+        assert!(!leaf.dirty().contains(DirtyPhases::PLACE));
+        assert!(leaf.dirty().contains(DirtyPhases::PAINT));
+        assert!(leaf.dirty().contains(DirtyPhases::SEMANTICS));
+        assert_eq!(leaf.phases.measured, Some(cached_size));
+        assert_eq!(leaf.phases.allocated, Some(cached_bounds));
+        assert!(leaf.phases.paint.is_empty());
+    }
+
+    #[test]
+    fn keyed_insertion_and_reorder_preserve_identity_and_cleanup_removed_nodes() {
+        let mut arena = RetainedNodeArena::default();
+        let first = Row::new()
+            .children([
+                keyed_text("a", "A"),
+                keyed_text("b", "B"),
+                keyed_text("c", "C"),
+            ])
+            .into_element();
+        arena.reconcile(&first);
+        let original = ids(&arena);
+        let reordered = Row::new()
+            .children([
+                keyed_text("x", "X"),
+                keyed_text("c", "C"),
+                keyed_text("a", "A"),
+            ])
+            .into_element();
+        let stats = arena.reconcile(&reordered);
+        let current = ids(&arena);
+        assert_eq!(current[&UiId::from("a")], original[&UiId::from("a")]);
+        assert_eq!(current[&UiId::from("c")], original[&UiId::from("c")]);
+        assert!(!current.contains_key(&UiId::from("b")));
+        assert_eq!(stats.created, 1);
+        assert_eq!(stats.removed, 1);
+        assert!(stats.moved >= 2);
+        assert_eq!(arena.nodes().count(), 4);
+    }
+
+    #[test]
+    fn positional_nodes_reuse_only_their_documented_slot() {
+        let mut arena = RetainedNodeArena::default();
+        let first = Column::new()
+            .child(Text::<()>::new("A"))
+            .child(Text::<()>::new("B"))
+            .into_element();
+        arena.reconcile(&first);
+        let before = arena.nodes().map(RetainedNode::id).collect::<HashSet<_>>();
+        let second = Column::new()
+            .child(Text::<()>::new("B"))
+            .child(Text::<()>::new("A"))
+            .into_element();
+        arena.reconcile(&second);
+        assert_eq!(
+            arena.nodes().map(RetainedNode::id).collect::<HashSet<_>>(),
+            before
+        );
+    }
+
+    proptest! {
+        #[test]
+        fn incremental_reconciliation_matches_a_cold_frame(
+            operations in prop::collection::vec((0u8..4, 0u8..12), 1..48)
+        ) {
+            let bounds = Rect::new(0.0, 0.0, 420.0, 320.0);
+            let mut order = vec![0u8, 1, 2, 3];
+            let mut values = (0u8..12).map(|key| (key, key as u16)).collect::<HashMap<_, _>>();
+            let make_view = |order: &[u8], values: &HashMap<u8, u16>| {
+                Column::new()
+                    .children(order.iter().map(|key| {
+                        keyed_text(
+                            &format!("item-{key}"),
+                            &format!("value-{}", values[key]),
+                        )
+                    }))
+                    .into_element()
+            };
+
+            let mut retained_state = UiStateStore::default();
+            let mut retained = UiFrame::resolve(
+                make_view(&order, &values),
+                FrameRequest::new(bounds, &mut retained_state),
+            );
+            for (operation, key) in operations {
+                match operation {
+                    0 if !order.contains(&key) => order.insert((key as usize) % (order.len() + 1), key),
+                    1 if order.len() > 1 => order.retain(|candidate| *candidate != key),
+                    2 if order.contains(&key) => {
+                        order.retain(|candidate| *candidate != key);
+                        order.insert((key as usize * 7) % (order.len() + 1), key);
+                    }
+                    _ => *values.entry(key).or_default() += 1,
+                }
+                if order.is_empty() {
+                    order.push(key);
+                }
+
+                let mut next_state = retained_state.clone();
+                let next = UiFrame::resolve_against(
+                    make_view(&order, &values),
+                    FrameRequest::new(bounds, &mut next_state),
+                    &retained,
+                );
+                let mut cold_state = retained_state.clone();
+                let cold = UiFrame::resolve(
+                    make_view(&order, &values),
+                    FrameRequest::new(bounds, &mut cold_state),
+                );
+                prop_assert_eq!(next.resolved_layout(), cold.resolved_layout());
+                prop_assert_eq!(next.commands(), cold.commands());
+                prop_assert_eq!(next.semantic_nodes(), cold.semantic_nodes());
+                retained = next;
+                retained_state = next_state;
+            }
+        }
+    }
+}

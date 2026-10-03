@@ -4026,8 +4026,11 @@ impl<A: Application> UiHost<A> {
         // disturbed unless the effective blocking layer, including its anchor
         // and content, has successfully staged for publication.
         let mut staged_state = self.state.clone();
-        let mut staged_tree =
-            UiFrame::resolve(view, FrameRequest::new(self.bounds, &mut staged_state));
+        let mut staged_tree = UiFrame::resolve_against(
+            view,
+            FrameRequest::new(self.bounds, &mut staged_state),
+            &self.tree,
+        );
         overlay_interaction.restore_before_overlay(&mut staged_state);
         let mut overlay_failures =
             apply_frame_overlays(&mut staged_tree, &mut staged_state, overlays);
@@ -4057,7 +4060,11 @@ impl<A: Application> UiHost<A> {
             view_calls = view_calls.saturating_add(1);
             let overlays = self.application.frame_overlays(context);
             staged_state = self.state.clone();
-            staged_tree = UiFrame::resolve(view, FrameRequest::new(self.bounds, &mut staged_state));
+            staged_tree = UiFrame::resolve_against(
+                view,
+                FrameRequest::new(self.bounds, &mut staged_state),
+                &self.tree,
+            );
             overlay_interaction.restore_before_overlay(&mut staged_state);
             overlay_failures = apply_frame_overlays(&mut staged_tree, &mut staged_state, overlays);
             overlay_interaction.restore(&mut staged_state, &staged_tree);
