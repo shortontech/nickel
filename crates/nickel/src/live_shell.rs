@@ -162,6 +162,8 @@ const RECURRING_DIAGNOSTIC_INTERVAL: Duration = Duration::from_secs(30);
 const WALLPAPER_MAX_WIDTH: u32 = 7680;
 const WALLPAPER_MAX_HEIGHT: u32 = 4320;
 const PREVIEW_CACHE_CAPACITY: usize = 32;
+const WARM_SHELL_SURFACE_CAPACITY: usize = 4;
+const WARM_SHELL_SURFACE_BYTE_BUDGET: u64 = 32 * 1024 * 1024;
 
 #[path = "live_shell/icon_resources.rs"]
 mod icon_resources;
@@ -661,6 +663,18 @@ pub struct LiveShell {
             nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>,
         ),
     >,
+    /// Bounded, quiescent cache for selected-shell overlays. These hosts own no
+    /// native surface while parked and are excluded from visibility queries.
+    warm_shell_surface_hosts: std::collections::BTreeMap<
+        nickel_core::plugins::PluginSurfaceKey,
+        (
+            nickel_core::plugins::PluginSurface,
+            nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>,
+            u64,
+            u64,
+        ),
+    >,
+    warm_shell_surface_clock: u64,
     plugin_pointer_paint: Option<nickel_core::plugins::PluginSurfaceKey>,
     plugin_panel_memory: std::collections::BTreeMap<nickel_core::plugins::PluginSurfaceKey, u64>,
     plugin_window_placement_overrides: std::collections::BTreeMap<
@@ -1412,6 +1426,8 @@ impl LiveShell {
                 }
                 hosts
             },
+            warm_shell_surface_hosts: std::collections::BTreeMap::new(),
+            warm_shell_surface_clock: 0,
             plugin_pointer_paint: None,
             plugin_panel_memory: std::collections::BTreeMap::new(),
             plugin_window_placement_overrides: std::collections::BTreeMap::new(),
@@ -2842,6 +2858,7 @@ impl LiveShell {
         if let Err(error) = transition {
             self.plugin_surface_hosts
                 .retain(|key, _| key.plugin_id != id);
+            self.retire_warm_shell_surfaces_for(id);
             self.active_shell_package_id = old;
             return Err(error);
         }
@@ -2860,6 +2877,7 @@ impl LiveShell {
             }
             self.plugin_surface_hosts
                 .retain(|key, _| key.plugin_id != old);
+            self.retire_warm_shell_surfaces_for(&old);
             self.plugin_window_placement_overrides
                 .retain(|key, _| key.plugin_id != old);
         }
@@ -4133,6 +4151,85 @@ impl LiveShell {
         self.maybe_publish_plugin_status();
     }
 
+    fn warm_shell_surface_eligible(
+        &self,
+        key: &nickel_core::plugins::PluginSurfaceKey,
+        kind: nickel_core::plugins::PluginSurfaceKind,
+    ) -> bool {
+        key.plugin_id == self.active_shell_package_id
+            && self.is_shell_package(&key.plugin_id)
+            && kind == nickel_core::plugins::PluginSurfaceKind::Overlay
+    }
+
+    fn retire_warm_shell_surface(&mut self, key: &nickel_core::plugins::PluginSurfaceKey) {
+        if let Some((_, host, _, _)) = self.warm_shell_surface_hosts.remove(key)
+            && let Err(error) = host.application().retire_surface()
+        {
+            tracing::warn!(plugin = %key.plugin_id, surface = %key.surface_id, %error, "warm shell surface could not unmount");
+        }
+        self.plugin_panel_memory.remove(key);
+    }
+
+    fn retire_warm_shell_surfaces_for(&mut self, id: &str) {
+        let keys = self
+            .warm_shell_surface_hosts
+            .keys()
+            .filter(|key| key.plugin_id == id)
+            .cloned()
+            .collect::<Vec<_>>();
+        for key in keys {
+            self.retire_warm_shell_surface(&key);
+        }
+        let remaining_bytes = self
+            .plugin_panel_memory
+            .iter()
+            .filter(|(surface, _)| surface.plugin_id == id)
+            .map(|(_, bytes)| *bytes)
+            .fold(0_u64, u64::saturating_add);
+        let _ = self.plugin_registry.record_memory(
+            id,
+            nickel_core::plugins::PluginMemory {
+                native_ui_bytes: Some(remaining_bytes),
+                ..Default::default()
+            },
+        );
+    }
+
+    fn trim_warm_shell_surfaces(&mut self) {
+        while self.warm_shell_surface_hosts.len() > WARM_SHELL_SURFACE_CAPACITY
+            || self
+                .warm_shell_surface_hosts
+                .values()
+                .map(|(_, _, bytes, _)| *bytes)
+                .sum::<u64>()
+                > WARM_SHELL_SURFACE_BYTE_BUDGET
+        {
+            let Some(key) = self
+                .warm_shell_surface_hosts
+                .iter()
+                .min_by_key(|(_, (_, _, _, generation))| *generation)
+                .map(|(key, _)| key.clone())
+            else {
+                break;
+            };
+            let plugin_id = key.plugin_id.clone();
+            self.retire_warm_shell_surface(&key);
+            let remaining_bytes = self
+                .plugin_panel_memory
+                .iter()
+                .filter(|(surface, _)| surface.plugin_id == plugin_id)
+                .map(|(_, bytes)| *bytes)
+                .fold(0_u64, u64::saturating_add);
+            let _ = self.plugin_registry.record_memory(
+                &plugin_id,
+                nickel_core::plugins::PluginMemory {
+                    native_ui_bytes: Some(remaining_bytes),
+                    ..Default::default()
+                },
+            );
+        }
+    }
+
     pub(crate) fn close_plugin_window(
         &mut self,
         key: &nickel_core::plugins::PluginSurfaceKey,
@@ -4163,18 +4260,42 @@ impl LiveShell {
         for dialog in owned_dialogs {
             self.close_plugin_window(&dialog)?;
         }
-        // Surface visibility does not determine package lifetime. The shared
-        // runtime remains owned until explicit disable or runtime failure.
-        if let Some(host) = self.plugin_panel_host_for(key) {
-            host.application().retire_surface()?;
+        let kind = self
+            .plugin_surface_hosts
+            .get(key)
+            .map(|(surface, _)| surface.kind);
+        if kind.is_some_and(|kind| self.warm_shell_surface_eligible(key, kind)) {
+            let (surface, mut host) = self
+                .plugin_surface_hosts
+                .remove(key)
+                .expect("visible eligible surface has a host");
+            host.park();
+            let bytes = self
+                .plugin_panel_memory
+                .get(key)
+                .copied()
+                .unwrap_or_else(|| {
+                    (host.inspect().resources.estimated_retained_bytes as u64)
+                        .saturating_add(host.application().retained_image_bytes())
+                });
+            self.warm_shell_surface_clock = self.warm_shell_surface_clock.wrapping_add(1).max(1);
+            self.warm_shell_surface_hosts.insert(
+                key.clone(),
+                (surface, host, bytes, self.warm_shell_surface_clock),
+            );
+            self.trim_warm_shell_surfaces();
+        } else {
+            // Surface visibility does not determine package lifetime. The shared
+            // runtime remains owned until explicit disable or runtime failure.
+            if let Some(host) = self.plugin_panel_host_for(key) {
+                host.application().retire_surface()?;
+            }
+            self.plugin_surface_hosts.remove(key);
+            self.plugin_panel_memory.remove(key);
         }
         if self.primary_panel_key == *key {
-            self.plugin_surface_hosts.remove(key);
             self.primary_panel_key = crate::plugin_panel::surface_key();
-        } else {
-            self.plugin_surface_hosts.remove(key);
         }
-        self.plugin_panel_memory.remove(key);
         self.plugin_window_placement_overrides.remove(key);
         let remaining_bytes = self
             .plugin_panel_memory
@@ -4349,6 +4470,19 @@ impl LiveShell {
             if !self.plugin_surface_matches(&owner_key) {
                 return Err(format!("dialog owner {owner:?} is closed"));
             }
+        }
+        if let Some((surface, mut host, bytes, _)) = self.warm_shell_surface_hosts.remove(&key) {
+            host.resume(Instant::now());
+            if self.primary_panel_host_ref().is_none() {
+                self.primary_panel_key = key.clone();
+            }
+            self.plugin_surface_hosts
+                .insert(key.clone(), (surface, host));
+            self.plugin_panel_memory.insert(key, bytes);
+            self.plugin_activation_generation =
+                self.plugin_activation_generation.wrapping_add(1).max(1);
+            self.maybe_publish_plugin_status();
+            return Ok(true);
         }
         let package = descriptor.load()?;
         let settings = self
@@ -4959,6 +5093,7 @@ impl LiveShell {
         self.application_search.retire(id);
         self.plugin_surface_hosts
             .retain(|key, _| key.plugin_id != id);
+        self.retire_warm_shell_surfaces_for(id);
         self.plugin_panel_memory
             .retain(|key, _| key.plugin_id != id);
         self.plugin_window_placement_overrides
@@ -5000,11 +5135,12 @@ impl LiveShell {
     }
 
     fn retire_development_panel_plugin_state(&mut self) {
-        let id = &crate::plugin_panel::manifest().id;
+        let id = crate::plugin_panel::manifest().id.clone();
         self.plugin_surface_hosts
-            .retain(|key, _| key.plugin_id != *id);
+            .retain(|key, _| key.plugin_id != id);
         self.plugin_panel_memory
-            .retain(|key, _| key.plugin_id != *id);
+            .retain(|key, _| key.plugin_id != id);
+        self.retire_warm_shell_surfaces_for(&id);
     }
 
     fn fail_plugin_panel_runtime(&mut self, id: &str, error: String) -> bool {
@@ -5020,6 +5156,7 @@ impl LiveShell {
     fn retire_preview_plugin_state(&mut self) {
         let key = self.active_shell_surface_key("window-preview");
         self.plugin_surface_hosts.remove(&key);
+        self.retire_warm_shell_surface(&key);
         self.plugin_panel_memory.remove(&key);
         let preview_was_open = self.preview_group.is_some() || self.task_switcher_group.is_some();
         if self.task_switcher_group.is_some() {
@@ -5369,6 +5506,7 @@ impl LiveShell {
             self.application_search.retire(id);
             self.plugin_surface_hosts
                 .retain(|key, _| key.plugin_id != id);
+            self.retire_warm_shell_surfaces_for(id);
             self.plugin_panel_memory
                 .retain(|key, _| key.plugin_id != id);
             self.plugin_window_placement_overrides
@@ -8090,6 +8228,8 @@ impl LiveShell {
                             .dismiss_context_menu(desktop::DesktopMenuDismissReason::FocusDeparted);
                         self.set_default_shell_surface_visible("launcher", false);
                         self.set_default_shell_surface_visible("quick-settings", false);
+                        let active_shell = self.active_shell_package_id.clone();
+                        self.retire_warm_shell_surfaces_for(&active_shell);
                         self.launcher_visible = false;
                         self.control_visible = false;
                         self.codex_project_menu_visible = false;

@@ -2510,6 +2510,220 @@ fn composed_shell_keeps_each_host_identity_when_launcher_opens_settings() {
 }
 
 #[test]
+fn selected_shell_overlay_reopen_reuses_quiescent_bounded_host() {
+    with_package_runtime_stack(|| {
+        let mut shell = LiveShell::new().unwrap();
+        let launcher = LiveShell::default_shell_surface_key("launcher");
+        shell.global_shortcut(crate::platform::GlobalShortcut::ShowLauncher);
+        assert!(shell.plugin_panel_scene(&launcher, 608, 628).is_some());
+        let (mount, settings_id, composition, mount_count) = {
+            let host = shell.plugin_panel_host_ref(&launcher).unwrap();
+            let settings = host
+                .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                    role: nickel_ui::SemanticRole::Button,
+                    name: "Settings".into(),
+                })
+                .unwrap();
+            (
+                host.application().diagnostic_mount(),
+                settings.id,
+                host.application().shared_composition_runtime().unwrap(),
+                host.application()
+                    .shared_composition_runtime()
+                    .unwrap()
+                    .borrow()
+                    .mount_count(),
+            )
+        };
+
+        shell.global_shortcut(crate::platform::GlobalShortcut::HideLauncher);
+        assert!(!shell.plugin_surface_hosts.contains_key(&launcher));
+        assert!(shell.warm_shell_surface_hosts.contains_key(&launcher));
+        assert_eq!(
+            shell.warm_shell_surface_hosts[&launcher].1.next_deadline(),
+            None
+        );
+        let parked_generation = shell.warm_shell_surface_hosts[&launcher]
+            .1
+            .inspect()
+            .frame_generation;
+
+        shell.global_shortcut(crate::platform::GlobalShortcut::ShowLauncher);
+        let host = shell.plugin_panel_host_ref(&launcher).unwrap();
+        assert_eq!(host.application().diagnostic_mount(), mount);
+        assert_eq!(host.inspect().frame_generation, parked_generation);
+        assert_eq!(composition.borrow().mount_count(), mount_count);
+        assert_eq!(
+            host.query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: nickel_ui::SemanticRole::Button,
+                name: "Settings".into(),
+            })
+            .unwrap()
+            .id,
+            settings_id
+        );
+        assert!(shell.warm_shell_surface_hosts.len() <= super::WARM_SHELL_SURFACE_CAPACITY);
+        assert!(
+            shell
+                .warm_shell_surface_hosts
+                .values()
+                .map(|(_, _, bytes, _)| *bytes)
+                .sum::<u64>()
+                <= super::WARM_SHELL_SURFACE_BYTE_BUDGET
+        );
+    });
+}
+
+#[test]
+fn launcher_passive_pointer_motion_never_creates_component_mounts_or_wakeups() {
+    with_package_runtime_stack(|| {
+        let mut shell = LiveShell::new().unwrap();
+        shell.global_shortcut(crate::platform::GlobalShortcut::ShowLauncher);
+        let launcher = LiveShell::default_shell_surface_key("launcher");
+        shell.plugin_panel_scene(&launcher, 608, 628).unwrap();
+        let composition = shell
+            .plugin_panel_host_ref(&launcher)
+            .unwrap()
+            .application()
+            .shared_composition_runtime()
+            .unwrap();
+        let mounts = composition.borrow().mount_count();
+        let button = shell
+            .plugin_panel_host_ref(&launcher)
+            .unwrap()
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: nickel_ui::SemanticRole::Button,
+                name: "Settings".into(),
+            })
+            .unwrap();
+        let first = nickel_ui::Point {
+            x: button.bounds.origin.x + button.bounds.size.width * 0.25,
+            y: button.bounds.origin.y + button.bounds.size.height * 0.5,
+        };
+        shell.plugin_panel_host_ui_for(
+            &launcher,
+            nickel_ui::UiEvent::PointerMoved(first),
+            608,
+            628,
+        );
+        for index in 0..256 {
+            let point = nickel_ui::Point {
+                x: button.bounds.origin.x
+                    + button.bounds.size.width * (0.3 + (index % 20) as f32 / 100.0),
+                y: button.bounds.origin.y + button.bounds.size.height * 0.5,
+            };
+            assert!(!shell.plugin_panel_host_ui_for(
+                &launcher,
+                nickel_ui::UiEvent::PointerMoved(point),
+                608,
+                628,
+            ));
+            assert_eq!(composition.borrow().mount_count(), mounts);
+        }
+        // The default launcher has no intended continuous animation. Passive
+        // hover may repaint, but must settle without scheduling a frame loop.
+        assert_eq!(
+            shell
+                .plugin_panel_host_ref(&launcher)
+                .unwrap()
+                .next_deadline(),
+            None
+        );
+    });
+}
+
+#[test]
+fn generic_windows_unmount_and_lock_retires_warm_shell_overlays() {
+    with_package_runtime_stack(|| {
+        let mut shell = LiveShell::new().unwrap();
+        shell.global_shortcut(crate::platform::GlobalShortcut::OpenSettings);
+        let settings = LiveShell::default_shell_surface_key("settings");
+        let first_mount = shell
+            .plugin_panel_host_ref(&settings)
+            .unwrap()
+            .application()
+            .diagnostic_mount();
+        assert!(shell.close_plugin_window(&settings).unwrap());
+        assert!(!shell.warm_shell_surface_hosts.contains_key(&settings));
+        assert!(
+            shell
+                .show_plugin_window("nickel-default", "settings")
+                .unwrap()
+        );
+        assert_ne!(
+            shell
+                .plugin_panel_host_ref(&settings)
+                .unwrap()
+                .application()
+                .diagnostic_mount(),
+            first_mount
+        );
+
+        shell.global_shortcut(crate::platform::GlobalShortcut::ShowLauncher);
+        shell.global_shortcut(crate::platform::GlobalShortcut::HideLauncher);
+        assert!(!shell.warm_shell_surface_hosts.is_empty());
+        shell.global_shortcut(crate::platform::GlobalShortcut::LockState { locked: true });
+        assert!(shell.warm_shell_surface_hosts.is_empty());
+    });
+}
+
+#[test]
+fn warm_shell_overlay_cache_evicts_by_lru_entry_and_byte_budgets() {
+    with_package_runtime_stack(|| {
+        let mut shell = LiveShell::new().unwrap();
+        let overlays = [
+            "launcher",
+            "quick-settings",
+            "notifications",
+            "volume-osd",
+            "keyboard",
+        ];
+        for surface_id in overlays {
+            let key = LiveShell::default_shell_surface_key(surface_id);
+            assert!(
+                shell
+                    .show_plugin_window("nickel-default", surface_id)
+                    .unwrap()
+            );
+            let (width, height) = {
+                let surface = &shell.plugin_surface_hosts[&key].0;
+                (surface.width, surface.height)
+            };
+            shell.plugin_panel_scene(&key, width, height).unwrap();
+            assert!(shell.close_plugin_window(&key).unwrap());
+        }
+        assert_eq!(
+            shell.warm_shell_surface_hosts.len(),
+            super::WARM_SHELL_SURFACE_CAPACITY
+        );
+        assert!(
+            !shell
+                .warm_shell_surface_hosts
+                .contains_key(&LiveShell::default_shell_surface_key("launcher"))
+        );
+
+        let oldest = shell
+            .warm_shell_surface_hosts
+            .iter()
+            .min_by_key(|(_, (_, _, _, generation))| *generation)
+            .map(|(key, _)| key.clone())
+            .unwrap();
+        shell.warm_shell_surface_hosts.get_mut(&oldest).unwrap().2 =
+            super::WARM_SHELL_SURFACE_BYTE_BUDGET + 1;
+        shell.trim_warm_shell_surfaces();
+        assert!(!shell.warm_shell_surface_hosts.contains_key(&oldest));
+        assert!(
+            shell
+                .warm_shell_surface_hosts
+                .values()
+                .map(|(_, _, bytes, _)| *bytes)
+                .sum::<u64>()
+                <= super::WARM_SHELL_SURFACE_BYTE_BUDGET
+        );
+    });
+}
+
+#[test]
 fn window_menu_hotkey_uses_selected_package_and_native_window_policy() {
     with_package_runtime_stack(|| {
         let session = std::sync::Arc::new(crate::session_host::StagedSessionHost::new(

@@ -879,6 +879,13 @@ impl ShellCompositionRuntime {
         &self.resolution
     }
 
+    /// Number of live native component mounts owned by this composition host.
+    /// This is payload-free lifecycle telemetry used to prove that native-only
+    /// interaction and warm surface activation do not create guest mounts.
+    pub fn mount_count(&self) -> usize {
+        self.mounts.len()
+    }
+
     pub fn component(&self, contract: &str) -> Option<ComponentReference> {
         self.resolution
             .exports

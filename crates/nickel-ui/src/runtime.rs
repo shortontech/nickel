@@ -2446,6 +2446,27 @@ impl<A: Application> UiHost<A> {
         self.tree.commands()
     }
 
+    /// Quiesces a host while its native surface is not presented.
+    ///
+    /// The resolved tree and application are deliberately retained so a warm
+    /// surface can resume without re-running application/component code. Input
+    /// transactions and time-based wakeups are not retained across the hidden
+    /// boundary; the platform owner is responsible for bounding the lifetime
+    /// and memory of parked hosts.
+    pub fn park(&mut self) {
+        let _ = self.handle_event(UiEvent::Suspended);
+        self.next_application_deadline = None;
+        self.pending_long_press = None;
+    }
+
+    /// Re-enables application polling after a parked host becomes visible.
+    pub fn resume(&mut self, now: Instant) {
+        self.next_application_deadline = self
+            .application
+            .poll_interval()
+            .map(|interval| now + interval);
+    }
+
     /// Returns authoritative logical damage for the current retained paint
     /// update. `None` means the frame was rebuilt through a path that cannot
     /// prove bounded damage; `Some([])` means paint was proven unchanged.

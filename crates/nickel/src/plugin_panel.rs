@@ -1426,6 +1426,11 @@ impl PluginPanelApplication {
             .fold(0_u64, u64::saturating_add)
     }
 
+    #[cfg(test)]
+    pub(crate) fn diagnostic_mount(&self) -> u64 {
+        self.diagnostic_mount
+    }
+
     pub fn retained_image_allocations(&self) -> impl Iterator<Item = (usize, u64)> + '_ {
         self.images
             .values()
