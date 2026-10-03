@@ -77,6 +77,13 @@ pub struct RenderedComponent {
     pub node: Value,
     /// Node action indices address this host-owned table, not a JS runtime.
     pub events: BTreeMap<u64, ComponentEventHandle>,
+    generation: u64,
+}
+
+impl RenderedComponent {
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
 }
 
 pub struct ScheduledComponentDispatch {
@@ -1097,6 +1104,7 @@ impl ShellCompositionRuntime {
         rendered: RenderedComponent,
         validate: impl FnOnce(&Value) -> Result<T, String>,
     ) -> Result<(RenderedComponent, T), String> {
+        let generation = rendered.generation;
         let mut expansion = ExpansionState {
             root,
             events: BTreeMap::new(),
@@ -1126,6 +1134,7 @@ impl ShellCompositionRuntime {
             RenderedComponent {
                 node,
                 events: expansion.events,
+                generation,
             },
             validated,
         ))
@@ -1598,7 +1607,11 @@ impl ShellCompositionRuntime {
                 0,
             )?;
             validate(&node)?;
-            Ok(RenderedComponent { node, events })
+            Ok(RenderedComponent {
+                node,
+                events,
+                generation,
+            })
         });
         if event.is_some() {
             runtime.finish_event(result.is_ok())?;
@@ -1662,6 +1675,7 @@ impl ShellCompositionRuntime {
             Ok(RenderedComponent {
                 node,
                 events: owned_events,
+                generation,
             })
         });
         runtime.finish_event(outcome.is_ok())?;
@@ -2777,6 +2791,7 @@ mod tests {
         let mount = host.mount(&reference).unwrap();
         let tree = host.render(&mount, &serde_json::json!({})).unwrap();
         let event = tree.events[&0].clone();
+        assert_eq!(tree.generation(), event.generation);
 
         let outcome = host.dispatch_scheduled(&event, &Value::Null).unwrap();
         assert!(outcome.rendered.is_none());

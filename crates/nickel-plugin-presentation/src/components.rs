@@ -4199,12 +4199,33 @@ pub fn render_panel_validated(
     stylesheet: &StyleSheet,
     validation_rejected: &mut bool,
 ) -> Result<PanelNode, String> {
+    render_retained_panel_validated(
+        runtime,
+        manifest,
+        expected_surface_id,
+        expression,
+        stylesheet,
+        0,
+        validation_rejected,
+    )
+    .map(RetainedPanelTree::into_node)
+}
+
+pub fn render_retained_panel_validated(
+    runtime: &mut JsxRuntime,
+    manifest: &PluginManifest,
+    expected_surface_id: Option<&str>,
+    expression: &str,
+    stylesheet: &StyleSheet,
+    generation: u64,
+    validation_rejected: &mut bool,
+) -> Result<RetainedPanelTree, String> {
     runtime.render(expression, |value| {
-        let node =
-            parse_panel_for_manifest(value, manifest, expected_surface_id).map_err(|error| {
-                *validation_rejected = true;
-                error
-            })?;
+        let retained = RetainedPanelTree::admit(value, manifest, expected_surface_id, generation)
+            .map_err(|error| {
+            *validation_rejected = true;
+            error
+        })?;
         if let Some(surface_id) = expected_surface_id {
             let grant = manifest
                 .surfaces
@@ -4214,12 +4235,15 @@ pub fn render_panel_validated(
                     *validation_rejected = true;
                     "rendered surface is no longer declared"
                 })?;
-            node.requested_surface(grant, stylesheet).map_err(|error| {
-                *validation_rejected = true;
-                error
-            })?;
+            retained
+                .node()
+                .requested_surface(grant, stylesheet)
+                .map_err(|error| {
+                    *validation_rejected = true;
+                    error
+                })?;
         }
-        Ok(node)
+        Ok(retained)
     })
 }
 
