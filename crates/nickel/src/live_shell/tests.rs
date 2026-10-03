@@ -1151,7 +1151,7 @@ fn internal_shell_presents_two_surfaces_from_one_package_on_one_output() {
     .unwrap();
     std::fs::write(
         directory.join("main.js"),
-        "function App() { return h(Panel, {}, h(Text, {}, nickel.data.surface.id)); }",
+        "function App() { return h(Panel, {}, h(Text, {}, useSurface().id)); }",
     )
     .unwrap();
     let mut coordinator = crate::internal_shell::InternalShellCoordinator::new(

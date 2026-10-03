@@ -574,10 +574,10 @@ fn styled_text<Message>(mut text: Text<Message>, style: &ControlStyle) -> Text<M
     } else {
         style.inherited_text
     };
-    text = text
-        .css_paint(true)
-        .inherited_state_text(inherits)
-        .color(style.color.unwrap_or(0));
+    text = text.css_paint(true).inherited_state_text(inherits);
+    if let Some(color) = style.color {
+        text = text.color(color);
+    }
     if let Some(font_size) = style.font_size {
         text = text.font_size(font_size);
     }
@@ -5868,6 +5868,23 @@ mod tests {
             &mut state,
         );
         assert!(!frame.commands().iter().any(|command| matches!(command, PaintCommand::Fill { color, .. } | PaintCommand::RoundedFill { color, .. } | PaintCommand::Stroke { color, .. } | PaintCommand::Text { color, .. } if *color != 0)));
+    }
+
+    #[test]
+    fn unstyled_text_keeps_the_native_fallback_foreground() {
+        let node = PanelNode::parse(&serde_json::json!({
+            "kind": "text",
+            "children": ["visible"]
+        }))
+        .unwrap();
+        let frame = UiFrame::layout(
+            node.view(&PluginImages::new(), &StyleSheet::default()),
+            Rect::new(0.0, 0.0, 160.0, 40.0),
+        );
+        assert!(frame.commands().iter().any(|command| matches!(
+            command,
+            PaintCommand::Text { text, .. } if text == "visible"
+        )));
     }
 
     #[test]
