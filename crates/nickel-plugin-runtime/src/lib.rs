@@ -200,6 +200,41 @@ impl JsxRuntime {
         if let Some(windows) = data.get("windows") {
             self.set_windows_store(windows)?;
         }
+        // Effective presentation state is globally readable and deliberately
+        // separate from the capability-gated appearance configuration client.
+        if let Some(appearance) = data.get("appearance") {
+            let resolved = appearance.get("resolved").unwrap_or(&Value::Null);
+            let configured = appearance.get("configured").unwrap_or(&Value::Null);
+            let accent = resolved.get("accent").and_then(|value| {
+                let channels = value.as_array()?;
+                if channels.len() != 3 {
+                    return None;
+                }
+                Some(
+                    0xff00_0000u64
+                        | (channels[0].as_u64()? << 16)
+                        | (channels[1].as_u64()? << 8)
+                        | channels[2].as_u64()?,
+                )
+            });
+            let animations = configured.get("animations").and_then(Value::as_str);
+            let theme = serde_json::json!({
+                "mode": resolved.get("theme").and_then(Value::as_str).unwrap_or("unknown"),
+                "accent": accent,
+                "accentHue": resolved.get("hue").and_then(Value::as_u64),
+                "accentIntensity": resolved.get("intensity").and_then(Value::as_u64),
+                "reducedMotion": match animations {
+                    Some("off" | "reduced") => Some(true),
+                    Some("normal") => Some(false),
+                    _ => None,
+                },
+                "reducedTransparency": configured.get("reduce_transparency").and_then(Value::as_bool),
+                // The runtime data projection does not currently carry the
+                // renderer's semantic palette. Absence is explicit, not guessed.
+                "palette": Value::Null,
+            });
+            self.set_theme_store(&theme)?;
+        }
         // Host snapshots are data, not source code. Compiling a large object
         // literal on every input/projection update stalls the compositor.
         let argument =
@@ -242,6 +277,27 @@ impl JsxRuntime {
         setter
             .as_callable()
             .ok_or("windows store setter is not callable")?
+            .call(&JsValue::undefined(), &[snapshot], &mut self.context)
+            .map(|changed| changed.to_boolean())
+            .map_err(|error| error.to_string())
+    }
+
+    /// Publish host-owned effective presentation state. This is observation,
+    /// not the capability-gated appearance configuration authority.
+    pub fn set_theme_store(&mut self, snapshot: &Value) -> Result<bool, String> {
+        if self.invalidated {
+            return Err("runtime checkpoint was invalidated".into());
+        }
+        let snapshot =
+            JsValue::from_json(snapshot, &mut self.context).map_err(|error| error.to_string())?;
+        let setter = self
+            .context
+            .global_object()
+            .get(js_string!("__nickelSetThemeStore"), &mut self.context)
+            .map_err(|error| error.to_string())?;
+        setter
+            .as_callable()
+            .ok_or("theme store setter is not callable")?
             .call(&JsValue::undefined(), &[snapshot], &mut self.context)
             .map(|changed| changed.to_boolean())
             .map_err(|error| error.to_string())
@@ -786,6 +842,98 @@ mod tests {
             !runtime
                 .eval_json::<bool>("JSON.parse(__nickelReconciliationRequest()).requested")
                 .unwrap()
+        );
+    }
+
+    #[test]
+    fn theme_store_is_always_readable_versioned_and_structurally_shared() {
+        let source = r#"
+            globalThis.observed=[];
+            function App(){const theme=useTheme();observed.push(theme);return h(Text,null,theme.mode)}
+        "#;
+        let mut runtime = super::JsxRuntime::new(source, None).unwrap();
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        assert_eq!(
+            runtime
+                .eval_json::<serde_json::Value>("JSON.stringify(observed[0])")
+                .unwrap(),
+            serde_json::json!({"generation":0,"mode":"unknown","accent":null,"accentHue":null,"accentIntensity":null,"reducedMotion":null,"reducedTransparency":null,"palette":null})
+        );
+        let dark = serde_json::json!({
+            "mode":"dark","accent":4294901760u64,"accentHue":0,"accentIntensity":70,
+            "reducedMotion":false,"reducedTransparency":true,
+            "palette":{"background":1,"panel":2,"surface":3,"surfaceHover":4,"text":5,
+                "muted":6,"accent":7,"accentSoft":8,"complement":9}
+        });
+        assert!(runtime.set_theme_store(&dark).unwrap());
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        assert!(!runtime.set_theme_store(&dark).unwrap());
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        assert!(runtime.eval_json::<bool>("observed[1] === observed[2] && Object.isFrozen(observed[1]) && Object.isFrozen(observed[1].palette)").unwrap());
+        assert_eq!(
+            runtime.eval_json::<u64>("__themeStore.generation").unwrap(),
+            1
+        );
+        let light = serde_json::json!({"mode":"light","accent":4294901760u64,"accentHue":0,
+            "accentIntensity":70,"reducedMotion":false,"reducedTransparency":true,
+            "palette":{"background":1,"panel":2,"surface":3,"surfaceHover":4,"text":5,
+                "muted":6,"accent":7,"accentSoft":8,"complement":9}});
+        assert!(runtime.set_theme_store(&light).unwrap());
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        assert!(
+            runtime
+                .eval_json::<bool>("observed[2].palette === observed[3].palette")
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn theme_store_dirties_only_changed_theme_selections() {
+        let source = r#"
+            globalThis.runs={app:0,mode:0,motion:0,windows:0,sibling:0};
+            function Mode(){runs.mode++;return h(Text,null,useTheme(theme=>theme.mode))}
+            function Motion(){runs.motion++;return h(Text,null,String(useReducedMotion()))}
+            function Windows(){runs.windows++;return h(Text,null,String(useWindows().length))}
+            function Sibling(){runs.sibling++;return h(Text,null,'stable')}
+            function App(){runs.app++;return h(Window,{},h(Mode),h(Motion),h(Windows),h(Sibling))}
+        "#;
+        let mut runtime = super::JsxRuntime::new(source, None).unwrap();
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        runtime
+            .set_theme_store(&serde_json::json!({"mode":"dark","reducedMotion":null}))
+            .unwrap();
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        assert_eq!(
+            runtime
+                .eval_json::<serde_json::Value>("JSON.stringify(runs)")
+                .unwrap(),
+            serde_json::json!({"app":1,"mode":2,"motion":1,"windows":1,"sibling":1})
+        );
+        runtime
+            .set_windows_store(&serde_json::json!([{"id":"one"}]))
+            .unwrap();
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        assert_eq!(
+            runtime
+                .eval_json::<serde_json::Value>("JSON.stringify(runs)")
+                .unwrap(),
+            serde_json::json!({"app":1,"mode":2,"motion":1,"windows":2,"sibling":1})
+        );
+    }
+
+    #[test]
+    fn appearance_projection_feeds_effective_theme_without_fabricating_palette() {
+        let mut runtime = super::JsxRuntime::new(
+            "globalThis.seen=[];function App(){seen.push([useTheme(),useReducedMotion()]);return h(Text,null,'theme')}",
+            Some(r#"{"appearance":{"available":true,"configured":{"animations":"reduced","reduce_transparency":true},"resolved":{"theme":"light","hue":210,"intensity":55,"accent":[1,2,3]}}}"#),
+        ).unwrap();
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        assert_eq!(
+            runtime
+                .eval_json::<serde_json::Value>("JSON.stringify(seen[0])")
+                .unwrap(),
+            serde_json::json!([{"generation":1,"mode":"light","accent":4278256131u64,"accentHue":210,
+                "accentIntensity":55,"reducedMotion":true,"reducedTransparency":true,"palette":null},true])
         );
     }
 

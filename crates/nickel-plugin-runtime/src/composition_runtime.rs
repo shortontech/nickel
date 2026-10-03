@@ -3046,4 +3046,63 @@ mod tests {
             2
         );
     }
+
+    #[test]
+    fn composition_host_publishes_effective_theme_independently_of_other_stores() {
+        let package = package(
+            "theme-shell",
+            "globalThis.themeObservation=null;\nexport function Taskbar(){const theme=useTheme();themeObservation=theme;return h(Text,null,theme.mode+':'+String(useReducedMotion()));}\nexport function QuickSettings(){return h(Text,null,'settings');}\nexport default Taskbar;",
+            None,
+        );
+        let owner = PackageIdentity {
+            id: "theme-shell".into(),
+            version: package
+                .manifest
+                .composition
+                .as_ref()
+                .unwrap()
+                .version
+                .parse()
+                .unwrap(),
+        };
+        let first = serde_json::json!({"appearance":{"available":true,
+            "configured":{"animations":"normal","reduce_transparency":false},
+            "resolved":{"theme":"dark","hue":271,"intensity":63,"accent":[10,20,30]}}});
+        let mut host = ShellCompositionRuntime::new(
+            &BTreeMap::from([("theme-shell".into(), package)]),
+            "theme-shell",
+            &BTreeMap::from([(owner.clone(), first.clone())]),
+        )
+        .unwrap();
+        let mount = host
+            .mount(&host.component("shell.taskbar").unwrap())
+            .unwrap();
+        let rendered = host.render(&mount, &serde_json::json!({})).unwrap();
+        assert!(rendered.node.to_string().contains("dark:false"));
+        let runtime = host.shared_owner_runtime(&owner).unwrap();
+        assert_eq!(
+            runtime
+                .borrow_mut()
+                .eval_json::<u64>("__themeStore.generation")
+                .unwrap(),
+            1
+        );
+        host.update_snapshot(&owner, &first).unwrap();
+        assert_eq!(
+            runtime
+                .borrow_mut()
+                .eval_json::<u64>("__themeStore.generation")
+                .unwrap(),
+            1
+        );
+        host.update_snapshot(
+            &owner,
+            &serde_json::json!({"appearance":{"available":true,
+            "configured":{"animations":"off","reduce_transparency":false},
+            "resolved":{"theme":"dark","hue":271,"intensity":63,"accent":[10,20,30]}}}),
+        )
+        .unwrap();
+        let rendered = host.render(&mount, &serde_json::json!({})).unwrap();
+        assert!(rendered.node.to_string().contains("dark:true"));
+    }
 }

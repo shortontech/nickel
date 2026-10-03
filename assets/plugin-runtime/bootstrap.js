@@ -102,6 +102,10 @@ let __surfaceStore = {generation:0, snapshot:Object.freeze({
     output:null, availableSize:null, scaleFactor:null, focused:null, visible:null
 })};
 let __windowsStore = {generation:0, snapshot:Object.freeze([])};
+let __themeStore = {generation:0, snapshot:Object.freeze({
+    generation:0, mode:'unknown', accent:null, accentHue:null, accentIntensity:null,
+    reducedMotion:null, reducedTransparency:null, palette:null
+})};
 let __nickelData = Object.freeze({query: '', results: []});
 let __activeSurface = 'default';
 const __surfaceStates = new Map();
@@ -686,6 +690,92 @@ function useWindows(selector) {
 
 const __nickelSelectActiveWindow = windows => windows.find(window => window.active) ?? null;
 function useActiveWindow() { return useWindows(__nickelSelectActiveWindow); }
+
+const __nickelThemePaletteFields = ['background','panel','surface','surfaceHover','text','muted',
+    'accent','accentSoft','complement'];
+function __nickelThemeColor(value, field) {
+    if (value === undefined || value === null) return null;
+    if (!Number.isSafeInteger(value) || value < 0 || value > 0xffffffff)
+        throw Error(`invalid theme ${field}`);
+    return value;
+}
+function __nickelThemeSnapshot(value, generation) {
+    if (!value || typeof value !== 'object' || Array.isArray(value))
+        throw Error('invalid effective theme snapshot');
+    const mode = value.mode ?? 'unknown';
+    if (mode !== 'light' && mode !== 'dark' && mode !== 'unknown')
+        throw Error('invalid effective theme mode');
+    const nullableBoolean = field => value[field] === undefined || value[field] === null ? null
+        : typeof value[field] === 'boolean' ? value[field]
+        : (() => { throw Error(`invalid theme ${field}`); })();
+    const boundedInteger = (field, maximum) => value[field] === undefined || value[field] === null ? null
+        : Number.isInteger(value[field]) && value[field] >= 0 && value[field] <= maximum ? value[field]
+        : (() => { throw Error(`invalid theme ${field}`); })();
+    let palette = null;
+    if (value.palette !== undefined && value.palette !== null) {
+        if (typeof value.palette !== 'object' || Array.isArray(value.palette))
+            throw Error('invalid theme palette');
+        const colors = {};
+        for (const field of __nickelThemePaletteFields) {
+            const color = __nickelThemeColor(value.palette[field], `palette ${field}`);
+            if (color === null) throw Error(`missing theme palette ${field}`);
+            colors[field] = color;
+        }
+        palette = Object.freeze(colors);
+    }
+    return Object.freeze({generation, mode, accent:__nickelThemeColor(value.accent, 'accent'),
+        accentHue:boundedInteger('accentHue', 359), accentIntensity:boundedInteger('accentIntensity', 100),
+        reducedMotion:nullableBoolean('reducedMotion'),
+        reducedTransparency:nullableBoolean('reducedTransparency'), palette});
+}
+function __nickelThemeEqual(left, right) {
+    const fields = ['mode','accent','accentHue','accentIntensity','reducedMotion','reducedTransparency'];
+    if (!fields.every(field => Object.is(left[field], right[field]))) return false;
+    if (left.palette === null || right.palette === null) return left.palette === right.palette;
+    return __nickelThemePaletteFields.every(field => left.palette[field] === right.palette[field]);
+}
+function __nickelSetThemeStore(value) {
+    const generation = __themeStore.generation + 1;
+    let snapshot = __nickelThemeSnapshot(value, generation);
+    if (__nickelThemeEqual(__themeStore.snapshot, snapshot)) return false;
+    if (__pendingRender !== null || __pendingEvent !== null)
+        throw Error('cannot publish changed theme store during a render or event');
+    if (__themeStore.snapshot.palette !== null && snapshot.palette !== null
+        && __nickelThemePaletteFields.every(field => __themeStore.snapshot.palette[field] === snapshot.palette[field]))
+        snapshot = Object.freeze({...snapshot, palette:__themeStore.snapshot.palette});
+    __themeStore = {generation, snapshot};
+    __nickelForEachSurfaceHooks((hooks, dirty) => {
+        for (const [owner, slots] of hooks) for (const entry of slots) {
+            if (entry?.kind !== 'theme-store') continue;
+            try {
+                const selected = entry.selector ? entry.selector(snapshot) : snapshot;
+                entry.storeError = undefined;
+                if (!Object.is(selected, entry.value)) dirty.add(owner);
+            } catch (error) {
+                entry.storeError = error;
+                dirty.add(owner);
+            }
+        }
+    });
+    return true;
+}
+function useTheme(selector) {
+    if (__currentComponent === null) throw Error('useTheme requires a component');
+    if (selector !== undefined && typeof selector !== 'function') throw TypeError('useTheme selector must be a function');
+    const slot = __hookIndex++;
+    const hooks = __componentHooks.get(__currentComponent);
+    const normalized = selector ?? null;
+    let entry = hooks[slot];
+    if (!entry || (entry.kind === 'theme-store' && entry.selector !== normalized))
+        hooks[slot] = entry = {kind:'theme-store', selector:normalized, value:undefined, generation:0};
+    if (entry.kind !== 'theme-store') throw Error('hook order changed');
+    entry.storeError = undefined;
+    entry.value = normalized ? normalized(__themeStore.snapshot) : __themeStore.snapshot;
+    entry.generation = __themeStore.generation;
+    return entry.value;
+}
+const __nickelSelectReducedMotion = theme => theme.reducedMotion;
+function useReducedMotion() { return useTheme(__nickelSelectReducedMotion); }
 
 function __nickelSurfaceSelection(name, snapshot) {
     if (name === 'surface') return snapshot;

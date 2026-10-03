@@ -248,6 +248,26 @@ declare function useContext<T>(context: NickelContext<T>): T;
 declare function useWindows(): ReadonlyArray<Readonly<NickelNativeWindow>>;
 declare function useWindows<T>(selector: (windows: ReadonlyArray<Readonly<NickelNativeWindow>>) => T): T;
 declare function useActiveWindow(): Readonly<NickelNativeWindow> | null;
+interface NickelThemePalette {
+    readonly background:NickelColor; readonly panel:NickelColor; readonly surface:NickelColor;
+    readonly surfaceHover:NickelColor; readonly text:NickelColor; readonly muted:NickelColor;
+    readonly accent:NickelColor; readonly accentSoft:NickelColor; readonly complement:NickelColor;
+}
+interface NickelThemeSnapshot {
+    readonly generation:number;
+    readonly mode:"light"|"dark"|"unknown";
+    readonly accent:NickelColor|null;
+    readonly accentHue:number|null;
+    readonly accentIntensity:number|null;
+    /** null means the host has not bridged an authoritative preference. */
+    readonly reducedMotion:boolean|null;
+    /** null means the host has not bridged an authoritative preference. */
+    readonly reducedTransparency:boolean|null;
+    readonly palette:Readonly<NickelThemePalette>|null;
+}
+declare function useTheme(): Readonly<NickelThemeSnapshot>;
+declare function useTheme<T>(selector: (theme: Readonly<NickelThemeSnapshot>) => T): T;
+declare function useReducedMotion(): boolean|null;
 declare function useEffect(setup: () => void | (() => void), dependencies?: ReadonlyArray<unknown>): void;
 interface NickelSurfaceSnapshot {
     readonly generation:number;
