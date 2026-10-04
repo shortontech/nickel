@@ -4717,45 +4717,50 @@ mod tests {
 
     #[test]
     fn shared_window_preview_uses_public_snapshot_and_typed_revision_request() {
-        let package = crate::bundled_plugin_assets::load_package("nickel-default").unwrap();
-        let surface = package
-            .manifest
-            .surfaces
-            .iter()
-            .find(|s| s.id == "window-preview")
-            .unwrap();
-        let mut app =
-            PluginPanelApplication::from_package_surface(&package, &Default::default(), surface)
+        with_package_runtime_stack(|| {
+            let package = crate::bundled_plugin_assets::load_package("nickel-default").unwrap();
+            let surface = package
+                .manifest
+                .surfaces
+                .iter()
+                .find(|s| s.id == "window-preview")
                 .unwrap();
-        app.sync_host_data_field(
-            "windowPreviews",
-            &serde_json::json!({"available":true,"revision":"r1","windows":[
-                {"id":"71","title":"Document","image":"window:71","canClose":true},
-                {"id":"72","title":"Mail","image":"window:72","canClose":true}
-            ]}),
-        )
-        .unwrap();
-        let mut host = nickel_ui::UiHost::new(app, 600, 214);
-        let selector = |name: &str| nickel_ui::SemanticSelector::RoleAndName {
-            role: SemanticRole::Button,
-            name: name.into(),
-        };
-        let first = host.query_unique(&selector("Document")).unwrap();
-        let second = host.query_unique(&selector("Mail")).unwrap();
-        assert!(second.bounds.origin.x > first.bounds.origin.x);
-        assert!(second.bounds.origin.x + second.bounds.size.width <= 600.0);
-        host.perform_semantic_action(
-            first.id,
-            nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
-        );
-        assert_eq!(
-            host.application_mut().take_effects(),
-            vec![PluginEffect::WindowPreviewRequest {
-                plugin_id: "nickel-default".into(),
-                revision: "r1".into(),
-                action: PreviewAction::Activate(crate::model::WindowId(71))
-            }]
-        );
+            let mut app = PluginPanelApplication::from_package_surface(
+                &package,
+                &Default::default(),
+                surface,
+            )
+            .unwrap();
+            app.sync_host_data_field(
+                "windowPreviews",
+                &serde_json::json!({"available":true,"revision":"r1","windows":[
+                    {"id":"71","title":"Document","image":"window:71","canClose":true},
+                    {"id":"72","title":"Mail","image":"window:72","canClose":true}
+                ]}),
+            )
+            .unwrap();
+            let mut host = nickel_ui::UiHost::new(app, 600, 214);
+            let selector = |name: &str| nickel_ui::SemanticSelector::RoleAndName {
+                role: SemanticRole::Button,
+                name: name.into(),
+            };
+            let first = host.query_unique(&selector("Document")).unwrap();
+            let second = host.query_unique(&selector("Mail")).unwrap();
+            assert!(second.bounds.origin.x > first.bounds.origin.x);
+            assert!(second.bounds.origin.x + second.bounds.size.width <= 600.0);
+            host.perform_semantic_action(
+                first.id,
+                nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
+            );
+            assert_eq!(
+                host.application_mut().take_effects(),
+                vec![PluginEffect::WindowPreviewRequest {
+                    plugin_id: "nickel-default".into(),
+                    revision: "r1".into(),
+                    action: PreviewAction::Activate(crate::model::WindowId(71))
+                }]
+            );
+        });
     }
 
     #[test]
