@@ -3659,40 +3659,42 @@ impl nickel_ui::Application for InternalHitTestApp {
 
 #[test]
 fn admitted_internal_window_produces_real_switcher_preview_pixels() {
-    let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
-    let (_event_loop, mut session) = internal_shell_test_session();
-    let surface = session.internal_ui.insert(
-        InternalHitTestApp,
-        crate::session::InternalSurfacePlacement {
-            role: crate::session::InternalSurfaceRole::Application,
-            geometry: (200, 150, 250, 200),
-            output: Some("file-test".into()),
-        },
-        1.0,
-    );
-    let window = session.register_internal_application(surface).unwrap();
-    session.set_switcher_preview_interest(vec![window]);
+    with_package_runtime_stack(|| {
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = internal_shell_test_session();
+        let surface = session.internal_ui.insert(
+            InternalHitTestApp,
+            crate::session::InternalSurfacePlacement {
+                role: crate::session::InternalSurfaceRole::Application,
+                geometry: (200, 150, 250, 200),
+                output: Some("file-test".into()),
+            },
+            1.0,
+        );
+        let window = session.register_internal_application(surface).unwrap();
+        session.set_switcher_preview_interest(vec![window]);
 
-    let wave = session.begin_preview_render_wave();
-    assert!(session.preview_capture_candidates(wave).is_empty());
-    let frame = session
-        .preview_frames
-        .get(&window)
-        .expect("internal preview is captured without a Wayland client window");
-    assert_eq!((frame.width, frame.height), (168, 135));
-    assert_eq!(
-        frame.rgba.len(),
-        usize::from(frame.width) * usize::from(frame.height) * 4
-    );
-    assert!(
-        frame
-            .rgba
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .any(|pixel| pixel[3] != 0 && pixel[..3] != [0, 0, 0]),
-        "the preview must contain the hosted application's rendered pixels"
-    );
+        let wave = session.begin_preview_render_wave();
+        assert!(session.preview_capture_candidates(wave).is_empty());
+        let frame = session
+            .preview_frames
+            .get(&window)
+            .expect("internal preview is captured without a Wayland client window");
+        assert_eq!((frame.width, frame.height), (168, 135));
+        assert_eq!(
+            frame.rgba.len(),
+            usize::from(frame.width) * usize::from(frame.height) * 4
+        );
+        assert!(
+            frame
+                .rgba
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .any(|pixel| pixel[3] != 0 && pixel[..3] != [0, 0, 0]),
+            "the preview must contain the hosted application's rendered pixels"
+        );
+    });
 }
 
 #[test]
