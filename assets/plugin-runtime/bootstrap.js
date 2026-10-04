@@ -119,6 +119,9 @@ const __componentIds = new WeakMap();
 let __nextComponentId = 0;
 let __componentHooks = new Map();
 let __componentRecords = new Map();
+// Legacy capability clients still take part in retained invalidation. Track
+// their top-level snapshot reads per component so unrelated data stays cold.
+let __componentResourceReads = new Map();
 let __visitedComponents = new Set();
 let __componentChildren = new Map();
 // Render-local adjacency for the previously admitted component tree. Reusing
@@ -483,6 +486,10 @@ function __nickelSettingsMetadata() {
     return JSON.stringify({settings: Array.from(__settings.values(), entry => entry.metadata), pages: Array.from(__settingsPages.values(), entry => entry.metadata)});
 }
 function __nickelSetSettingsRegistry(provider, settings, pages) {
+    if (provider !== __settingsProvider
+        || JSON.stringify(settings) !== JSON.stringify(__settingsSnapshot)
+        || JSON.stringify(pages) !== JSON.stringify(__settingsPagesSnapshot))
+        __nickelDirtyResourceConsumers('__settingsRegistry');
     __settingsProvider = provider;
     __settingsSnapshot = settings;
     __settingsPagesSnapshot = pages;
@@ -508,8 +515,8 @@ function __readSettings(snapshot, page) {
     }
     return result;
 }
-function readPluginSettings() { return __readSettings(__settingsSnapshot, false); }
-function readSettingsPages() { return __readSettings(__settingsPagesSnapshot, true); }
+function readPluginSettings() { __nickelMarkResourceRead('__settingsRegistry'); return __readSettings(__settingsSnapshot, false); }
+function readSettingsPages() { __nickelMarkResourceRead('__settingsRegistry'); return __readSettings(__settingsPagesSnapshot, true); }
 function readPluginSettingsPages() { return readSettingsPages(); }
 function __nickelRegisteredPageComponent(id) {
     const entry = __settingsPages.get(id);
@@ -533,7 +540,23 @@ function __nickelRetireSettings() {
 }
 
 function __nickelResource(name, fallback) {
+    __nickelMarkResourceRead(name);
     return JSON.parse(JSON.stringify(__nickelData[name] === undefined ? fallback : __nickelData[name]));
+}
+function __nickelMarkResourceRead(name) {
+    if (__currentComponent === null) return;
+    let reads = __componentResourceReads.get(__currentComponent);
+    if (!reads) __componentResourceReads.set(__currentComponent, reads = new Set());
+    reads.add(name);
+}
+function __nickelDirtyResourceConsumers(name) {
+    const dirty = (records, pending) => {
+        for (const [path, record] of records)
+            if (record.resources?.includes(name)) pending.add(path);
+    };
+    dirty(__componentRecords, __dirtyComponents);
+    for (const state of __surfaceStates.values())
+        if (state.records !== __componentRecords) dirty(state.records, state.dirty);
 }
 function __nickelIdentity(id) {
     if (typeof id !== 'string' || !id.length || id.length > 512) throw TypeError('invalid capability identity');
@@ -889,7 +912,22 @@ const nickel = Object.freeze({
     get data() { return __nickelData; }
 });
 
-function __nickelSetData(data) { __nickelData = Object.freeze(data); }
+function __nickelSetData(data) {
+    const changed = new Map();
+    const fieldChanged = name => {
+        if (!changed.has(name)) changed.set(name,
+            JSON.stringify(__nickelData[name]) !== JSON.stringify(data[name]));
+        return changed.get(name);
+    };
+    const dirtyConsumers = (records, dirty) => {
+        for (const [path, record] of records)
+            if (record.resources?.some(fieldChanged)) dirty.add(path);
+    };
+    dirtyConsumers(__componentRecords, __dirtyComponents);
+    for (const state of __surfaceStates.values())
+        if (state.records !== __componentRecords) dirtyConsumers(state.records, state.dirty);
+    __nickelData = Object.freeze(data);
+}
 
 function __nickelWindowEqual(left, right) {
     const fields = ['id','applicationId','title','active','minimized','maximized','fullscreen',
@@ -1900,6 +1938,7 @@ function __nickelResolveDeclaration(declaration) {
     if (__runtimeReasons.length === __MAX_RUNTIME_REASONS) __runtimeReasons.shift();
     __runtimeReasons.push({surface:__activeSurface,path,reason});
     __hookIndex = 0;
+    if (execute) __componentResourceReads.set(path, new Set());
     const componentDepth=__componentExecutionStack.length;
     if(componentDepth>48)
         __nickelDeveloperDiagnostic('excessive-component-depth',`component depth ${componentDepth} exceeds the development threshold`,
@@ -1958,13 +1997,17 @@ function __nickelResolveDeclaration(declaration) {
                 raw = declaration.children.length === 1 ? declaration.children[0] : declaration.children;
                 const result = __nickelResolveVirtual(raw);
                 const output = __nickelApplyDeclarationKey(declaration, result);
-                __componentRecords.set(path, {kind, declaration, raw, output});
+                const resources = Array.from(__componentResourceReads.get(path) ?? retained?.resources ?? []);
+                __componentResourceReads.delete(path);
+                __componentRecords.set(path, {kind, declaration, raw, output,
+                    resources});
                 return output;
             } finally {
                 values.pop();
                 if (!values.length) __contextValues.delete(context);
             }
         } else {
+            let resources = retained?.resources ?? [];
             if (execute) {
                 const componentStarted=Date.now();profile.componentExecutions++;
                 try { raw = kind({...declaration.props, children:declaration.children}); }
@@ -1973,12 +2016,16 @@ function __nickelResolveDeclaration(declaration) {
                     try { Object.defineProperty(error, '__nickelComponent', {value:{path,module:metadata?.module ?? null,export:metadata?.export ?? kind.name ?? null}}); }
                     catch (_) { /* diagnostics must not replace the component failure */ }
                     throw error;
-                } finally { profile.componentExecutionMillis+=Math.max(0,Date.now()-componentStarted); }
+                } finally {
+                    resources = Array.from(__componentResourceReads.get(path) ?? []);
+                    __componentResourceReads.delete(path);
+                    profile.componentExecutionMillis+=Math.max(0,Date.now()-componentStarted);
+                }
             } else raw = retained.raw;
             const result = __nickelResolveVirtual(raw);
             if (execute && __hookIndex !== __componentHooks.get(path).length) throw Error('hook order changed');
             const output = __nickelApplyDeclarationKey(declaration, result);
-            __componentRecords.set(path, {kind, declaration, raw, output});
+            __componentRecords.set(path, {kind, declaration, raw, output, resources});
             return output;
         }
     } catch(error) {

@@ -4138,7 +4138,10 @@ impl LiveShell {
         key: &nickel_core::plugins::PluginSurfaceKey,
         bytes: u64,
     ) {
-        self.plugin_panel_memory.insert(key.clone(), bytes);
+        let first_measurement = self
+            .plugin_panel_memory
+            .insert(key.clone(), bytes)
+            .is_none();
         let total = self
             .plugin_panel_memory
             .iter()
@@ -4152,7 +4155,13 @@ impl LiveShell {
                 ..Default::default()
             },
         );
-        self.maybe_publish_plugin_status();
+        // Native status consumers need lifecycle accounting promptly. Retained
+        // tree byte fluctuations within an already-live surface are recorded
+        // locally and can ride the next status publication instead of turning
+        // every incremental frame into a protocol update.
+        if first_measurement {
+            self.maybe_publish_plugin_status();
+        }
     }
 
     fn warm_shell_surface_eligible(

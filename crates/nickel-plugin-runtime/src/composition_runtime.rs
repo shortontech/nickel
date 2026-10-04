@@ -2334,6 +2334,24 @@ impl ShellCompositionRuntime {
                                 .ok_or("expanded event identity exhausted")?,
                         );
                         expansion.events.insert(token, handle);
+                        if let Some(global_slot) = retained_slots.get(key).and_then(Value::as_str) {
+                            let prefix = self
+                                .nested_mounts
+                                .iter()
+                                .find(|((owner, _), mount)| {
+                                    *owner == expansion.root && mount.id == source_mount
+                                })
+                                .map(|((_, path), _)| format!("{path}::"));
+                            let local_slot = prefix
+                                .as_deref()
+                                .and_then(|prefix| global_slot.strip_prefix(prefix))
+                                .unwrap_or(global_slot);
+                            self.patch_authority
+                                .entry(source_mount)
+                                .or_default()
+                                .slots
+                                .insert(local_slot.to_owned(), token);
+                        }
                         *value = Value::from(token);
                     } else {
                         *value = self.expand_node(
