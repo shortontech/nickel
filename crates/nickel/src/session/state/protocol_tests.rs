@@ -11,7 +11,8 @@ use super::{
     internal_restore_is_current, mapped_surface_origin, maximized_content_geometry,
     output_contains_logical_point, output_index_for_shell_surface,
     output_rescue_revision_is_current, pending_launch_window_disposition,
-    placement_restore_is_current, prepare_shell_behavior_update, preview_mapping_has_exact_size,
+    placement_restore_is_current, prepare_shell_behavior_update,
+    preserve_user_owned_internal_geometry, preview_mapping_has_exact_size,
     protocol_preview_from_cached, record_preview_capture_attempt, restored_drag_content_geometry,
     retain_launcher_invocation_output, retain_live_idle_inhibitors,
     retain_superseded_xdg_settlement, retire_displaced_window, retire_pointer_surface,
@@ -21,6 +22,39 @@ use super::{
     xdg_configure_extends_existing_request, xdg_configure_matches_existing_desired,
     xdg_settlement_requires_resize_cleanup,
 };
+
+#[test]
+fn unchanged_shell_declaration_preserves_user_move_and_resize() {
+    let declared = crate::session::InternalSurfacePlacement {
+        role: crate::session::InternalSurfaceRole::Application,
+        geometry: (510, 240, 900, 600),
+        output: Some("primary".into()),
+    };
+    let current = crate::session::InternalSurfacePlacement {
+        geometry: (84, 96, 1180, 720),
+        ..declared.clone()
+    };
+
+    assert_eq!(
+        preserve_user_owned_internal_geometry(&current, Some(&declared), declared.clone()),
+        current
+    );
+
+    let resized_declaration = crate::session::InternalSurfacePlacement {
+        geometry: (510, 240, 960, 640),
+        ..declared.clone()
+    };
+    assert_eq!(
+        preserve_user_owned_internal_geometry(
+            &current,
+            Some(&declared),
+            resized_declaration.clone()
+        )
+        .geometry,
+        (84, 96, 960, 640),
+        "an explicit JSX size change applies without recentering the user-owned window"
+    );
+}
 
 fn with_package_runtime_stack(test: impl FnOnce() + Send + 'static) {
     std::thread::Builder::new()

@@ -2695,6 +2695,11 @@ pub struct NickelSession {
     pub(crate) internal_codex: Option<crate::internal_codex::InternalCodexHost>,
     pub(crate) internal_shell_surfaces:
         HashMap<nickel_ui::InternalSurfaceId, nickel_ui::InternalSurfaceId>,
+    /// Last geometry declared by each retained shell surface. Application
+    /// windows use this baseline to distinguish a new JSX geometry request
+    /// from an unrelated scene refresh, preserving user-owned move/resize.
+    internal_shell_declared_placements:
+        HashMap<nickel_ui::InternalSurfaceId, crate::session::InternalSurfacePlacement>,
     controller_route: Option<ControllerRoute>,
     controller_routing_epoch: u64,
     controller_published_routing_epoch: Arc<AtomicU64>,
@@ -5492,6 +5497,7 @@ impl NickelSession {
         );
 
         let mut plugin_windows = Vec::new();
+        let mut retained_declarations = HashSet::new();
         for mut surface in shell.surfaces().to_vec() {
             if !shell.visible(surface.id) {
                 continue;
@@ -5540,6 +5546,19 @@ impl NickelSession {
                     }
                 }
             }
+            let declared_placement = placement.clone();
+            retained_declarations.insert(surface.id);
+            if let Some(runtime_id) = previous.get(&surface.id).copied()
+                && let Some(current) = self.internal_ui.placement(runtime_id)
+            {
+                placement = preserve_user_owned_internal_geometry(
+                    current,
+                    self.internal_shell_declared_placements.get(&surface.id),
+                    placement,
+                );
+            }
+            self.internal_shell_declared_placements
+                .insert(surface.id, declared_placement);
             let scale = surface
                 .output
                 .as_deref()
@@ -5572,6 +5591,8 @@ impl NickelSession {
             self.unregister_internal_application(runtime);
             self.internal_ui.remove(runtime);
         }
+        self.internal_shell_declared_placements
+            .retain(|surface, _| retained_declarations.contains(surface));
         for (runtime, key) in plugin_windows {
             self.register_internal_application_with_plugin(runtime, Some(&key));
         }
@@ -7539,6 +7560,18 @@ impl NickelSession {
                 surface.size = (placement.geometry.2, placement.geometry.3);
                 resized = shell.set_surface_size(surface.id, surface.size);
             }
+            let declared_placement = placement.clone();
+            if let Some(runtime_id) = self.internal_shell_surfaces.get(&surface.id).copied()
+                && let Some(current) = self.internal_ui.placement(runtime_id)
+            {
+                placement = preserve_user_owned_internal_geometry(
+                    current,
+                    self.internal_shell_declared_placements.get(&surface.id),
+                    placement,
+                );
+            }
+            self.internal_shell_declared_placements
+                .insert(surface.id, declared_placement);
             let output_scale = placement
                 .output
                 .as_deref()
@@ -8128,6 +8161,42 @@ fn internal_placement_geometry(placement: &crate::session::InternalSurfacePlacem
         width: i32::try_from(placement.geometry.2).unwrap_or(i32::MAX),
         height: i32::try_from(placement.geometry.3).unwrap_or(i32::MAX),
     }
+}
+
+fn preserve_user_owned_internal_geometry(
+    current: &crate::session::InternalSurfacePlacement,
+    previous_declared: Option<&crate::session::InternalSurfacePlacement>,
+    mut declared: crate::session::InternalSurfacePlacement,
+) -> crate::session::InternalSurfacePlacement {
+    if declared.role != crate::session::InternalSurfaceRole::Application
+        || current.role != crate::session::InternalSurfaceRole::Application
+    {
+        return declared;
+    }
+    let Some(previous) = previous_declared else {
+        return declared;
+    };
+
+    // JSX window geometry is an initial/default request. A field becomes
+    // authoritative again only when the declaration itself changes; ordinary
+    // data, hover, focus, or paint reconciliation must retain the geometry the
+    // user established through the compositor frame.
+    if declared.geometry.0 == previous.geometry.0 {
+        declared.geometry.0 = current.geometry.0;
+    }
+    if declared.geometry.1 == previous.geometry.1 {
+        declared.geometry.1 = current.geometry.1;
+    }
+    if declared.geometry.2 == previous.geometry.2 {
+        declared.geometry.2 = current.geometry.2;
+    }
+    if declared.geometry.3 == previous.geometry.3 {
+        declared.geometry.3 = current.geometry.3;
+    }
+    if declared.output == previous.output {
+        declared.output.clone_from(&current.output);
+    }
+    declared
 }
 
 fn internal_restore_is_current(
@@ -8849,6 +8918,7 @@ impl NickelSession {
             internal_shell: None,
             internal_codex: None,
             internal_shell_surfaces: HashMap::new(),
+            internal_shell_declared_placements: HashMap::new(),
             controller_route: None,
             controller_routing_epoch: 0,
             controller_published_routing_epoch: Arc::new(AtomicU64::new(0)),
