@@ -452,12 +452,46 @@ fn installed_icon_themes_in(roots: impl IntoIterator<Item = PathBuf>) -> Vec<Str
         .filter_map(|root| fs::read_dir(root).ok())
         .flatten()
         .filter_map(Result::ok)
-        .filter(|entry| entry.path().join("index.theme").is_file())
+        .filter(|entry| usable_icon_theme(&entry.path()))
         .filter_map(|entry| entry.file_name().into_string().ok())
         .collect::<Vec<_>>();
     themes.sort_by_key(|theme| theme.to_ascii_lowercase());
     themes.dedup();
     themes
+}
+
+fn usable_icon_theme(theme: &Path) -> bool {
+    let Ok(index) = fs::read_to_string(theme.join("index.theme")) else {
+        return false;
+    };
+    let mut in_icon_theme = false;
+    let mut directories = Vec::new();
+    for line in index.lines().map(str::trim) {
+        if line.starts_with('[') && line.ends_with(']') {
+            in_icon_theme = line == "[Icon Theme]";
+        } else if in_icon_theme
+            && let Some((key, value)) = line.split_once('=')
+            && matches!(key.trim(), "Directories" | "ScaledDirectories")
+        {
+            directories.extend(
+                value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty()),
+            );
+        }
+    }
+    directories.into_iter().any(|directory| {
+        let relative = Path::new(directory);
+        relative
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
+            && !directory.split('/').any(|part| {
+                part.eq_ignore_ascii_case("cursors")
+                    || part.eq_ignore_ascii_case("cursors_scalable")
+            })
+            && theme.join(relative).is_dir()
+    })
 }
 
 fn icon_search_roots() -> Vec<PathBuf> {
@@ -734,13 +768,38 @@ mod tests {
         std::fs::create_dir(first.path().join("not-a-theme")).unwrap();
         for (root, theme) in [(first.path(), "Zulu"), (second.path(), "alpha")] {
             let directory = root.join(theme);
-            std::fs::create_dir(&directory).unwrap();
-            std::fs::write(directory.join("index.theme"), "[Icon Theme]\n").unwrap();
+            std::fs::create_dir_all(directory.join("16x16/apps")).unwrap();
+            std::fs::write(
+                directory.join("index.theme"),
+                "[Icon Theme]\nDirectories=16x16/apps\n",
+            )
+            .unwrap();
         }
         assert_eq!(
             installed_icon_themes_in([first.path().into(), second.path().into()]),
             ["alpha", "Zulu"]
         );
+    }
+
+    #[test]
+    fn installed_theme_discovery_rejects_cursor_only_themes() {
+        let root = tempfile::tempdir().unwrap();
+        let cursor = root.path().join("Oxygen_Zion");
+        std::fs::create_dir_all(cursor.join("cursors_scalable")).unwrap();
+        std::fs::write(
+            cursor.join("index.theme"),
+            "[Icon Theme]\nDirectories=cursors_scalable\n[cursors_scalable]\nSize=32\n",
+        )
+        .unwrap();
+        let icons = root.path().join("Usable");
+        std::fs::create_dir_all(icons.join("48x48/mimetypes")).unwrap();
+        std::fs::write(
+            icons.join("index.theme"),
+            "[Icon Theme]\nDirectories=48x48/mimetypes\n",
+        )
+        .unwrap();
+
+        assert_eq!(installed_icon_themes_in([root.path().into()]), ["Usable"]);
     }
 
     #[test]

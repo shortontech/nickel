@@ -90,20 +90,22 @@ export function FileArtwork() {
     const needle = query.trim().toLowerCase();
     const themes = snapshot.iconThemes || [];
     const filtered = themes.filter(theme => !needle || theme.toLowerCase().includes(needle));
+    const usesSystemIcons = configured.fileIconProvider === "system";
     const set = patch => nickel.preferences.set(patch);
     return h(Column, { className: "preferences-page" },
         h(PreferenceStatus, { snapshot: snapshot }),
         snapshot.available ? h(Column, { className: "preferences-card" },
             h(Text, { className: "preferences-heading" }, "File artwork"),
             h(Row, { className: "preferences-choices" }, [{ value: "nickel", label: "Nickel icons" }, { value: "system", label: "System icons" }].map(option => h(Button, { key: option.value, id: "preferences-file-icons-" + option.value, disabled: !snapshot.writable, state: configured.fileIconProvider === option.value ? "selected" : "unselected", onClick: () => set({ fileIconProvider: option.value }) }, option.label))),
-            h(Text, { wrap: true }, snapshot.unavailableSelections?.fileIconTheme ? "Configured theme " + configured.fileIconTheme + " is unavailable and will be retained until you select another theme."
-                : configured.fileIconTheme ? "Selected theme: " + configured.fileIconTheme : "System default icon theme"),
-            h(Button, { id: "preferences-file-theme-system", disabled: !snapshot.writable, onClick: () => set({ fileIconProvider: "system", fileIconTheme: null }) }, "Use system default icon theme"),
-            themes.length ? h(Column, { className: "preferences-page" },
+            h(Text, { wrap: true }, !usesSystemIcons ? "Nickel artwork" + (configured.fileIconTheme ? ". Saved system theme: " + configured.fileIconTheme : "")
+                : snapshot.unavailableSelections?.fileIconTheme ? "Configured theme " + configured.fileIconTheme + " is unavailable; Nickel artwork is used until you select another theme."
+                    : configured.fileIconTheme ? "Selected system theme: " + configured.fileIconTheme : "System default icon theme"),
+            usesSystemIcons ? h(Button, { id: "preferences-file-theme-system", disabled: !snapshot.writable, onClick: () => set({ fileIconProvider: "system", fileIconTheme: null }) }, "Use system default icon theme") : null,
+            usesSystemIcons && themes.length ? h(Column, { className: "preferences-page" },
                 h(TextField, { id: "preferences-file-theme-search", accessibilityLabel: "Search icon themes", placeholder: "Search installed icon themes", value: query, onChange: setQuery }),
                 filtered.slice(0, 40).map((theme, index) => h(Button, { key: theme, id: "preferences-file-theme-choice-" + index, disabled: !snapshot.writable, state: configured.fileIconTheme === theme ? "selected" : "unselected", onClick: () => set({ fileIconProvider: "system", fileIconTheme: theme }) }, theme.slice(0, 120))),
                 filtered.length > 40 ? h(Text, null, "Search to narrow the remaining icon themes.") : null,
-                !filtered.length ? h(Text, null, "No installed icon themes match.") : null) : h(Text, null, "No installed icon themes are available on this platform.")) : null);
+                !filtered.length ? h(Text, null, "No installed icon themes match.") : null) : usesSystemIcons ? h(Text, null, "No installed icon themes are available on this platform.") : null) : null);
 }
 registerSettingsPage({ id: "shell-preferences", group: "Shell", label: "Desktop and taskbar", description: "Virtual desktops and taskbar behavior", component: Preferences });
 registerSettingsPage({ id: "idle-preferences", group: "Power and security", label: "Idle behavior", description: "Dim, lock, and suspend timeouts", component: IdlePreferences });
