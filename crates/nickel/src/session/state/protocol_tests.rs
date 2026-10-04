@@ -6768,14 +6768,16 @@ fn connection_cleanup_setup_failure_preserves_owner_fallback() {
 
 #[test]
 fn connection_cleanup_eventfd_wakes_idle_production_owner() {
-    let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
-    let (mut event_loop, mut session) = internal_shell_test_session();
-    let wake = session.remote_cleanup_wake.clone();
-    wake.notify();
-    event_loop
-        .dispatch(Duration::from_millis(50), &mut session)
-        .unwrap();
-    assert!(!wake.take_pending());
+    with_package_runtime_stack(|| {
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (mut event_loop, mut session) = internal_shell_test_session();
+        let wake = session.remote_cleanup_wake.clone();
+        wake.notify();
+        event_loop
+            .dispatch(Duration::from_millis(50), &mut session)
+            .unwrap();
+        assert!(!wake.take_pending());
+    });
 }
 
 static PREVIEW_SESSION_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
