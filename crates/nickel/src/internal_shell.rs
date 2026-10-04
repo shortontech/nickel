@@ -1726,42 +1726,44 @@ mod tests {
 
     #[test]
     fn ephemeral_focus_loss_hides_control_center_without_requesting_focus_restoration() {
-        #[derive(Default)]
-        struct RecordingHost(std::sync::Mutex<Vec<ShellCommand>>);
-        impl SessionHost for RecordingHost {
-            fn dispatch(&self, command: ShellCommand) -> Result<(), SessionRequestError> {
-                self.0.lock().unwrap().push(command);
-                Ok(())
+        with_package_runtime_stack(|| {
+            #[derive(Default)]
+            struct RecordingHost(std::sync::Mutex<Vec<ShellCommand>>);
+            impl SessionHost for RecordingHost {
+                fn dispatch(&self, command: ShellCommand) -> Result<(), SessionRequestError> {
+                    self.0.lock().unwrap().push(command);
+                    Ok(())
+                }
             }
-        }
-        let host = Arc::new(RecordingHost::default());
-        let mut coordinator =
-            InternalShellCoordinator::new(host.clone(), PanelEdge::Bottom).unwrap();
-        coordinator.set_outputs(&[InternalOutput {
-            x: 0,
-            y: 0,
-            name: "test".into(),
-            width: 1280,
-            height: 720,
-            scale: 1.0,
-        }]);
-        coordinator.global_shortcut(nickel_session_protocol::ShortcutAction::ShowControlCenter);
-        host.0.lock().unwrap().clear();
-        assert!(coordinator.dismiss_ephemeral_on_focus_loss(SurfaceRole::ControlCenter));
-        let control = coordinator
-            .surface(SurfaceRole::ControlCenter, None)
-            .unwrap()
-            .id;
-        assert!(!coordinator.visible(control));
-        assert!(
-            !host
-                .0
-                .lock()
+            let host = Arc::new(RecordingHost::default());
+            let mut coordinator =
+                InternalShellCoordinator::new(host.clone(), PanelEdge::Bottom).unwrap();
+            coordinator.set_outputs(&[InternalOutput {
+                x: 0,
+                y: 0,
+                name: "test".into(),
+                width: 1280,
+                height: 720,
+                scale: 1.0,
+            }]);
+            coordinator.global_shortcut(nickel_session_protocol::ShortcutAction::ShowControlCenter);
+            host.0.lock().unwrap().clear();
+            assert!(coordinator.dismiss_ephemeral_on_focus_loss(SurfaceRole::ControlCenter));
+            let control = coordinator
+                .surface(SurfaceRole::ControlCenter, None)
                 .unwrap()
-                .iter()
-                .any(|command| matches!(command, ShellCommand::RestoreApplicationFocus)),
-            "focus loss must not issue a restore command"
-        );
+                .id;
+            assert!(!coordinator.visible(control));
+            assert!(
+                !host
+                    .0
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|command| matches!(command, ShellCommand::RestoreApplicationFocus)),
+                "focus loss must not issue a restore command"
+            );
+        });
     }
 
     #[test]
@@ -1909,183 +1911,193 @@ mod tests {
 
     #[test]
     fn plugin_slots_on_the_same_output_keep_distinct_identities() {
-        let mut shell = coordinator();
-        let first = nickel_core::plugins::PluginSurfaceKey {
-            plugin_id: "org.example.clock".into(),
-            surface_id: "main".into(),
-        };
-        let second = nickel_core::plugins::PluginSurfaceKey {
-            plugin_id: "org.example.mail".into(),
-            surface_id: "main".into(),
-        };
-        shell.insert(
-            SurfaceRole::Panel,
-            Some(first.clone()),
-            Some("test".into()),
-            (300, 48),
-        );
-        shell.insert(
-            SurfaceRole::Panel,
-            Some(second.clone()),
-            Some("test".into()),
-            (360, 64),
-        );
-        let clock = shell.plugin_surface(&first, "test").unwrap();
-        let mail = shell.plugin_surface(&second, "test").unwrap();
-        assert_ne!(clock.id, mail.id);
-        assert_eq!((clock.size, mail.size), ((300, 48), (360, 64)));
+        with_package_runtime_stack(|| {
+            let mut shell = coordinator();
+            let first = nickel_core::plugins::PluginSurfaceKey {
+                plugin_id: "org.example.clock".into(),
+                surface_id: "main".into(),
+            };
+            let second = nickel_core::plugins::PluginSurfaceKey {
+                plugin_id: "org.example.mail".into(),
+                surface_id: "main".into(),
+            };
+            shell.insert(
+                SurfaceRole::Panel,
+                Some(first.clone()),
+                Some("test".into()),
+                (300, 48),
+            );
+            shell.insert(
+                SurfaceRole::Panel,
+                Some(second.clone()),
+                Some("test".into()),
+                (360, 64),
+            );
+            let clock = shell.plugin_surface(&first, "test").unwrap();
+            let mail = shell.plugin_surface(&second, "test").unwrap();
+            assert_ne!(clock.id, mail.id);
+            assert_eq!((clock.size, mail.size), ((300, 48), (360, 64)));
+        });
     }
 
     #[test]
     fn retired_plugin_slot_cannot_render_or_receive_input_for_new_owner() {
-        let mut shell = coordinator();
-        let active = shell
-            .shell
-            .plugin_panels()
-            .into_iter()
-            .next()
-            .expect("active package panel")
-            .0;
-        let stale = nickel_core::plugins::PluginSurfaceKey {
-            plugin_id: "org.example.retired".into(),
-            surface_id: active.surface_id.clone(),
-        };
-        shell.insert(
-            SurfaceRole::Panel,
-            Some(active),
-            Some("test".into()),
-            (360, 64),
-        );
-        shell.insert(
-            SurfaceRole::Panel,
-            Some(stale),
-            Some("test".into()),
-            (360, 64),
-        );
-        let active_id = shell.entries[0].id;
-        let stale_id = shell.entries[1].id;
-        assert!(shell.visible(active_id));
-        assert!(!shell.visible(stale_id));
-        assert!(shell.scene(active_id).is_some());
-        assert!(shell.scene(stale_id).is_none());
-        assert!(!shell.step_slot(
-            stale_id,
-            HostBatch {
-                events: vec![nickel_ui::HostEvent::Ui(
-                    nickel_ui::UiEvent::KeyboardActivate
-                )],
-                ..HostBatch::default()
-            },
-        ));
+        with_package_runtime_stack(|| {
+            let mut shell = coordinator();
+            let active = shell
+                .shell
+                .plugin_panels()
+                .into_iter()
+                .next()
+                .expect("active package panel")
+                .0;
+            let stale = nickel_core::plugins::PluginSurfaceKey {
+                plugin_id: "org.example.retired".into(),
+                surface_id: active.surface_id.clone(),
+            };
+            shell.insert(
+                SurfaceRole::Panel,
+                Some(active),
+                Some("test".into()),
+                (360, 64),
+            );
+            shell.insert(
+                SurfaceRole::Panel,
+                Some(stale),
+                Some("test".into()),
+                (360, 64),
+            );
+            let active_id = shell.entries[0].id;
+            let stale_id = shell.entries[1].id;
+            assert!(shell.visible(active_id));
+            assert!(!shell.visible(stale_id));
+            assert!(shell.scene(active_id).is_some());
+            assert!(shell.scene(stale_id).is_none());
+            assert!(!shell.step_slot(
+                stale_id,
+                HostBatch {
+                    events: vec![nickel_ui::HostEvent::Ui(
+                        nickel_ui::UiEvent::KeyboardActivate
+                    )],
+                    ..HostBatch::default()
+                },
+            ));
+        });
     }
 
     #[cfg(target_os = "linux")]
     #[test]
     fn jsx_keyboard_click_delivers_to_the_press_time_recipient() {
-        use nickel_input::{
-            DeviceId, EventOrder, InputEvent, KeyEdge, PointerButton, PointerEvent,
-        };
-        use nickel_session_protocol::{OnScreenKeyboardInput, OnScreenKeyboardSnapshot, WindowId};
-        struct KeyboardHost {
-            snapshot: std::sync::Mutex<OnScreenKeyboardSnapshot>,
-            inputs: std::sync::Mutex<Vec<(u64, OnScreenKeyboardInput)>>,
-        }
-        impl SessionHost for KeyboardHost {
-            fn dispatch(&self, _: ShellCommand) -> Result<(), SessionRequestError> {
-                Ok(())
+        with_package_runtime_stack(|| {
+            use nickel_input::{
+                DeviceId, EventOrder, InputEvent, KeyEdge, PointerButton, PointerEvent,
+            };
+            use nickel_session_protocol::{
+                OnScreenKeyboardInput, OnScreenKeyboardSnapshot, WindowId,
+            };
+            struct KeyboardHost {
+                snapshot: std::sync::Mutex<OnScreenKeyboardSnapshot>,
+                inputs: std::sync::Mutex<Vec<(u64, OnScreenKeyboardInput)>>,
             }
-            fn keyboard_snapshot(&self) -> Result<OnScreenKeyboardSnapshot, SessionRequestError> {
-                Ok(self.snapshot.lock().unwrap().clone())
+            impl SessionHost for KeyboardHost {
+                fn dispatch(&self, _: ShellCommand) -> Result<(), SessionRequestError> {
+                    Ok(())
+                }
+                fn keyboard_snapshot(
+                    &self,
+                ) -> Result<OnScreenKeyboardSnapshot, SessionRequestError> {
+                    Ok(self.snapshot.lock().unwrap().clone())
+                }
+                fn configure_keyboard(
+                    &self,
+                    _: bool,
+                    _: bool,
+                    _: u64,
+                    _: bool,
+                    _: bool,
+                    _: u32,
+                ) -> Result<(), SessionRequestError> {
+                    Ok(())
+                }
+                fn keyboard_input(
+                    &self,
+                    epoch: u64,
+                    input: OnScreenKeyboardInput,
+                ) -> Result<(), SessionRequestError> {
+                    self.inputs.lock().unwrap().push((epoch, input));
+                    Ok(())
+                }
             }
-            fn configure_keyboard(
-                &self,
-                _: bool,
-                _: bool,
-                _: u64,
-                _: bool,
-                _: bool,
-                _: u32,
-            ) -> Result<(), SessionRequestError> {
-                Ok(())
-            }
-            fn keyboard_input(
-                &self,
-                epoch: u64,
-                input: OnScreenKeyboardInput,
-            ) -> Result<(), SessionRequestError> {
-                self.inputs.lock().unwrap().push((epoch, input));
-                Ok(())
-            }
-        }
-        let host = Arc::new(KeyboardHost {
-            snapshot: std::sync::Mutex::new(OnScreenKeyboardSnapshot {
-                enabled: true,
-                visible: true,
-                epoch: 19,
-                generation: 1,
-                recipient: Some(WindowId(7)),
-                ..Default::default()
-            }),
-            inputs: std::sync::Mutex::new(Vec::new()),
-        });
-        let mut coordinator =
-            InternalShellCoordinator::new(host.clone(), PanelEdge::Bottom).unwrap();
-        let output = InternalOutput {
-            name: "test".into(),
-            x: 0,
-            y: 0,
-            width: 1280,
-            height: 800,
-            scale: 1.0,
-        };
-        coordinator.set_outputs(std::slice::from_ref(&output));
-        coordinator.poll(Instant::now());
-        coordinator.set_outputs(std::slice::from_ref(&output));
-        let key = coordinator.shell.active_shell_surface_key("keyboard");
-        assert!(
-            coordinator
-                .surface(SurfaceRole::OnScreenKeyboard, None)
-                .is_none()
-        );
-        let id = coordinator.plugin_surface(&key, "test").unwrap().id;
-        assert!(coordinator.visible(id));
-        coordinator.scene(id);
-        let button = coordinator
-            .shell
-            .plugin_surface_semantic_nodes(&key)
-            .unwrap()
-            .into_iter()
-            .find(|node| node.name.as_deref() == Some("a") && node.enabled)
-            .expect("JSX key button");
-        let point = nickel_input::Point {
-            x: f64::from(button.bounds.origin.x + button.bounds.size.width / 2.0),
-            y: f64::from(button.bounds.origin.y + button.bounds.size.height / 2.0),
-        };
-        let event = |edge| HostBatch {
-            events: vec![nickel_ui::HostEvent::Normalized {
-                input: InputEvent::Pointer(PointerEvent::Button {
-                    device: DeviceId(1),
-                    order: EventOrder(1),
-                    button: PointerButton::Primary,
-                    edge,
-                    position: Some(point),
+            let host = Arc::new(KeyboardHost {
+                snapshot: std::sync::Mutex::new(OnScreenKeyboardSnapshot {
+                    enabled: true,
+                    visible: true,
+                    epoch: 19,
+                    generation: 1,
+                    recipient: Some(WindowId(7)),
+                    ..Default::default()
                 }),
-                clipboard_text: None,
-            }],
-            ..Default::default()
-        };
-        coordinator.step_slot_changes(id, event(KeyEdge::Pressed));
-        coordinator.step_slot_changes(id, event(KeyEdge::Released));
-        assert_eq!(
-            *host.inputs.lock().unwrap(),
-            vec![(19, OnScreenKeyboardInput::Text { text: "a".into() })]
-        );
-        coordinator.scene(id);
-        coordinator.step_slot_changes(id, event(KeyEdge::Pressed));
-        host.snapshot.lock().unwrap().epoch = 20;
-        coordinator.poll(Instant::now());
-        coordinator.step_slot_changes(id, event(KeyEdge::Released));
-        assert_eq!(host.inputs.lock().unwrap().len(), 1);
+                inputs: std::sync::Mutex::new(Vec::new()),
+            });
+            let mut coordinator =
+                InternalShellCoordinator::new(host.clone(), PanelEdge::Bottom).unwrap();
+            let output = InternalOutput {
+                name: "test".into(),
+                x: 0,
+                y: 0,
+                width: 1280,
+                height: 800,
+                scale: 1.0,
+            };
+            coordinator.set_outputs(std::slice::from_ref(&output));
+            coordinator.poll(Instant::now());
+            coordinator.set_outputs(std::slice::from_ref(&output));
+            let key = coordinator.shell.active_shell_surface_key("keyboard");
+            assert!(
+                coordinator
+                    .surface(SurfaceRole::OnScreenKeyboard, None)
+                    .is_none()
+            );
+            let id = coordinator.plugin_surface(&key, "test").unwrap().id;
+            assert!(coordinator.visible(id));
+            coordinator.scene(id);
+            let button = coordinator
+                .shell
+                .plugin_surface_semantic_nodes(&key)
+                .unwrap()
+                .into_iter()
+                .find(|node| node.name.as_deref() == Some("a") && node.enabled)
+                .expect("JSX key button");
+            let point = nickel_input::Point {
+                x: f64::from(button.bounds.origin.x + button.bounds.size.width / 2.0),
+                y: f64::from(button.bounds.origin.y + button.bounds.size.height / 2.0),
+            };
+            let event = |edge| HostBatch {
+                events: vec![nickel_ui::HostEvent::Normalized {
+                    input: InputEvent::Pointer(PointerEvent::Button {
+                        device: DeviceId(1),
+                        order: EventOrder(1),
+                        button: PointerButton::Primary,
+                        edge,
+                        position: Some(point),
+                    }),
+                    clipboard_text: None,
+                }],
+                ..Default::default()
+            };
+            coordinator.step_slot_changes(id, event(KeyEdge::Pressed));
+            coordinator.step_slot_changes(id, event(KeyEdge::Released));
+            assert_eq!(
+                *host.inputs.lock().unwrap(),
+                vec![(19, OnScreenKeyboardInput::Text { text: "a".into() })]
+            );
+            coordinator.scene(id);
+            coordinator.step_slot_changes(id, event(KeyEdge::Pressed));
+            host.snapshot.lock().unwrap().epoch = 20;
+            coordinator.poll(Instant::now());
+            coordinator.step_slot_changes(id, event(KeyEdge::Released));
+            assert_eq!(host.inputs.lock().unwrap().len(), 1);
+        });
     }
 
     struct StorageHost(Arc<AtomicU8>);
@@ -2142,132 +2154,145 @@ mod tests {
 
     #[test]
     fn compositor_can_publish_codex_availability_to_shell_surfaces() {
-        use nickel_core::optional_features::{
-            CodexAvailabilityProjection, FeatureHealth, FeatureInstallation, FeatureSupport,
-        };
+        with_package_runtime_stack(|| {
+            use nickel_core::optional_features::{
+                CodexAvailabilityProjection, FeatureHealth, FeatureInstallation, FeatureSupport,
+            };
 
-        let mut coordinator = coordinator();
-        assert!(!coordinator.codex_available());
+            let mut coordinator = coordinator();
+            assert!(!coordinator.codex_available());
 
-        assert!(
-            coordinator.apply_codex_projection(CodexAvailabilityProjection::new(
-                FeatureSupport::Supported,
-                FeatureInstallation::Installed,
-                true,
-                FeatureHealth::Loading,
-                7,
-                Some("Checking the selected Codex backend…".into()),
-            ))
-        );
+            assert!(
+                coordinator.apply_codex_projection(CodexAvailabilityProjection::new(
+                    FeatureSupport::Supported,
+                    FeatureInstallation::Installed,
+                    true,
+                    FeatureHealth::Loading,
+                    7,
+                    Some("Checking the selected Codex backend…".into()),
+                ))
+            );
 
-        assert!(coordinator.codex_available());
+            assert!(coordinator.codex_available());
+        });
     }
 
     #[test]
     fn reserved_panels_stack_per_output_without_counting_floating_panels() {
-        let mut coordinator = coordinator();
-        let key = |plugin_id: &str| nickel_core::plugins::PluginSurfaceKey {
-            plugin_id: plugin_id.into(),
-            surface_id: "main".into(),
-        };
-        let taskbar = key("taskbar");
-        let floating = key("floating");
-        let extension = key("extension");
-        coordinator.insert(
-            SurfaceRole::Panel,
-            Some(taskbar.clone()),
-            Some("left".into()),
-            (800, 56),
-        );
-        coordinator.insert(
-            SurfaceRole::Panel,
-            Some(floating),
-            Some("left".into()),
-            (400, 90),
-        );
-        coordinator.insert(
-            SurfaceRole::Panel,
-            Some(extension.clone()),
-            Some("left".into()),
-            (800, 36),
-        );
-        coordinator.insert(
-            SurfaceRole::Panel,
-            Some(taskbar),
-            Some("right".into()),
-            (800, 56),
-        );
-        let is_reserved =
-            |key: &nickel_core::plugins::PluginSurfaceKey| key.plugin_id != "floating";
-        assert_eq!(
-            reserved_panel_measure(&coordinator.entries, "left", is_reserved, Some(&extension)),
-            (92, Some(56))
-        );
-        assert_eq!(
-            reserved_panel_measure(&coordinator.entries, "right", is_reserved, Some(&extension)),
-            (56, None)
-        );
+        with_package_runtime_stack(|| {
+            let mut coordinator = coordinator();
+            let key = |plugin_id: &str| nickel_core::plugins::PluginSurfaceKey {
+                plugin_id: plugin_id.into(),
+                surface_id: "main".into(),
+            };
+            let taskbar = key("taskbar");
+            let floating = key("floating");
+            let extension = key("extension");
+            coordinator.insert(
+                SurfaceRole::Panel,
+                Some(taskbar.clone()),
+                Some("left".into()),
+                (800, 56),
+            );
+            coordinator.insert(
+                SurfaceRole::Panel,
+                Some(floating),
+                Some("left".into()),
+                (400, 90),
+            );
+            coordinator.insert(
+                SurfaceRole::Panel,
+                Some(extension.clone()),
+                Some("left".into()),
+                (800, 36),
+            );
+            coordinator.insert(
+                SurfaceRole::Panel,
+                Some(taskbar),
+                Some("right".into()),
+                (800, 56),
+            );
+            let is_reserved =
+                |key: &nickel_core::plugins::PluginSurfaceKey| key.plugin_id != "floating";
+            assert_eq!(
+                reserved_panel_measure(&coordinator.entries, "left", is_reserved, Some(&extension)),
+                (92, Some(56))
+            );
+            assert_eq!(
+                reserved_panel_measure(
+                    &coordinator.entries,
+                    "right",
+                    is_reserved,
+                    Some(&extension)
+                ),
+                (56, None)
+            );
+        });
     }
 
     #[test]
     fn native_desktop_surface_is_stable_across_output_reconciliation() {
-        let mut coordinator = coordinator();
-        let output = InternalOutput {
-            x: 0,
-            y: 0,
-            name: "nested".into(),
-            width: 800,
-            height: 600,
-            scale: 1.0,
-        };
-        coordinator.set_outputs(std::slice::from_ref(&output));
-        let desktop = coordinator
-            .surface(SurfaceRole::Desktop, Some("nested"))
-            .unwrap();
-        let id = desktop.id;
-        assert_eq!(desktop.plugin, None);
-        assert!(coordinator.visible(id));
+        with_package_runtime_stack(|| {
+            let mut coordinator = coordinator();
+            let output = InternalOutput {
+                x: 0,
+                y: 0,
+                name: "nested".into(),
+                width: 800,
+                height: 600,
+                scale: 1.0,
+            };
+            coordinator.set_outputs(std::slice::from_ref(&output));
+            let desktop = coordinator
+                .surface(SurfaceRole::Desktop, Some("nested"))
+                .unwrap();
+            let id = desktop.id;
+            assert_eq!(desktop.plugin, None);
+            assert!(coordinator.visible(id));
 
-        coordinator.set_outputs(std::slice::from_ref(&output));
-        let retained = coordinator
-            .surface(SurfaceRole::Desktop, Some("nested"))
-            .unwrap();
-        assert_eq!(retained.id, id);
-        assert_eq!(retained.plugin, None);
-        assert!(coordinator.visible(retained.id));
-        assert!(coordinator.scene(retained.id).is_some());
+            coordinator.set_outputs(std::slice::from_ref(&output));
+            let retained = coordinator
+                .surface(SurfaceRole::Desktop, Some("nested"))
+                .unwrap();
+            assert_eq!(retained.id, id);
+            assert_eq!(retained.plugin, None);
+            assert!(coordinator.visible(retained.id));
+            assert!(coordinator.scene(retained.id).is_some());
+        });
     }
 
     #[test]
     fn preview_slot_uses_its_plugin_surface_identity() {
-        let mut coordinator = coordinator();
-        coordinator
-            .shell
-            .show_plugin_window("nickel-default", "window-preview")
-            .unwrap();
-        coordinator.set_outputs(&[InternalOutput {
-            x: 0,
-            y: 0,
-            name: "nested".into(),
-            width: 800,
-            height: 600,
-            scale: 1.0,
-        }]);
-        let preview = coordinator
-            .surface(SurfaceRole::WindowPreview, None)
-            .unwrap();
-        let preview_key = coordinator.shell.active_shell_surface_key("window-preview");
-        assert!(
-            !coordinator
-                .entries
-                .iter()
-                .any(|entry| entry.role == SurfaceRole::Panel
-                    && entry.plugin.as_ref() == Some(&preview_key))
-        );
-        assert_eq!(
-            preview.plugin,
-            Some(coordinator.shell.active_shell_surface_key("window-preview"))
-        );
+        with_package_runtime_stack(|| {
+            let mut coordinator = coordinator();
+            coordinator
+                .shell
+                .show_plugin_window("nickel-default", "window-preview")
+                .unwrap();
+            coordinator.set_outputs(&[InternalOutput {
+                x: 0,
+                y: 0,
+                name: "nested".into(),
+                width: 800,
+                height: 600,
+                scale: 1.0,
+            }]);
+            let preview = coordinator
+                .surface(SurfaceRole::WindowPreview, None)
+                .unwrap();
+            let preview_key = coordinator.shell.active_shell_surface_key("window-preview");
+            assert!(
+                !coordinator
+                    .entries
+                    .iter()
+                    .any(|entry| entry.role == SurfaceRole::Panel
+                        && entry.plugin.as_ref() == Some(&preview_key))
+            );
+            assert_eq!(
+                preview.plugin,
+                Some(coordinator.shell.active_shell_surface_key("window-preview"))
+            );
+        });
     }
 
     #[test]
@@ -2331,47 +2356,49 @@ mod tests {
 
     #[test]
     fn native_lock_routes_normalized_keyboard_input_to_the_password_field() {
-        use nickel_input::{DeviceId, EventOrder, InputEvent, TextEvent};
+        with_package_runtime_stack(|| {
+            use nickel_input::{DeviceId, EventOrder, InputEvent, TextEvent};
 
-        let mut coordinator = coordinator();
-        coordinator.set_outputs(&[InternalOutput {
-            name: "nested".into(),
-            x: 0,
-            y: 0,
-            width: 1280,
-            height: 720,
-            scale: 1.0,
-        }]);
-        coordinator.set_lock_state(true);
-        let lock = coordinator
-            .surface(SurfaceRole::Lock, Some("nested"))
-            .unwrap()
-            .id;
-        coordinator.scene(lock);
-        coordinator.step_slot_changes(
-            lock,
-            HostBatch {
-                window_focused: Some(true),
-                ..HostBatch::default()
-            },
-        );
+            let mut coordinator = coordinator();
+            coordinator.set_outputs(&[InternalOutput {
+                name: "nested".into(),
+                x: 0,
+                y: 0,
+                width: 1280,
+                height: 720,
+                scale: 1.0,
+            }]);
+            coordinator.set_lock_state(true);
+            let lock = coordinator
+                .surface(SurfaceRole::Lock, Some("nested"))
+                .unwrap()
+                .id;
+            coordinator.scene(lock);
+            coordinator.step_slot_changes(
+                lock,
+                HostBatch {
+                    window_focused: Some(true),
+                    ..HostBatch::default()
+                },
+            );
 
-        coordinator.step_slot_changes(
-            lock,
-            HostBatch {
-                events: vec![nickel_ui::HostEvent::Normalized {
-                    input: InputEvent::Text(TextEvent::Commit {
-                        device: DeviceId(1),
-                        order: EventOrder(1),
-                        text: "a".into(),
-                    }),
-                    clipboard_text: None,
-                }],
-                ..HostBatch::default()
-            },
-        );
+            coordinator.step_slot_changes(
+                lock,
+                HostBatch {
+                    events: vec![nickel_ui::HostEvent::Normalized {
+                        input: InputEvent::Text(TextEvent::Commit {
+                            device: DeviceId(1),
+                            order: EventOrder(1),
+                            text: "a".into(),
+                        }),
+                        clipboard_text: None,
+                    }],
+                    ..HostBatch::default()
+                },
+            );
 
-        assert_eq!(coordinator.shell_mut().lock_password_len(), 1);
+            assert_eq!(coordinator.shell_mut().lock_password_len(), 1);
+        });
     }
 
     #[test]
@@ -2403,85 +2430,89 @@ mod tests {
 
     #[test]
     fn remote_accessibility_menu_retirement_cannot_hide_a_replacement() {
-        let mut coordinator = coordinator();
-        let outputs = [InternalOutput {
-            x: 0,
-            y: 0,
-            name: "nested".into(),
-            width: 800,
-            height: 600,
-            scale: 1.0,
-        }];
-        coordinator.set_outputs(&outputs);
-        coordinator.apply_session_snapshot(nickel_session_protocol::Snapshot {
-            windows: vec![nickel_session_protocol::WindowSnapshot {
-                id: nickel_session_protocol::WindowId(41),
-                application_id: "owned-test".into(),
-                title: "Owned test".into(),
-                active: true,
-                minimized: false,
-                maximized: false,
-                fullscreen: false,
-                geometry: None,
-                workspace: nickel_session_protocol::WorkspaceId(1),
-            }],
-            ..Default::default()
-        });
-        assert!(coordinator.open_window_menu_at(41, 20, 30));
-        let old = coordinator.window_menu_generation().unwrap();
-        assert!(coordinator.open_window_menu_at(41, 70, 80));
-        let replacement = coordinator.window_menu_generation().unwrap();
-        assert!(replacement > old);
-        assert!(!coordinator.retire_window_menu(old));
-        assert_eq!(coordinator.window_menu_generation(), Some(replacement));
-        coordinator.set_outputs(&outputs);
-        let key = coordinator.shell.active_shell_surface_key("window-menu");
-        let menu = coordinator
-            .surfaces()
-            .iter()
-            .find(|surface| surface.plugin.as_ref() == Some(&key))
-            .unwrap()
-            .id;
-        assert!(coordinator.scene(menu).is_some());
-        coordinator.step_slot(
-            menu,
-            HostBatch {
-                events: vec![nickel_ui::HostEvent::Shortcut(nickel_ui::Shortcut::Escape)],
+        with_package_runtime_stack(|| {
+            let mut coordinator = coordinator();
+            let outputs = [InternalOutput {
+                x: 0,
+                y: 0,
+                name: "nested".into(),
+                width: 800,
+                height: 600,
+                scale: 1.0,
+            }];
+            coordinator.set_outputs(&outputs);
+            coordinator.apply_session_snapshot(nickel_session_protocol::Snapshot {
+                windows: vec![nickel_session_protocol::WindowSnapshot {
+                    id: nickel_session_protocol::WindowId(41),
+                    application_id: "owned-test".into(),
+                    title: "Owned test".into(),
+                    active: true,
+                    minimized: false,
+                    maximized: false,
+                    fullscreen: false,
+                    geometry: None,
+                    workspace: nickel_session_protocol::WorkspaceId(1),
+                }],
                 ..Default::default()
-            },
-        );
-        assert_eq!(coordinator.window_menu_generation(), None);
-        assert!(coordinator.open_window_menu_at(41, 70, 80));
-        let replacement = coordinator.window_menu_generation().unwrap();
-        assert!(coordinator.retire_window_menu(replacement));
-        assert_eq!(coordinator.window_menu_generation(), None);
+            });
+            assert!(coordinator.open_window_menu_at(41, 20, 30));
+            let old = coordinator.window_menu_generation().unwrap();
+            assert!(coordinator.open_window_menu_at(41, 70, 80));
+            let replacement = coordinator.window_menu_generation().unwrap();
+            assert!(replacement > old);
+            assert!(!coordinator.retire_window_menu(old));
+            assert_eq!(coordinator.window_menu_generation(), Some(replacement));
+            coordinator.set_outputs(&outputs);
+            let key = coordinator.shell.active_shell_surface_key("window-menu");
+            let menu = coordinator
+                .surfaces()
+                .iter()
+                .find(|surface| surface.plugin.as_ref() == Some(&key))
+                .unwrap()
+                .id;
+            assert!(coordinator.scene(menu).is_some());
+            coordinator.step_slot(
+                menu,
+                HostBatch {
+                    events: vec![nickel_ui::HostEvent::Shortcut(nickel_ui::Shortcut::Escape)],
+                    ..Default::default()
+                },
+            );
+            assert_eq!(coordinator.window_menu_generation(), None);
+            assert!(coordinator.open_window_menu_at(41, 70, 80));
+            let replacement = coordinator.window_menu_generation().unwrap();
+            assert!(coordinator.retire_window_menu(replacement));
+            assert_eq!(coordinator.window_menu_generation(), None);
+        });
     }
 
     #[test]
     fn applying_session_snapshot_immediately_refreshes_running_window_projection() {
-        let mut coordinator = coordinator();
-        let snapshot = nickel_session_protocol::Snapshot {
-            windows: vec![nickel_session_protocol::WindowSnapshot {
-                id: nickel_session_protocol::WindowId(41),
-                application_id: "org.kde.konsole".into(),
-                title: "Konsole".into(),
-                active: true,
-                minimized: false,
-                maximized: false,
-                fullscreen: false,
-                geometry: None,
-                workspace: nickel_session_protocol::WorkspaceId(1),
-            }],
-            ..Default::default()
-        };
+        with_package_runtime_stack(|| {
+            let mut coordinator = coordinator();
+            let snapshot = nickel_session_protocol::Snapshot {
+                windows: vec![nickel_session_protocol::WindowSnapshot {
+                    id: nickel_session_protocol::WindowId(41),
+                    application_id: "org.kde.konsole".into(),
+                    title: "Konsole".into(),
+                    active: true,
+                    minimized: false,
+                    maximized: false,
+                    fullscreen: false,
+                    geometry: None,
+                    workspace: nickel_session_protocol::WorkspaceId(1),
+                }],
+                ..Default::default()
+            };
 
-        assert!(coordinator.apply_session_snapshot(snapshot.clone()));
-        assert!(
-            coordinator
-                .shell_mut()
-                .taskbar_has_application("org.kde.konsole")
-        );
-        assert!(!coordinator.apply_session_snapshot(snapshot));
+            assert!(coordinator.apply_session_snapshot(snapshot.clone()));
+            assert!(
+                coordinator
+                    .shell_mut()
+                    .taskbar_has_application("org.kde.konsole")
+            );
+            assert!(!coordinator.apply_session_snapshot(snapshot));
+        });
     }
 
     #[test]
@@ -2557,37 +2588,39 @@ mod tests {
 
     #[test]
     fn native_screenshot_accepts_escape_and_controller_cancel() {
-        use nickel_input::{
-            DeviceId, EventOrder, InputEvent, KeyEvent, KeyLocation, LogicalKey, ModifierState,
-            NamedKey, PhysicalKey,
-        };
-        for event in [
-            nickel_ui::HostEvent::Normalized {
-                input: InputEvent::Key(KeyEvent {
-                    device: DeviceId(1),
-                    order: EventOrder(1),
-                    physical: PhysicalKey::Code(nickel_input::KeyCode::Escape),
-                    logical: LogicalKey::Named(NamedKey::Escape),
-                    location: KeyLocation::Standard,
-                    edge: nickel_input::KeyEdge::Pressed,
-                    repeat: false,
-                    modifiers: ModifierState::default(),
-                }),
-                clipboard_text: None,
-            },
-            nickel_ui::HostEvent::Shortcut(nickel_ui::Shortcut::Escape),
-            nickel_ui::HostEvent::Controller(nickel_ui::ControllerAction::Cancel),
-        ] {
-            let (mut coordinator, id) = opened_screenshot();
-            coordinator.step_slot_changes(
-                id,
-                HostBatch {
-                    events: vec![event],
-                    ..HostBatch::default()
+        with_package_runtime_stack(|| {
+            use nickel_input::{
+                DeviceId, EventOrder, InputEvent, KeyEvent, KeyLocation, LogicalKey, ModifierState,
+                NamedKey, PhysicalKey,
+            };
+            for event in [
+                nickel_ui::HostEvent::Normalized {
+                    input: InputEvent::Key(KeyEvent {
+                        device: DeviceId(1),
+                        order: EventOrder(1),
+                        physical: PhysicalKey::Code(nickel_input::KeyCode::Escape),
+                        logical: LogicalKey::Named(NamedKey::Escape),
+                        location: KeyLocation::Standard,
+                        edge: nickel_input::KeyEdge::Pressed,
+                        repeat: false,
+                        modifiers: ModifierState::default(),
+                    }),
+                    clipboard_text: None,
                 },
-            );
-            assert!(!coordinator.visible(id));
-        }
+                nickel_ui::HostEvent::Shortcut(nickel_ui::Shortcut::Escape),
+                nickel_ui::HostEvent::Controller(nickel_ui::ControllerAction::Cancel),
+            ] {
+                let (mut coordinator, id) = opened_screenshot();
+                coordinator.step_slot_changes(
+                    id,
+                    HostBatch {
+                        events: vec![event],
+                        ..HostBatch::default()
+                    },
+                );
+                assert!(!coordinator.visible(id));
+            }
+        });
     }
 
     #[test]
@@ -2631,65 +2664,67 @@ mod tests {
 
     #[test]
     fn native_screenshot_drag_confirmation_and_cancel_use_normalized_pointer_input() {
-        use nickel_input::{
-            DeviceId, EventOrder, InputEvent, KeyEdge, PointerButton, PointerEvent,
-        };
-        let (mut coordinator, id) = opened_screenshot();
-        let image = coordinator
-            .scene(id)
-            .unwrap()
-            .iter()
-            .find_map(|command| match command {
-                PaintCommand::Image { bounds, .. } => Some(*bounds),
-                _ => None,
-            })
-            .unwrap();
-        let point = |fraction: f32| nickel_input::Point {
-            x: f64::from(image.origin.x + image.size.width * fraction),
-            y: f64::from(image.origin.y + image.size.height * fraction),
-        };
-        let send = |coordinator: &mut InternalShellCoordinator, position, edge, order| {
-            coordinator.step_slot_changes(
-                id,
-                HostBatch {
-                    events: vec![nickel_ui::HostEvent::Normalized {
-                        input: InputEvent::Pointer(PointerEvent::Button {
-                            device: DeviceId(1),
-                            order: EventOrder(order),
-                            position: Some(position),
-                            button: PointerButton::Primary,
-                            edge,
-                        }),
-                        clipboard_text: None,
-                    }],
-                    ..HostBatch::default()
-                },
-            );
-        };
-        send(&mut coordinator, point(0.25), KeyEdge::Pressed, 1);
-        send(&mut coordinator, point(0.75), KeyEdge::Released, 2);
-        for order in [3, 5] {
-            send(&mut coordinator, point(0.5), KeyEdge::Pressed, order);
-            send(&mut coordinator, point(0.5), KeyEdge::Released, order + 1);
-        }
-        let scene = coordinator.scene(id).unwrap();
-        assert!(scene.iter().any(|command| matches!(command,
+        with_package_runtime_stack(|| {
+            use nickel_input::{
+                DeviceId, EventOrder, InputEvent, KeyEdge, PointerButton, PointerEvent,
+            };
+            let (mut coordinator, id) = opened_screenshot();
+            let image = coordinator
+                .scene(id)
+                .unwrap()
+                .iter()
+                .find_map(|command| match command {
+                    PaintCommand::Image { bounds, .. } => Some(*bounds),
+                    _ => None,
+                })
+                .unwrap();
+            let point = |fraction: f32| nickel_input::Point {
+                x: f64::from(image.origin.x + image.size.width * fraction),
+                y: f64::from(image.origin.y + image.size.height * fraction),
+            };
+            let send = |coordinator: &mut InternalShellCoordinator, position, edge, order| {
+                coordinator.step_slot_changes(
+                    id,
+                    HostBatch {
+                        events: vec![nickel_ui::HostEvent::Normalized {
+                            input: InputEvent::Pointer(PointerEvent::Button {
+                                device: DeviceId(1),
+                                order: EventOrder(order),
+                                position: Some(position),
+                                button: PointerButton::Primary,
+                                edge,
+                            }),
+                            clipboard_text: None,
+                        }],
+                        ..HostBatch::default()
+                    },
+                );
+            };
+            send(&mut coordinator, point(0.25), KeyEdge::Pressed, 1);
+            send(&mut coordinator, point(0.75), KeyEdge::Released, 2);
+            for order in [3, 5] {
+                send(&mut coordinator, point(0.5), KeyEdge::Pressed, order);
+                send(&mut coordinator, point(0.5), KeyEdge::Released, order + 1);
+            }
+            let scene = coordinator.scene(id).unwrap();
+            assert!(scene.iter().any(|command| matches!(command,
             PaintCommand::Text { text, .. } if text == "SELECTION CONFIRMED")));
-        let cancel = scene
-            .iter()
-            .find_map(|command| match command {
-                PaintCommand::Text { text, bounds, .. } if text == "Cancel" => Some(*bounds),
-                _ => None,
-            })
-            .expect("confirmed selection exposes Cancel");
-        let cancel = nickel_input::Point {
-            x: f64::from(cancel.origin.x + cancel.size.width / 2.0),
-            y: f64::from(cancel.origin.y + cancel.size.height / 2.0),
-        };
-        send(&mut coordinator, cancel, KeyEdge::Pressed, 7);
-        assert!(coordinator.visible(id));
-        send(&mut coordinator, cancel, KeyEdge::Released, 8);
-        assert!(!coordinator.visible(id));
+            let cancel = scene
+                .iter()
+                .find_map(|command| match command {
+                    PaintCommand::Text { text, bounds, .. } if text == "Cancel" => Some(*bounds),
+                    _ => None,
+                })
+                .expect("confirmed selection exposes Cancel");
+            let cancel = nickel_input::Point {
+                x: f64::from(cancel.origin.x + cancel.size.width / 2.0),
+                y: f64::from(cancel.origin.y + cancel.size.height / 2.0),
+            };
+            send(&mut coordinator, cancel, KeyEdge::Pressed, 7);
+            assert!(coordinator.visible(id));
+            send(&mut coordinator, cancel, KeyEdge::Released, 8);
+            assert!(!coordinator.visible(id));
+        });
     }
 
     #[test]
@@ -2802,59 +2837,63 @@ mod tests {
 
     #[test]
     fn native_screenshot_capture_is_available_without_plugin() {
-        let mut coordinator = coordinator();
-        coordinator.set_outputs(&[InternalOutput {
-            x: 0,
-            y: 0,
-            name: "nested".into(),
-            width: 800,
-            height: 600,
-            scale: 1.0,
-        }]);
-        let id = coordinator
-            .surface(SurfaceRole::Screenshot, None)
-            .unwrap()
-            .id;
-        assert!(
-            coordinator
-                .global_shortcut(nickel_session_protocol::ShortcutAction::ShowScreenshotTool)
-        );
-        coordinator.poll(Instant::now() + std::time::Duration::from_millis(100));
-        assert!(coordinator.visible(id));
-        assert!(coordinator.scene(id).is_some());
+        with_package_runtime_stack(|| {
+            let mut coordinator = coordinator();
+            coordinator.set_outputs(&[InternalOutput {
+                x: 0,
+                y: 0,
+                name: "nested".into(),
+                width: 800,
+                height: 600,
+                scale: 1.0,
+            }]);
+            let id = coordinator
+                .surface(SurfaceRole::Screenshot, None)
+                .unwrap()
+                .id;
+            assert!(
+                coordinator
+                    .global_shortcut(nickel_session_protocol::ShortcutAction::ShowScreenshotTool)
+            );
+            coordinator.poll(Instant::now() + std::time::Duration::from_millis(100));
+            assert!(coordinator.visible(id));
+            assert!(coordinator.scene(id).is_some());
+        });
     }
 
     #[test]
     fn production_print_screen_reducer_requests_internal_capture_surface() {
-        let mut coordinator = coordinator();
-        coordinator.set_outputs(&[InternalOutput {
-            x: 0,
-            y: 0,
-            name: "nested".into(),
-            width: 800,
-            height: 600,
-            scale: 1.0,
-        }]);
-        let screenshot = coordinator
-            .surface(SurfaceRole::Screenshot, None)
-            .unwrap()
-            .id;
-        let mut hotkeys = CompositorShortcutAdapter::default();
+        with_package_runtime_stack(|| {
+            let mut coordinator = coordinator();
+            coordinator.set_outputs(&[InternalOutput {
+                x: 0,
+                y: 0,
+                name: "nested".into(),
+                width: 800,
+                height: 600,
+                scale: 1.0,
+            }]);
+            let screenshot = coordinator
+                .surface(SurfaceRole::Screenshot, None)
+                .unwrap()
+                .id;
+            let mut hotkeys = CompositorShortcutAdapter::default();
 
-        assert_eq!(
-            hotkeys
-                .handle(KeyCode::PrintScreen, KeyEdge::Pressed)
-                .action,
-            Some(HotkeyAction::ShowScreenshotTool)
-        );
-        assert!(
-            coordinator
-                .global_shortcut(nickel_session_protocol::ShortcutAction::ShowScreenshotTool)
-        );
+            assert_eq!(
+                hotkeys
+                    .handle(KeyCode::PrintScreen, KeyEdge::Pressed)
+                    .action,
+                Some(HotkeyAction::ShowScreenshotTool)
+            );
+            assert!(
+                coordinator
+                    .global_shortcut(nickel_session_protocol::ShortcutAction::ShowScreenshotTool)
+            );
 
-        assert!(!coordinator.visible(screenshot));
-        coordinator.poll(Instant::now() + std::time::Duration::from_millis(100));
-        assert!(coordinator.visible(screenshot));
-        assert!(!coordinator.scene(screenshot).unwrap().is_empty());
+            assert!(!coordinator.visible(screenshot));
+            coordinator.poll(Instant::now() + std::time::Duration::from_millis(100));
+            assert!(coordinator.visible(screenshot));
+            assert!(!coordinator.scene(screenshot).unwrap().is_empty());
+        });
     }
 }
