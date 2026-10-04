@@ -2,8 +2,8 @@
 import "./styles/window-menu.css";
 // Native window facts and permitted operations remain owned by the window service.
 export function WindowMenu() {
-    const target = nickel.windows.menu().targetId;
-    const window = nickel.windows.list().find(item => item.id === target);
+    const target = useWindowMenu().targetId;
+    const window = useWindows().find(item => item.id === target);
     const destinations = nickel.windows.destinations();
     const dismiss = () => nickel.windows.dismissMenu();
     const act = operation => { operation(window.id); dismiss(); };

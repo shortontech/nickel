@@ -2212,9 +2212,19 @@ impl ShellCompositionRuntime {
                 self.nested_mounts.insert(identity, mount.clone());
                 mount
             };
+            // Public package components are ownership boundaries within the
+            // same native surface. Give each nested mount the root mount's
+            // current compositor authority so surface hooks never retain the
+            // package snapshot that happened to exist when it was created.
+            let root_surface = self.mounts[&expansion.root].surface.clone();
+            let surface_changed = self.mounts[&mount.id].surface != root_surface;
+            if surface_changed {
+                self.mounts.get_mut(&mount.id).unwrap().surface = root_surface;
+            }
             let props = node.get("props").ok_or("missing public component props")?;
             let can_reuse = patch.as_ref().is_some_and(|patch| {
-                !patch.dirty.contains(&mount.id)
+                !surface_changed
+                    && !patch.dirty.contains(&mount.id)
                     && !contains_owned_transport(props)
                     && self.mounts[&mount.id].props == *props
             });

@@ -1,7 +1,7 @@
 // @jsx h
 import "./styles/preview.css";
 export function Preview() {
-    const data = nickel.windowPreviews.get();
+    const data = useWindowPreviews();
     const windows = data.windows || [];
     const switcher = data.taskSwitcher;
     return h(Window, { id: "window-preview", placement: "fixed", width: "100%", height: "100%", className: "window-preview" },

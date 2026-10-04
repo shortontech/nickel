@@ -532,6 +532,21 @@ impl JsxRuntime {
         if let Some(windows) = data.get("windows") {
             self.set_windows_store(windows)?;
         }
+        if let Some(window_previews) = data.get("windowPreviews") {
+            self.engine.call_global_bool(
+                "__nickelSetProjectionStore",
+                &[
+                    Value::String("windowPreviews".into()),
+                    window_previews.clone(),
+                ],
+            )?;
+        }
+        if let Some(window_menu) = data.get("windowMenu") {
+            self.engine.call_global_bool(
+                "__nickelSetProjectionStore",
+                &[Value::String("windowMenu".into()), window_menu.clone()],
+            )?;
+        }
         if let Some(applications) = data.get("applications")
             && applications.as_array().is_some_and(|applications| {
                 applications.first().is_none_or(|application| {
@@ -2521,6 +2536,38 @@ mod tests {
                 .eval_json::<u64>("__windowsStore.generation")
                 .unwrap(),
             2
+        );
+    }
+
+    #[test]
+    fn preview_and_window_menu_hooks_reconcile_only_their_consumers() {
+        let source = r#"
+            globalThis.runs={app:0,previews:0,menu:0,sibling:0};
+            function Previews(){runs.previews++;return h(Text,null,String(useWindowPreviews().windows.length));}
+            function MenuReader(){runs.menu++;return h(Text,null,String(useWindowMenu().targetId));}
+            function Sibling(){runs.sibling++;return h(Text,null,'stable');}
+            function App(){runs.app++;return h(Window,null,h(Previews),h(MenuReader),h(Sibling));}
+        "#;
+        let mut runtime = super::JsxRuntime::new(source, None).unwrap();
+        runtime
+            .set_data_value(serde_json::json!({
+                "windowPreviews":{"available":true,"windows":[]},
+                "windowMenu":{"targetId":null}
+            }))
+            .unwrap();
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        runtime
+            .set_data_value(serde_json::json!({
+                "windowPreviews":{"available":true,"windows":[{"id":"7"}]},
+                "windowMenu":{"targetId":null}
+            }))
+            .unwrap();
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        assert_eq!(
+            runtime
+                .eval_json::<serde_json::Value>("JSON.stringify(runs)")
+                .unwrap(),
+            serde_json::json!({"app":1,"previews":2,"menu":1,"sibling":1})
         );
     }
 

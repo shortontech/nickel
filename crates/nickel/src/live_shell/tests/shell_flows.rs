@@ -80,6 +80,7 @@
 
     #[test]
     fn task_switcher_cards_render_in_jsx_and_activate_through_the_host() {
+        with_package_runtime_stack(|| {
         let host = std::sync::Arc::new(crate::session_host::StagedSessionHost::new(
             crate::session_host::default_session_host(),
         ));
@@ -166,6 +167,7 @@
         assert!(shell.scene(SurfaceRole::WindowPreview, 474, 214).is_empty());
         assert!(!shell.surface_visible(SurfaceRole::WindowPreview));
         assert!(!shell.preview_plugin_active());
+        });
     }
 
 
@@ -424,6 +426,7 @@
 
     #[test]
     fn preview_window_menus_anchor_to_their_distinct_cards() {
+        with_package_runtime_stack(|| {
         let mut shell = LiveShell::new().unwrap();
         shell.launcher.set_preferences(LauncherPreferences::default());
         let application = ApplicationId::new("org.example.Editor");
@@ -490,6 +493,7 @@
         assert_eq!(shell.window_menu, Some(WindowId(71)));
         assert_eq!(shell.plugin_surface_hosts.get(&key).unwrap().0.offset_x,first);
         assert!(shell.default_shell_surface_visible("window-menu"));
+        });
     }
 
     #[test]

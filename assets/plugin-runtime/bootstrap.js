@@ -8,7 +8,7 @@ const __nickelPublicRuntimeGlobals = Object.freeze([
     'ColorSwatch','Select','Option','TextField','Button','Spacer','Slot','Dialog','Menu',
     'MenuItem','ErrorBoundary','NickelStores','registerSetting','registerSettingsPage',
     'readPluginSettings','readSettingsPages','readPluginSettingsPages','nickel','useWindows',
-    'useActiveWindow','useApplications','useNotifications','useWorkspaces','useWorkspace',
+    'useActiveWindow','useWindowPreviews','useWindowMenu','useApplications','useNotifications','useWorkspaces','useWorkspace',
     'useOutputs','useLocale','useSyncExternalStore','memo','useTheme','useReducedMotion',
     'useCapability','useSurface','useOutput','useScaleFactor','useSurfaceFocus','useState',
     'useReducer','useRef','useId','createContext','useContext','useMemo','useCallback',
@@ -346,6 +346,8 @@ let __themeStore = {generation:0, snapshot:Object.freeze({
     reducedMotion:null, reducedTransparency:null, palette:null
 })};
 let __capabilityStore = {generation:0, known:Object.freeze([]), snapshot:Object.freeze({})};
+let __windowPreviewsStore = {generation:0, encoded:'null', snapshot:Object.freeze({available:false,windows:Object.freeze([])})};
+let __windowMenuStore = {generation:0, encoded:'null', snapshot:Object.freeze({targetId:null})};
 let __nickelData = Object.freeze({query: '', results: []});
 const __nickelExternalSubscriptions = new WeakMap();
 const __nickelExternalSnapshots = new WeakMap();
@@ -969,6 +971,43 @@ function __nickelSetWindowsStore(value) {
     });
     __nickelRecordStoreChange('windows',generation,before); return true;
 }
+
+function __nickelImmutableProjection(value) {
+    const copy=JSON.parse(JSON.stringify(value));
+    const freeze=value=>{if(value&&typeof value==='object'&&!Object.isFrozen(value)){for(const child of Object.values(value))freeze(child);Object.freeze(value);}return value;};
+    return freeze(copy);
+}
+function __nickelSetProjectionStore(name,value) {
+    if (__pendingRender !== null || __pendingEvent !== null)
+        throw Error('cannot publish projection store during a render or event');
+    if (!value || typeof value !== 'object' || Array.isArray(value)) throw Error(`invalid ${name} snapshot`);
+    const encoded=JSON.stringify(value);
+    const current=name==='windowPreviews'?__windowPreviewsStore:name==='windowMenu'?__windowMenuStore:null;
+    if(current===null)throw Error('unknown projection store');
+    if(current.encoded===encoded)return false;
+    const generation=current.generation+1,snapshot=__nickelImmutableProjection(value),next={generation,encoded,snapshot};
+    if(name==='windowPreviews')__windowPreviewsStore=next;else __windowMenuStore=next;
+    __nickelForEachSurfaceHooks((hooks,dirty)=>{for(const [owner,slots] of hooks)for(const entry of slots){
+        if(entry?.kind!==`${name}-store`)continue;
+        try{const selected=entry.selector?entry.selector(snapshot):snapshot;entry.storeError=undefined;if(!Object.is(selected,entry.value))dirty.add(owner);}
+        catch(error){entry.storeError=error;dirty.add(owner);}
+    }});
+    return true;
+}
+function __nickelUseProjectionStore(name,selector) {
+    if(__currentComponent===null)throw Error(`${name} hooks require a component`);
+    if(selector!==undefined&&typeof selector!=='function')throw TypeError(`${name} selector must be a function`);
+    const slot=__hookIndex++,hooks=__componentHooks.get(__currentComponent),normalized=selector??null;
+    const store=name==='windowPreviews'?__windowPreviewsStore:name==='windowMenu'?__windowMenuStore:null;
+    if(store===null)throw Error('unknown projection store');
+    const entry=__nickelSelectedStoreEntry(hooks,slot,`${name}-store`,normalized,name);
+    entry.storeError=undefined;
+    entry.value=__nickelSelectedValue(entry,normalized,store.snapshot,store.generation,name);
+    entry.generation=store.generation;
+    return entry.value;
+}
+function useWindowPreviews(selector){return __nickelUseProjectionStore('windowPreviews',selector);}
+function useWindowMenu(selector){return __nickelUseProjectionStore('windowMenu',selector);}
 
 function useWindows(selector) {
     if (__currentComponent === null) throw Error('useWindows requires a component');
