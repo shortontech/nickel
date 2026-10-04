@@ -76,6 +76,7 @@ Use the domain hooks rather than copying broad `nickel.data` snapshots into
 component state:
 
 - `useWindows(selector?)` and `useActiveWindow()`
+- `useWindowPreviews(selector?)` and `useWindowMenu(selector?)`
 - `useApplications(selector?)`
 - `useNotifications(selector?)`
 - `useWorkspaces(selector?)` and `useWorkspace()`
