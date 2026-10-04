@@ -896,96 +896,98 @@ fn pointer_targets_resolve_exact_generations_coordinates_and_protected_hits() {
 
 #[test]
 fn desktop_motion_burst_rebuilds_once_at_frame_boundary_and_focus_cancels_immediately() {
-    use crate::session::internal_ui::DesktopPointerAction;
-    use nickel_input::{InputEvent, KeyEdge, PointerButton};
-    let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
-    let (_event_loop, mut session) = internal_shell_test_session();
-    let desktop = session
-        .internal_shell
-        .as_ref()
-        .unwrap()
-        .surfaces()
-        .iter()
-        .find(|surface| surface.role == crate::winit_shell::SurfaceRole::Desktop)
-        .unwrap()
-        .id;
-    let runtime = session.internal_shell_surfaces[&desktop];
-    let placement = session.internal_ui.placement(runtime).unwrap().clone();
-    let point = (
-        f64::from(placement.geometry.0) + f64::from(placement.geometry.2) / 2.0,
-        f64::from(placement.geometry.1) + f64::from(placement.geometry.3) / 2.0,
-    );
-    assert!(session.internal_ui.desktop_pointer_input(
-        "test",
-        point,
-        DesktopPointerAction::Button {
-            button: PointerButton::Primary,
-            edge: KeyEdge::Pressed
-        },
-        Default::default(),
-        false
-    ));
-    session.flush_internal_shell_input();
-    let generation = |session: &super::NickelSession| {
-        session
+    with_package_runtime_stack(|| {
+        use crate::session::internal_ui::DesktopPointerAction;
+        use nickel_input::{InputEvent, KeyEdge, PointerButton};
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = internal_shell_test_session();
+        let desktop = session
             .internal_shell
             .as_ref()
             .unwrap()
             .surfaces()
             .iter()
-            .find(|surface| surface.id == desktop)
+            .find(|surface| surface.role == crate::winit_shell::SurfaceRole::Desktop)
             .unwrap()
-            .scene_generation
-    };
-    let before = generation(&session);
-    let armed = session.internal_shell_timer_counters().armed;
-    for index in 0..1000 {
+            .id;
+        let runtime = session.internal_shell_surfaces[&desktop];
+        let placement = session.internal_ui.placement(runtime).unwrap().clone();
+        let point = (
+            f64::from(placement.geometry.0) + f64::from(placement.geometry.2) / 2.0,
+            f64::from(placement.geometry.1) + f64::from(placement.geometry.3) / 2.0,
+        );
         assert!(session.internal_ui.desktop_pointer_input(
             "test",
-            (point.0 + f64::from(index % 40), point.1),
-            DesktopPointerAction::Motion,
+            point,
+            DesktopPointerAction::Button {
+                button: PointerButton::Primary,
+                edge: KeyEdge::Pressed
+            },
             Default::default(),
             false
         ));
         session.flush_internal_shell_input();
-    }
-    assert_eq!(
-        generation(&session),
-        before,
-        "input dispatch must not rebuild scenes"
-    );
-    assert_eq!(session.pending_desktop_scenes.len(), 1);
-    assert_eq!(
-        session.internal_shell_timer_counters().armed,
-        armed,
-        "motion must not accumulate wake timers"
-    );
-    session.flush_desktop_scenes_for_frame();
-    assert_eq!(generation(&session), before + 1);
-    assert!(session.pending_desktop_scenes.is_empty());
-    session.flush_desktop_scenes_for_frame();
-    assert_eq!(
-        generation(&session),
-        before + 1,
-        "idle frames must not repeat layout"
-    );
-    // Cancel through the production lifecycle boundary; never persist a
-    // test drag into the user's desktop layout or activate a real file.
-    session.internal_ui.step(
-        runtime,
-        nickel_ui::HostBatch {
-            events: vec![nickel_ui::HostEvent::Normalized {
-                input: InputEvent::FocusLost {
-                    order: nickel_input::EventOrder(2000),
-                },
-                clipboard_text: None,
-            }],
-            ..Default::default()
-        },
-    );
-    session.flush_internal_shell_input();
-    assert!(generation(&session) > before + 1);
-    assert!(session.pending_desktop_scenes.is_empty());
+        let generation = |session: &super::NickelSession| {
+            session
+                .internal_shell
+                .as_ref()
+                .unwrap()
+                .surfaces()
+                .iter()
+                .find(|surface| surface.id == desktop)
+                .unwrap()
+                .scene_generation
+        };
+        let before = generation(&session);
+        let armed = session.internal_shell_timer_counters().armed;
+        for index in 0..1000 {
+            assert!(session.internal_ui.desktop_pointer_input(
+                "test",
+                (point.0 + f64::from(index % 40), point.1),
+                DesktopPointerAction::Motion,
+                Default::default(),
+                false
+            ));
+            session.flush_internal_shell_input();
+        }
+        assert_eq!(
+            generation(&session),
+            before,
+            "input dispatch must not rebuild scenes"
+        );
+        assert_eq!(session.pending_desktop_scenes.len(), 1);
+        assert_eq!(
+            session.internal_shell_timer_counters().armed,
+            armed,
+            "motion must not accumulate wake timers"
+        );
+        session.flush_desktop_scenes_for_frame();
+        assert_eq!(generation(&session), before + 1);
+        assert!(session.pending_desktop_scenes.is_empty());
+        session.flush_desktop_scenes_for_frame();
+        assert_eq!(
+            generation(&session),
+            before + 1,
+            "idle frames must not repeat layout"
+        );
+        // Cancel through the production lifecycle boundary; never persist a
+        // test drag into the user's desktop layout or activate a real file.
+        session.internal_ui.step(
+            runtime,
+            nickel_ui::HostBatch {
+                events: vec![nickel_ui::HostEvent::Normalized {
+                    input: InputEvent::FocusLost {
+                        order: nickel_input::EventOrder(2000),
+                    },
+                    clipboard_text: None,
+                }],
+                ..Default::default()
+            },
+        );
+        session.flush_internal_shell_input();
+        assert!(generation(&session) > before + 1);
+        assert!(session.pending_desktop_scenes.is_empty());
+    });
 }
 
 #[test]
