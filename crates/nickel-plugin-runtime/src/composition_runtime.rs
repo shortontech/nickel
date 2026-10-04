@@ -1051,6 +1051,46 @@ impl ShellCompositionRuntime {
         runtime.eval("__dirtyComponents.clear()")
     }
 
+    /// Publish one root mount's current surface authority to every component
+    /// ownership boundary on that native surface and report whether a hook
+    /// selector actually observed a change.
+    pub fn publish_mount_surface_authority(
+        &mut self,
+        root: &ComponentMount,
+    ) -> Result<bool, String> {
+        self.validate_mount(root)?;
+        let root_surface = self.mounts[&root.id]
+            .surface
+            .clone()
+            .unwrap_or_else(|| serde_json::json!({}));
+        let mounts = std::iter::once(root.id)
+            .chain(
+                self.nested_mounts
+                    .iter()
+                    .filter(|((owner, _), _)| *owner == root.id)
+                    .map(|(_, mount)| mount.id),
+            )
+            .collect::<Vec<_>>();
+        let mut requested = false;
+        for id in mounts {
+            if id != root.id {
+                self.mounts.get_mut(&id).unwrap().surface = Some(root_surface.clone());
+            }
+            let owner = self.mounts[&id].reference.owner.clone();
+            let package = self
+                .packages
+                .get_mut(&owner)
+                .ok_or("retired component owner")?;
+            let mut runtime = package.runtime.borrow_mut();
+            runtime.select_surface(&surface(id))?;
+            let was_requested = runtime.reconciliation_requested()?;
+            runtime.set_surface_store(&surface(id), &root_surface)?;
+            let now_requested = runtime.reconciliation_requested()?;
+            requested |= !was_requested && now_requested;
+        }
+        Ok(requested)
+    }
+
     /// Begin a bounded transaction spanning every participating owner context.
     /// IDs remain monotonic so rolled-back mount/callback handles cannot be reused.
     pub fn begin_transaction(&mut self) -> Result<(), String> {
@@ -3178,10 +3218,36 @@ fn diff_native_subtree(
             });
         }
     }
-    if let Some(slots) = after_object
+    let before_slots = before_object
         .get("__handlerSlots")
-        .and_then(Value::as_object)
+        .and_then(Value::as_object);
+    let after_slots = after_object
+        .get("__handlerSlots")
+        .and_then(Value::as_object);
+    if before_slots.map(|slots| slots.keys().collect::<Vec<_>>())
+        != after_slots.map(|slots| slots.keys().collect::<Vec<_>>())
     {
+        operations.push(NativePatchOperation::ReplaceSubtree {
+            target: target.to_owned(),
+            node: after.clone(),
+        });
+        return Ok(());
+    }
+    if let Some(slots) = after_slots {
+        if slots.keys().any(|event| {
+            before_object
+                .get(event)
+                .is_some_and(|value| !value.is_null())
+                != after_object
+                    .get(event)
+                    .is_some_and(|value| !value.is_null())
+        }) {
+            operations.push(NativePatchOperation::ReplaceSubtree {
+                target: target.to_owned(),
+                node: after.clone(),
+            });
+            return Ok(());
+        }
         for (event, slot) in slots {
             let action = after_object.get(event).and_then(Value::as_u64);
             if action != before_object.get(event).and_then(Value::as_u64) {
@@ -5344,6 +5410,25 @@ mod tests {
         assert!(operations.iter().any(|operation| matches!(operation, NativePatchOperation::ReplaceHandlerSlot { slot, action } if slot == "a::action" && *action == 9)));
         assert!(!operations.iter().any(|operation| matches!(operation, NativePatchOperation::ReplaceSubtree { target, .. } if target == "root")));
         assert!(visited >= 2);
+    }
+
+    #[test]
+    fn native_diff_replaces_only_the_node_when_its_handler_slots_change_shape() {
+        let before = serde_json::json!({
+            "kind":"window","__nativeId":"root","__handlerSlots":{"escapeAction":"root:escapeAction"},"escapeAction":0,"children":[]
+        });
+        let after = serde_json::json!({
+            "kind":"window","__nativeId":"root","__handlerSlots":{"escapeAction":"root:escapeAction","submitAction":"root:submitAction"},"escapeAction":0,"submitAction":1,"children":[]
+        });
+        let mut operations = Vec::new();
+        let mut visited = 0;
+        diff_native_subtree(&before, &after, &mut operations, &mut visited).unwrap();
+        assert_eq!(operations.len(), 1);
+        assert!(matches!(
+            &operations[0],
+            NativePatchOperation::ReplaceSubtree { target, node }
+                if target == "root" && node["submitAction"] == 1
+        ));
     }
 
     #[test]

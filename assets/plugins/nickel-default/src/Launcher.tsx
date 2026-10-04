@@ -27,7 +27,7 @@ function Pages(props) {
 }
 
 export function Launcher() {
-    const surface = useSurface();
+    const availableSize = useSurface(surface => surface.availableSize);
     const applications = nickel.applications.list().filter(app => app.canLaunch !== false);
     const search = nickel.applications.searchResults();
     const session = nickel.session?.get() || {account:{displayName:"Local session"},support:{}};
@@ -55,7 +55,7 @@ export function Launcher() {
     const dashboard = view === "places" ? places : view === "applications" ? allApps : view === "recent" ? recent : pinned;
     const safeDashboardPage = Math.min(dashboardPage, Math.max(0, Math.ceil(dashboard.length / PAGE_SIZE) - 1));
     const now = search.nowUnixSeconds || Math.floor(Date.now() / 1000);
-    const viewport = surface.availableSize || {};
+    const viewport = availableSize || {};
     const windowWidth = Math.min(608,
         Number.isFinite(viewport.width) ? Math.max(1, viewport.width - 16) : 608);
     const windowHeight = Math.min(628,

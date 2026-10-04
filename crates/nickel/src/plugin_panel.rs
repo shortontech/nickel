@@ -704,6 +704,20 @@ impl PluginPanelApplication {
         Ok(true)
     }
 
+    pub(crate) fn reconcile_surface_focus_authority(&mut self) -> Result<bool, String> {
+        let Some(state) = &mut self.composition else {
+            return self.reconcile_surface_authority();
+        };
+        if !state
+            .host
+            .borrow_mut()
+            .publish_mount_surface_authority(&state.mount)?
+        {
+            return Ok(false);
+        }
+        self.reconcile_surface_authority()
+    }
+
     pub(crate) fn sync_surface_geometry(
         &mut self,
         output: Option<&str>,

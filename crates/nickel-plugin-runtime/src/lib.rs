@@ -2361,6 +2361,36 @@ mod tests {
     }
 
     #[test]
+    fn patched_dispatch_replaces_node_when_a_conditional_handler_appears() {
+        let source = r#"
+            function App() {
+                const [enabled,setEnabled]=useState(false);
+                return h(Window,{onSubmit:enabled?()=>{}:undefined},
+                    h(Button,{onClick:()=>setEnabled(true)},'enable'));
+            }
+        "#;
+        let mut runtime = super::JsxRuntime::new(source, None).unwrap();
+        let initial = runtime
+            .render("__nickelRender()", |node| Ok(node.clone()))
+            .unwrap();
+        let action = initial["children"][0]["action"].as_u64().unwrap();
+        let outcome = runtime
+            .dispatch_patched(&format!("__nickelDispatchBatchPatched([[{action},null]])"))
+            .unwrap();
+        let super::ScheduledPatch::Patched { patch, .. } = outcome else {
+            panic!("conditional handler update must stay typed");
+        };
+        assert_eq!(patch.operations.len(), 1);
+        assert!(matches!(
+            &patch.operations[0],
+            super::NativePatchOperation::ReplaceSubtree { target, node }
+                if target == "root" && node["submitAction"].is_number()
+        ));
+        runtime.finish_patch_render(true).unwrap();
+        runtime.finish_event(true).unwrap();
+    }
+
+    #[test]
     fn native_and_handler_slot_ids_survive_keyed_insertion() {
         let source = r#"
             function Item({name}) { return h(Button,{key:name,onClick:()=>{}},name); }
@@ -2481,6 +2511,37 @@ mod tests {
                 .eval_json::<serde_json::Value>("JSON.stringify(runs)")
                 .unwrap(),
             serde_json::json!({"app":1,"reducer":2,"store":2,"sibling":1})
+        );
+    }
+
+    #[test]
+    fn surface_selector_ignores_focus_only_updates_and_retains_size_identity() {
+        let source = r#"
+            globalThis.runs=0;globalThis.sizes=[];
+            function App(){runs++;const size=useSurface(surface=>surface.availableSize);sizes.push(size);return h(Text,null,String(size?.width??0));}
+        "#;
+        let mut runtime = super::JsxRuntime::new(source, None).unwrap();
+        runtime
+            .set_surface_store(
+                "mount",
+                &serde_json::json!({"availableWidth":640,"availableHeight":480,"focused":false}),
+            )
+            .unwrap();
+        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        runtime
+            .set_surface_store(
+                "mount",
+                &serde_json::json!({"availableWidth":640,"availableHeight":480,"focused":true}),
+            )
+            .unwrap();
+        assert!(!runtime.reconciliation_requested().unwrap());
+        assert_eq!(runtime.eval_json::<u64>("JSON.stringify(runs)").unwrap(), 1);
+        assert!(
+            runtime
+                .eval_json::<bool>(
+                    "JSON.stringify(sizes[0] === __surfaceStore.snapshot.availableSize)"
+                )
+                .unwrap()
         );
     }
 

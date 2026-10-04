@@ -6116,7 +6116,8 @@ impl LiveShell {
             step_plugin_host(host, None, batch).and_then(|(mut outcome, _)| {
                 if let Some(focused) = focused {
                     host.application_mut().sync_surface_focus(focused)?;
-                    outcome.changed |= host.application_mut().reconcile_surface_authority()?;
+                    outcome.changed |=
+                        host.application_mut().reconcile_surface_focus_authority()?;
                 }
                 if let Some(target) = restore_focus
                     && host.inspect().keyboard_focus.is_none()
@@ -6258,7 +6259,7 @@ impl LiveShell {
                     .sync_surface_focus(focused)
                     .and_then(|changed| {
                         host.application_mut()
-                            .reconcile_surface_authority()
+                            .reconcile_surface_focus_authority()
                             .map(|rendered| changed || rendered)
                     });
             return match published {

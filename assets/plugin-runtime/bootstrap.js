@@ -1523,32 +1523,35 @@ function __nickelSetSurfaceStore(mountId, value) {
         && Object.is(previous.scaleFactor, next.scaleFactor) && previous.focused === next.focused
         && previous.visible === next.visible;
     if (unchanged) return false;
+    if (sameSize(previous.logicalSize,next.logicalSize)) next.logicalSize=previous.logicalSize;
+    if (sameSize(previous.availableSize,next.availableSize)) next.availableSize=previous.availableSize;
     const generation = __surfaceStore.generation + 1;
     const snapshot = Object.freeze({...next, generation});
     __surfaceStore = {generation, snapshot};
     for (const [owner, hooks] of __componentHooks) {
         for (const entry of hooks) {
             if (entry?.kind !== 'surface-store') continue;
-            const selected = __nickelSurfaceSelection(entry.selection, snapshot);
+            const selected = entry.selector ? entry.selector(snapshot) : __nickelSurfaceSelection(entry.selection, snapshot);
             if (!Object.is(selected, entry.value)) __dirtyComponents.add(owner);
         }
     }
     __nickelRecordStoreChange('surface',generation,before); return true;
 }
 
-function __nickelUseSurfaceSelection(selection) {
+function __nickelUseSurfaceSelection(selection, selector) {
     if (__currentComponent === null) throw Error('surface hooks require a component');
     const slot = __hookIndex++;
     const hooks = __componentHooks.get(__currentComponent);
     let entry = hooks[slot];
-    if (!entry) hooks[slot] = entry = {kind:'surface-store', selection, value:undefined, generation:0};
+    if (!entry) hooks[slot] = entry = {kind:'surface-store', selection, selector:null, value:undefined, generation:0};
     if (entry.kind !== 'surface-store' || entry.selection !== selection) throw Error('hook order changed');
-    entry.value = __nickelSurfaceSelection(selection, __surfaceStore.snapshot);
+    entry.selector=selector??null;
+    entry.value = entry.selector ? entry.selector(__surfaceStore.snapshot) : __nickelSurfaceSelection(selection, __surfaceStore.snapshot);
     entry.generation = __surfaceStore.generation;
     return entry.value;
 }
 
-function useSurface() { return __nickelUseSurfaceSelection('surface'); }
+function useSurface(selector) { if(selector!==undefined&&typeof selector!=='function')throw TypeError('useSurface selector must be a function'); return __nickelUseSurfaceSelection('surface',selector); }
 function useOutput() { const name=__nickelUseSurfaceSelection('output'); const topology=useOutputs(); return name===null?null:topology.outputs.find(output=>output.name===name)??null; }
 function useScaleFactor() { return __nickelUseSurfaceSelection('scale'); }
 function useSurfaceFocus() { return __nickelUseSurfaceSelection('focus'); }
@@ -2451,8 +2454,15 @@ function __nickelNativePatch(previous, next) {
         for (const key of keys) {
             if (__nickelNativeEqual(left[key],right[key])) continue;
             const slot = right.__handlerSlots?.[key] ?? left.__handlerSlots?.[key];
-            if (slot && Number.isSafeInteger(right[key]) && right[key] >= 0) {
+            if (slot && Number.isSafeInteger(left[key]) && left[key] >= 0
+                    && Number.isSafeInteger(right[key]) && right[key] >= 0) {
                 operations.push({op:'replaceHandlerSlot', slot, action:right[key]});
+            } else if (slot) {
+                // Activating or removing a conditional callback changes the
+                // native handler-slot topology, so install the containing node
+                // atomically instead of addressing authority that does not yet
+                // exist (or has just disappeared).
+                return false;
             } else if (primitive(left[key]) && primitive(right[key])) {
                 operations.push({op:'setPrimitive', target:right.__nativeId, property:key,
                     value:right[key] === undefined ? null : right[key]});

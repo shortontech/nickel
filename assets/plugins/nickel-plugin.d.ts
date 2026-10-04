@@ -333,6 +333,7 @@ interface NickelSurfaceSnapshot {
     readonly visible:boolean|null;
 }
 declare function useSurface():NickelSurfaceSnapshot;
+declare function useSurface<T>(selector:(surface:NickelSurfaceSnapshot)=>T):T;
 declare function useOutput():NickelDisplaySnapshot["outputs"][number]|null;
 declare function useScaleFactor():number|null;
 declare function useSurfaceFocus():boolean|null;
