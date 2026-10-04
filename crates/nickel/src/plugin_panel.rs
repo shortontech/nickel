@@ -7057,57 +7057,65 @@ mod tests {
 
     #[test]
     fn component_window_example_opens_dialog_and_requests_settings() {
-        let directory = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../assets/plugins/example-window"
-        );
-        let package = PluginPackage::load(directory).unwrap();
-        let mut host = nickel_ui::UiHost::new(
-            PluginPanelApplication::from_package(&package).unwrap(),
-            520,
-            340,
-        );
-        assert!(matches!(
-            host.application().accepted.node(),
-            PanelNode::Surface {
-                window_request: Some(_),
-                ..
-            }
-        ));
-        let open = host
-            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
-                role: nickel_ui::SemanticRole::Button,
-                name: "Open dialog".into(),
+        std::thread::Builder::new()
+            .name("component-window-example-test".into())
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                let directory = concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../../assets/plugins/example-window"
+                );
+                let package = PluginPackage::load(directory).unwrap();
+                let mut host = nickel_ui::UiHost::new(
+                    PluginPanelApplication::from_package(&package).unwrap(),
+                    520,
+                    340,
+                );
+                assert!(matches!(
+                    host.application().accepted.node(),
+                    PanelNode::Surface {
+                        window_request: Some(_),
+                        ..
+                    }
+                ));
+                let open = host
+                    .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                        role: nickel_ui::SemanticRole::Button,
+                        name: "Open dialog".into(),
+                    })
+                    .unwrap();
+                assert!(open.bounds.size.width > 0.0);
+                assert!(open.bounds.size.height > 0.0);
+                host.step(nickel_ui::HostBatch {
+                    events: vec![nickel_ui::HostEvent::Ui(
+                        nickel_ui::UiEvent::AccessibilityActivate(open.id),
+                    )],
+                    ..Default::default()
+                });
+                assert!(host.inspect().open_overlay.is_some());
+                let settings = host
+                    .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                        role: nickel_ui::SemanticRole::Button,
+                        name: "Open Settings".into(),
+                    })
+                    .unwrap();
+                assert!(settings.bounds.size.width > 0.0);
+                assert!(settings.bounds.size.height > 0.0);
+                host.step(nickel_ui::HostBatch {
+                    events: vec![nickel_ui::HostEvent::Ui(
+                        nickel_ui::UiEvent::AccessibilityActivate(settings.id),
+                    )],
+                    ..Default::default()
+                });
+                assert_eq!(
+                    host.application_mut().take_effects(),
+                    vec![PluginEffect::ShowSettings(None)]
+                );
+                assert!(host.application_mut().last_error().is_none());
             })
+            .unwrap()
+            .join()
             .unwrap();
-        assert!(open.bounds.size.width > 0.0);
-        assert!(open.bounds.size.height > 0.0);
-        host.step(nickel_ui::HostBatch {
-            events: vec![nickel_ui::HostEvent::Ui(
-                nickel_ui::UiEvent::AccessibilityActivate(open.id),
-            )],
-            ..Default::default()
-        });
-        assert!(host.inspect().open_overlay.is_some());
-        let settings = host
-            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
-                role: nickel_ui::SemanticRole::Button,
-                name: "Open Settings".into(),
-            })
-            .unwrap();
-        assert!(settings.bounds.size.width > 0.0);
-        assert!(settings.bounds.size.height > 0.0);
-        host.step(nickel_ui::HostBatch {
-            events: vec![nickel_ui::HostEvent::Ui(
-                nickel_ui::UiEvent::AccessibilityActivate(settings.id),
-            )],
-            ..Default::default()
-        });
-        assert_eq!(
-            host.application_mut().take_effects(),
-            vec![PluginEffect::ShowSettings(None)]
-        );
-        assert!(host.application_mut().last_error().is_none());
     }
 
     #[test]
