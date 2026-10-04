@@ -342,6 +342,92 @@
         });
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn rejected_pointer_launch_keeps_shipped_launcher_open_with_status() {
+        with_package_runtime_stack(|| {
+            use std::sync::atomic::{AtomicUsize, Ordering};
+
+            struct StartingStorageHost(AtomicUsize);
+
+            impl crate::session_host::SessionHost for StartingStorageHost {
+                fn dispatch(
+                    &self,
+                    _command: crate::platform::ShellCommand,
+                ) -> Result<(), crate::platform::SessionRequestError> {
+                    Ok(())
+                }
+
+                fn secure_storage_state(
+                    &self,
+                ) -> Result<
+                    crate::platform::SecureStorageState,
+                    crate::platform::SessionRequestError,
+                > {
+                    Ok(crate::platform::SecureStorageState::Starting)
+                }
+
+                fn request_secure_storage_retry(
+                    &self,
+                ) -> Result<(), crate::platform::SessionRequestError> {
+                    self.0.fetch_add(1, Ordering::Relaxed);
+                    Ok(())
+                }
+            }
+
+            let host = std::sync::Arc::new(StartingStorageHost(AtomicUsize::new(0)));
+            let mut shell = LiveShell::new_with_session_host(host.clone()).unwrap();
+            let id = "org.example.blocked";
+            shell
+                .launcher
+                .replace_discovered_applications(vec![crate::model::Application::new(
+                    id.into(),
+                    "Blocked application".into(),
+                    None,
+                    None,
+                    Some(vec!["nickel-command-that-must-never-run".into()]),
+                )]);
+            shell.launcher.toggle_pin(id);
+            shell.set_launcher_visible(true);
+            let launcher = LiveShell::default_shell_surface_key("launcher");
+            shell.plugin_panel_scene(&launcher, 608, 628).unwrap();
+            let button = shell
+                .plugin_panel_host_for(&launcher)
+                .unwrap()
+                .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                    role: nickel_ui::SemanticRole::Button,
+                    name: "Blocked application".into(),
+                })
+                .unwrap();
+            let point = nickel_ui::Point {
+                x: button.bounds.origin.x + button.bounds.size.width / 2.0,
+                y: button.bounds.origin.y + button.bounds.size.height / 2.0,
+            };
+
+            assert!(shell.plugin_panel_host_ui_for(
+                &launcher,
+                nickel_ui::UiEvent::PointerPressed(point),
+                608,
+                628,
+            ));
+            assert!(shell.plugin_panel_host_ui_for(
+                &launcher,
+                nickel_ui::UiEvent::PointerReleased(point),
+                608,
+                628,
+            ));
+
+            assert_eq!(host.0.load(Ordering::Relaxed), 1);
+            assert!(shell.default_shell_surface_visible("launcher"));
+            assert_eq!(
+                shell.launcher_status.as_deref(),
+                Some(
+                    "Secure storage is not ready. Blocked application will remain blocked until your existing wallet is available."
+                )
+            );
+        });
+    }
+
     #[test]
     fn unavailable_shortcut_application_is_a_visible_typed_failure() {
         with_package_runtime_stack(|| {

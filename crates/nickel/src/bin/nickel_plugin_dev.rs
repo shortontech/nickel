@@ -1087,7 +1087,7 @@ mod platform {
                 let launch = action(&results,"launcher-result-application:native-editor").unwrap();
                 runtime.render(&format!("__nickelDispatch({launch})"), |node|Ok(node.clone())).unwrap();
                 runtime.finish_event(true).unwrap();
-                assert_eq!(runtime.take_effects().unwrap(),vec![serde_json::json!({"type":"applications.launch","id":"native-editor"}),serde_json::json!({"type":"surface.hide","surfaceId":"launcher"})]);
+                assert_eq!(runtime.take_effects().unwrap(),vec![serde_json::json!({"type":"applications.launch","id":"native-editor"})]);
                 let mut manifest = PluginManifest::from_json(include_str!("../../../../assets/plugins/nickel-default/plugin.json")).unwrap();
                 manifest.entry = "main.js".into();
                 manifest.composition = None;

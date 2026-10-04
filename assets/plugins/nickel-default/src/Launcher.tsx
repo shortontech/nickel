@@ -72,12 +72,15 @@ export function Launcher() {
     const openAppMenu = (item, anchor) => { setMenuTarget({id:item.id, anchor}); nickel.openMenu("launcher-app-actions"); };
     const menuApplication = menuTarget && [...applications, ...results].find(app => app.id === menuTarget.id);
     const activate = item => {
-        if (item.kind === "setting") nickel.request({type:"show-settings", screen:item.destination});
+        if (item.kind === "setting") {
+            nickel.request({type:"show-settings", screen:item.destination});
+            nickel.surfaces.hide("launcher");
+        }
         else if (item.kind === "action") {
             if (item.destination === "projects") nickel.projects.show();
             else nickel.surfaces.show(item.destination);
+            nickel.surfaces.hide("launcher");
         } else nickel.applications.launch(item.id);
-        nickel.surfaces.hide("launcher");
     };
     const canPin = item => item && (!item.kind || item.kind === "application" || item.kind === "place") && item.canPin !== false;
     const recentRow = item => <Row key={item.id} className={item.kind === "place" && item.path ? "launcher-recent-row with-path" : "launcher-recent-row"}>
