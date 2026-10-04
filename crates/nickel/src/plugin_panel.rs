@@ -1528,6 +1528,7 @@ impl PluginPanelApplication {
             .map(|(_, image)| (Arc::as_ptr(image) as usize, image.as_raw().len() as u64))
     }
 
+    #[cfg(test)]
     pub(crate) fn sync_host_data_field(
         &mut self,
         field: &str,
@@ -5840,6 +5841,38 @@ mod tests {
     }
 
     #[test]
+    fn managed_window_declared_size_is_initial_geometry_not_a_fixed_viewport() {
+        let mut external_manifest = manifest().clone();
+        external_manifest.id = "org.example.managed-window-resize".into();
+        external_manifest.surfaces[0].kind = PluginSurfaceKind::Window;
+        external_manifest.surfaces[0].width = 900;
+        external_manifest.surfaces[0].height = 600;
+        let package = PluginPackage {
+            modules: Vec::new(),
+            manifest: external_manifest,
+            images: Default::default(),
+            stylesheet: String::new(),
+            source: "function App() { return h(Window, {id: 'main', accessibilityLabel: 'Managed window', width: 900, height: 600}, h(Button, {id: 'open', onClick: () => {}}, 'Open')); }".into(),
+        };
+        let app = PluginPanelApplication::from_package(&package).unwrap();
+        let mut host = nickel_ui::UiHost::new(app, 900, 600);
+        for (width, height) in [(900, 600), (1100, 720), (640, 480)] {
+            host.step(nickel_ui::HostBatch {
+                surface_size: Some((width, height)),
+                ..Default::default()
+            });
+            let root = host
+                .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                    role: nickel_ui::SemanticRole::ApplicationPresentation,
+                    name: "Managed window".into(),
+                })
+                .unwrap();
+            assert_eq!(root.bounds.size.width, width as f32);
+            assert_eq!(root.bounds.size.height, height as f32);
+        }
+    }
+
+    #[test]
     fn state_update_changes_resolved_window_root_size() {
         let manifest = PluginManifest::from_json(
             r#"{"api_version":1,"id":"org.example.window-resize","name":"Resize","entry":"main.js","surfaces":[{"id":"main","kind":"window","width":400,"height":240}]}"#,
@@ -8244,6 +8277,13 @@ mod tests {
                 name: "Appearance".into(),
             })
             .unwrap();
+        assert_eq!(
+            host.application()
+                .accepted
+                .node()
+                .button_action("settings-navigation/destination/nickel-default/appearance"),
+            Some(6)
+        );
         host.perform_semantic_action(
             appearance.id,
             nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
@@ -8323,6 +8363,96 @@ mod tests {
         };
         let total = total_started.elapsed();
         (work, [open, page_switch, control_edit, close, total])
+    }
+
+    #[test]
+    fn settings_navigation_survives_surface_authority_reconciliation() {
+        std::thread::Builder::new()
+            .stack_size(32 * 1024 * 1024)
+            .spawn(settings_navigation_survives_surface_authority_reconciliation_inner)
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    fn settings_navigation_survives_surface_authority_reconciliation_inner() {
+        let (catalog, surface, composition) = settings_admission_runtime().unwrap();
+        let application = settings_admission_application_with_runtime(
+            "nickel-default/plugins",
+            &catalog,
+            &surface,
+            composition,
+        )
+        .unwrap();
+        let mut host = nickel_ui::UiHost::new(application, 900, 600);
+        let navigation = serde_json::json!({
+            "revision": "live",
+            "destination": "nickel-default/plugins",
+        });
+        assert!(
+            host.application_mut()
+                .sync_host_data_fields(&[("navigation", &navigation)])
+                .unwrap()
+        );
+        assert!(
+            host.application_mut()
+                .sync_surface_geometry(Some("nested"), Some((780.0, 580.0)), Some(1.0), Some(true))
+                .unwrap()
+        );
+        assert!(
+            host.application_mut()
+                .reconcile_surface_authority()
+                .unwrap()
+        );
+        assert!(host.application_mut().sync_surface_focus(true).unwrap());
+        host.application_mut()
+            .reconcile_surface_focus_authority()
+            .unwrap();
+        for tick in 0..64 {
+            let clock = serde_json::json!({"tick": tick});
+            assert!(
+                host.application_mut()
+                    .sync_host_data_fields(&[("clock", &clock)])
+                    .unwrap()
+            );
+        }
+        let appearance = host
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: SemanticRole::Button,
+                name: "Appearance".into(),
+            })
+            .unwrap();
+        let point = nickel_ui::Point {
+            x: appearance.bounds.origin.x + appearance.bounds.size.width / 2.0,
+            y: appearance.bounds.origin.y + appearance.bounds.size.height / 2.0,
+        };
+        host.step(nickel_ui::HostBatch {
+            events: vec![
+                nickel_ui::HostEvent::Ui(nickel_ui::UiEvent::PointerMoved(point)),
+                nickel_ui::HostEvent::Ui(nickel_ui::UiEvent::PointerPressed(point)),
+            ],
+            ..Default::default()
+        });
+        let clock = serde_json::json!({"tick": 65});
+        assert!(
+            host.application_mut()
+                .sync_host_data_fields(&[("clock", &clock)])
+                .unwrap()
+        );
+        host.step(nickel_ui::HostBatch {
+            events: vec![nickel_ui::HostEvent::Ui(
+                nickel_ui::UiEvent::PointerReleased(point),
+            )],
+            ..Default::default()
+        });
+        assert!(host.application_mut().last_error().is_none());
+        assert!(
+            host.query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: SemanticRole::Slider,
+                name: "Interface hue".into(),
+            })
+            .is_ok()
+        );
     }
 
     #[test]

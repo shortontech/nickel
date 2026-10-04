@@ -700,21 +700,33 @@ impl InternalShellCoordinator {
     }
 
     pub fn scene(&mut self, id: InternalSurfaceId) -> Option<Vec<PaintCommand>> {
+        let size = self.entries.iter().find(|surface| surface.id == id)?.size;
+        self.scene_at_size(id, size)
+    }
+
+    /// Resolve a retained shell scene for the compositor-owned viewport.
+    /// Managed application windows may have a user-owned size that differs
+    /// from the JSX declaration retained in `entries`; do not overwrite that
+    /// declaration merely to lay out and route the current native viewport.
+    pub fn scene_at_size(
+        &mut self,
+        id: InternalSurfaceId,
+        size: (u32, u32),
+    ) -> Option<Vec<PaintCommand>> {
         self.select_desktop_viewport(id)?;
         let surface = self.entries.iter_mut().find(|surface| surface.id == id)?;
         let commands = if let Some(key) = surface.plugin.as_ref() {
             self.shell.plugin_surface_scene_for_output(
                 key,
                 surface.output.as_deref(),
-                surface.size.0,
-                surface.size.1,
+                size.0,
+                size.1,
             )?
         } else {
             if surface.role == SurfaceRole::Panel {
                 return None;
             }
-            self.shell
-                .scene(surface.role, surface.size.0, surface.size.1)
+            self.shell.scene(surface.role, size.0, size.1)
         };
         surface.scene_generation = surface.scene_generation.saturating_add(1);
         surface.commands_copied = surface
@@ -1160,22 +1172,22 @@ impl InternalShellCoordinator {
                 nickel_ui::HostEvent::Normalized { .. }
                     | nickel_ui::HostEvent::NormalizedIngress(_)
             ) {
+                if let Some(key) = entry.plugin.as_ref() {
+                    let input = match event {
+                        nickel_ui::HostEvent::Normalized { input, .. } => input,
+                        nickel_ui::HostEvent::NormalizedIngress(envelope) => envelope.input,
+                        _ => unreachable!(),
+                    };
+                    changed |= self.shell.plugin_panel_host_input_for(
+                        key,
+                        input,
+                        entry.size.0,
+                        entry.size.1,
+                    );
+                    continue;
+                }
                 match entry.role {
-                    SurfaceRole::Panel => {
-                        let input = match event {
-                            nickel_ui::HostEvent::Normalized { input, .. } => input,
-                            nickel_ui::HostEvent::NormalizedIngress(envelope) => envelope.input,
-                            _ => unreachable!(),
-                        };
-                        if let Some(key) = entry.plugin.as_ref() {
-                            changed |= self.shell.plugin_panel_host_input_for(
-                                key,
-                                input,
-                                entry.size.0,
-                                entry.size.1,
-                            );
-                        }
-                    }
+                    SurfaceRole::Panel => {}
                     SurfaceRole::Lock => {
                         let input = match event {
                             nickel_ui::HostEvent::Normalized { input, .. } => input,
@@ -2350,6 +2362,175 @@ mod tests {
                     .any(|command| matches!(
                         command, PaintCommand::Text { text, .. } if text == "konsole"
                     ))
+            );
+        });
+    }
+
+    #[test]
+    fn normalized_plugin_window_input_routes_through_the_owning_surface() {
+        with_package_runtime_stack(|| {
+            use nickel_input::{
+                DeviceId, EventOrder, InputEvent, KeyEdge, Point, PointerButton, PointerEvent,
+            };
+
+            let mut coordinator = coordinator();
+            coordinator.set_outputs(&[InternalOutput {
+                x: 0,
+                y: 0,
+                name: "nested".into(),
+                width: 1280,
+                height: 720,
+                scale: 1.0,
+            }]);
+            assert!(coordinator.toggle_launcher());
+            coordinator.set_outputs(&[InternalOutput {
+                x: 0,
+                y: 0,
+                name: "nested".into(),
+                width: 1280,
+                height: 720,
+                scale: 1.0,
+            }]);
+            let key = coordinator.shell.active_shell_surface_key("launcher");
+            let launcher = coordinator
+                .entries
+                .iter()
+                .find(|entry| entry.plugin.as_ref() == Some(&key))
+                .unwrap()
+                .id;
+            coordinator.scene(launcher).unwrap();
+            let target = coordinator
+                .shell
+                .plugin_panel_host_ref(&key)
+                .unwrap()
+                .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                    role: nickel_ui::SemanticRole::Button,
+                    name: "Settings".into(),
+                })
+                .unwrap();
+            let position = Point {
+                x: f64::from(target.bounds.origin.x + target.bounds.size.width / 2.0),
+                y: f64::from(target.bounds.origin.y + target.bounds.size.height / 2.0),
+            };
+            for (order, edge) in [(1, KeyEdge::Pressed), (2, KeyEdge::Released)] {
+                coordinator.step_slot_changes(
+                    launcher,
+                    HostBatch {
+                        events: vec![nickel_ui::HostEvent::Normalized {
+                            input: InputEvent::Pointer(PointerEvent::Button {
+                                device: DeviceId(1),
+                                order: EventOrder(order),
+                                position: Some(position),
+                                button: PointerButton::Primary,
+                                edge,
+                            }),
+                            clipboard_text: None,
+                        }],
+                        ..HostBatch::default()
+                    },
+                );
+            }
+            let settings = coordinator.shell.active_shell_surface_key("settings");
+            assert!(
+                coordinator
+                    .plugin_surfaces()
+                    .iter()
+                    .any(|(key, _)| key == &settings)
+            );
+            coordinator.toggle_launcher();
+            coordinator.set_outputs(&[InternalOutput {
+                x: 0,
+                y: 0,
+                name: "nested".into(),
+                width: 1280,
+                height: 720,
+                scale: 1.0,
+            }]);
+            let settings_id = coordinator
+                .entries
+                .iter()
+                .find(|entry| entry.plugin.as_ref() == Some(&settings))
+                .unwrap()
+                .id;
+            coordinator.scene(settings_id).unwrap();
+            let appearance = coordinator
+                .shell
+                .plugin_panel_host_ref(&settings)
+                .unwrap()
+                .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                    role: nickel_ui::SemanticRole::Button,
+                    name: "Appearance".into(),
+                })
+                .unwrap();
+            let appearance_action = coordinator
+                .shell
+                .plugin_panel_host_ref(&settings)
+                .unwrap()
+                .application()
+                .button_message("settings-navigation/destination/nickel-default/appearance");
+            assert!(appearance_action.is_some(), "Appearance has no action");
+            let position = Point {
+                x: f64::from(appearance.bounds.origin.x + appearance.bounds.size.width / 2.0),
+                y: f64::from(appearance.bounds.origin.y + appearance.bounds.size.height / 2.0),
+            };
+            coordinator.step_slot_changes(
+                settings_id,
+                HostBatch {
+                    window_focused: Some(true),
+                    ..HostBatch::default()
+                },
+            );
+            coordinator.step_slot_changes(
+                settings_id,
+                HostBatch {
+                    events: vec![nickel_ui::HostEvent::Normalized {
+                        input: InputEvent::Pointer(PointerEvent::Motion {
+                            device: DeviceId(1),
+                            order: EventOrder(3),
+                            position,
+                            delta: None,
+                        }),
+                        clipboard_text: None,
+                    }],
+                    ..HostBatch::default()
+                },
+            );
+            for (order, edge) in [(4, KeyEdge::Pressed), (5, KeyEdge::Released)] {
+                coordinator.step_slot_changes(
+                    settings_id,
+                    HostBatch {
+                        events: vec![nickel_ui::HostEvent::Normalized {
+                            input: InputEvent::Pointer(PointerEvent::Button {
+                                device: DeviceId(1),
+                                order: EventOrder(order),
+                                position: Some(position),
+                                button: PointerButton::Primary,
+                                edge,
+                            }),
+                            clipboard_text: None,
+                        }],
+                        ..HostBatch::default()
+                    },
+                );
+            }
+            let last_error = coordinator
+                .shell
+                .plugin_panel_host_ref(&settings)
+                .unwrap()
+                .application()
+                .last_error()
+                .map(str::to_owned);
+            assert!(
+                coordinator
+                    .shell
+                    .plugin_panel_host_ref(&settings)
+                    .unwrap()
+                    .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                        role: nickel_ui::SemanticRole::Slider,
+                        name: "Interface hue".into(),
+                    })
+                    .is_ok(),
+                "Appearance action {appearance_action:?} did not navigate; error={last_error:?}"
             );
         });
     }

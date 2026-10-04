@@ -1643,12 +1643,13 @@ function useState(initial) {
     if (!hooks[slot]) {
         const entry = {kind: 'state', value: typeof initial === 'function' ? initial() : initial, set: null};
         entry.set = next => {
-            if (__componentHooks.get(owner)?.[slot] !== entry) return;
+            const current = __componentHooks.get(owner)?.[slot];
+            if (!current || current.kind !== 'state') return;
             if (__currentComponent !== null)
                 throw Error('state updates are not allowed during component render');
-            const value = typeof next === 'function' ? next(entry.value) : next;
-            if (!Object.is(value, entry.value)) {
-                entry.value = value;
+            const value = typeof next === 'function' ? next(current.value) : next;
+            if (!Object.is(value, current.value)) {
+                current.value = value;
                 __dirtyComponents.add(owner);
             }
         };
@@ -1669,17 +1670,18 @@ function useReducer(reducer, initialArg, init) {
     if (!hooks[slot]) {
         const entry = {kind: 'reducer', value: init === undefined ? initialArg : init(initialArg), reducer, dispatch: null};
         entry.dispatch = action => {
-            if (__componentHooks.get(owner)?.[slot] !== entry) return;
+            const current = __componentHooks.get(owner)?.[slot];
+            if (!current || current.kind !== 'reducer') return;
             if (__currentComponent !== null)
                 throw Error('reducer updates are not allowed during component render');
             let value;
-            try { value = entry.reducer(entry.value, action); }
+            try { value = current.reducer(current.value, action); }
             catch (error) {
                 if (__nickelCaptureFailure(owner, error, 'reducer')) return;
                 throw error;
             }
-            if (!Object.is(value, entry.value)) {
-                entry.value = value;
+            if (!Object.is(value, current.value)) {
+                current.value = value;
                 __dirtyComponents.add(owner);
             }
         };
@@ -2132,9 +2134,11 @@ function __nickelMaterializeVirtual(value, path = 'root') {
                     return __nickelMaterializeVirtual(child, `${path}/${identity}`);
                 });
             } else {
-                materialized[key] = __nickelMaterializeVirtual(item, `${path}/${key}`);
+                const itemPath = __nickelIsHandlerBinding(item)
+                    ? `${path}:${key}` : `${path}/${key}`;
+                materialized[key] = __nickelMaterializeVirtual(item, itemPath);
             }
-            if (native && __nickelIsHandlerBinding(item)) slots[key] = `${path}:${key}`;
+            if (__nickelIsHandlerBinding(item)) slots[key] = `${path}:${key}`;
         }
         if (native) {
             __runtimeCounters.nativeNodesMaterialized++;
@@ -2640,6 +2644,14 @@ function __nickelDispatchBatchPatched(events, previous = false) {
         __nickelRollbackEvent();
         throw error;
     }
+}
+
+function __nickelDispatchSlotsPatched(events, previous = false) {
+    return __nickelDispatchBatchPatched(events.map(([slot, value]) => {
+        const action = __handlerSlots.get(slot);
+        if (action === undefined) throw Error(`retired component event slot: ${slot}`);
+        return [action, value];
+    }), previous);
 }
 
 function __nickelReconciliationRequest() {

@@ -2861,12 +2861,25 @@ impl PanelNode {
                 background,
                 width,
                 height,
+                window_request,
                 ..
             } => {
                 let style =
                     inherited.resolve(stylesheet, "window", id.as_deref(), class_name.as_deref());
-                let width = style.width.unwrap_or(*width);
-                let height = style.height.unwrap_or(*height);
+                // A managed window's declared dimensions request its initial
+                // native geometry; they are not a permanent content viewport.
+                // Once the compositor resizes the window, its root must follow
+                // the current host surface. Fixed shell surfaces keep their
+                // declarative dimensions and placement contract.
+                let managed = window_request
+                    .as_ref()
+                    .is_some_and(|request| request.placement == "managed");
+                let width = managed
+                    .then_some(Length::Percent(1.0))
+                    .unwrap_or_else(|| style.width.unwrap_or(*width));
+                let height = managed
+                    .then_some(Length::Percent(1.0))
+                    .unwrap_or_else(|| style.height.unwrap_or(*height));
                 let mut layer = Layer::new().width_length(width).height_length(height);
                 for child in children {
                     if !matches!(child, Self::Dialog { .. }) {

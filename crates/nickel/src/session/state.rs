@@ -5512,9 +5512,6 @@ impl NickelSession {
                 shell.set_surface_size(surface.id, surface.size);
             }
 
-            let Some(scene) = shell.scene(surface.id) else {
-                continue;
-            };
             let mut placement = internal_shell_surface_placement(
                 surface.role,
                 surface.output.as_deref(),
@@ -5559,6 +5556,11 @@ impl NickelSession {
             }
             self.internal_shell_declared_placements
                 .insert(surface.id, declared_placement);
+            let Some(scene) =
+                shell.scene_at_size(surface.id, (placement.geometry.2, placement.geometry.3))
+            else {
+                continue;
+            };
             let scale = surface
                 .output
                 .as_deref()
@@ -6113,12 +6115,9 @@ impl NickelSession {
             .space
             .element_under(pos)
             .filter(|(window, _)| !self.locked || self.lock_windows.contains(window));
-        if let Some((window, _)) = space_hit
-            && self.is_shell_owned_window(window)
-            && !self.desktop_windows.contains(window)
-        {
-            return Some(OrdinarySceneWindow::Client(window.clone()));
-        }
+        // Internal application windows and Wayland clients share the ordinary
+        // scene order. A raw client hit may be physically present underneath a
+        // compositor-owned application, so it must not bypass that ordering.
         self.ordinary_scene_hit_at(pos)
             .or_else(|| space_hit.map(|(window, _)| OrdinarySceneWindow::Client(window.clone())))
     }
@@ -7572,6 +7571,7 @@ impl NickelSession {
             }
             self.internal_shell_declared_placements
                 .insert(surface.id, declared_placement);
+            let viewport_size = (placement.geometry.2, placement.geometry.3);
             let output_scale = placement
                 .output
                 .as_deref()
@@ -7598,7 +7598,7 @@ impl NickelSession {
                     || (preview_pixels_changed
                         && surface.role == crate::winit_shell::SurfaceRole::WindowPreview)
                     || changed.is_none_or(|ids| ids.contains(&surface.id)))
-                    && let Some(scene) = shell.scene(surface.id)
+                    && let Some(scene) = shell.scene_at_size(surface.id, viewport_size)
                 {
                     tracing::trace!(surface = ?surface.id, role = ?surface.role, reason = if changed.is_none() { "global" } else { "content" }, "rebuild internal shell scene");
                     self.pending_desktop_scenes.remove(&surface.id);
@@ -7908,8 +7908,11 @@ impl NickelSession {
             write.revision,
         );
         let scale = self.internal_ui.scale_factor(surface).unwrap_or(1.0);
-        self.internal_ui
-            .configure_surface(surface, placement, scale)
+        let size = (placement.geometry.2, placement.geometry.3);
+        let changed = self
+            .internal_ui
+            .configure_surface(surface, placement, scale);
+        changed | self.refresh_internal_shell_surface_viewport(surface, size)
     }
 
     pub(crate) fn finish_internal_resize(
@@ -7950,8 +7953,33 @@ impl NickelSession {
             desired.height as u32,
         );
         let scale = self.internal_ui.scale_factor(surface).unwrap_or(1.0);
-        self.internal_ui
-            .configure_surface(surface, placement, scale)
+        let size = (placement.geometry.2, placement.geometry.3);
+        let changed = self
+            .internal_ui
+            .configure_surface(surface, placement, scale);
+        changed | self.refresh_internal_shell_surface_viewport(surface, size)
+    }
+
+    fn refresh_internal_shell_surface_viewport(
+        &mut self,
+        runtime: nickel_ui::InternalSurfaceId,
+        size: (u32, u32),
+    ) -> bool {
+        let Some(owner) = self
+            .internal_shell_surfaces
+            .iter()
+            .find_map(|(owner, candidate)| (*candidate == runtime).then_some(*owner))
+        else {
+            return false;
+        };
+        let Some(scene) = self
+            .internal_shell
+            .as_mut()
+            .and_then(|shell| shell.scene_at_size(owner, size))
+        else {
+            return false;
+        };
+        self.internal_ui.update_scene(runtime, scene)
     }
 
     pub fn step_internal_surface(

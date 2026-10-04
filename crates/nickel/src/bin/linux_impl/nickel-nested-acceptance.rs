@@ -251,13 +251,48 @@ fn exercise(
         Duration::from_secs(5),
     )?;
     verify_layout_snapshot(test_input, &environment, "nickel-default/launcher")?;
-    click_plugin_control(
+    // The nested window is visible on the host, so incidental host keyboard
+    // input can reach the focused launcher while the harness is running. A
+    // non-empty query intentionally replaces the dashboard footer. Clear that
+    // state through the launcher's production Escape handler before requiring
+    // the Settings affordance.
+    if plugin_control_geometry(
         test_input,
         &environment,
         "nickel-default/launcher",
         "launcher-settings",
-        launcher,
-    )?;
+    )
+    .is_err()
+    {
+        checked(test_input, &environment, &["key", "escape", "pressed"])?;
+        checked(test_input, &environment, &["key", "escape", "released"])?;
+        wait_for_plugin_surface(
+            test_input,
+            &environment,
+            "nickel-default/launcher",
+            Duration::from_secs(5),
+        )?;
+    }
+    // The visible nested backend can interleave physical host pointer events
+    // with injected input. Showing an already shown singleton is idempotent,
+    // so retry the real launcher control until its window reaches the native
+    // registry instead of treating one stolen click as a product failure.
+    for _ in 0..3 {
+        click_plugin_control(
+            test_input,
+            &environment,
+            "nickel-default/launcher",
+            "launcher-settings",
+            launcher,
+        )?;
+        let windows = checked(test_input, &environment, &["windows"])?;
+        if windows
+            .lines()
+            .any(|line| line.contains("\tnickel-default\tNickel Settings\t"))
+        {
+            break;
+        }
+    }
     let settings = wait_for_plugin_window(
         test_input,
         &environment,
@@ -268,22 +303,64 @@ fn exercise(
     // The launcher is an overlay, so dismiss it before interacting with the
     // ordinary Settings window below it. Settings must remain independently
     // mapped after its launcher surface loses visibility.
-    checked(test_input, &environment, &["key", "meta", "pressed"])?;
-    checked(test_input, &environment, &["key", "meta", "released"])?;
-    wait_for_plugin_surface_absent(
-        test_input,
-        &environment,
-        "nickel-default/launcher",
-        Duration::from_secs(5),
-    )?;
+    let dismiss_deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let surfaces = checked(test_input, &environment, &["surfaces"])?;
+        if plugin_surface_origin(&surfaces, "nickel-default/launcher").is_none() {
+            break;
+        }
+        checked(test_input, &environment, &["key", "meta", "pressed"])?;
+        checked(test_input, &environment, &["key", "meta", "released"])?;
+        if Instant::now() >= dismiss_deadline {
+            return Err(format!("launcher remained mapped above Settings: {surfaces}"));
+        }
+        thread::sleep(POLL);
+    }
     verify_layout_snapshot(test_input, &environment, "nickel-default/settings")?;
-    click_plugin_control(
+    let settings_surface_origin = wait_for_plugin_surface(
         test_input,
         &environment,
         "nickel-default/settings",
-        "settings-navigation/destination/nickel-default/appearance",
-        (settings.1, settings.2),
+        Duration::from_secs(5),
     )?;
+    for _ in 0..3 {
+        click_plugin_control(
+            test_input,
+            &environment,
+            "nickel-default/settings",
+            "settings-navigation/destination/nickel-default/appearance",
+            settings_surface_origin,
+        )?;
+        if plugin_control_geometry(
+            test_input,
+            &environment,
+            "nickel-default/settings",
+            "appearance-hue",
+        )
+        .is_ok()
+        {
+            break;
+        }
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    for id in [
+        "appearance-hue",
+        "appearance-intensity",
+        "appearance-accent-custom",
+    ] {
+        let [_, _, width, height] = loop {
+            match plugin_control_geometry(test_input, &environment, "nickel-default/settings", id)
+            {
+                Ok(geometry) => break geometry,
+                Err(_) if Instant::now() < deadline => thread::sleep(POLL),
+                Err(error) => return Err(error),
+            }
+        };
+        if width <= 0.0 || height <= 0.0 {
+            return Err(format!("required Appearance control {id} has no layout"));
+        }
+    }
+    verify_managed_settings_resize(test_input, &environment, settings.0)?;
     for id in [
         "appearance-hue",
         "appearance-intensity",
@@ -292,7 +369,9 @@ fn exercise(
         let [_, _, width, height] =
             plugin_control_geometry(test_input, &environment, "nickel-default/settings", id)?;
         if width <= 0.0 || height <= 0.0 {
-            return Err(format!("required Appearance control {id} has no layout"));
+            return Err(format!(
+                "Appearance control {id} disappeared after the Settings resize"
+            ));
         }
     }
     checked(
@@ -328,6 +407,103 @@ fn exercise(
     verify_separate_plugin_overlay(test_input, &environment)?;
     verify_native_screenshot_lifecycle(test_input, &environment)?;
     Ok(())
+}
+
+fn window_geometry(windows: &str, id: u64) -> Option<(i32, i32, u32, u32)> {
+    let geometry = windows
+        .lines()
+        .find(|line| line.starts_with(&format!("{id}\t")))?
+        .rsplit('\t')
+        .next()?;
+    let mut fields = geometry.split_whitespace();
+    let (x, y) = fields.next()?.split_once(',')?;
+    let (width, height) = fields.next()?.split_once('x')?;
+    Some((
+        x.parse().ok()?,
+        y.parse().ok()?,
+        width.parse().ok()?,
+        height.parse().ok()?,
+    ))
+}
+
+fn verify_managed_settings_resize(
+    test_input: &Path,
+    environment: &[(String, String)],
+    window: u64,
+) -> Result<(i32, i32, u32, u32), String> {
+    let windows = checked(test_input, environment, &["windows"])?;
+    let before = window_geometry(&windows, window)
+        .ok_or_else(|| format!("Settings geometry is absent before resize: {windows}"))?;
+    let corner = (
+        before.0 + i32::try_from(before.2).unwrap_or(i32::MAX) - 2,
+        before.1 + i32::try_from(before.3).unwrap_or(i32::MAX) - 2,
+    );
+    checked(
+        test_input,
+        environment,
+        &["move", &corner.0.to_string(), &corner.1.to_string()],
+    )?;
+    thread::sleep(POLL);
+    checked(test_input, environment, &["button", "left", "pressed"])?;
+    thread::sleep(POLL);
+    checked(
+        test_input,
+        environment,
+        &[
+            "move",
+            &(corner.0 - 120).to_string(),
+            &(corner.1 - 80).to_string(),
+        ],
+    )?;
+    thread::sleep(POLL);
+    checked(test_input, environment, &["button", "left", "released"])?;
+    thread::sleep(POLL);
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let resized = loop {
+        let windows = checked(test_input, environment, &["windows"])?;
+        if let Some(current) = window_geometry(&windows, window)
+            && (current.2, current.3) != (before.2, before.3)
+        {
+            break current;
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "Settings frame did not resize through production input: {windows}"
+            ));
+        }
+        thread::sleep(POLL);
+    };
+    let [_, _, root_width, root_height] =
+        plugin_control_geometry(test_input, environment, "nickel-default/settings", "settings")?;
+    if (root_width - resized.2 as f32).abs() > 1.0
+        || (root_height - resized.3 as f32).abs() > 1.0
+    {
+        return Err(format!(
+            "Settings content did not follow its resized native viewport: native={:?}, content={root_width}x{root_height}",
+            (resized.2, resized.3)
+        ));
+    }
+
+    // Ordinary pointer movement may repaint hover state, but it must neither
+    // restore the JSX default geometry nor rotate away the current callbacks.
+    checked(
+        test_input,
+        environment,
+        &[
+            "move",
+            &(resized.0 + 24).to_string(),
+            &(resized.1 + 64).to_string(),
+        ],
+    )?;
+    thread::sleep(POLL);
+    let after_motion = checked(test_input, environment, &["windows"])?;
+    if window_geometry(&after_motion, window) != Some(resized) {
+        return Err(format!(
+            "pointer motion reset the user-owned Settings geometry: before={resized:?}; windows={after_motion}"
+        ));
+    }
+    Ok(resized)
 }
 
 fn assert_default_package(
@@ -539,27 +715,6 @@ fn wait_for_plugin_surface(
     }
 }
 
-fn wait_for_plugin_surface_absent(
-    test_input: &Path,
-    environment: &[(String, String)],
-    plugin_surface: &str,
-    timeout: Duration,
-) -> Result<(), String> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        let surfaces = checked(test_input, environment, &["surfaces"])?;
-        if plugin_surface_origin(&surfaces, plugin_surface).is_none() {
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
-            return Err(format!(
-                "plugin surface {plugin_surface} remained mapped: {surfaces}"
-            ));
-        }
-        thread::sleep(POLL);
-    }
-}
-
 fn click_at(
     test_input: &Path,
     environment: &[(String, String)],
@@ -571,8 +726,20 @@ fn click_at(
         environment,
         &["move", &x.to_string(), &y.to_string()],
     )?;
+    thread::sleep(POLL);
     checked(test_input, environment, &["button", "left", "pressed"])?;
+    thread::sleep(POLL);
+    // The visible nested backend also receives the host's physical mouse.
+    // Reassert the synthetic pointer target so unrelated host motion cannot
+    // split a press/release pair across different controls.
+    checked(
+        test_input,
+        environment,
+        &["move", &x.to_string(), &y.to_string()],
+    )?;
+    thread::sleep(POLL);
     checked(test_input, environment, &["button", "left", "released"])?;
+    thread::sleep(POLL);
     Ok(())
 }
 

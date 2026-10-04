@@ -6035,7 +6035,7 @@ impl LiveShell {
         self.plugin_surface_hosts.get_mut(key).map(|(_, host)| host)
     }
 
-    fn plugin_panel_host_ref(
+    pub(crate) fn plugin_panel_host_ref(
         &self,
         key: &nickel_core::plugins::PluginSurfaceKey,
     ) -> Option<&nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>> {

@@ -9,7 +9,7 @@ fn runtime(page: &str, writable: bool) -> JsxRuntime {
         ModuleSource { path:"styles/preferences.css", source:include_str!("../../../assets/plugins/nickel-default/src/styles/preferences.css") },
     ]).unwrap();
     let data = json!({"testPage":page,"preferences":{"available":true,"writable":writable,"revision":"0123456789abcdef",
-        "configured":{"barOnAllDisplays":true,"allWindowsOnEveryBar":false,"desktopCount":4,"preferredTerminal":null,"preferredFileManager":"files.desktop","fileIconProvider":"nickel","fileIconTheme":"temporarily-missing","idleDimSeconds":300,"idleLockSeconds":900,"idleSuspendSeconds":null},
+        "configured":{"barOnAllDisplays":true,"allWindowsOnEveryBar":false,"desktopCount":4,"preferredTerminal":null,"preferredFileManager":"files.desktop","fileIconProvider":"system","fileIconTheme":"temporarily-missing","idleDimSeconds":300,"idleLockSeconds":900,"idleSuspendSeconds":null},
         "applications":[{"id":"terminal.desktop"},{"id":"files.desktop"}],"iconThemes":["Papirus"],"unavailableSelections":{"preferredTerminal":true,"preferredFileManager":false,"fileIconTheme":true}},
         "applications":[{"id":"terminal.desktop","name":"Terminal"},{"id":"files.desktop","name":"Files"}]}).to_string();
     JsxRuntime::new_modules(&graph, Some(&data)).unwrap()
@@ -118,7 +118,7 @@ fn preferences_package_pages_preserve_unavailable_choices_until_explicit_selecti
     let tree = render(&mut icons);
     assert!(
         tree.to_string()
-            .contains("temporarily-missing is unavailable")
+            .contains("Configured theme temporarily-missing is unavailable")
     );
     assert!(icons.take_effects().unwrap().is_empty());
     let effect = click(&mut icons, "preferences-file-theme-choice-0");
