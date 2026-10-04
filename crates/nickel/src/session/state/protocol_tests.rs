@@ -6692,78 +6692,83 @@ fn only_the_latest_output_identification_generation_may_expire() {
 
 #[test]
 fn connection_cleanup_precedes_first_request_from_full_ordinary_queue() {
-    let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
-    let (_event_loop, mut session) = internal_shell_test_session();
-    let wake = session.remote_cleanup_wake.clone();
-    let control = session.remote_control.control();
-    let lease = {
-        let mut authority = control.lock().unwrap();
-        authority.set_enabled(true);
-        let client = authority.connect_identity("Cleanup priority test").unwrap();
-        let then = Instant::now() - Duration::from_secs(61);
-        let watch = authority
-            .reserve_connection_watch(&client.client_id, &client.token, then)
-            .unwrap();
-        authority
-            .activate_connection_watch(&client.client_id, &client.token, watch, false, then)
-            .unwrap();
-        authority
-            .leases_mut()
-            .approve_local(
-                client.client_id.clone(),
-                nickel_remote_control::leases::ResourceScope::FullSession,
-                then,
-                None,
-                false,
-                false,
-            )
-            .unwrap()
-    };
-    let (sender, receiver) = smithay::reexports::calloop::channel::sync_channel(32);
-    for sequence in 0..32 {
+    with_package_runtime_stack(|| {
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = internal_shell_test_session();
+        let wake = session.remote_cleanup_wake.clone();
+        let control = session.remote_control.control();
+        let lease = {
+            let mut authority = control.lock().unwrap();
+            authority.set_enabled(true);
+            let client = authority.connect_identity("Cleanup priority test").unwrap();
+            let then = Instant::now() - Duration::from_secs(61);
+            let watch = authority
+                .reserve_connection_watch(&client.client_id, &client.token, then)
+                .unwrap();
+            authority
+                .activate_connection_watch(&client.client_id, &client.token, watch, false, then)
+                .unwrap();
+            authority
+                .leases_mut()
+                .approve_local(
+                    client.client_id.clone(),
+                    nickel_remote_control::leases::ResourceScope::FullSession,
+                    then,
+                    None,
+                    false,
+                    false,
+                )
+                .unwrap()
+        };
+        let (sender, receiver) = smithay::reexports::calloop::channel::sync_channel(32);
+        for sequence in 0..32 {
+            assert!(
+                sender
+                    .try_send(super::RemoteDesktopRequest::NativeKeyboardState {
+                        source: smithay::input::keyboard::KeyboardSource::new_focus_bound_auxiliary(
+                        ),
+                        sequence,
+                        result: Err("stale native query".into()),
+                    })
+                    .is_ok()
+            );
+        }
+        wake.notify();
+        // Same production handler used by the registered ordinary channel. Do
+        // not dispatch the separate wake source: priority must also hold here.
+        session.handle_remote_desktop_request(receiver.try_recv().unwrap());
+        assert!(!wake.take_pending());
         assert!(
-            sender
-                .try_send(super::RemoteDesktopRequest::NativeKeyboardState {
-                    source: smithay::input::keyboard::KeyboardSource::new_focus_bound_auxiliary(),
-                    sequence,
-                    result: Err("stale native query".into()),
-                })
-                .is_ok()
+            control
+                .lock()
+                .unwrap()
+                .leases()
+                .iter()
+                .all(|entry| entry.id != lease)
         );
-    }
-    wake.notify();
-    // Same production handler used by the registered ordinary channel. Do
-    // not dispatch the separate wake source: priority must also hold here.
-    session.handle_remote_desktop_request(receiver.try_recv().unwrap());
-    assert!(!wake.take_pending());
-    assert!(
-        control
-            .lock()
-            .unwrap()
-            .leases()
-            .iter()
-            .all(|entry| entry.id != lease)
-    );
+    });
 }
 
 #[test]
 fn connection_cleanup_setup_failure_preserves_owner_fallback() {
-    let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
-    let (event_loop, mut session) = internal_shell_test_session();
-    let wake = super::NickelSession::register_remote_connection_cleanup_wake(
-        &event_loop.handle(),
-        Err(std::io::Error::other("descriptor unavailable")),
-    );
-    session.remote_cleanup_wake = wake.clone();
-    wake.notify();
-    assert!(wake.take_wake_failure());
-    // Exercise the same owner drain used by the retained periodic timer.
-    session.service_remote_connection_cleanup();
-    assert!(!wake.take_pending());
-    wake.notify();
-    assert!(wake.take_wake_failure());
-    session.service_remote_connection_cleanup();
-    assert!(!wake.take_pending());
+    with_package_runtime_stack(|| {
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (event_loop, mut session) = internal_shell_test_session();
+        let wake = super::NickelSession::register_remote_connection_cleanup_wake(
+            &event_loop.handle(),
+            Err(std::io::Error::other("descriptor unavailable")),
+        );
+        session.remote_cleanup_wake = wake.clone();
+        wake.notify();
+        assert!(wake.take_wake_failure());
+        // Exercise the same owner drain used by the retained periodic timer.
+        session.service_remote_connection_cleanup();
+        assert!(!wake.take_pending());
+        wake.notify();
+        assert!(wake.take_wake_failure());
+        session.service_remote_connection_cleanup();
+        assert!(!wake.take_pending());
+    });
 }
 
 #[test]
