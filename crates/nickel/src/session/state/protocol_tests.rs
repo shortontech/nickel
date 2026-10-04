@@ -1896,31 +1896,33 @@ fn internal_codex_chat_resize_uses_supported_logical_minimum() {
 
 #[test]
 fn desired_geometry_record_does_not_reclaim_external_or_unknown_owner() {
-    use crate::session::window_registry::WindowId;
-    use nickel_core::geometry_authority::FieldOwner;
+    with_package_runtime_stack(|| {
+        use crate::session::window_registry::WindowId;
+        use nickel_core::geometry_authority::FieldOwner;
 
-    let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
-    let (_event_loop, mut session) = internal_shell_test_session();
-    let original = Geometry {
-        x: 10,
-        y: 20,
-        width: 300,
-        height: 200,
-    };
-    for (raw_id, owner) in [(9_901, FieldOwner::External), (9_902, FieldOwner::Unknown)] {
-        let id = WindowId(raw_id);
-        session.record_desired_geometry(id, original);
-        let authority = session.geometry_authorities.get_mut(&id).unwrap();
-        authority.base_placement.owner = owner;
-        let revision = authority.revisions().placement;
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = internal_shell_test_session();
+        let original = Geometry {
+            x: 10,
+            y: 20,
+            width: 300,
+            height: 200,
+        };
+        for (raw_id, owner) in [(9_901, FieldOwner::External), (9_902, FieldOwner::Unknown)] {
+            let id = WindowId(raw_id);
+            session.record_desired_geometry(id, original);
+            let authority = session.geometry_authorities.get_mut(&id).unwrap();
+            authority.base_placement.owner = owner;
+            let revision = authority.revisions().placement;
 
-        let observed = session.record_desired_geometry(id, Geometry { x: 40, ..original });
-        let authority = &session.geometry_authorities[&id];
-        assert_eq!(observed, revision);
-        assert_eq!(authority.base_placement.revision, revision);
-        assert_eq!(authority.base_placement.value, original);
-        assert_eq!(authority.base_placement.owner, owner);
-    }
+            let observed = session.record_desired_geometry(id, Geometry { x: 40, ..original });
+            let authority = &session.geometry_authorities[&id];
+            assert_eq!(observed, revision);
+            assert_eq!(authority.base_placement.revision, revision);
+            assert_eq!(authority.base_placement.value, original);
+            assert_eq!(authority.base_placement.owner, owner);
+        }
+    });
 }
 
 #[test]
