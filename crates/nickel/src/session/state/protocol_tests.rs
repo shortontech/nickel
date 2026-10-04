@@ -7325,49 +7325,54 @@ fn queued_confirm_keeps_pre_launcher_recipient_epoch_across_batches() {
 
 #[test]
 fn broker_overflow_requests_neutral_probe_and_rearms_internal_owner() {
-    let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
-    let (_event_loop, mut session) = internal_shell_test_session();
-    let event = nickel_ui::ControllerEnvelope {
-        device: nickel_input::controller::ControllerId(7),
-        action: None,
-        edge: nickel_input::KeyEdge::Pressed,
-        repeat: false,
-        family: nickel_ui::ControllerFamily::Xbox,
-        evidence: nickel_ui::ControllerSourceEvidence {
-            seat: 0,
-            source_namespace: "test".into(),
-            backend: "test".into(),
-            native: nickel_input::NativeCode::Numeric(7),
-            fingerprint: None,
-            identity_capability: "native",
-            physical: nickel_ui::ControllerPhysicalControl::Button(
-                nickel_input::controller::ControllerButton::Guide,
-            ),
-            backend_order: 1,
-            produced_unix_ms: 1,
-        },
-    };
-    let epoch = session.refresh_controller_route().0;
-    session.handle_brokered_controller_batch_for_route(
-        vec![event; nickel_session_protocol::controller_broker::DEFAULT_CONTROLLER_QUEUE_LIMIT + 1],
-        false,
-        epoch,
-    );
-    assert!(session.controller_broker.active_lease().is_none());
-    assert!(
-        session
-            .controller_neutral_probe_requested
-            .load(std::sync::atomic::Ordering::Acquire)
-    );
+    with_package_runtime_stack(|| {
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = internal_shell_test_session();
+        let event = nickel_ui::ControllerEnvelope {
+            device: nickel_input::controller::ControllerId(7),
+            action: None,
+            edge: nickel_input::KeyEdge::Pressed,
+            repeat: false,
+            family: nickel_ui::ControllerFamily::Xbox,
+            evidence: nickel_ui::ControllerSourceEvidence {
+                seat: 0,
+                source_namespace: "test".into(),
+                backend: "test".into(),
+                native: nickel_input::NativeCode::Numeric(7),
+                fingerprint: None,
+                identity_capability: "native",
+                physical: nickel_ui::ControllerPhysicalControl::Button(
+                    nickel_input::controller::ControllerButton::Guide,
+                ),
+                backend_order: 1,
+                produced_unix_ms: 1,
+            },
+        };
+        let epoch = session.refresh_controller_route().0;
+        session.handle_brokered_controller_batch_for_route(
+            vec![
+                event;
+                nickel_session_protocol::controller_broker::DEFAULT_CONTROLLER_QUEUE_LIMIT + 1
+            ],
+            false,
+            epoch,
+        );
+        assert!(session.controller_broker.active_lease().is_none());
+        assert!(
+            session
+                .controller_neutral_probe_requested
+                .load(std::sync::atomic::Ordering::Acquire)
+        );
 
-    session.handle_brokered_controller_batch_for_route(Vec::new(), true, epoch);
-    assert_eq!(
-        session
-            .controller_broker
-            .active_lease()
-            .map(|lease| lease.host),
-        Some(ControllerHostId(0))
-    );
+        session.handle_brokered_controller_batch_for_route(Vec::new(), true, epoch);
+        assert_eq!(
+            session
+                .controller_broker
+                .active_lease()
+                .map(|lease| lease.host),
+            Some(ControllerHostId(0))
+        );
+    });
 }
 
 #[test]
