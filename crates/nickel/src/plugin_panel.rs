@@ -3456,13 +3456,20 @@ impl nickel_ui::Application for PluginPanelApplication {
             let result = (|| {
                 let events = events
                     .iter()
-                    .map(|event| {
-                        let handle = state
-                            .events
-                            .get(&event[0].as_u64().ok_or("invalid host action")?)
-                            .ok_or("stale host action")?
-                            .clone();
-                        Ok((handle, event.get(1).cloned().unwrap_or(Value::Null)))
+                    .filter_map(|event| {
+                        let action = match event[0].as_u64() {
+                            Some(action) => action,
+                            None => return Some(Err("invalid host action".into())),
+                        };
+                        // Resource publication can admit a newer frame between
+                        // the press and release (or while a removed control's
+                        // blur callback is unwinding). The native host is then
+                        // allowed to finish the old transition, but its token
+                        // no longer grants execution in the current event
+                        // table. Reject that bounded callback locally instead
+                        // of turning ordinary stale input into package failure.
+                        let handle = state.events.get(&action)?.clone();
+                        Some(Ok((handle, event.get(1).cloned().unwrap_or(Value::Null))))
                     })
                     .collect::<Result<Vec<_>, String>>()?;
                 let mut host = state.host.borrow_mut();
@@ -4305,6 +4312,11 @@ mod tests {
         };
         let accepted_event =
             application.composition.as_ref().unwrap().events[&(action as u64)].clone();
+
+        application.update(PluginMessage::Click(action.saturating_add(10_000)));
+        assert_eq!(application.accepted.node(), &accepted_node);
+        assert!(application.last_error().is_none());
+        assert!(application.take_runtime_failure().is_none());
 
         application.update(PluginMessage::Click(action));
 
