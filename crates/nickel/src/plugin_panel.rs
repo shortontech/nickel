@@ -5346,7 +5346,8 @@ mod tests {
 
     #[test]
     fn row_and_column_classes_apply_css_flex_alignment() {
-        let package = PluginPackage {
+        with_package_runtime_stack(|| {
+            let package = PluginPackage {
             modules: Vec::new(),
             manifest: manifest().clone(),
             images: Default::default(),
@@ -5364,30 +5365,31 @@ mod tests {
                 }
             "#.into(),
         };
-        let host = nickel_ui::UiHost::new(
-            PluginPanelApplication::from_package(&package).unwrap(),
-            400,
-            220,
-        );
-        let button = |name: &str| {
-            host.query_unique(&nickel_ui::SemanticSelector::RoleAndName {
-                role: SemanticRole::Button,
-                name: name.into(),
-            })
-            .unwrap()
-            .bounds
-        };
-        let left = button("Left");
-        let right = button("Right");
-        let top = button("Top");
-        let bottom = button("Bottom");
-        assert!(right.origin.x > left.origin.x + 250.0);
-        assert!(
-            left.origin.y > 20.0,
-            "left={left:?} right={right:?} top={top:?} bottom={bottom:?}"
-        );
-        assert!(top.origin.x > 300.0);
-        assert!(bottom.origin.y > top.origin.y + 50.0);
+            let host = nickel_ui::UiHost::new(
+                PluginPanelApplication::from_package(&package).unwrap(),
+                400,
+                220,
+            );
+            let button = |name: &str| {
+                host.query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                    role: SemanticRole::Button,
+                    name: name.into(),
+                })
+                .unwrap()
+                .bounds
+            };
+            let left = button("Left");
+            let right = button("Right");
+            let top = button("Top");
+            let bottom = button("Bottom");
+            assert!(right.origin.x > left.origin.x + 250.0);
+            assert!(
+                left.origin.y > 20.0,
+                "left={left:?} right={right:?} top={top:?} bottom={bottom:?}"
+            );
+            assert!(top.origin.x > 300.0);
+            assert!(bottom.origin.y > top.origin.y + 50.0);
+        });
     }
 
     #[test]
