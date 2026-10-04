@@ -7179,90 +7179,96 @@ fn rejected_native_handoff_clears_stale_internal_focus_and_lease() {
 
 #[test]
 fn denied_ordinary_seat_focus_preserves_locked_internal_owner_and_controller_lease() {
-    let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
-    let (_event_loop, mut session) = internal_shell_test_session();
-    session.lock_session();
-    let lock = session.internal_ui.focused().expect("focused lock surface");
-    assert_eq!(session.native_controller_route().target, Some(lock));
-    let prior_seat_focus = session.seat.get_keyboard().unwrap().current_focus();
+    with_package_runtime_stack(|| {
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = internal_shell_test_session();
+        session.lock_session();
+        let lock = session.internal_ui.focused().expect("focused lock surface");
+        assert_eq!(session.native_controller_route().target, Some(lock));
+        let prior_seat_focus = session.seat.get_keyboard().unwrap().current_focus();
 
-    // An ordinary XDG focus request must be rejected before it can mutate
-    // either protected focus projection or the controller routing lease.
-    assert!(!session.realize_seat_focus(None, nickel_core::focus::FocusScope::Ordinary));
+        // An ordinary XDG focus request must be rejected before it can mutate
+        // either protected focus projection or the controller routing lease.
+        assert!(!session.realize_seat_focus(None, nickel_core::focus::FocusScope::Ordinary));
 
-    assert_eq!(
-        session.seat.get_keyboard().unwrap().current_focus(),
-        prior_seat_focus
-    );
-    assert_eq!(session.internal_ui.focused(), Some(lock));
-    assert_eq!(session.native_controller_route().target, Some(lock));
-    assert!(session.seat_focus.acknowledged().is_none());
+        assert_eq!(
+            session.seat.get_keyboard().unwrap().current_focus(),
+            prior_seat_focus
+        );
+        assert_eq!(session.internal_ui.focused(), Some(lock));
+        assert_eq!(session.native_controller_route().target, Some(lock));
+        assert!(session.seat_focus.acknowledged().is_none());
+    });
 }
 
 #[test]
 fn mapped_metadata_focus_preserves_locked_internal_owner_and_controller_lease() {
-    let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
-    let (_event_loop, mut session) = internal_shell_test_session();
-    session.lock_session();
-    let lock = session.internal_ui.focused().expect("focused lock surface");
-    assert_eq!(session.native_controller_route().target, Some(lock));
-    let prior_seat_focus = session.seat.get_keyboard().unwrap().current_focus();
+    with_package_runtime_stack(|| {
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = internal_shell_test_session();
+        session.lock_session();
+        let lock = session.internal_ui.focused().expect("focused lock surface");
+        assert_eq!(session.native_controller_route().target, Some(lock));
+        let prior_seat_focus = session.seat.get_keyboard().unwrap().current_focus();
 
-    // Model a mapped Codex window becoming identifiable through an app-id
-    // metadata change while the lock surface owns protected input.
-    assert!(!session.complete_deferred_metadata_focus(None));
+        // Model a mapped Codex window becoming identifiable through an app-id
+        // metadata change while the lock surface owns protected input.
+        assert!(!session.complete_deferred_metadata_focus(None));
 
-    assert_eq!(
-        session.seat.get_keyboard().unwrap().current_focus(),
-        prior_seat_focus
-    );
-    assert_eq!(session.internal_ui.focused(), Some(lock));
-    assert_eq!(session.native_controller_route().target, Some(lock));
-    assert!(session.seat_focus.acknowledged().is_none());
+        assert_eq!(
+            session.seat.get_keyboard().unwrap().current_focus(),
+            prior_seat_focus
+        );
+        assert_eq!(session.internal_ui.focused(), Some(lock));
+        assert_eq!(session.native_controller_route().target, Some(lock));
+        assert!(session.seat_focus.acknowledged().is_none());
+    });
 }
 
 #[test]
 fn controller_batch_drops_old_route_tail_after_launcher_changes_recipient() {
-    let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
-    let (_event_loop, mut session) = internal_shell_test_session();
-    assert!(!session.internal_shell.as_ref().unwrap().launcher_visible());
-    let event = nickel_ui::ControllerEnvelope {
-        device: nickel_input::controller::ControllerId(7),
-        action: Some(nickel_ui::ControllerAction::Launcher),
-        edge: nickel_input::KeyEdge::Pressed,
-        repeat: false,
-        family: nickel_ui::ControllerFamily::Xbox,
-        evidence: nickel_ui::ControllerSourceEvidence {
-            seat: 0,
-            source_namespace: "test".into(),
-            backend: "test".into(),
-            native: nickel_input::NativeCode::Numeric(7),
-            fingerprint: None,
-            identity_capability: "native",
-            physical: nickel_ui::ControllerPhysicalControl::Button(
-                nickel_input::controller::ControllerButton::Guide,
-            ),
-            backend_order: 1,
-            produced_unix_ms: 1,
-        },
-    };
-
-    session.handle_brokered_controller_batch(
-        vec![
-            event.clone(),
-            nickel_ui::ControllerEnvelope {
-                repeat: true,
-                ..event
+    with_package_runtime_stack(|| {
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = internal_shell_test_session();
+        assert!(!session.internal_shell.as_ref().unwrap().launcher_visible());
+        let event = nickel_ui::ControllerEnvelope {
+            device: nickel_input::controller::ControllerId(7),
+            action: Some(nickel_ui::ControllerAction::Launcher),
+            edge: nickel_input::KeyEdge::Pressed,
+            repeat: false,
+            family: nickel_ui::ControllerFamily::Xbox,
+            evidence: nickel_ui::ControllerSourceEvidence {
+                seat: 0,
+                source_namespace: "test".into(),
+                backend: "test".into(),
+                native: nickel_input::NativeCode::Numeric(7),
+                fingerprint: None,
+                identity_capability: "native",
+                physical: nickel_ui::ControllerPhysicalControl::Button(
+                    nickel_input::controller::ControllerButton::Guide,
+                ),
+                backend_order: 1,
+                produced_unix_ms: 1,
             },
-        ],
-        false,
-    );
+        };
 
-    assert!(
-        session.internal_shell.as_ref().unwrap().launcher_visible(),
-        "the first transition must invalidate, not retarget, the queued second action"
-    );
-    assert!(session.controller_routing_epoch >= 2);
+        session.handle_brokered_controller_batch(
+            vec![
+                event.clone(),
+                nickel_ui::ControllerEnvelope {
+                    repeat: true,
+                    ..event
+                },
+            ],
+            false,
+        );
+
+        assert!(
+            session.internal_shell.as_ref().unwrap().launcher_visible(),
+            "the first transition must invalidate, not retarget, the queued second action"
+        );
+        assert!(session.controller_routing_epoch >= 2);
+    });
 }
 
 #[test]
@@ -7451,33 +7457,35 @@ fn timed_out_security_takeover_rearms_internal_on_same_steady_neutral_batch() {
 
 #[test]
 fn controller_host_lease_fails_closed_without_exact_focused_client() {
-    let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
-    let (_event_loop, mut session) = internal_shell_test_session();
-    let peer = 424_242;
-    let attached = session.handle_controller_host_request(
-        peer,
-        nickel_session_protocol::ControllerHostRequest::Attach,
-    );
-    let generation = match attached {
-        nickel_session_protocol::ServerMessage::ControllerHost(
-            nickel_session_protocol::ControllerHostResponse::Attached {
-                connection_generation,
-                ..
-            },
-        ) => connection_generation,
-        other => panic!("unexpected attach response: {other:?}"),
-    };
-    assert!(matches!(
-        session.handle_controller_host_request(
+    with_package_runtime_stack(|| {
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = internal_shell_test_session();
+        let peer = 424_242;
+        let attached = session.handle_controller_host_request(
             peer,
-            nickel_session_protocol::ControllerHostRequest::RequestLease {
-                connection_generation: generation,
-            },
-        ),
-        nickel_session_protocol::ServerMessage::ControllerHost(
-            nickel_session_protocol::ControllerHostResponse::LeaseFailed
-        )
-    ));
+            nickel_session_protocol::ControllerHostRequest::Attach,
+        );
+        let generation = match attached {
+            nickel_session_protocol::ServerMessage::ControllerHost(
+                nickel_session_protocol::ControllerHostResponse::Attached {
+                    connection_generation,
+                    ..
+                },
+            ) => connection_generation,
+            other => panic!("unexpected attach response: {other:?}"),
+        };
+        assert!(matches!(
+            session.handle_controller_host_request(
+                peer,
+                nickel_session_protocol::ControllerHostRequest::RequestLease {
+                    connection_generation: generation,
+                },
+            ),
+            nickel_session_protocol::ServerMessage::ControllerHost(
+                nickel_session_protocol::ControllerHostResponse::LeaseFailed
+            )
+        ));
+    });
 }
 
 #[test]
