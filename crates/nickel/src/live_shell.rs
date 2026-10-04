@@ -10960,5 +10960,16 @@ fn retain_preview_generation(
 }
 
 #[cfg(test)]
+// Shipped package evaluation needs the same stack reserve as production hosts.
+fn with_package_runtime_stack(test: impl FnOnce() + Send + 'static) {
+    std::thread::Builder::new()
+        .stack_size(32 * 1024 * 1024)
+        .spawn(test)
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[cfg(test)]
 #[path = "live_shell/tests.rs"]
 mod tests;

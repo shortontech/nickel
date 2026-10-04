@@ -76,6 +76,7 @@
 
     #[test]
     fn configured_wallpaper_changes_replace_the_live_desktop_image() {
+        with_package_runtime_stack(|| {
         let directory = tempfile::tempdir().expect("wallpaper fixture directory");
         let first_path = directory.path().join("first.png");
         let second_path = directory.path().join("second.png");
@@ -103,10 +104,12 @@
             [20, 80, 230, 255]
         );
         assert!(!shell.refresh_configured_wallpaper(shell.wallpaper_path.clone()));
+        });
     }
 
     #[test]
     fn desktop_error_banner_appears_once_in_native_view() {
+        with_package_runtime_stack(|| {
         let mut shell = LiveShell::new().unwrap();
         shell.desktop_host.application_mut().error = Some("Desktop files unavailable".into());
         let scene = shell.scene(SurfaceRole::Desktop, 320, 200);
@@ -116,10 +119,12 @@
                 if text == "Desktop files unavailable"
         )).count();
         assert_eq!(banner_count, 1);
+        });
     }
 
     #[test]
     fn failed_wallpaper_decode_preserves_the_last_presentable_image() {
+        with_package_runtime_stack(|| {
         let directory = tempfile::tempdir().expect("wallpaper fixture directory");
         let valid_path = directory.path().join("valid.png");
         let invalid_path = directory.path().join("invalid.png");
@@ -139,6 +144,7 @@
             shell.wallpaper.as_ref().expect("prior wallpaper retained"),
             &prior
         ));
+        });
     }
 
     #[test]

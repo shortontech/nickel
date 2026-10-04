@@ -643,49 +643,51 @@ mod windows_tests {
 
     #[test]
     fn jsx_keyboard_delivers_with_windows_recipient_lease() {
-        let host = Arc::new(Host {
-            snapshot: Mutex::new(OnScreenKeyboardSnapshot {
-                epoch: 19,
-                recipient: Some(WindowId(7)),
-                ..Default::default()
-            }),
-            inputs: Mutex::new(Vec::new()),
+        with_package_runtime_stack(|| {
+            let host = Arc::new(Host {
+                snapshot: Mutex::new(OnScreenKeyboardSnapshot {
+                    epoch: 19,
+                    recipient: Some(WindowId(7)),
+                    ..Default::default()
+                }),
+                inputs: Mutex::new(Vec::new()),
+            });
+            let mut shell = LiveShell::new_with_session_host(host.clone()).unwrap();
+            shell.keyboard_enabled = true;
+            shell.set_keyboard_visible(true);
+            assert!(shell.native_surface_visible(
+                SurfaceRole::Panel,
+                Some(&shell.active_shell_surface_key("keyboard"))
+            ));
+            assert!(!shell.surface_visible(SurfaceRole::OnScreenKeyboard));
+            let effect = crate::plugin_panel::PluginEffect::Keyboard {
+                plugin_id: "nickel-default".into(),
+                effect: crate::keyboard_capabilities::KeyboardRequest {
+                    operation: "keyboard.press".into(),
+                    id: Some("osk-char-97".into()),
+                    generation: shell.keyboard_service_generation,
+                    delta: None,
+                },
+            };
+            assert!(shell.apply_keyboard_plugin_effect(effect.clone(), Some(19)));
+            assert_eq!(
+                *host.inputs.lock().unwrap(),
+                vec![(19, OnScreenKeyboardInput::Text { text: "a".into() })]
+            );
+            host.snapshot.lock().unwrap().epoch = 20;
+            shell.refresh_keyboard();
+            let stale = crate::plugin_panel::PluginEffect::Keyboard {
+                plugin_id: "nickel-default".into(),
+                effect: crate::keyboard_capabilities::KeyboardRequest {
+                    operation: "keyboard.press".into(),
+                    id: Some("osk-char-97".into()),
+                    generation: shell.keyboard_service_generation,
+                    delta: None,
+                },
+            };
+            assert!(!shell.apply_keyboard_plugin_effect(stale, Some(19)));
+            assert_eq!(host.inputs.lock().unwrap().len(), 1);
         });
-        let mut shell = LiveShell::new_with_session_host(host.clone()).unwrap();
-        shell.keyboard_enabled = true;
-        shell.set_keyboard_visible(true);
-        assert!(shell.native_surface_visible(
-            SurfaceRole::Panel,
-            Some(&shell.active_shell_surface_key("keyboard"))
-        ));
-        assert!(!shell.surface_visible(SurfaceRole::OnScreenKeyboard));
-        let effect = crate::plugin_panel::PluginEffect::Keyboard {
-            plugin_id: "nickel-default".into(),
-            effect: crate::keyboard_capabilities::KeyboardRequest {
-                operation: "keyboard.press".into(),
-                id: Some("osk-char-97".into()),
-                generation: shell.keyboard_service_generation,
-                delta: None,
-            },
-        };
-        assert!(shell.apply_keyboard_plugin_effect(effect.clone(), Some(19)));
-        assert_eq!(
-            *host.inputs.lock().unwrap(),
-            vec![(19, OnScreenKeyboardInput::Text { text: "a".into() })]
-        );
-        host.snapshot.lock().unwrap().epoch = 20;
-        shell.refresh_keyboard();
-        let stale = crate::plugin_panel::PluginEffect::Keyboard {
-            plugin_id: "nickel-default".into(),
-            effect: crate::keyboard_capabilities::KeyboardRequest {
-                operation: "keyboard.press".into(),
-                id: Some("osk-char-97".into()),
-                generation: shell.keyboard_service_generation,
-                delta: None,
-            },
-        };
-        assert!(!shell.apply_keyboard_plugin_effect(stale, Some(19)));
-        assert_eq!(host.inputs.lock().unwrap().len(), 1);
     }
 }
 
@@ -725,155 +727,159 @@ mod tests {
 
     #[test]
     fn primary_keyboard_gesture_keeps_epoch_through_other_buttons_and_cancels_on_topology() {
-        let host = Arc::new(Host::default());
-        let mut shell = LiveShell::new_with_session_host(host.clone()).unwrap();
-        shell.keyboard_recipient = Some(OnScreenKeyboardSnapshot {
-            epoch: 19,
-            generation: 1,
-            recipient: Some(WindowId(7)),
-            enabled: true,
-            visible: true,
-            ..Default::default()
+        with_package_runtime_stack(|| {
+            let host = Arc::new(Host::default());
+            let mut shell = LiveShell::new_with_session_host(host.clone()).unwrap();
+            shell.keyboard_recipient = Some(OnScreenKeyboardSnapshot {
+                epoch: 19,
+                generation: 1,
+                recipient: Some(WindowId(7)),
+                enabled: true,
+                visible: true,
+                ..Default::default()
+            });
+            shell
+                .keyboard_host
+                .application_mut()
+                .recipient_changed(true);
+            shell.scene(SurfaceRole::OnScreenKeyboard, 1280, 368);
+            let target = shell
+                .resolve_semantic_target(&ShellSemanticTarget::OnScreenKeyboard {
+                    key: "osk-char-97".into(),
+                })
+                .unwrap();
+            let event = |button, edge| {
+                InputEvent::Pointer(PointerEvent::Button {
+                    device: DeviceId(1),
+                    order: EventOrder(1),
+                    button,
+                    edge,
+                    position: Some(nickel_input::Point {
+                        x: f64::from(target.x),
+                        y: f64::from(target.y),
+                    }),
+                })
+            };
+            for (button, edge) in [
+                (PointerButton::Primary, KeyEdge::Pressed),
+                (PointerButton::Secondary, KeyEdge::Pressed),
+                (PointerButton::Secondary, KeyEdge::Released),
+                (PointerButton::Primary, KeyEdge::Released),
+            ] {
+                shell.keyboard_host_input(event(button, edge), 1280, 368);
+            }
+            assert_eq!(
+                *host.0.lock().unwrap(),
+                vec![(19, OnScreenKeyboardInput::Text { text: "a".into() })]
+            );
+            shell.keyboard_host_input(event(PointerButton::Primary, KeyEdge::Pressed), 1280, 368);
+            // A newer snapshot cannot retarget an already-started gesture. Keeping
+            // the old epoch lets the session authority reject the stale command.
+            shell.keyboard_recipient.as_mut().unwrap().epoch = 20;
+            shell.keyboard_host_input(event(PointerButton::Primary, KeyEdge::Released), 1280, 368);
+            assert_eq!(host.0.lock().unwrap().last().unwrap().0, 19);
+            shell.keyboard_host_input(event(PointerButton::Primary, KeyEdge::Pressed), 1280, 368);
+            shell.keyboard_resize = Some((DeviceId(1), None, 2.0));
+            shell.cancel_keyboard_gestures();
+            assert!(shell.keyboard_resize.is_none());
+            assert!(shell.keyboard_gesture_leases.is_empty());
+            shell.keyboard_host_input(event(PointerButton::Primary, KeyEdge::Released), 1280, 368);
+            assert_eq!(host.0.lock().unwrap().len(), 2);
         });
-        shell
-            .keyboard_host
-            .application_mut()
-            .recipient_changed(true);
-        shell.scene(SurfaceRole::OnScreenKeyboard, 1280, 368);
-        let target = shell
-            .resolve_semantic_target(&ShellSemanticTarget::OnScreenKeyboard {
-                key: "osk-char-97".into(),
-            })
-            .unwrap();
-        let event = |button, edge| {
-            InputEvent::Pointer(PointerEvent::Button {
-                device: DeviceId(1),
-                order: EventOrder(1),
-                button,
-                edge,
-                position: Some(nickel_input::Point {
-                    x: f64::from(target.x),
-                    y: f64::from(target.y),
-                }),
-            })
-        };
-        for (button, edge) in [
-            (PointerButton::Primary, KeyEdge::Pressed),
-            (PointerButton::Secondary, KeyEdge::Pressed),
-            (PointerButton::Secondary, KeyEdge::Released),
-            (PointerButton::Primary, KeyEdge::Released),
-        ] {
-            shell.keyboard_host_input(event(button, edge), 1280, 368);
-        }
-        assert_eq!(
-            *host.0.lock().unwrap(),
-            vec![(19, OnScreenKeyboardInput::Text { text: "a".into() })]
-        );
-        shell.keyboard_host_input(event(PointerButton::Primary, KeyEdge::Pressed), 1280, 368);
-        // A newer snapshot cannot retarget an already-started gesture. Keeping
-        // the old epoch lets the session authority reject the stale command.
-        shell.keyboard_recipient.as_mut().unwrap().epoch = 20;
-        shell.keyboard_host_input(event(PointerButton::Primary, KeyEdge::Released), 1280, 368);
-        assert_eq!(host.0.lock().unwrap().last().unwrap().0, 19);
-        shell.keyboard_host_input(event(PointerButton::Primary, KeyEdge::Pressed), 1280, 368);
-        shell.keyboard_resize = Some((DeviceId(1), None, 2.0));
-        shell.cancel_keyboard_gestures();
-        assert!(shell.keyboard_resize.is_none());
-        assert!(shell.keyboard_gesture_leases.is_empty());
-        shell.keyboard_host_input(event(PointerButton::Primary, KeyEdge::Released), 1280, 368);
-        assert_eq!(host.0.lock().unwrap().len(), 2);
     }
 
     #[test]
     fn plugin_keyboard_effect_rejects_a_recipient_changed_after_press() {
-        let host = Arc::new(Host::default());
-        let mut shell = LiveShell::new_with_session_host(host.clone()).unwrap();
-        shell.keyboard_enabled = true;
-        assert!(
-            shell.active_shell_declares("keyboard"),
-            "{:?}",
-            shell.plugin_registry.get("nickel-default")
-        );
-        assert!(shell.set_keyboard_visible(true));
-        assert!(
-            shell.plugin_surface_matches(&shell.active_shell_surface_key("keyboard")),
-            "{:?}",
-            shell.show_plugin_window("nickel-default", "keyboard")
-        );
-        shell.keyboard_recipient = Some(OnScreenKeyboardSnapshot {
-            epoch: 19,
-            generation: 1,
-            recipient: Some(WindowId(7)),
-            enabled: true,
-            visible: true,
-            ..Default::default()
+        with_package_runtime_stack(|| {
+            let host = Arc::new(Host::default());
+            let mut shell = LiveShell::new_with_session_host(host.clone()).unwrap();
+            shell.keyboard_enabled = true;
+            assert!(
+                shell.active_shell_declares("keyboard"),
+                "{:?}",
+                shell.plugin_registry.get("nickel-default")
+            );
+            assert!(shell.set_keyboard_visible(true));
+            assert!(
+                shell.plugin_surface_matches(&shell.active_shell_surface_key("keyboard")),
+                "{:?}",
+                shell.show_plugin_window("nickel-default", "keyboard")
+            );
+            shell.keyboard_recipient = Some(OnScreenKeyboardSnapshot {
+                epoch: 19,
+                generation: 1,
+                recipient: Some(WindowId(7)),
+                enabled: true,
+                visible: true,
+                ..Default::default()
+            });
+            shell
+                .keyboard_host
+                .application_mut()
+                .recipient_changed(true);
+            let input = |edge| {
+                InputEvent::Pointer(PointerEvent::Button {
+                    device: DeviceId(4),
+                    order: EventOrder(1),
+                    button: PointerButton::Primary,
+                    edge,
+                    position: Some(nickel_input::Point { x: 50.0, y: 50.0 }),
+                })
+            };
+            assert_eq!(
+                shell.keyboard_gesture_epoch(&input(KeyEdge::Pressed)),
+                Some(19)
+            );
+            shell.keyboard_recipient.as_mut().unwrap().epoch = 20;
+            let pressed_epoch = shell.keyboard_gesture_epoch(&input(KeyEdge::Released));
+            assert_eq!(pressed_epoch, Some(19));
+            assert!(!shell.apply_keyboard_plugin_effect(
+                crate::plugin_panel::PluginEffect::Keyboard {
+                    plugin_id: "nickel-default".into(),
+                    effect: crate::keyboard_capabilities::KeyboardRequest {
+                        operation: "keyboard.press".into(),
+                        id: Some("osk-char-97".into()),
+                        generation: shell.keyboard_service_generation,
+                        delta: None
+                    }
+                },
+                pressed_epoch,
+            ));
+            assert!(host.0.lock().unwrap().is_empty());
+            assert!(shell.apply_keyboard_plugin_effect(
+                crate::plugin_panel::PluginEffect::Keyboard {
+                    plugin_id: "nickel-default".into(),
+                    effect: crate::keyboard_capabilities::KeyboardRequest {
+                        operation: "keyboard.press".into(),
+                        id: Some("osk-char-97".into()),
+                        generation: shell.keyboard_service_generation,
+                        delta: None
+                    }
+                },
+                Some(20),
+            ));
+            assert_eq!(
+                *host.0.lock().unwrap(),
+                vec![(20, OnScreenKeyboardInput::Text { text: "a".into() })]
+            );
+            let current = crate::plugin_panel::PluginEffect::Keyboard {
+                plugin_id: "nickel-default".into(),
+                effect: crate::keyboard_capabilities::KeyboardRequest {
+                    operation: "keyboard.press".into(),
+                    id: Some("osk-char-97".into()),
+                    generation: shell.keyboard_service_generation,
+                    delta: None,
+                },
+            };
+            shell.locked = true;
+            assert!(!shell.apply_keyboard_plugin_effect(current.clone(), Some(20)));
+            shell.locked = false;
+            shell
+                .plugin_registry
+                .set_enabled("nickel-default", false)
+                .unwrap();
+            assert!(!shell.apply_keyboard_plugin_effect(current, Some(20)));
+            assert_eq!(host.0.lock().unwrap().len(), 1);
         });
-        shell
-            .keyboard_host
-            .application_mut()
-            .recipient_changed(true);
-        let input = |edge| {
-            InputEvent::Pointer(PointerEvent::Button {
-                device: DeviceId(4),
-                order: EventOrder(1),
-                button: PointerButton::Primary,
-                edge,
-                position: Some(nickel_input::Point { x: 50.0, y: 50.0 }),
-            })
-        };
-        assert_eq!(
-            shell.keyboard_gesture_epoch(&input(KeyEdge::Pressed)),
-            Some(19)
-        );
-        shell.keyboard_recipient.as_mut().unwrap().epoch = 20;
-        let pressed_epoch = shell.keyboard_gesture_epoch(&input(KeyEdge::Released));
-        assert_eq!(pressed_epoch, Some(19));
-        assert!(!shell.apply_keyboard_plugin_effect(
-            crate::plugin_panel::PluginEffect::Keyboard {
-                plugin_id: "nickel-default".into(),
-                effect: crate::keyboard_capabilities::KeyboardRequest {
-                    operation: "keyboard.press".into(),
-                    id: Some("osk-char-97".into()),
-                    generation: shell.keyboard_service_generation,
-                    delta: None
-                }
-            },
-            pressed_epoch,
-        ));
-        assert!(host.0.lock().unwrap().is_empty());
-        assert!(shell.apply_keyboard_plugin_effect(
-            crate::plugin_panel::PluginEffect::Keyboard {
-                plugin_id: "nickel-default".into(),
-                effect: crate::keyboard_capabilities::KeyboardRequest {
-                    operation: "keyboard.press".into(),
-                    id: Some("osk-char-97".into()),
-                    generation: shell.keyboard_service_generation,
-                    delta: None
-                }
-            },
-            Some(20),
-        ));
-        assert_eq!(
-            *host.0.lock().unwrap(),
-            vec![(20, OnScreenKeyboardInput::Text { text: "a".into() })]
-        );
-        let current = crate::plugin_panel::PluginEffect::Keyboard {
-            plugin_id: "nickel-default".into(),
-            effect: crate::keyboard_capabilities::KeyboardRequest {
-                operation: "keyboard.press".into(),
-                id: Some("osk-char-97".into()),
-                generation: shell.keyboard_service_generation,
-                delta: None,
-            },
-        };
-        shell.locked = true;
-        assert!(!shell.apply_keyboard_plugin_effect(current.clone(), Some(20)));
-        shell.locked = false;
-        shell
-            .plugin_registry
-            .set_enabled("nickel-default", false)
-            .unwrap();
-        assert!(!shell.apply_keyboard_plugin_effect(current, Some(20)));
-        assert_eq!(host.0.lock().unwrap().len(), 1);
     }
 }

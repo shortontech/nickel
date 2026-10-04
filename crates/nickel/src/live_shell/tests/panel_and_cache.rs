@@ -1,5 +1,6 @@
     #[test]
     fn full_preview_refresh_moves_provider_pixels_and_preserves_unchanged_identity() {
+        with_package_runtime_stack(|| {
         let mut shell = LiveShell::new().unwrap();
         shell.launcher = crate::launcher::Launcher::new(Vec::new());
         let id = WindowId(42);
@@ -35,6 +36,7 @@
         shell.close_window_preview();
         assert!(shell.preview_images.is_empty());
         assert!(last.upgrade().is_none());
+        });
     }
 
     #[test]
@@ -122,12 +124,14 @@
 
     #[test]
     fn panel_reentry_cancels_a_stale_preview_leave_deadline() {
+        with_package_runtime_stack(|| {
         let mut shell = LiveShell::new().unwrap();
         shell.preview_leave_deadline = Some(Instant::now());
 
         assert!(shell.panel_pointer_entered());
         assert!(shell.preview_leave_deadline.is_none());
         assert!(!shell.panel_pointer_entered());
+        });
     }
 
     #[test]
@@ -161,6 +165,7 @@
 
     #[test]
     fn desktop_scene_rebuilds_when_wallpaper_arrives_at_the_initial_host_size() {
+        with_package_runtime_stack(|| {
         let mut shell = LiveShell::new().unwrap();
         shell.wallpaper = None;
         shell.wallpaper_size = (0, 0);
@@ -187,6 +192,7 @@
                 nickel_ui::backend::PaintCommand::Image { id: 1, .. })),
             "the native desktop must paint the arriving wallpaper"
         );
+        });
     }
 
     #[test]
@@ -207,6 +213,7 @@
 
     #[test]
     fn shell_image_diagnostics_account_owned_caches_without_process_rss() {
+        with_package_runtime_stack(|| {
         let mut shell = LiveShell::new().unwrap();
         shell.wallpaper = Some(Arc::new(RgbaImage::new(10, 10)));
         shell.tray = vec![TrayItem {
@@ -233,6 +240,7 @@
         assert_eq!(empty.preview_entries, 0);
         assert_eq!(empty.preview_bytes, 0);
         assert_eq!(empty.wallpaper_bytes, diagnostics.wallpaper_bytes);
+        });
     }
 
     #[test]

@@ -3,6 +3,7 @@
 
     #[test]
     fn ordinary_plugin_window_title_comes_from_its_jsx_root() {
+        with_package_runtime_stack(|| {
         let directory = concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../assets/plugins/example-surface-dialog"
@@ -36,6 +37,7 @@
         assert_eq!(shell.plugin_panel_title(&key), Some("Home"));
         shell.plugin_surface_hosts.remove(&key);
         assert_eq!(shell.plugin_panel_title(&key), None);
+        });
     }
 
 
@@ -50,6 +52,7 @@
 
     #[test]
     fn window_preview_shared_surface_retires_and_public_requests_recheck_revision_lock() {
+        with_package_runtime_stack(|| {
         let host = Arc::new(crate::session_host::StagedSessionHost::new(crate::session_host::default_session_host()));
         let mut shell = LiveShell::new_with_session_host(host.clone()).unwrap();
         shell.launcher = crate::launcher::Launcher::new(Vec::new());
@@ -76,6 +79,7 @@
         assert!(!shell.preview_plugin_active());
         assert!(shell.preview_group.is_none());
         assert!(shell.plugin_window_previews("nickel-default").is_none());
+        });
     }
 
     #[test]
@@ -262,6 +266,7 @@
 
     #[test]
     fn failed_application_launch_keeps_launcher_open_and_reports_error() {
+        with_package_runtime_stack(|| {
         let mut shell = LiveShell::new().unwrap();
         shell.launcher_visible = true;
         let application = crate::model::Application::new(
@@ -278,11 +283,13 @@
         let status = shell.launcher_status.as_deref().unwrap_or_default();
         assert!(status.starts_with("Could not launch Missing application: "));
         assert!(status.contains("No such file") || status.contains("not found"));
+        });
     }
 
     #[cfg(target_os = "linux")]
     #[test]
     fn repeated_application_activation_cannot_bypass_secure_storage_readiness() {
+        with_package_runtime_stack(|| {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         struct StartingStorageHost(AtomicUsize);
@@ -332,10 +339,12 @@
                 "Secure storage is not ready. External application will remain blocked until your existing wallet is available."
             )
         );
+        });
     }
 
     #[test]
     fn unavailable_shortcut_application_is_a_visible_typed_failure() {
+        with_package_runtime_stack(|| {
         let mut shell = LiveShell::new().unwrap();
 
         assert!(!shell.launch_named_application("Missing Nickel Tool"));
@@ -343,12 +352,14 @@
             shell.shortcut_action_status.as_deref(),
             Some("Missing Nickel Tool is unavailable.")
         );
+        });
     }
 
 
 
     #[test]
     fn plugin_retry_saves_failed_launcher_preferences_once() {
+        with_package_runtime_stack(|| {
         let directory = tempfile::tempdir().expect("temporary preferences directory");
         let preferences_path = directory.path().join("launcher-preferences");
         let mut shell = LiveShell::new().unwrap();
@@ -379,10 +390,12 @@
             crate::plugin_panel::PluginEffect::RetryApplicationPinSave
         ]));
         assert_eq!(shell.launcher_persistence_attempts, 2);
+        });
     }
 
     #[test]
     fn granted_plugin_can_pin_catalog_app_and_unpin_unavailable_app() {
+        with_package_runtime_stack(|| {
         let directory = tempfile::tempdir().expect("temporary preferences directory");
         let mut shell = LiveShell::new().unwrap();
         shell.launcher = crate::launcher::Launcher::default();
@@ -412,6 +425,7 @@
             }
         ]));
         assert!(!shell.launcher.is_pinned("org.example.unavailable"));
+        });
     }
 
 
@@ -498,6 +512,7 @@
 
     #[test]
     fn preview_geometry_and_thumbnail_bounds_follow_the_projected_card_limit() {
+        with_package_runtime_stack(|| {
         let mut shell = LiveShell::new().unwrap();
         shell.launcher.set_preferences(LauncherPreferences::default());
         shell.windows = (1..=13)
@@ -516,10 +531,12 @@
         let windows = (1..=12).map(WindowId).collect::<Vec<_>>();
         assert_eq!(shell.preview_thumbnail_bounds(&windows).unwrap().len(), 12);
         assert!(shell.preview_plugin_bounds(crate::window_preview::PreviewAction::Activate(WindowId(13))).is_none());
+        });
     }
 
     #[test]
     fn public_jsx_window_close_consumes_and_dismisses_the_preview_menu() {
+        with_package_runtime_stack(|| {
         let host=Arc::new(crate::session_host::StagedSessionHost::new(crate::session_host::default_session_host()));
         let mut shell=LiveShell::new_with_session_host(host.clone()).unwrap();
         let window=OpenWindow{id:WindowId(73),application_id:Some(ApplicationId::new("org.example.Editor")),active:true,title:"Document".into(),state:Default::default()};
@@ -534,10 +551,12 @@
         assert!(shell.window_menu_snapshot.is_none());
         assert!(!shell.default_shell_surface_visible("window-menu"));
         assert!(host.take_commands().iter().any(|command|matches!(command,crate::platform::ShellCommand::WindowAction{window:WindowId(73),action:crate::platform::WindowAction::Close})));
+        });
     }
 
     #[test]
     fn public_menu_blur_dismissal_invalidates_intent_without_restoring_application_focus() {
+        with_package_runtime_stack(|| {
         let host = Arc::new(crate::session_host::StagedSessionHost::new(crate::session_host::default_session_host()));
         let mut shell = LiveShell::new_with_session_host(host.clone()).unwrap();
         shell.windows = vec![OpenWindow { id: WindowId(73), application_id: Some(ApplicationId::new("org.example.Editor")), active: true, title: "Document".into(), state: Default::default() }];
@@ -556,6 +575,7 @@
         assert_eq!(shell.windows.iter().find(|window| window.active).unwrap().id, WindowId(74));
         assert!(!shell.default_shell_surface_visible("window-menu"));
         assert!(!host.take_commands().iter().any(|command| matches!(command, crate::platform::ShellCommand::RestoreApplicationFocus)));
+        });
     }
 
     #[test]
@@ -648,6 +668,7 @@
 
     #[test]
     fn project_displays_shortcut_opens_dedicated_projection_view() {
+        with_package_runtime_stack(|| {
         let mut shell = LiveShell::new().unwrap();
 
         assert!(shell.global_shortcut(GlobalShortcut::ProjectDisplays));
@@ -656,4 +677,5 @@
             role: nickel_ui::SemanticRole::Button,
             name: "Show desktop".into(),
         }).is_err());
+        });
     }

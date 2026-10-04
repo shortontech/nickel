@@ -377,8 +377,10 @@ mod tests {
 
     #[test]
     fn every_advertised_production_shell_action_has_a_dispatch_disposition() {
-        let shell = LiveShell::new().expect("live shell");
+        with_package_runtime_stack(|| {
+            let shell = LiveShell::new().expect("live shell");
 
-        assert_advertised_actions_are_guarded(&shell.control_host, control_activate);
+            assert_advertised_actions_are_guarded(&shell.control_host, control_activate);
+        });
     }
 }

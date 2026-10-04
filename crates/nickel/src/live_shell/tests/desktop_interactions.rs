@@ -141,6 +141,7 @@
 
     #[test]
     fn desktop_topology_changes_invalidate_without_a_viewport_switch() {
+        with_package_runtime_stack(|| {
         let mut shell = LiveShell::new().unwrap();
         let output = |primary, width| nickel_file::desktop::DesktopOutput {
             id: "same-output".into(),
@@ -168,10 +169,12 @@
         assert!(!shell.desktop_application_dirty);
         let _ = shell.scene(SurfaceRole::Desktop, 800, 600);
         assert_eq!(shell.desktop_change_token.frame_generation, stable);
+        });
     }
 
     #[test]
     fn desktop_live_input_rebuilds_selection_and_keyboard_navigation() {
+        with_package_runtime_stack(|| {
         use std::{ffi::OsString, path::PathBuf};
         let mut shell = LiveShell::new().unwrap();
         isolate_live_desktop_fixture(&mut shell);
@@ -279,10 +282,12 @@
             ))
         );
         assert_ne!(shell.desktop_change_token, pointer_token);
+        });
     }
 
     #[test]
     fn desktop_selection_marquee_preserves_icons_through_delayed_refresh_poll_and_release() {
+        with_package_runtime_stack(|| {
         use std::{ffi::OsString, path::PathBuf};
 
         let mut shell = LiveShell::new().unwrap();
@@ -427,10 +432,12 @@
                 .iter()
                 .all(|overlay| !matches!(overlay, FrameOverlay::SelectionMarquee { .. }))
         );
+        });
     }
 
     #[test]
     fn desktop_secondary_press_opens_overlay_without_hiding_items_on_release_or_motion() {
+        with_package_runtime_stack(|| {
         let mut shell = LiveShell::new().unwrap();
         isolate_live_desktop_fixture(&mut shell);
         shell.set_file_clipboard_available(true);
@@ -511,10 +518,12 @@
         }));
         assert!(shell.desktop_host.application().context_menu.is_none());
         assert!(shell.desktop_host.inspect().open_overlay.is_none());
+        });
     }
 
     #[test]
     fn desktop_menu_owner_survives_two_output_render_and_foreign_pointer_motion() {
+        with_package_runtime_stack(|| {
         let mut shell = LiveShell::new().unwrap();
         shell.set_desktop_outputs(vec![
             nickel_file::desktop::DesktopOutput {
@@ -669,10 +678,12 @@
             dismissal.reason,
             super::desktop::DesktopMenuDismissReason::OutsidePress
         );
+        });
     }
 
     #[test]
     fn parked_desktop_viewport_deadlines_are_polled_independently() {
+        with_package_runtime_stack(|| {
         let mut shell = LiveShell::new().unwrap();
         shell.set_desktop_outputs(vec![
             nickel_file::desktop::DesktopOutput {
@@ -720,6 +731,7 @@
         };
         assert!(deadline_for("left").is_some_and(|deadline| deadline > now));
         assert!(deadline_for("right").is_some_and(|deadline| deadline > now));
+        });
     }
 
     #[test]
@@ -798,6 +810,7 @@
 
     #[test]
     fn desktop_live_host_keeps_rename_click_transaction_out_of_the_file_plane() {
+        with_package_runtime_stack(|| {
         use std::{ffi::OsString, path::PathBuf};
 
         let mut shell = LiveShell::new().unwrap();
@@ -923,6 +936,7 @@
             Some(selected)
         );
         assert_ne!(shell.desktop_host.application().layout.active(), underneath);
+        });
     }
 
     #[test]
@@ -1046,6 +1060,7 @@
 
     #[test]
     fn desktop_live_drag_commits_through_native_input() {
+        with_package_runtime_stack(|| {
         use std::{ffi::OsString, path::PathBuf};
 
         let palette = nickel_core::theme::ThemePalette::from_appearance(Default::default());
@@ -1101,10 +1116,12 @@
             shell.desktop_host.application().layout.items()[0].position.x,
             start.x + cell_width * 2.0,
         );
+        });
     }
 
     #[test]
     fn desktop_background_menu_uses_native_overlay_for_controller_input() {
+        with_package_runtime_stack(|| {
         let mut shell = LiveShell::new().unwrap();
         shell.scene(SurfaceRole::Desktop, 800, 600);
         assert!(shell.desktop_controller(ControllerAction::ContextMenu));
@@ -1113,6 +1130,7 @@
         assert!(shell.desktop_host.application().frame_overlays(ViewContext::new(
             Rect::new(0.0, 0.0, 800.0, 600.0), InputModality::Controller,
         )).iter().any(|overlay| matches!(overlay, FrameOverlay::Menu(_))));
+        });
     }
 
     #[test]
@@ -1394,6 +1412,7 @@ fn desktop_settings_destinations_are_typed_and_keep_the_invoking_output() {
     }
     #[test]
     fn desktop_scroll_preserves_pixels_and_fractional_lines_without_selection_snapback() {
+        with_package_runtime_stack(|| {
         let palette = nickel_core::theme::ThemePalette::from_appearance(Default::default());
         let mut desktop = super::DesktopApplication::fixture(None, palette);
         desktop.set_outputs(vec![nickel_file::desktop::DesktopOutput {
@@ -1426,4 +1445,5 @@ fn desktop_settings_destinations_are_typed_and_keep_the_invoking_output() {
         assert!(shell.desktop_input(axis(Some((0, 0)))));
         assert_eq!(shell.desktop_host.application().overflow_offsets["primary"], 145.5);
         assert!(shell.desktop_host.application().layout.selected().contains(&first));
+        });
     }
