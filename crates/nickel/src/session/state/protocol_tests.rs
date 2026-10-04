@@ -8165,55 +8165,59 @@ fn native_screenshot_claims_keyboard_on_show_and_escape_hides_without_clicking()
 
 #[test]
 fn control_center_hides_on_client_or_internal_focus_transfer_and_stays_hidden() {
-    let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
-    let (_event_loop, mut session) = internal_shell_test_session();
-    let application = session.internal_ui.insert(
-        InternalWindowTestApp,
-        crate::session::InternalSurfacePlacement {
-            role: crate::session::InternalSurfaceRole::Application,
-            geometry: (100, 100, 300, 300),
-            output: Some("file-test".into()),
-        },
-        1.0,
-    );
-    for client in [true, false] {
-        session.notify_global_shortcut(nickel_session_protocol::ShortcutAction::ShowControlCenter);
-        let control = session
-            .internal_shell
-            .as_ref()
-            .unwrap()
-            .plugin_surface(
-                &session
-                    .internal_shell
-                    .as_ref()
-                    .unwrap()
-                    .active_shell_surface_key("quick-settings"),
-                "file-test",
-            )
-            .unwrap()
-            .id;
-        let runtime = session.internal_shell_surfaces[&control];
-        assert_eq!(session.internal_ui.focused(), Some(runtime));
-        assert!(session.internal_shell.as_ref().unwrap().visible(control));
-        let handled = session
-            .internal_ui
-            .pointer_button_with_client((200.0, 200.0), true, client);
-        assert_eq!(handled, !client);
-        session.flush_internal_shell_input();
-        assert!(!session.internal_shell.as_ref().unwrap().visible(control));
-        assert!(!session.internal_ui.is_visible(runtime));
-        assert_eq!(
-            session.internal_ui.focused(),
-            (!client).then_some(application)
+    with_package_runtime_stack(|| {
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = internal_shell_test_session();
+        let application = session.internal_ui.insert(
+            InternalWindowTestApp,
+            crate::session::InternalSurfacePlacement {
+                role: crate::session::InternalSurfaceRole::Application,
+                geometry: (100, 100, 300, 300),
+                output: Some("file-test".into()),
+            },
+            1.0,
         );
-        session.flush_internal_shell_input();
-        session.sync_internal_shell();
-        assert!(!session.internal_shell.as_ref().unwrap().visible(control));
-        assert_eq!(
-            session.internal_ui.focused(),
-            (!client).then_some(application)
-        );
-    }
+        for client in [true, false] {
+            session
+                .notify_global_shortcut(nickel_session_protocol::ShortcutAction::ShowControlCenter);
+            let control = session
+                .internal_shell
+                .as_ref()
+                .unwrap()
+                .plugin_surface(
+                    &session
+                        .internal_shell
+                        .as_ref()
+                        .unwrap()
+                        .active_shell_surface_key("quick-settings"),
+                    "file-test",
+                )
+                .unwrap()
+                .id;
+            let runtime = session.internal_shell_surfaces[&control];
+            assert_eq!(session.internal_ui.focused(), Some(runtime));
+            assert!(session.internal_shell.as_ref().unwrap().visible(control));
+            let handled =
+                session
+                    .internal_ui
+                    .pointer_button_with_client((200.0, 200.0), true, client);
+            assert_eq!(handled, !client);
+            session.flush_internal_shell_input();
+            assert!(!session.internal_shell.as_ref().unwrap().visible(control));
+            assert!(!session.internal_ui.is_visible(runtime));
+            assert_eq!(
+                session.internal_ui.focused(),
+                (!client).then_some(application)
+            );
+            session.flush_internal_shell_input();
+            session.sync_internal_shell();
+            assert!(!session.internal_shell.as_ref().unwrap().visible(control));
+            assert_eq!(
+                session.internal_ui.focused(),
+                (!client).then_some(application)
+            );
+        }
+    });
 }
 
 #[test]
