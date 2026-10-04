@@ -3833,6 +3833,15 @@ mod tests {
     use super::*;
     use nickel_ui::Application;
 
+    fn with_package_runtime_stack(test: impl FnOnce() + Send + 'static) {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(test)
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
     #[test]
     fn public_session_callback_emits_native_operation_and_rejects_ungranted_or_stale_requests() {
         use nickel_ui::Application;
@@ -4977,10 +4986,11 @@ mod tests {
 
     #[test]
     fn packaged_panel_aligns_at_bottom_and_dispatches_dialog_action() {
-        let mut external_manifest = manifest().clone();
-        external_manifest.id = "org.example.tall-panel".into();
-        external_manifest.surfaces[0].height = 400;
-        let package = PluginPackage {
+        with_package_runtime_stack(|| {
+            let mut external_manifest = manifest().clone();
+            external_manifest.id = "org.example.tall-panel".into();
+            external_manifest.surfaces[0].height = 400;
+            let package = PluginPackage {
             modules: Vec::new(),
             manifest: external_manifest,
             images: Default::default(),
@@ -4995,52 +5005,53 @@ mod tests {
             "#
             .into(),
         };
-        let app = PluginPanelApplication::from_package_surface(
-            &package,
-            &Default::default(),
-            &package.manifest.surfaces[0],
-        )
-        .unwrap();
-        let mut host = nickel_ui::UiHost::new(app, 440, 400);
-        let open = host
-            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
-                role: nickel_ui::SemanticRole::Button,
-                name: "Open dialog".into(),
-            })
+            let app = PluginPanelApplication::from_package_surface(
+                &package,
+                &Default::default(),
+                &package.manifest.surfaces[0],
+            )
             .unwrap();
-        assert!(matches!(
-            &host.application().accepted.node(),
-            PanelNode::Surface {
-                width: Length::Percent(1.0),
-                height: Length::Percent(1.0),
-                ..
-            }
-        ));
-        assert!(open.bounds.origin.y > 250.0);
-        assert!(open.bounds.origin.y + open.bounds.size.height <= 400.0);
-        host.step(nickel_ui::HostBatch {
-            events: vec![nickel_ui::HostEvent::Ui(
-                nickel_ui::UiEvent::AccessibilityActivate(open.id),
-            )],
-            ..Default::default()
+            let mut host = nickel_ui::UiHost::new(app, 440, 400);
+            let open = host
+                .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                    role: nickel_ui::SemanticRole::Button,
+                    name: "Open dialog".into(),
+                })
+                .unwrap();
+            assert!(matches!(
+                &host.application().accepted.node(),
+                PanelNode::Surface {
+                    width: Length::Percent(1.0),
+                    height: Length::Percent(1.0),
+                    ..
+                }
+            ));
+            assert!(open.bounds.origin.y > 250.0);
+            assert!(open.bounds.origin.y + open.bounds.size.height <= 400.0);
+            host.step(nickel_ui::HostBatch {
+                events: vec![nickel_ui::HostEvent::Ui(
+                    nickel_ui::UiEvent::AccessibilityActivate(open.id),
+                )],
+                ..Default::default()
+            });
+            assert!(host.inspect().open_overlay.is_some());
+            let show = host
+                .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                    role: nickel_ui::SemanticRole::Button,
+                    name: "Show launcher".into(),
+                })
+                .unwrap();
+            host.step(nickel_ui::HostBatch {
+                events: vec![nickel_ui::HostEvent::Ui(
+                    nickel_ui::UiEvent::AccessibilityActivate(show.id),
+                )],
+                ..Default::default()
+            });
+            assert_eq!(
+                host.application_mut().take_effects(),
+                vec![PluginEffect::ShowLauncher]
+            );
         });
-        assert!(host.inspect().open_overlay.is_some());
-        let show = host
-            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
-                role: nickel_ui::SemanticRole::Button,
-                name: "Show launcher".into(),
-            })
-            .unwrap();
-        host.step(nickel_ui::HostBatch {
-            events: vec![nickel_ui::HostEvent::Ui(
-                nickel_ui::UiEvent::AccessibilityActivate(show.id),
-            )],
-            ..Default::default()
-        });
-        assert_eq!(
-            host.application_mut().take_effects(),
-            vec![PluginEffect::ShowLauncher]
-        );
     }
 
     #[test]
@@ -7057,65 +7068,59 @@ mod tests {
 
     #[test]
     fn component_window_example_opens_dialog_and_requests_settings() {
-        std::thread::Builder::new()
-            .name("component-window-example-test".into())
-            .stack_size(16 * 1024 * 1024)
-            .spawn(|| {
-                let directory = concat!(
-                    env!("CARGO_MANIFEST_DIR"),
-                    "/../../assets/plugins/example-window"
-                );
-                let package = PluginPackage::load(directory).unwrap();
-                let mut host = nickel_ui::UiHost::new(
-                    PluginPanelApplication::from_package(&package).unwrap(),
-                    520,
-                    340,
-                );
-                assert!(matches!(
-                    host.application().accepted.node(),
-                    PanelNode::Surface {
-                        window_request: Some(_),
-                        ..
-                    }
-                ));
-                let open = host
-                    .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
-                        role: nickel_ui::SemanticRole::Button,
-                        name: "Open dialog".into(),
-                    })
-                    .unwrap();
-                assert!(open.bounds.size.width > 0.0);
-                assert!(open.bounds.size.height > 0.0);
-                host.step(nickel_ui::HostBatch {
-                    events: vec![nickel_ui::HostEvent::Ui(
-                        nickel_ui::UiEvent::AccessibilityActivate(open.id),
-                    )],
-                    ..Default::default()
-                });
-                assert!(host.inspect().open_overlay.is_some());
-                let settings = host
-                    .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
-                        role: nickel_ui::SemanticRole::Button,
-                        name: "Open Settings".into(),
-                    })
-                    .unwrap();
-                assert!(settings.bounds.size.width > 0.0);
-                assert!(settings.bounds.size.height > 0.0);
-                host.step(nickel_ui::HostBatch {
-                    events: vec![nickel_ui::HostEvent::Ui(
-                        nickel_ui::UiEvent::AccessibilityActivate(settings.id),
-                    )],
-                    ..Default::default()
-                });
-                assert_eq!(
-                    host.application_mut().take_effects(),
-                    vec![PluginEffect::ShowSettings(None)]
-                );
-                assert!(host.application_mut().last_error().is_none());
-            })
-            .unwrap()
-            .join()
-            .unwrap();
+        with_package_runtime_stack(|| {
+            let directory = concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../assets/plugins/example-window"
+            );
+            let package = PluginPackage::load(directory).unwrap();
+            let mut host = nickel_ui::UiHost::new(
+                PluginPanelApplication::from_package(&package).unwrap(),
+                520,
+                340,
+            );
+            assert!(matches!(
+                host.application().accepted.node(),
+                PanelNode::Surface {
+                    window_request: Some(_),
+                    ..
+                }
+            ));
+            let open = host
+                .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                    role: nickel_ui::SemanticRole::Button,
+                    name: "Open dialog".into(),
+                })
+                .unwrap();
+            assert!(open.bounds.size.width > 0.0);
+            assert!(open.bounds.size.height > 0.0);
+            host.step(nickel_ui::HostBatch {
+                events: vec![nickel_ui::HostEvent::Ui(
+                    nickel_ui::UiEvent::AccessibilityActivate(open.id),
+                )],
+                ..Default::default()
+            });
+            assert!(host.inspect().open_overlay.is_some());
+            let settings = host
+                .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                    role: nickel_ui::SemanticRole::Button,
+                    name: "Open Settings".into(),
+                })
+                .unwrap();
+            assert!(settings.bounds.size.width > 0.0);
+            assert!(settings.bounds.size.height > 0.0);
+            host.step(nickel_ui::HostBatch {
+                events: vec![nickel_ui::HostEvent::Ui(
+                    nickel_ui::UiEvent::AccessibilityActivate(settings.id),
+                )],
+                ..Default::default()
+            });
+            assert_eq!(
+                host.application_mut().take_effects(),
+                vec![PluginEffect::ShowSettings(None)]
+            );
+            assert!(host.application_mut().last_error().is_none());
+        });
     }
 
     #[test]
