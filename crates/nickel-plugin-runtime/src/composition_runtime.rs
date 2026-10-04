@@ -816,15 +816,10 @@ impl ShellCompositionRuntime {
         }
         let changed = next.contributions != self.resolution.contributions
             || owners != self.packages.keys().cloned().collect();
-        for owner in self
-            .packages
-            .keys()
-            .filter(|owner| !owners.contains(*owner))
-            .cloned()
-            .collect::<Vec<_>>()
-        {
-            self.retire(&owner);
-        }
+        // Removed owners remain live until the host has admitted the consumer
+        // tree produced from this catalog. Their mounts and callback grants
+        // are still required to validate that transition; the host retires
+        // them explicitly after native application succeeds.
         for owner in owners {
             if let std::collections::btree_map::Entry::Vacant(entry) =
                 self.packages.entry(owner.clone())
@@ -4922,6 +4917,20 @@ mod tests {
             .render_expanded(&root, &serde_json::json!({}), |_| Ok(()))
             .unwrap();
         assert!(tree.node.to_string().contains("provider0"));
+        let mut without_provider = catalog.clone();
+        without_provider.remove("provider");
+        assert!(
+            host.sync_contributors(&without_provider, &BTreeMap::new())
+                .unwrap()
+        );
+        assert!(host.contributions("taskbar.items").is_empty());
+        assert!(host.shared_owner_runtime(&owner).is_ok());
+        let tree = host
+            .render_expanded(&root, &serde_json::json!({}), |_| Ok(()))
+            .unwrap();
+        assert!(!tree.node.to_string().contains("provider"));
+        host.retire(&owner);
+        assert!(host.shared_owner_runtime(&owner).is_err());
     }
 
     #[test]

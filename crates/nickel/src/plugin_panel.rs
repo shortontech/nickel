@@ -944,7 +944,11 @@ impl PluginPanelApplication {
             return Ok(false);
         };
         let host = state.host.borrow();
-        let owners = host.participating_owners().cloned().collect::<Vec<_>>();
+        let owners = host
+            .participating_owners()
+            .filter(|owner| catalog.contains_key(&owner.id))
+            .cloned()
+            .collect::<Vec<_>>();
         let mut css = String::new();
         let mut images = PluginImages::new();
         let mut pixels = 0u64;
@@ -984,7 +988,11 @@ impl PluginPanelApplication {
         drop(host);
         self.stylesheet = stylesheet;
         self.sync_images(images);
-        self.refresh_composition_snapshots()
+        // Contributor membership changes can remove nested ownership
+        // boundaries. Re-admit the complete surface while the departing owner
+        // is still live, rather than composing incremental patches against a
+        // boundary that the same transaction removes.
+        self.reconcile_surface_authority()
     }
 
     pub(crate) fn refresh_composition_snapshots(&mut self) -> Result<bool, String> {

@@ -5504,10 +5504,6 @@ impl LiveShell {
         if !enabled && self.is_shell_package(id) {
             self.cancel_keyboard_gestures();
         }
-        if !enabled {
-            self.retire_installed_composition_owner(id);
-        }
-
         self.plugin_activation_generation =
             self.plugin_activation_generation.wrapping_add(1).max(1);
         if !enabled {
@@ -5515,6 +5511,22 @@ impl LiveShell {
                 self.retire_preview_plugin_state();
             }
             self.run_status.remove(id);
+            // Publish both contribution and callback-backed Settings removal
+            // while the provider's mount and callback authority remain alive.
+            // The active shell admits that consumer-removal patch before the
+            // provider owner itself is retired.
+            self.package_settings_registry.retire_provider(id);
+            self.package_settings_runtimes.remove(id);
+            self.package_settings_values.remove(id);
+            self.package_settings_value_revisions.remove(id);
+            for runtime in self.package_settings_runtimes.values() {
+                runtime
+                    .borrow_mut()
+                    .set_settings_registry(&self.package_settings_registry)?;
+            }
+            self.reconcile_installed_contributors()
+                .map_err(|error| format!("could not detach provider contributions: {error}"))?;
+            self.retire_installed_composition_owner(id);
             self.package_runtimes.remove(id);
             self.application_search.retire(id);
             self.plugin_surface_hosts
@@ -5526,9 +5538,6 @@ impl LiveShell {
                 .retain(|key, _| key.plugin_id != id);
             if id == self.primary_panel_key.plugin_id {
                 self.primary_panel_key = crate::plugin_panel::surface_key();
-            }
-            if let Err(error) = self.reconcile_installed_contributors() {
-                tracing::warn!(%error,"contributor retirement refresh failed");
             }
             if self
                 .shell_selection_preview
