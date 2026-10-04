@@ -552,41 +552,43 @@ fn protocol_publication_records_ordinary_window_state_changes() {
 
 #[test]
 fn codex_diagnostic_projects_health_without_source_or_failure_details() {
-    use nickel_core::optional_features::{
-        CodexAvailabilityProjection, FeatureHealth, FeatureInstallation, FeatureSupport,
-    };
-    use nickel_remote_control::diagnostics::{
-        FeatureHealthDiagnostic, FeatureInstallationDiagnostic,
-    };
-    let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
-    let (_event_loop, mut session) = internal_shell_test_session();
-    session
-        .internal_shell
-        .as_mut()
-        .unwrap()
-        .apply_codex_projection(CodexAvailabilityProjection::new(
-            FeatureSupport::Supported,
-            FeatureInstallation::Incompatible,
-            true,
-            FeatureHealth::Failed,
-            47,
-            Some("private path and provider failure".into()),
-        ));
-    let diagnostic = session
-        .remote_codex_feature_diagnostic(8, 19)
-        .expect("Codex projection");
-    assert_eq!(diagnostic.observation_generation, 8);
-    assert_eq!(diagnostic.observed_at_us, 19);
-    assert!(diagnostic.supported && diagnostic.enabled);
-    assert_eq!(
-        diagnostic.installation,
-        FeatureInstallationDiagnostic::Incompatible
-    );
-    assert_eq!(diagnostic.health, FeatureHealthDiagnostic::Failed);
-    assert_eq!(diagnostic.configuration_generation, 47);
-    let json = serde_json::to_string(&diagnostic).unwrap();
-    assert!(!json.contains("private path"));
-    assert!(!json.contains("provider failure"));
+    with_package_runtime_stack(|| {
+        use nickel_core::optional_features::{
+            CodexAvailabilityProjection, FeatureHealth, FeatureInstallation, FeatureSupport,
+        };
+        use nickel_remote_control::diagnostics::{
+            FeatureHealthDiagnostic, FeatureInstallationDiagnostic,
+        };
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = internal_shell_test_session();
+        session
+            .internal_shell
+            .as_mut()
+            .unwrap()
+            .apply_codex_projection(CodexAvailabilityProjection::new(
+                FeatureSupport::Supported,
+                FeatureInstallation::Incompatible,
+                true,
+                FeatureHealth::Failed,
+                47,
+                Some("private path and provider failure".into()),
+            ));
+        let diagnostic = session
+            .remote_codex_feature_diagnostic(8, 19)
+            .expect("Codex projection");
+        assert_eq!(diagnostic.observation_generation, 8);
+        assert_eq!(diagnostic.observed_at_us, 19);
+        assert!(diagnostic.supported && diagnostic.enabled);
+        assert_eq!(
+            diagnostic.installation,
+            FeatureInstallationDiagnostic::Incompatible
+        );
+        assert_eq!(diagnostic.health, FeatureHealthDiagnostic::Failed);
+        assert_eq!(diagnostic.configuration_generation, 47);
+        let json = serde_json::to_string(&diagnostic).unwrap();
+        assert!(!json.contains("private path"));
+        assert!(!json.contains("provider failure"));
+    });
 }
 
 #[test]
