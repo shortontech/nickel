@@ -22,6 +22,15 @@ use super::{
     xdg_settlement_requires_resize_cleanup,
 };
 
+fn with_package_runtime_stack(test: impl FnOnce() + Send + 'static) {
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(test)
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
 #[test]
 fn keyed_plugin_popover_follows_its_control_to_the_selected_output() {
     let outputs = vec![
@@ -2942,139 +2951,141 @@ fn spec_0231_delayed_collectors_do_not_stall_or_commit_after_cancellation() {
 
 #[test]
 fn active_remote_lease_owns_one_overlay_per_output_and_revoke_removes_it() {
-    let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
-    let (_event_loop, mut session) = internal_shell_test_session();
-    let control = session.remote_control.control();
-    let mut control_guard = control.lock().unwrap();
-    control_guard.set_enabled(true);
-    let pairing = control_guard.start_pairing(10).unwrap();
-    let pending = control_guard
-        .exchange_short_code(
-            &pairing.ceremony_id,
-            &pairing.short_code,
-            "Indicator test",
-            vec![nickel_remote_control::Capability::Observe],
-            11,
-        )
-        .unwrap();
-    control_guard
-        .approve(
-            &pending.id,
-            nickel_remote_control::Approval::AllowOnce,
-            vec![nickel_remote_control::Capability::Observe],
-        )
-        .unwrap();
-    drop(control_guard);
+    with_package_runtime_stack(|| {
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = internal_shell_test_session();
+        let control = session.remote_control.control();
+        let mut control_guard = control.lock().unwrap();
+        control_guard.set_enabled(true);
+        let pairing = control_guard.start_pairing(10).unwrap();
+        let pending = control_guard
+            .exchange_short_code(
+                &pairing.ceremony_id,
+                &pairing.short_code,
+                "Indicator test",
+                vec![nickel_remote_control::Capability::Observe],
+                11,
+            )
+            .unwrap();
+        control_guard
+            .approve(
+                &pending.id,
+                nickel_remote_control::Approval::AllowOnce,
+                vec![nickel_remote_control::Capability::Observe],
+            )
+            .unwrap();
+        drop(control_guard);
 
-    session.sync_remote_control_indicators();
-    assert!(session.remote_indicator_surfaces.is_empty());
-    control
-        .lock()
-        .unwrap()
-        .leases_mut()
-        .approve_local(
-            pending.id.clone(),
-            nickel_remote_control::leases::ResourceScope::FullSession,
-            Instant::now(),
-            None,
-            false,
-            false,
-        )
-        .unwrap();
-    session.sync_remote_control_indicators();
-    assert_eq!(session.remote_indicator_surfaces.len(), 1);
-    let indicator = session.remote_indicator_surfaces["file-test"];
-    let placement = session.internal_ui.placement(indicator).unwrap();
-    assert_eq!(
-        placement.role,
-        crate::session::InternalSurfaceRole::TrustedControl
-    );
-    assert_eq!(session.remote_indicator_accessibility.len(), 1);
-    assert!(session.internal_ui.remote_access_protected(indicator));
-    assert_eq!(
-        session
-            .internal_ui
-            .bounded_application_semantics(indicator)
-            .unwrap_err(),
-        "hosted application semantics unavailable"
-    );
-    assert_eq!(placement.output.as_deref(), Some("file-test"));
-    assert!(
-        session
-            .internal_ui
-            .surface_at((900.0, 30.0), true)
-            .is_some()
-    );
-
-    let stop = session
-        .internal_ui
-        .semantic_nodes(indicator)
-        .into_iter()
-        .find(|node| node.name.as_deref() == Some("Stop"))
-        .expect("trusted indicator exposes an accessible Stop button");
-    assert!(stop.actions.contains(&nickel_ui::ActionKind::Activate));
-    session
-        .internal_ui
-        .perform_accessibility_action(
-            indicator,
-            stop.id,
-            nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
-        )
-        .unwrap();
-    assert!(
-        session
-            .internal_ui
-            .application_mut::<super::super::remote_indicator::RemoteIndicator>(indicator)
+        session.sync_remote_control_indicators();
+        assert!(session.remote_indicator_surfaces.is_empty());
+        control
+            .lock()
             .unwrap()
-            .stop_requested
-    );
-    assert!(control.lock().unwrap().revoke(&pending.id));
-    session.sync_remote_control_indicators();
-    assert!(session.remote_indicator_surfaces.is_empty());
-    assert!(session.remote_indicator_accessibility.is_empty());
-    assert!(session.internal_ui.placement(indicator).is_none());
+            .leases_mut()
+            .approve_local(
+                pending.id.clone(),
+                nickel_remote_control::leases::ResourceScope::FullSession,
+                Instant::now(),
+                None,
+                false,
+                false,
+            )
+            .unwrap();
+        session.sync_remote_control_indicators();
+        assert_eq!(session.remote_indicator_surfaces.len(), 1);
+        let indicator = session.remote_indicator_surfaces["file-test"];
+        let placement = session.internal_ui.placement(indicator).unwrap();
+        assert_eq!(
+            placement.role,
+            crate::session::InternalSurfaceRole::TrustedControl
+        );
+        assert_eq!(session.remote_indicator_accessibility.len(), 1);
+        assert!(session.internal_ui.remote_access_protected(indicator));
+        assert_eq!(
+            session
+                .internal_ui
+                .bounded_application_semantics(indicator)
+                .unwrap_err(),
+            "hosted application semantics unavailable"
+        );
+        assert_eq!(placement.output.as_deref(), Some("file-test"));
+        assert!(
+            session
+                .internal_ui
+                .surface_at((900.0, 30.0), true)
+                .is_some()
+        );
 
-    let pairing = control.lock().unwrap().start_pairing(20).unwrap();
-    let pending = control
-        .lock()
-        .unwrap()
-        .exchange_short_code(
-            &pairing.ceremony_id,
-            &pairing.short_code,
-            "Lock test",
-            vec![nickel_remote_control::Capability::Observe],
-            21,
-        )
-        .unwrap();
-    control
-        .lock()
-        .unwrap()
-        .approve(
-            &pending.id,
-            nickel_remote_control::Approval::AllowOnce,
-            vec![nickel_remote_control::Capability::Observe],
-        )
-        .unwrap();
-    control
-        .lock()
-        .unwrap()
-        .leases_mut()
-        .approve_local(
-            pending.id.clone(),
-            nickel_remote_control::leases::ResourceScope::FullSession,
-            Instant::now(),
-            None,
-            false,
-            false,
-        )
-        .unwrap();
-    session.sync_remote_control_indicators();
-    assert_eq!(session.remote_indicator_surfaces.len(), 1);
-    session.locked = true;
-    session.remote_control.lock();
-    session.sync_remote_control_indicators();
-    assert!(session.remote_indicator_surfaces.is_empty());
-    assert!(control.lock().unwrap().granted_clients().next().is_none());
+        let stop = session
+            .internal_ui
+            .semantic_nodes(indicator)
+            .into_iter()
+            .find(|node| node.name.as_deref() == Some("Stop"))
+            .expect("trusted indicator exposes an accessible Stop button");
+        assert!(stop.actions.contains(&nickel_ui::ActionKind::Activate));
+        session
+            .internal_ui
+            .perform_accessibility_action(
+                indicator,
+                stop.id,
+                nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
+            )
+            .unwrap();
+        assert!(
+            session
+                .internal_ui
+                .application_mut::<super::super::remote_indicator::RemoteIndicator>(indicator)
+                .unwrap()
+                .stop_requested
+        );
+        assert!(control.lock().unwrap().revoke(&pending.id));
+        session.sync_remote_control_indicators();
+        assert!(session.remote_indicator_surfaces.is_empty());
+        assert!(session.remote_indicator_accessibility.is_empty());
+        assert!(session.internal_ui.placement(indicator).is_none());
+
+        let pairing = control.lock().unwrap().start_pairing(20).unwrap();
+        let pending = control
+            .lock()
+            .unwrap()
+            .exchange_short_code(
+                &pairing.ceremony_id,
+                &pairing.short_code,
+                "Lock test",
+                vec![nickel_remote_control::Capability::Observe],
+                21,
+            )
+            .unwrap();
+        control
+            .lock()
+            .unwrap()
+            .approve(
+                &pending.id,
+                nickel_remote_control::Approval::AllowOnce,
+                vec![nickel_remote_control::Capability::Observe],
+            )
+            .unwrap();
+        control
+            .lock()
+            .unwrap()
+            .leases_mut()
+            .approve_local(
+                pending.id.clone(),
+                nickel_remote_control::leases::ResourceScope::FullSession,
+                Instant::now(),
+                None,
+                false,
+                false,
+            )
+            .unwrap();
+        session.sync_remote_control_indicators();
+        assert_eq!(session.remote_indicator_surfaces.len(), 1);
+        session.locked = true;
+        session.remote_control.lock();
+        session.sync_remote_control_indicators();
+        assert!(session.remote_indicator_surfaces.is_empty());
+        assert!(control.lock().unwrap().granted_clients().next().is_none());
+    });
 }
 
 #[cfg(target_os = "linux")]
