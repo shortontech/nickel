@@ -1151,90 +1151,92 @@ fn closing_dialog_owner_retires_its_dialog_but_preserves_sibling_window() {
 #[cfg(target_os = "linux")]
 #[test]
 fn internal_shell_presents_two_surfaces_from_one_package_on_one_output() {
-    struct Host;
-    impl crate::session_host::SessionHost for Host {
-        fn dispatch(
-            &self,
-            _command: crate::platform::ShellCommand,
-        ) -> Result<(), crate::platform::SessionRequestError> {
-            Ok(())
-        }
+    with_package_runtime_stack(|| {
+        struct Host;
+        impl crate::session_host::SessionHost for Host {
+            fn dispatch(
+                &self,
+                _command: crate::platform::ShellCommand,
+            ) -> Result<(), crate::platform::SessionRequestError> {
+                Ok(())
+            }
 
-        fn secure_storage_state(
-            &self,
-        ) -> Result<crate::platform::SecureStorageState, crate::platform::SessionRequestError>
-        {
-            Ok(crate::platform::SecureStorageState::Ready)
+            fn secure_storage_state(
+                &self,
+            ) -> Result<crate::platform::SecureStorageState, crate::platform::SessionRequestError>
+            {
+                Ok(crate::platform::SecureStorageState::Ready)
+            }
         }
-    }
-    let root = tempfile::tempdir().unwrap();
-    let directory = root.path().join("org.example.multi");
-    std::fs::create_dir(&directory).unwrap();
-    std::fs::write(
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("org.example.multi");
+        std::fs::create_dir(&directory).unwrap();
+        std::fs::write(
         directory.join("plugin.json"),
         r#"{"api_version":1,"id":"org.example.multi","name":"Multi","entry":"main.js","surfaces":[{"id":"clock","kind":"panel","width":300,"height":64},{"id":"mail","kind":"panel","width":340,"height":68}]}"#,
     )
     .unwrap();
-    std::fs::write(
-        directory.join("main.js"),
-        "function App() { return h(Panel, {}, h(Text, {}, useSurface().id)); }",
-    )
-    .unwrap();
-    let mut coordinator = crate::internal_shell::InternalShellCoordinator::new(
-        Arc::new(Host),
-        crate::winit_shell::PanelEdge::Bottom,
-    )
-    .unwrap();
-    let catalog = nickel_core::plugins::PluginCatalog::discover(root.path()).unwrap();
-    for (id, descriptor) in catalog.packages {
-        let shell = coordinator.shell_mut();
-        shell
-            .plugin_registry
-            .register(descriptor.manifest.clone())
-            .unwrap();
-        shell
-            .external_plugin_packages
-            .insert(id.clone(), descriptor.into());
-        shell.set_plugin_enabled(&id, true).unwrap();
-    }
-    coordinator.set_outputs(&[crate::internal_shell::InternalOutput {
-        x: 0,
-        y: 0,
-        name: "test".into(),
-        width: 1280,
-        height: 720,
-        scale: 1.0,
-    }]);
-    let panels = coordinator
-        .surfaces()
-        .iter()
-        .filter(|surface| {
-            surface.role == crate::winit_shell::SurfaceRole::Panel
-                && surface
-                    .plugin
-                    .as_ref()
-                    .is_some_and(|key| key.plugin_id == "org.example.multi")
-        })
-        .map(|surface| {
-            (
-                surface.id,
-                surface.plugin.as_ref().unwrap().surface_id.clone(),
-            )
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(panels.len(), 2);
-    for (id, label) in panels {
-        assert!(coordinator.visible(id));
-        assert!(
-            coordinator
-                .scene(id)
-                .unwrap()
-                .iter()
-                .any(|command| matches!(command,
-                    nickel_ui::backend::PaintCommand::Text { text, .. } if text == &label
-                ))
-        );
-    }
+        std::fs::write(
+            directory.join("main.js"),
+            "function App() { return h(Panel, {}, h(Text, {}, useSurface().id)); }",
+        )
+        .unwrap();
+        let mut coordinator = crate::internal_shell::InternalShellCoordinator::new(
+            Arc::new(Host),
+            crate::winit_shell::PanelEdge::Bottom,
+        )
+        .unwrap();
+        let catalog = nickel_core::plugins::PluginCatalog::discover(root.path()).unwrap();
+        for (id, descriptor) in catalog.packages {
+            let shell = coordinator.shell_mut();
+            shell
+                .plugin_registry
+                .register(descriptor.manifest.clone())
+                .unwrap();
+            shell
+                .external_plugin_packages
+                .insert(id.clone(), descriptor.into());
+            shell.set_plugin_enabled(&id, true).unwrap();
+        }
+        coordinator.set_outputs(&[crate::internal_shell::InternalOutput {
+            x: 0,
+            y: 0,
+            name: "test".into(),
+            width: 1280,
+            height: 720,
+            scale: 1.0,
+        }]);
+        let panels = coordinator
+            .surfaces()
+            .iter()
+            .filter(|surface| {
+                surface.role == crate::winit_shell::SurfaceRole::Panel
+                    && surface
+                        .plugin
+                        .as_ref()
+                        .is_some_and(|key| key.plugin_id == "org.example.multi")
+            })
+            .map(|surface| {
+                (
+                    surface.id,
+                    surface.plugin.as_ref().unwrap().surface_id.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(panels.len(), 2);
+        for (id, label) in panels {
+            assert!(coordinator.visible(id));
+            assert!(
+                coordinator
+                    .scene(id)
+                    .unwrap()
+                    .iter()
+                    .any(|command| matches!(command,
+                        nickel_ui::backend::PaintCommand::Text { text, .. } if text == &label
+                    ))
+            );
+        }
+    });
 }
 
 #[test]

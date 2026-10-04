@@ -1263,6 +1263,7 @@ fn desktop_settings_destinations_are_typed_and_keep_the_invoking_output() {
     #[test]
     #[cfg(target_os = "linux")]
     fn native_desktop_initial_scene_and_hotplug_use_output_topology() {
+        with_package_runtime_stack(|| {
         use crate::internal_shell::{InternalOutput, InternalShellCoordinator};
         use crate::winit_shell::{PanelEdge, PANEL_HEIGHT};
         use std::{ffi::OsString, path::PathBuf};
@@ -1409,6 +1410,7 @@ fn desktop_settings_destinations_are_typed_and_keep_the_invoking_output() {
                 assert!(coordinator.shell_mut().desktop_viewports.len() <= 1);
             }
         }
+        });
     }
     #[test]
     fn desktop_scroll_preserves_pixels_and_fractional_lines_without_selection_snapback() {
