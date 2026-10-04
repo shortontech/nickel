@@ -4067,6 +4067,7 @@ impl NickelSession {
                     &action,
                     nickel_remote_control::diagnostics::DiagnosticAction::RefreshPlatformStatus { .. }
                 );
+                let mut shell_changes_after_commit = Vec::new();
                 let effect = || {
                     #[cfg(not(any(feature = "backend-udev", feature = "backend-winit")))]
                     {
@@ -4190,7 +4191,7 @@ impl NickelSession {
                                     },
                                     self.start_time.elapsed().as_micros().min(u128::from(u64::MAX)) as u64,
                                 );
-                                self.sync_internal_shell_changes(Some(&changed));
+                                shell_changes_after_commit.extend(changed);
                             }
                             nickel_remote_control::diagnostics::DiagnosticAction::RefreshPlatformStatus { domain } => {
                                 let prepared = platform_refresh.ok_or(
@@ -4375,12 +4376,9 @@ impl NickelSession {
                                         self.start_time.elapsed().as_micros().min(u128::from(u64::MAX)) as u64,
                                     );
                                 }
-                                self.sync_internal_shell_changes(Some(&changed));
+                                shell_changes_after_commit.extend(changed);
                             }
                         }
-                        #[cfg(feature = "backend-udev")]
-                        self.invalidate_native_outputs();
-                        self.request_output_redraw();
                         self.remote_observation_generation =
                             self.remote_observation_generation.saturating_add(1);
                         Ok(
@@ -4406,6 +4404,16 @@ impl NickelSession {
                 } else {
                     permit.with_debug(protected, effect)
                 };
+                if result.is_ok() {
+                    shell_changes_after_commit.sort_unstable();
+                    shell_changes_after_commit.dedup();
+                    if !shell_changes_after_commit.is_empty() {
+                        self.sync_internal_shell_changes(Some(&shell_changes_after_commit));
+                    }
+                    #[cfg(feature = "backend-udev")]
+                    self.invalidate_native_outputs();
+                    self.request_output_redraw();
+                }
                 if let Ok(outcome) = &result {
                     use nickel_remote_control::desktop_events::ProductionEffectOutcome;
                     let completion = if outcome.output_identification.is_some()
