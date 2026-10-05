@@ -1645,6 +1645,479 @@ fn unchanged_system_feed_events_are_idle_and_do_not_schedule_polling() {
 }
 
 #[test]
+#[ignore = "release-profile real-deadline Settings traversal workload"]
+fn scheduled_settings_traversal_reports_retained_lifetimes() {
+    with_package_runtime_stack(|| {
+        let cycles = std::env::var("NICKEL_SCHEDULED_SETTINGS_CYCLES")
+            .map(|value| value.parse::<usize>().expect("integer cycle count"))
+            .unwrap_or(128);
+        assert!((24..=8192).contains(&cycles));
+        let mut shell = LiveShell::new().unwrap();
+        let previews_enabled =
+            std::env::var("NICKEL_SCHEDULED_SETTINGS_PREVIEWS").is_ok_and(|value| value == "1");
+        let fixture = previews_enabled.then(|| tempfile::tempdir().unwrap());
+        let sweep_previews =
+            std::env::var("NICKEL_SCHEDULED_SETTINGS_SWEEP").is_ok_and(|value| value == "1");
+        assert!(!sweep_previews || (previews_enabled && cycles >= 64));
+        let mut seen_previews = std::collections::BTreeSet::new();
+        if let Some(directory) = &fixture {
+            for index in 0..128u8 {
+                image::RgbaImage::from_pixel(800, 450, image::Rgba([index, 80, 160, 255]))
+                    .save(directory.path().join(format!("wallpaper-{index:03}.png")))
+                    .unwrap();
+            }
+            shell
+                .appearance_capabilities
+                .install_wallpaper_preview_fixture(
+                    crate::wallpaper_selection::Catalog::discover_fixture(directory.path()),
+                );
+        }
+        shell.launch_settings(None);
+        let key = shell.active_shell_surface_key("settings");
+        shell.plugin_panel_scene(&key, 1100, 800).unwrap();
+        let mut seen = std::collections::HashSet::new();
+        let runtimes = shell
+            .package_runtimes
+            .iter()
+            .flat_map(|(id, retained)| retained.contexts(id).into_values())
+            .filter(|runtime| seen.insert(std::rc::Rc::as_ptr(runtime) as usize))
+            .collect::<Vec<_>>();
+        let initial_tasks: u64 = runtimes
+            .iter()
+            .map(|runtime| runtime.borrow().platform_tasks_serviced())
+            .sum();
+        let started = std::time::Instant::now();
+        for cycle in 0..cycles {
+            let cycle_started = std::time::Instant::now();
+            for page in ["Keyboard shortcuts", "Appearance"] {
+                let target = shell
+                    .plugin_panel_host_for(&key)
+                    .unwrap()
+                    .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                        role: nickel_ui::SemanticRole::Button,
+                        name: page.into(),
+                    })
+                    .unwrap();
+                shell.plugin_panel_host_ui_for(
+                    &key,
+                    nickel_ui::UiEvent::AccessibilityActivate(target.id),
+                    1100,
+                    800,
+                );
+                shell.plugin_panel_scene(&key, 1100, 800).unwrap();
+                if previews_enabled {
+                    if page == "Appearance" {
+                        if sweep_previews {
+                            shell.plugin_panel_host_ui_for(
+                                &key,
+                                nickel_ui::UiEvent::Scroll {
+                                    point: nickel_ui::Point { x: 700.0, y: 600.0 },
+                                    delta_y: -100_000.0,
+                                },
+                                1100,
+                                800,
+                            );
+                            shell.plugin_panel_scene(&key, 1100, 800).unwrap();
+                        }
+                        shell.plugin_panel_host_ui_for(
+                            &key,
+                            nickel_ui::UiEvent::Scroll {
+                                point: nickel_ui::Point { x: 700.0, y: 600.0 },
+                                delta_y: if sweep_previews {
+                                    (cycle % 64) as f32 * 500.0
+                                } else if cycle % 2 == 0 {
+                                    100_000.0
+                                } else {
+                                    -100_000.0
+                                },
+                            },
+                            1100,
+                            800,
+                        );
+                        shell.plugin_panel_scene(&key, 1100, 800).unwrap();
+                    }
+                    let timeout = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                    while shell
+                        .appearance_capabilities
+                        .previews
+                        .next_deadline()
+                        .is_some()
+                    {
+                        assert!(
+                            std::time::Instant::now() < timeout,
+                            "preview convergence timed out"
+                        );
+                        std::thread::sleep(std::time::Duration::from_millis(1));
+                        shell.poll_deadlines(std::time::Instant::now());
+                    }
+                    if page == "Keyboard shortcuts" {
+                        assert!(shell.appearance_capabilities.previews.images().is_empty());
+                    } else if !sweep_previews && cycle % 2 == 0 {
+                        assert!(
+                            !shell.appearance_capabilities.previews.images().is_empty(),
+                            "endward Appearance traversal must decode visible previews"
+                        );
+                        assert!(shell.appearance_capabilities.previews.images().len() <= 10);
+                    }
+                    seen_previews.extend(
+                        shell
+                            .appearance_capabilities
+                            .previews
+                            .images()
+                            .keys()
+                            .cloned(),
+                    );
+                    assert!(seen_previews.len() <= 128);
+                }
+                assert!(
+                    shell
+                        .plugin_panel_host_for(&key)
+                        .unwrap()
+                        .application()
+                        .last_error()
+                        .is_none()
+                );
+            }
+            // Advance real time, not a synthetic future deadline. Do not pump
+            // a runtime directly or force collection to manufacture a plateau.
+            if let Some(remaining) =
+                std::time::Duration::from_millis(100).checked_sub(cycle_started.elapsed())
+            {
+                std::thread::sleep(remaining);
+            }
+            shell.poll_deadlines(std::time::Instant::now());
+            let host = shell.plugin_panel_host_for(&key).unwrap();
+            assert_eq!(host.render_frame().logical_size, (1100, 800));
+            assert!(host.application().last_error().is_none());
+            let memory = crate::process_memory::trim_snapshot();
+            let serviced_tasks: u64 = runtimes
+                .iter()
+                .map(|runtime| runtime.borrow().platform_tasks_serviced())
+                .sum();
+            eprintln!(
+                "nickel_scheduled_settings={}",
+                serde_json::json!({
+                    "cycle":cycle,"elapsedNs":started.elapsed().as_nanos() as u64,
+                    "backend":"live-shell-headless","viewport":[1100,800],
+                    "release":!cfg!(debug_assertions),"forcedCollection":false,
+                    "previewFixture":previews_enabled,
+                    "sweepPreviews":sweep_previews,"distinctPreviews":seen_previews.len(),
+                    "previewImages":shell.appearance_capabilities.previews.images().len(),
+                    "runtimeRoots":shell.package_runtimes.len(),
+                    "runtimeContexts":runtimes.len(),
+                    "platformTasksServiced":serviced_tasks - initial_tasks,
+                    "hostCount":shell.plugin_surface_hosts.len(),
+                    "rustLiveRequestedBytes":crate::allocation_counter::live_requested_bytes(),
+                    "rssBytes":memory.process_rss_bytes,
+                    "allocatorLiveBytes":memory.allocator_live_bytes,
+                })
+            );
+        }
+        if sweep_previews {
+            assert_eq!(
+                seen_previews.len(),
+                128,
+                "sweep must decode every catalog fixture"
+            );
+        }
+    });
+}
+
+#[test]
+fn cooperative_platform_maintenance_preserves_clean_frames_and_host_deadlines() {
+    use crate::live_shell::ShellDeadlineOutcome;
+    with_package_runtime_stack(|| {
+        let mut shell = LiveShell::new().unwrap();
+        for _ in 0..32 {
+            shell.service_cooperative_platform_tasks(&mut ShellDeadlineOutcome::default());
+        }
+        let generations = shell
+            .plugin_surface_hosts
+            .iter()
+            .map(|(key, (_, host))| (key.clone(), host.resolved_frame_generation()))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let deadline = shell.next_host_deadline();
+        let keyboard_deadline = shell.keyboard_deadline;
+        let (id, retained) = shell.package_runtimes.iter().next().unwrap();
+        let runtime = retained.contexts(id).into_values().next().unwrap();
+        for _ in 0..16 {
+            runtime.borrow_mut().eval("globalThis.maintenancePressure=Array.from({length:16384},(_,index)=>({index}));maintenancePressure=null").unwrap();
+        }
+        for _ in 0..32 {
+            let mut outcome = ShellDeadlineOutcome::default();
+            shell.service_cooperative_platform_tasks(&mut outcome);
+            assert!(outcome.redraw.is_empty());
+            assert!(!outcome.visibility_changed);
+        }
+        assert_eq!(shell.keyboard_deadline, keyboard_deadline);
+        assert_eq!(shell.next_host_deadline(), deadline);
+        for (key, (_, host)) in &shell.plugin_surface_hosts {
+            assert_eq!(host.resolved_frame_generation(), generations[key]);
+            assert!(host.application().last_error().is_none());
+        }
+    });
+}
+
+#[test]
+fn cooperative_platform_maintenance_reconciles_only_dirty_sibling_hosts() {
+    use crate::live_shell::{RetainedPackageRuntime, ShellDeadlineOutcome};
+    use crate::plugin_panel::PluginPanelApplication;
+    with_package_runtime_stack(|| {
+        let mut shell = LiveShell::new().unwrap();
+        let mut package = nickel_core::plugins::PluginPackage::load(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/plugins/example-two-windows"
+        ))
+        .unwrap();
+        package.source = "export default function App(){const [value,setValue]=useState(0);globalThis.latestMaintenanceSetter=setValue;return [h(Window,{id:'home',width:400,height:240},h(Text,null,'Home:'+value)),h(Window,{id:'details',width:450,height:260},h(Text,null,'Details:'+value))]}".into();
+        let runtime = PluginPanelApplication::shared_package_runtime(
+            &package,
+            &Default::default(),
+            &package.manifest.surfaces[0],
+        )
+        .unwrap();
+        shell.package_runtimes.clear();
+        shell.plugin_surface_hosts.clear();
+        shell
+            .plugin_registry
+            .register(package.manifest.clone())
+            .unwrap();
+        shell
+            .plugin_registry
+            .set_enabled(&package.manifest.id, true)
+            .unwrap();
+        shell.package_runtimes.insert(
+            package.manifest.id.clone(),
+            RetainedPackageRuntime::Ordinary(runtime.clone()),
+        );
+        let mut keys = Vec::new();
+        for (index, surface) in package.manifest.surfaces.iter().enumerate() {
+            let application = PluginPanelApplication::from_package_surface_with_runtime(
+                &package,
+                &Default::default(),
+                surface,
+                Default::default(),
+                Some(runtime.clone()),
+            )
+            .unwrap();
+            let resolved = application.resolved_surface(surface).unwrap();
+            let host = nickel_ui::UiHost::new(application, resolved.width, resolved.height);
+            let key = nickel_core::plugins::PluginSurfaceKey {
+                plugin_id: package.manifest.id.clone(),
+                surface_id: surface.id.clone(),
+            };
+            shell
+                .plugin_surface_hosts
+                .insert(key.clone(), (resolved, host));
+            keys.push(key);
+            if index == 0 {
+                runtime
+                    .borrow_mut()
+                    .eval("globalThis.firstMaintenanceSetter=latestMaintenanceSetter")
+                    .unwrap();
+            }
+        }
+        let generations = keys
+            .iter()
+            .map(|key| {
+                shell.plugin_surface_hosts[key]
+                    .1
+                    .resolved_frame_generation()
+            })
+            .collect::<Vec<_>>();
+        runtime
+            .borrow_mut()
+            .eval("firstMaintenanceSetter(7)")
+            .unwrap();
+        let mut outcome = ShellDeadlineOutcome::default();
+        shell.service_cooperative_platform_tasks(&mut outcome);
+        assert!(!outcome.redraw.is_empty());
+        assert!(
+            shell.plugin_surface_hosts[&keys[0]]
+                .1
+                .resolved_frame_generation()
+                > generations[0]
+        );
+        assert_eq!(
+            shell.plugin_surface_hosts[&keys[1]]
+                .1
+                .resolved_frame_generation(),
+            generations[1]
+        );
+        for key in &keys {
+            assert!(
+                shell.plugin_surface_hosts[key]
+                    .1
+                    .application()
+                    .last_error()
+                    .is_none()
+            );
+        }
+        // Exercise the actual scheduling entry point too, not just the helper.
+        // The ordinary keyboard service wakeup must admit this update without
+        // a new per-panel idle timer or another input event.
+        let first_generation = shell.plugin_surface_hosts[&keys[0]]
+            .1
+            .resolved_frame_generation();
+        runtime
+            .borrow_mut()
+            .eval("firstMaintenanceSetter(8)")
+            .unwrap();
+        let due = shell.keyboard_deadline;
+        let outcome = shell.poll_deadlines(due);
+        assert!(!outcome.redraw.is_empty());
+        assert!(shell.keyboard_deadline > due);
+        assert!(
+            shell.plugin_surface_hosts[&keys[0]]
+                .1
+                .resolved_frame_generation()
+                > first_generation
+        );
+        assert_eq!(
+            shell.plugin_surface_hosts[&keys[1]]
+                .1
+                .resolved_frame_generation(),
+            generations[1]
+        );
+    });
+}
+
+#[test]
+fn cooperative_platform_maintenance_rotates_unique_owners_after_retirement() {
+    use crate::live_shell::{RetainedPackageRuntime, ShellDeadlineOutcome};
+    with_package_runtime_stack(|| {
+        let mut shell = LiveShell::new().unwrap();
+        shell.plugin_surface_hosts.clear();
+        shell.package_runtimes.clear();
+        let runtimes = (0..3).map(|_| {
+            let mut runtime = nickel_plugin_runtime::JsxRuntime::new(
+                "function App(){return h(Text,null,'idle')}", None,
+            ).unwrap();
+            runtime.eval("globalThis.maintenanceProbes=0; const originalReady=__nickelPlatformMaintenanceReady; __nickelPlatformMaintenanceReady=()=>{maintenanceProbes++;return originalReady()}").unwrap();
+            std::rc::Rc::new(std::cell::RefCell::new(runtime))
+        }).collect::<Vec<_>>();
+        for (index, runtime) in runtimes.iter().enumerate() {
+            shell.package_runtimes.insert(
+                format!("owner-{index}"),
+                RetainedPackageRuntime::Ordinary(runtime.clone()),
+            );
+        }
+        shell.package_runtimes.insert(
+            "owner-0-alias".into(),
+            RetainedPackageRuntime::Ordinary(runtimes[0].clone()),
+        );
+        shell.platform_maintenance_cursor = 0;
+        let probes = || {
+            runtimes
+                .iter()
+                .map(|runtime| {
+                    runtime
+                        .borrow_mut()
+                        .eval_json::<u64>("maintenanceProbes")
+                        .unwrap()
+                })
+                .collect::<Vec<_>>()
+        };
+        for selected in 0..3 {
+            let before = probes();
+            shell.service_cooperative_platform_tasks(&mut ShellDeadlineOutcome::default());
+            let after = probes();
+            for index in 0..3 {
+                assert_eq!(
+                    after[index] > before[index],
+                    index == selected,
+                    "one unique owner must be serviced per turn"
+                );
+            }
+        }
+        // Keep a diagnostic Rc alive, but remove both registry aliases. It
+        // must no longer be eligible and an oversized cursor must be safe.
+        shell.package_runtimes.remove("owner-0");
+        shell.package_runtimes.remove("owner-0-alias");
+        shell.platform_maintenance_cursor = usize::MAX;
+        let before = probes();
+        for _ in 0..2 {
+            shell.service_cooperative_platform_tasks(&mut ShellDeadlineOutcome::default());
+        }
+        let after = probes();
+        assert_eq!(after[0], before[0]);
+        assert!(after[1] > before[1]);
+        assert!(after[2] > before[2]);
+    });
+}
+
+#[test]
+fn cooperative_platform_maintenance_defers_pending_ordinary_runtime() {
+    use crate::live_shell::{RetainedPackageRuntime, ShellDeadlineOutcome};
+    with_package_runtime_stack(|| {
+        let mut shell = LiveShell::new().unwrap();
+        let (id, retained) = shell.package_runtimes.iter().next().unwrap();
+        let runtime = retained.contexts(id).into_values().next().unwrap();
+        shell.plugin_surface_hosts.clear();
+        shell.package_runtimes.clear();
+        shell.package_runtimes.insert(
+            "ordinary".into(),
+            RetainedPackageRuntime::Ordinary(runtime.clone()),
+        );
+        runtime.borrow_mut().begin_transaction().unwrap();
+        shell.platform_maintenance_cursor = usize::MAX;
+        let mut outcome = ShellDeadlineOutcome::default();
+        shell.service_cooperative_platform_tasks(&mut outcome);
+        assert_eq!(shell.platform_maintenance_cursor, usize::MAX);
+        assert!(runtime.borrow().transaction_pending());
+        assert_eq!(shell.package_runtimes.len(), 1);
+        assert!(outcome.redraw.is_empty());
+        assert!(!outcome.visibility_changed);
+        runtime.borrow_mut().finish_transaction(false).unwrap();
+        shell.service_cooperative_platform_tasks(&mut outcome);
+        assert_eq!(shell.platform_maintenance_cursor, 0);
+        assert_eq!(shell.package_runtimes.len(), 1);
+        assert!(!runtime.borrow().transaction_pending());
+    });
+}
+
+#[test]
+fn cooperative_platform_maintenance_blocks_ordinary_aliases_of_pending_compositions() {
+    use crate::live_shell::{RetainedPackageRuntime, ShellDeadlineOutcome};
+    with_package_runtime_stack(|| {
+        let mut shell = LiveShell::new().unwrap();
+        let composition = shell
+            .package_runtimes
+            .values()
+            .find_map(|retained| match retained {
+                RetainedPackageRuntime::Composed(host) => Some(host.clone()),
+                _ => None,
+            })
+            .unwrap();
+        let owner = composition
+            .borrow()
+            .participating_owners()
+            .next()
+            .unwrap()
+            .clone();
+        let runtime = composition.borrow().shared_owner_runtime(&owner).unwrap();
+        shell.plugin_surface_hosts.clear();
+        shell.package_runtimes.clear();
+        shell
+            .package_runtimes
+            .insert("!alias".into(), RetainedPackageRuntime::Ordinary(runtime));
+        shell.package_runtimes.insert(
+            "root".into(),
+            RetainedPackageRuntime::Composed(composition.clone()),
+        );
+        composition.borrow_mut().begin_transaction().unwrap();
+        shell.platform_maintenance_cursor = usize::MAX;
+        let mut outcome = ShellDeadlineOutcome::default();
+        shell.service_cooperative_platform_tasks(&mut outcome);
+        assert_eq!(shell.platform_maintenance_cursor, usize::MAX);
+        assert_eq!(shell.package_runtimes.len(), 2);
+        assert!(outcome.redraw.is_empty());
+        assert!(!outcome.visibility_changed);
+        composition.borrow_mut().finish_transaction(false).unwrap();
+    });
+}
+
+#[test]
 fn control_center_focus_loss_dismisses_the_ephemeral_surface() {
     with_package_runtime_stack(|| {
         let mut shell = LiveShell::new().expect("live shell");
@@ -3237,7 +3710,11 @@ fn admitted_native_application_windows_reach_granted_public_resources() {
         assert_eq!(app["name"], "Native project chat");
         assert_eq!(app["canLaunch"], false); // running identity is not an invented launch command
         assert_eq!(app["canPin"], false);
-        let images = shell.plugin_application_images(Some(&apps), None);
+        let demand =
+            std::collections::BTreeSet::from([crate::application_capabilities::icon_asset(
+                &application,
+            )]);
+        let images = shell.plugin_application_images(Some(&apps), None, &demand);
         assert!(images.contains_key(&crate::application_capabilities::icon_asset(&application)));
         let key = shell.active_shell_surface_key("taskbar");
         shell.plugin_panel_scene(&key, 1280, 40).unwrap();

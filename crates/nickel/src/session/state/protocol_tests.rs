@@ -1,3 +1,30 @@
+#[test]
+fn codex_project_menu_is_bottom_right_on_selected_output() {
+    let outputs = [(
+        crate::internal_shell::InternalOutput {
+            name: "right".into(),
+            x: 1920,
+            y: -200,
+            width: 1280,
+            height: 720,
+            scale: 1.5,
+        },
+        1920,
+        -200,
+    )];
+    let menu = super::internal_codex_project_menu_placement(&outputs, Some("right"));
+    assert_eq!(menu.output.as_deref(), Some("right"));
+    assert_eq!(menu.chat_size, Some((360, 420)));
+    assert_eq!(
+        menu.origin,
+        (
+            1920 + 1280 - 360 - 8,
+            -200 + 720 - crate::winit_shell::PANEL_HEIGHT as i32 - 420 - 8
+        )
+    );
+    assert_eq!(menu.scale, 1.5);
+}
+
 use super::{
     ControllerConnectionGeneration, ControllerHostId, DisplacedWindow,
     ExternalControllerLeaseBinding, PREVIEW_BYTE_CAPACITY, PREVIEW_ENTRIES_PER_VISIBLE_CONSUMER,
@@ -476,11 +503,12 @@ fn newly_inserted_window_context_menu_receives_keyboard_focus() {
             .open_window_menu_at(41, 120, 80)
     );
     session.sync_internal_shell();
-    let menu = session
-        .internal_shell
-        .as_ref()
-        .unwrap()
-        .surface(crate::winit_shell::SurfaceRole::WindowContextMenu, None)
+    let shell = session.internal_shell.as_ref().unwrap();
+    let menu_key = shell.active_shell_surface_key("window-menu");
+    let menu = shell
+        .surfaces()
+        .iter()
+        .find(|surface| surface.plugin.as_ref() == Some(&menu_key))
         .unwrap()
         .id;
     let runtime = session.internal_shell_surfaces[&menu];
@@ -507,7 +535,13 @@ fn removed_shell_output_retires_every_old_surface_presentation() {
         .collect::<Vec<_>>();
     assert!(!old.is_empty());
 
-    session.internal_shell.as_mut().unwrap().set_outputs(&[]);
+    // Remove the authoritative native outputs, not only the coordinator's
+    // derived snapshot: synchronization must otherwise restore mapped outputs.
+    let outputs = session.space.outputs().cloned().collect::<Vec<_>>();
+    for output in outputs {
+        session.space.unmap_output(&output);
+    }
+    session.reconcile_internal_shell_outputs();
     session.sync_internal_shell();
 
     assert!(session.internal_shell_surfaces.is_empty());
@@ -1025,11 +1059,11 @@ fn desktop_motion_burst_rebuilds_once_at_frame_boundary_and_focus_cancels_immedi
 }
 
 #[test]
-fn surface_lease_retires_with_runtime_slot_and_cannot_follow_reopened_launcher() {
+fn surface_lease_retires_with_runtime_slot_and_cannot_follow_recreated_desktop() {
     use nickel_remote_control::leases::{ResourceId, ResourceScope};
     let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
     let (_event_loop, mut session) = internal_shell_test_session();
-    session.set_launcher_visible(true);
+    let output = session.space.outputs().next().unwrap().clone();
     let record = session
         .remote_shell_surface_diagnostics()
         .0
@@ -1037,7 +1071,7 @@ fn surface_lease_retires_with_runtime_slot_and_cannot_follow_reopened_launcher()
         .find(|record| {
             matches!(
                 record.role,
-                nickel_remote_control::diagnostics::ShellDiagnosticRole::Launcher
+                nickel_remote_control::diagnostics::ShellDiagnosticRole::Desktop
             )
         })
         .unwrap();
@@ -1083,7 +1117,8 @@ fn surface_lease_retires_with_runtime_slot_and_cannot_follow_reopened_launcher()
             .iter()
             .any(|candidate| candidate.id == lease)
     );
-    session.set_launcher_visible(false);
+    session.space.unmap_output(&output);
+    session.reconcile_internal_shell_outputs();
     assert!(
         !session
             .internal_ui
@@ -1099,7 +1134,20 @@ fn surface_lease_retires_with_runtime_slot_and_cannot_follow_reopened_launcher()
             .iter()
             .any(|candidate| candidate.id == lease)
     );
-    session.set_launcher_visible(true);
+    session.space.map_output(&output, (0, 0));
+    session.reconcile_internal_shell_outputs();
+    let replacement = session
+        .remote_shell_surface_diagnostics()
+        .0
+        .into_iter()
+        .find(|record| {
+            matches!(
+                record.role,
+                nickel_remote_control::diagnostics::ShellDiagnosticRole::Desktop
+            )
+        })
+        .expect("the desktop is recreated on the restored native output");
+    assert_ne!(replacement.generation, resource.generation);
     assert!(
         !session
             .internal_ui
@@ -1120,7 +1168,9 @@ fn repeated_native_identity_verification_does_not_duplicate_observation_events()
     use crate::session::{remote_identity::IdentitySource, window_registry::WindowAdmission};
     use nickel_remote_control::desktop_events::DesktopEventKind;
     let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
-    let (mut event_loop, mut session) = internal_shell_test_session();
+    // Identity observation belongs to the session worker, not shell rendering.
+    // Avoid unrelated package startup/deadline work in this worker regression.
+    let (mut event_loop, mut session) = preview_test_session();
     let window = session.windows.insert(WindowAdmission::Ordinary).unwrap();
     for _ in 0..2 {
         session.schedule_remote_window_identity(
@@ -1136,7 +1186,27 @@ fn repeated_native_identity_verification_does_not_duplicate_observation_events()
                 .dispatch(Duration::from_millis(10), &mut session)
                 .unwrap();
         }
-        assert!(!session.remote_window_is_protected(window));
+        assert!(
+            !session.remote_window_is_protected(window),
+            "identity={} locked={} recovery={} shell_owned={}",
+            match session.remote_window_identities.get(&window) {
+                None => "missing",
+                Some(crate::session::remote_identity::WindowIdentity::Pending) => "pending",
+                Some(crate::session::remote_identity::WindowIdentity::Unavailable) => "unavailable",
+                Some(crate::session::remote_identity::WindowIdentity::Verified(process)) => {
+                    if !process.is_current() {
+                        "stale"
+                    } else if process.protected {
+                        "protected"
+                    } else {
+                        "verified"
+                    }
+                }
+            },
+            session.locked,
+            session.shell_recovery_visible(),
+            session.shell_owned_windows.contains(&window),
+        );
     }
     let verified = session
         .remote_desktop_events
@@ -2733,6 +2803,7 @@ fn spec_0231_delayed_collectors_do_not_stall_or_commit_after_cancellation() {
         session: &mut super::NickelSession,
         permit: DesktopPermit,
     ) -> nickel_remote_control::diagnostics::DiagnosticSnapshot {
+        let trace_started = Instant::now();
         let authority = session.remote_desktop_authority.clone();
         let (sent, received) = std::sync::mpsc::sync_channel(1);
         let worker = std::thread::spawn(move || {
@@ -2754,7 +2825,15 @@ fn spec_0231_delayed_collectors_do_not_stall_or_commit_after_cancellation() {
             }
         };
         worker.join().unwrap();
-        snapshot.unwrap()
+        snapshot.unwrap_or_else(|error| {
+            panic!(
+                "owner snapshot failed: {error}; elapsed={:?} observation_generation={} topology_current={} shell_present={}",
+                trace_started.elapsed(),
+                session.remote_observation_generation,
+                session.last_protocol_outputs == session.protocol_outputs(),
+                session.internal_shell.is_some(),
+            )
+        })
     }
 
     let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
@@ -4491,6 +4570,40 @@ fn internal_protection_hides_remote_inventory_without_hiding_local_window() {
 }
 
 #[test]
+fn internal_runtime_diagnostics_require_test_control_and_report_measurement_scope() {
+    with_package_runtime_stack(|| {
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = internal_shell_test_session();
+        session.test_control_enabled = false;
+        assert!(matches!(
+            session.handle_protocol_query(Query::ShellRuntimeDiagnostics),
+            ServerMessage::Error { .. }
+        ));
+        session.test_control_enabled = true;
+        let ServerMessage::ShellRuntimeDiagnostics(diagnostics) =
+            session.handle_protocol_query(Query::ShellRuntimeDiagnostics)
+        else {
+            panic!("test-enabled internal shell must expose host diagnostics");
+        };
+        assert_eq!(diagnostics.validate(), Ok(()));
+        assert_eq!(diagnostics.frame_allocations.count, None);
+        assert!(diagnostics.frame_allocations.unavailable_reason.is_some());
+        assert!(diagnostics.warm_present_us.is_empty());
+        assert!(
+            diagnostics
+                .host_phases
+                .present_us
+                .unavailable_reason
+                .is_some()
+        );
+        assert_eq!(
+            diagnostics.host_phase_samples_available,
+            !diagnostics.input_to_frame_us.is_empty()
+        );
+    });
+}
+
+#[test]
 fn internal_diagnostics_follow_production_visibility_and_frame_lifecycle() {
     let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
     let (_event_loop, mut session) = internal_shell_test_session();
@@ -4646,6 +4759,11 @@ fn internal_application_has_canonical_window_lifecycle() {
         .find(|candidate| candidate.id.0 == window.0)
         .unwrap();
     assert_eq!(snapshot.title, "Codex — Nickel");
+    assert!(
+        session
+            .titlebar_cache_owners()
+            .any(|owner| owner == window.0)
+    );
     assert_eq!(snapshot.application_id, "nickel-codex");
     let geometry = snapshot.geometry.unwrap();
     assert_eq!((geometry.x, geometry.y), (80, 90));
@@ -4656,6 +4774,11 @@ fn internal_application_has_canonical_window_lifecycle() {
 
     session.minimize_window(window);
     assert!(!session.internal_ui.is_visible(surface));
+    assert!(
+        session
+            .titlebar_cache_owners()
+            .any(|owner| owner == window.0)
+    );
     assert!(
         session
             .protocol_windows()
@@ -4678,6 +4801,11 @@ fn internal_application_has_canonical_window_lifecycle() {
     session.close_window(window);
     assert!(!session.windows.contains(window));
     assert!(session.internal_ui.placement(surface).is_none());
+    assert!(
+        !session
+            .titlebar_cache_owners()
+            .any(|owner| owner == window.0)
+    );
 }
 
 #[test]
@@ -7003,6 +7131,14 @@ fn native_media_notification_bypasses_legacy_subscribers_and_preserves_focus() {
 }
 
 impl SessionHost for IdleInternalHost {
+    fn projection_outputs(&self) -> Result<Vec<nickel_session_protocol::OutputSnapshot>, String> {
+        // This fixture runs on the session owner. The trait's platform fallback
+        // would synchronously query that same owner's control socket and wait
+        // for a reply it cannot dispatch. Production InProcessSessionHost uses
+        // the owner's cached output projection instead.
+        Err("display projection is not supplied by the idle test host".into())
+    }
+
     fn dispatch(&self, _command: ShellCommand) -> Result<(), SessionRequestError> {
         Ok(())
     }
@@ -7139,16 +7275,15 @@ fn internal_launcher_owns_keyboard_until_it_is_hidden() {
     session.register_internal_application(application).unwrap();
 
     assert!(session.toggle_internal_launcher());
-    let launcher = session
-        .internal_shell
-        .as_ref()
-        .unwrap()
+    let shell = session.internal_shell.as_ref().unwrap();
+    let launcher_key = shell.active_shell_surface_key("launcher");
+    let launcher = shell
         .surfaces()
         .iter()
-        .find(|surface| surface.role == crate::winit_shell::SurfaceRole::Launcher)
+        .find(|surface| surface.plugin.as_ref() == Some(&launcher_key))
         .and_then(|surface| session.internal_shell_surfaces.get(&surface.id))
         .copied()
-        .unwrap();
+        .expect("selected launcher must have a native surface");
     assert_eq!(session.internal_ui.focused(), Some(launcher));
     assert_eq!(session.seat.get_keyboard().unwrap().current_focus(), None);
 
@@ -7172,13 +7307,12 @@ fn visible_shell_role_without_controller_lease_is_not_a_controller_recipient() {
     let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
     let (_event_loop, mut session) = internal_shell_test_session();
     assert!(session.toggle_internal_launcher());
-    let launcher = session
-        .internal_shell
-        .as_ref()
-        .unwrap()
+    let shell = session.internal_shell.as_ref().unwrap();
+    let launcher_key = shell.active_shell_surface_key("launcher");
+    let launcher = shell
         .surfaces()
         .iter()
-        .find(|surface| surface.role == crate::winit_shell::SurfaceRole::Launcher)
+        .find(|surface| surface.plugin.as_ref() == Some(&launcher_key))
         .and_then(|surface| session.internal_shell_surfaces.get(&surface.id))
         .copied()
         .unwrap();
@@ -7311,69 +7445,77 @@ fn controller_batch_drops_old_route_tail_after_launcher_changes_recipient() {
 
 #[test]
 fn queued_confirm_keeps_pre_launcher_recipient_epoch_across_batches() {
-    let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
-    let (_event_loop, mut session) = internal_shell_test_session();
-    let queued_epoch = session.refresh_controller_route().0;
-    let launcher = nickel_ui::ControllerEnvelope {
-        device: nickel_input::controller::ControllerId(7),
-        action: Some(nickel_ui::ControllerAction::Launcher),
-        edge: nickel_input::KeyEdge::Pressed,
-        repeat: false,
-        family: nickel_ui::ControllerFamily::Xbox,
-        evidence: nickel_ui::ControllerSourceEvidence {
-            seat: 0,
-            source_namespace: "test".into(),
-            backend: "test".into(),
-            native: nickel_input::NativeCode::Numeric(7),
-            fingerprint: None,
-            identity_capability: "native",
-            physical: nickel_ui::ControllerPhysicalControl::Button(
-                nickel_input::controller::ControllerButton::Guide,
-            ),
-            backend_order: 1,
-            produced_unix_ms: 1,
-        },
-    };
-    let confirm = nickel_ui::ControllerEnvelope {
-        action: Some(nickel_ui::ControllerAction::Confirm),
-        evidence: nickel_ui::ControllerSourceEvidence {
-            native: nickel_input::NativeCode::Numeric(0),
-            physical: nickel_ui::ControllerPhysicalControl::Button(
-                nickel_input::controller::ControllerButton::South,
-            ),
-            backend_order: 2,
-            ..launcher.evidence.clone()
-        },
-        ..launcher.clone()
-    };
+    with_package_runtime_stack(|| {
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = internal_shell_test_session();
+        let queued_epoch = session.refresh_controller_route().0;
+        let launcher = nickel_ui::ControllerEnvelope {
+            device: nickel_input::controller::ControllerId(7),
+            action: Some(nickel_ui::ControllerAction::Launcher),
+            edge: nickel_input::KeyEdge::Pressed,
+            repeat: false,
+            family: nickel_ui::ControllerFamily::Xbox,
+            evidence: nickel_ui::ControllerSourceEvidence {
+                seat: 0,
+                source_namespace: "test".into(),
+                backend: "test".into(),
+                native: nickel_input::NativeCode::Numeric(7),
+                fingerprint: None,
+                identity_capability: "native",
+                physical: nickel_ui::ControllerPhysicalControl::Button(
+                    nickel_input::controller::ControllerButton::Guide,
+                ),
+                backend_order: 1,
+                produced_unix_ms: 1,
+            },
+        };
+        let confirm = nickel_ui::ControllerEnvelope {
+            action: Some(nickel_ui::ControllerAction::Confirm),
+            evidence: nickel_ui::ControllerSourceEvidence {
+                native: nickel_input::NativeCode::Numeric(0),
+                physical: nickel_ui::ControllerPhysicalControl::Button(
+                    nickel_input::controller::ControllerButton::South,
+                ),
+                backend_order: 2,
+                ..launcher.evidence.clone()
+            },
+            ..launcher.clone()
+        };
 
-    session.handle_brokered_controller_batch_for_route(vec![launcher], false, queued_epoch);
-    assert!(session.internal_shell.as_ref().unwrap().launcher_visible());
-    let launcher_surface = session
-        .internal_shell
-        .as_ref()
-        .unwrap()
-        .surfaces()
-        .iter()
-        .find(|surface| surface.role == crate::winit_shell::SurfaceRole::Launcher)
-        .and_then(|surface| session.internal_shell_surfaces.get(&surface.id))
-        .copied()
-        .unwrap();
-    assert!(session.focus_internal_surface(launcher_surface));
-    assert_ne!(session.controller_routing_epoch, queued_epoch);
-    assert_eq!(
-        session
-            .controller_published_routing_epoch
-            .load(std::sync::atomic::Ordering::Acquire),
-        session.controller_routing_epoch,
-        "the focus transition must publish its fence before later controller collection"
-    );
+        session.handle_brokered_controller_batch_for_route(vec![launcher], false, queued_epoch);
+        assert!(session.internal_shell.as_ref().unwrap().launcher_visible());
+        let launcher_surface = session
+            .internal_shell
+            .as_ref()
+            .unwrap()
+            .surfaces()
+            .iter()
+            .find(|surface| {
+                // The production package hosts its launcher as a plugin overlay,
+                // not the retired built-in Launcher role.
+                surface.plugin.as_ref().is_some_and(|key| {
+                    key.plugin_id == "nickel-default" && key.surface_id == "launcher"
+                })
+            })
+            .and_then(|surface| session.internal_shell_surfaces.get(&surface.id))
+            .copied()
+            .unwrap();
+        assert!(session.focus_internal_surface(launcher_surface));
+        assert_ne!(session.controller_routing_epoch, queued_epoch);
+        assert_eq!(
+            session
+                .controller_published_routing_epoch
+                .load(std::sync::atomic::Ordering::Acquire),
+            session.controller_routing_epoch,
+            "the focus transition must publish its fence before later controller collection"
+        );
 
-    session.handle_brokered_controller_batch_for_route(vec![confirm], false, queued_epoch);
-    assert!(
-        session.internal_shell.as_ref().unwrap().launcher_visible(),
-        "the separately queued confirm must be rejected at the recipient-change barrier"
-    );
+        session.handle_brokered_controller_batch_for_route(vec![confirm], false, queued_epoch);
+        assert!(
+            session.internal_shell.as_ref().unwrap().launcher_visible(),
+            "the separately queued confirm must be rejected at the recipient-change barrier"
+        );
+    });
 }
 
 #[test]
@@ -7577,7 +7719,7 @@ fn focused_controller_host_retries_after_unrelated_internal_handoff() {
 }
 
 #[test]
-fn shell_diagnostics_follow_owner_scene_visibility_and_exclude_lock() {
+fn shell_diagnostics_preserve_desktop_geometry_and_exclude_protected_packages_and_lock() {
     use nickel_remote_control::diagnostics::ShellDiagnosticRole;
     let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
     let (_event_loop, mut session) = internal_shell_test_session();
@@ -7589,7 +7731,7 @@ fn shell_diagnostics_follow_owner_scene_visibility_and_exclude_lock() {
             .any(|record| matches!(record.role, ShellDiagnosticRole::Desktop))
     );
     assert!(
-        records
+        !records
             .iter()
             .any(|record| matches!(record.role, ShellDiagnosticRole::Panel)),
         "diagnostics={records:?}, surfaces={:?}",
@@ -7604,23 +7746,22 @@ fn shell_diagnostics_follow_owner_scene_visibility_and_exclude_lock() {
     let (shown, _) = session.remote_shell_surface_diagnostics();
     let launcher = shown
         .iter()
-        .find(|record| matches!(record.role, ShellDiagnosticRole::Launcher))
+        .find(|record| matches!(record.role, ShellDiagnosticRole::Desktop))
         .unwrap();
+    assert!(!shown.iter().any(|record| matches!(
+        record.role,
+        ShellDiagnosticRole::Launcher | ShellDiagnosticRole::Panel
+    )));
     let shell = session.internal_shell.as_ref().unwrap();
     let owner = shell
         .surfaces()
         .iter()
-        .find(|surface| surface.role == crate::winit_shell::SurfaceRole::Launcher)
+        .find(|surface| surface.role == crate::winit_shell::SurfaceRole::Desktop)
         .unwrap();
     let owner_id = owner.id;
     let (tree_generation, semantics) = shell.bounded_shell_semantics(owner_id).unwrap();
     assert!(tree_generation > 0);
-    assert!(semantics.iter().any(|node| node.focused));
-    assert!(
-        semantics
-            .iter()
-            .any(|node| node.name.as_deref() == Some("Home"))
-    );
+    assert!(semantics.iter().all(|node| node.actions.is_empty()));
     assert_eq!(
         shell.bounded_shell_semantics(owner_id).unwrap().0,
         tree_generation,
@@ -7639,13 +7780,16 @@ fn shell_diagnostics_follow_owner_scene_visibility_and_exclude_lock() {
             i64::from(placement.geometry.3)
         ]
     );
-    assert!(launcher.keyboard_focused);
+    assert!(!launcher.keyboard_focused);
     let input = session.remote_input_diagnostic(&[], &[], 41, 42);
-    let recipient = input.keyboard.unwrap();
-    assert!(recipient.focused_window.is_none());
-    let focused_surface = recipient.focused_surface.unwrap();
-    assert_eq!(focused_surface.id, launcher.id);
-    assert_eq!(focused_surface.generation, launcher.generation);
+    assert!(
+        input
+            .keyboard
+            .as_ref()
+            .and_then(|recipient| recipient.focused_surface.as_ref())
+            .is_none(),
+        "protected launcher focus must not expose a surface identity"
+    );
     let placement = placement.clone();
     session
         .internal_ui
@@ -7679,13 +7823,13 @@ fn shell_diagnostics_follow_owner_scene_visibility_and_exclude_lock() {
             .as_ref()
             .unwrap()
             .bounded_shell_semantics(owner_id)
-            .is_err()
+            .is_ok()
     );
     assert!(
         session
             .remote_shell_renderer_diagnostics(43)
             .iter()
-            .all(|record| record.surface != launcher.id)
+            .any(|record| record.surface == launcher.id)
     );
     assert!(
         !session
@@ -7704,42 +7848,35 @@ fn shell_diagnostics_follow_owner_scene_visibility_and_exclude_lock() {
 }
 
 #[test]
-fn ordinary_shell_semantic_mutation_updates_real_launcher_and_rejects_stale_tree() {
+fn ordinary_shell_semantics_reject_legacy_plugin_launcher_mutation() {
     let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
     let (_event_loop, mut session) = internal_shell_test_session();
     session.set_launcher_visible(true);
     let shell = session.internal_shell.as_mut().unwrap();
+    let launcher_key = shell.active_shell_surface_key("launcher");
     let id = shell
         .surfaces()
         .iter()
-        .find(|surface| surface.role == crate::winit_shell::SurfaceRole::Launcher)
+        .find(|surface| surface.plugin.as_ref() == Some(&launcher_key))
         .unwrap()
         .id;
-    let (generation, nodes) = shell.bounded_shell_semantics(id).unwrap();
-    let ordinal = nodes
-        .iter()
-        .position(|node| node.role == Some(nickel_ui::SemanticRole::TextField))
-        .unwrap();
+    // The package launcher is not the retired native launcher. Ordinary
+    // remote shell semantics must not acquire plugin mutation authority merely
+    // because this surface implements the selected launcher contract.
+    assert!(shell.bounded_shell_semantics(id).is_err());
+    let before = shell.scene(id).unwrap();
     let action = |text: &str| {
         nickel_ui::SemanticAction::SetValue(nickel_ui::SemanticValueInput::Text(text.into()))
     };
-    let outcome = shell
-        .perform_bounded_shell_action(
-            id,
-            generation,
-            ordinal,
-            action("semantic launcher query"),
-            2048,
-        )
-        .unwrap();
-    assert!(outcome.effects.is_empty());
-    assert!(outcome.host.semantic_failures.is_empty());
-    let (next, nodes) = shell.bounded_shell_semantics(id).unwrap();
-    assert_ne!(next, generation);
-    assert!(nodes.iter().any(|node| matches!(&node.value, Some(nickel_ui::SemanticValueSnapshot::Text(text)) if text == "semantic launcher query")));
     assert!(
         shell
-            .perform_bounded_shell_action(id, generation, ordinal, action("stale query"), 2048)
+            .perform_bounded_shell_action(id, 0, 0, action("semantic launcher query"), 2048,)
+            .is_err()
+    );
+    assert_eq!(shell.scene(id).unwrap(), before);
+    assert!(
+        shell
+            .perform_bounded_shell_action(id, u64::MAX, 0, action("stale query"), 2048)
             .is_err()
     );
     session.set_launcher_visible(false);
@@ -7748,7 +7885,7 @@ fn ordinary_shell_semantic_mutation_updates_real_launcher_and_rejects_stale_tree
             .internal_shell
             .as_mut()
             .unwrap()
-            .perform_bounded_shell_action(id, next, ordinal, action("hidden query"), 2048)
+            .perform_bounded_shell_action(id, 0, 0, action("hidden query"), 2048)
             .is_err()
     );
 }
@@ -7758,6 +7895,17 @@ fn launcher_protocol_visibility_updates_hosted_scene_and_restores_focus() {
     use nickel_session_protocol::Command;
     let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
     let (_event_loop, mut session) = internal_shell_test_session();
+    let launcher_key = session
+        .internal_shell
+        .as_ref()
+        .unwrap()
+        .active_shell_surface_key("launcher");
+    let selected_launcher = |surface: &nickel_session_protocol::ShellSurfaceSnapshot| {
+        surface.plugin.as_ref().is_some_and(|plugin| {
+            plugin.plugin_id == launcher_key.plugin_id
+                && plugin.surface_id == launcher_key.surface_id
+        })
+    };
     let application = session.internal_ui.insert(
         InternalWindowTestApp,
         crate::session::InternalSurfacePlacement {
@@ -7782,7 +7930,7 @@ fn launcher_protocol_visibility_updates_hosted_scene_and_restores_focus() {
             session
                 .protocol_shell_surfaces()
                 .iter()
-                .any(|surface| surface.role == ShellRole::Launcher && surface.geometry.is_some())
+                .any(|surface| selected_launcher(surface) && surface.geometry.is_some())
         );
         assert_ne!(session.internal_ui.focused(), Some(application));
     }
@@ -7798,10 +7946,11 @@ fn launcher_protocol_visibility_updates_hosted_scene_and_restores_focus() {
         assert!(!session.launcher_visibility.is_visible());
         assert_eq!(session.internal_ui.focused(), Some(application));
         assert!(
-            session
+            !session
                 .protocol_shell_surfaces()
                 .iter()
-                .any(|surface| surface.role == ShellRole::Launcher && surface.geometry.is_none())
+                .any(selected_launcher),
+            "hiding the plugin launcher must retire its protocol surface"
         );
     }
     session.handle_protocol_command(Command::ToggleLauncher, None, 0);
@@ -7809,6 +7958,100 @@ fn launcher_protocol_visibility_updates_hosted_scene_and_restores_focus() {
     session.handle_protocol_command(Command::ToggleLauncher, None, 0);
     assert!(!session.internal_shell.as_ref().unwrap().launcher_visible());
     assert_eq!(session.internal_ui.focused(), Some(application));
+}
+
+#[test]
+fn settings_reopen_uses_new_native_placement_not_previous_viewport() {
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+            let (_event_loop, mut session) = internal_shell_test_session();
+            assert!(
+                session
+                    .internal_shell
+                    .as_mut()
+                    .unwrap()
+                    .global_shortcut(nickel_session_protocol::ShortcutAction::OpenSettings,)
+            );
+            session.sync_internal_shell();
+            let shell = session.internal_shell.as_mut().unwrap();
+            let key = shell.active_shell_surface_key("settings");
+            let owner = shell
+                .surfaces()
+                .iter()
+                .find(|entry| entry.plugin.as_ref() == Some(&key))
+                .unwrap()
+                .id;
+            let runtime = session.internal_shell_surfaces[&owner];
+            let original = session.internal_ui.placement(runtime).unwrap().clone();
+            let mut resized = original.clone();
+            resized.geometry.2 -= 5;
+            assert!(session.apply_internal_resize(runtime, resized.clone()));
+            session.finish_internal_resize(runtime, false);
+            session.sync_internal_shell();
+            let viewport = session
+                .internal_shell
+                .as_mut()
+                .unwrap()
+                .shell_mut()
+                .plugin_panel_host_ref(&key)
+                .unwrap()
+                .render_frame()
+                .logical_size;
+            assert_eq!(viewport, (resized.geometry.2, resized.geometry.3));
+            assert!(
+                session
+                    .internal_shell
+                    .as_mut()
+                    .unwrap()
+                    .close_plugin_window(&key)
+                    .unwrap()
+            );
+            session.sync_internal_shell();
+            assert!(!session.internal_shell_surfaces.contains_key(&owner));
+            assert!(
+                session
+                    .internal_shell
+                    .as_mut()
+                    .unwrap()
+                    .global_shortcut(nickel_session_protocol::ShortcutAction::OpenSettings,)
+            );
+            session.sync_internal_shell();
+            let new_owner = session
+                .internal_shell
+                .as_ref()
+                .unwrap()
+                .surfaces()
+                .iter()
+                .find(|entry| entry.plugin.as_ref() == Some(&key))
+                .unwrap()
+                .id;
+            assert_ne!(new_owner, owner, "closed Settings slots must retire");
+            let new_runtime = session.internal_shell_surfaces[&new_owner];
+            assert_ne!(
+                new_runtime, runtime,
+                "reopening must create a new native lifetime"
+            );
+            let placement = session.internal_ui.placement(new_runtime).unwrap();
+            assert_eq!(placement.geometry, original.geometry);
+            let expected = (placement.geometry.2, placement.geometry.3);
+            let host = session
+                .internal_shell
+                .as_mut()
+                .unwrap()
+                .shell_mut()
+                .plugin_panel_host_ref(&key)
+                .unwrap();
+            assert_eq!(
+                host.render_frame().logical_size,
+                expected,
+                "new native lifetime inherited the previous viewport"
+            );
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 }
 
 #[test]
@@ -7844,7 +8087,17 @@ fn internal_shell_protocol_geometry_uses_authoritative_global_placement() {
 #[test]
 fn session_lock_drives_and_focuses_the_compositor_owned_lock_surface() {
     let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
-    let (_event_loop, mut session) = internal_shell_test_session();
+    let (mut event_loop, mut session) = internal_shell_test_session();
+    let host = crate::session_host::install_in_process_session_host(
+        &event_loop.handle(),
+        session.secure_storage_state_handle(),
+        session.secure_storage_retry_handle(),
+        Arc::clone(&session.internal_projection_outputs),
+        Arc::clone(&session.internal_capture),
+        Arc::clone(&session.internal_keyboard_snapshot),
+        session.remote_control.control(),
+    )
+    .unwrap();
     let lock = session
         .internal_shell
         .as_ref()
@@ -7877,11 +8130,57 @@ fn session_lock_drives_and_focuses_the_compositor_owned_lock_surface() {
     );
     assert_eq!(session.seat.get_keyboard().unwrap().current_focus(), None);
 
-    session.unlock_session();
+    crate::session_host::SessionHost::dispatch(&host, crate::platform::ShellCommand::Unlock)
+        .unwrap();
+    assert!(
+        session.locked,
+        "enqueueing alone must not unlock the session"
+    );
+    event_loop
+        .dispatch(std::time::Duration::ZERO, &mut session)
+        .unwrap();
 
     assert!(!session.locked);
     assert!(!session.internal_shell.as_ref().unwrap().visible(lock));
     assert!(!session.internal_shell_surfaces.contains_key(&lock));
+}
+
+#[test]
+fn opening_settings_transfers_focus_from_launcher_and_dismisses_it() {
+    let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+    let (_event_loop, mut session) = internal_shell_test_session();
+    session.set_launcher_visible(true);
+    let launcher = session.internal_ui.focused().expect("launcher focused");
+    session
+        .internal_shell
+        .as_mut()
+        .unwrap()
+        .shell_mut()
+        .show_plugin_window("nickel-default", "settings")
+        .unwrap();
+    session.reconcile_internal_shell_outputs();
+    session.sync_internal_shell();
+    let settings = session
+        .internal_shell
+        .as_ref()
+        .unwrap()
+        .surfaces()
+        .iter()
+        .find(|surface| {
+            surface
+                .plugin
+                .as_ref()
+                .is_some_and(|key| key.surface_id == "settings")
+        })
+        .unwrap()
+        .id;
+    let runtime = session.internal_shell_surfaces[&settings];
+    assert_ne!(runtime, launcher);
+    assert_eq!(session.internal_ui.focused(), Some(runtime));
+    session.flush_internal_shell_input();
+    assert!(!session.internal_shell.as_ref().unwrap().launcher_visible());
+    assert!(session.internal_ui.is_visible(runtime));
+    assert_eq!(session.internal_ui.focused(), Some(runtime));
 }
 
 #[test]
@@ -8307,8 +8606,11 @@ fn launcher_sidebar_press_is_not_dismissed_for_a_client_underneath() {
     let (_event_loop, mut session) = internal_shell_test_session();
     assert!(session.toggle_internal_launcher());
     let shell = session.internal_shell.as_mut().unwrap();
+    let launcher_key = shell.active_shell_surface_key("launcher");
     let launcher = shell
-        .surface(crate::winit_shell::SurfaceRole::Launcher, None)
+        .surfaces()
+        .iter()
+        .find(|surface| surface.plugin.as_ref() == Some(&launcher_key))
         .unwrap()
         .id;
     // The native launcher owns its sidebar even if an ordinary client scene

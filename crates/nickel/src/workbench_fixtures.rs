@@ -288,10 +288,10 @@ impl Fixture for WindowPreviewFixture {
             PluginPanelApplication::from_package_surface(&package, &Default::default(), surface)
                 .expect("shared shell preview fixture");
         application
-            .sync_host_data_field(
+            .sync_host_data_fields(&[(
                 "windowPreviews",
                 &serde_json::json!({"available":true,"revision":"fixture","windows":windows}),
-            )
+            )])
             .unwrap();
         if v.id != "missing-preview" {
             let thumbnail = Arc::new(image::RgbaImage::from_pixel(

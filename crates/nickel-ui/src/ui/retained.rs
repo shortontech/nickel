@@ -39,10 +39,14 @@ impl DirtyPhases {
     }
 }
 
+/// Intrinsic measurements for the two scroll-content constraint variants.
+type ScrollMeasurementCache = [Option<([u32; 2], Size)>; 2];
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct RetainedPhaseData {
     pub(crate) measured: Option<Size>,
     measured_constraints: Option<[u32; 2]>,
+    scroll_measurements: Option<Box<ScrollMeasurementCache>>,
     pub(crate) allocated: Option<Rect>,
     pub(crate) paint: Vec<PaintCommand>,
     pub(crate) interaction_revision: u64,
@@ -72,6 +76,8 @@ pub(crate) struct RetainedNode {
     children: Vec<RetainedNodeId>,
     subtree_dirty: DirtyPhases,
     subtree_nodes: usize,
+    /// Recomputed bottom-up during reconciliation, before layout reuse queries.
+    subtree_layout_clean: bool,
     postorder_index: usize,
     pub(crate) phases: RetainedPhaseData,
 }
@@ -163,6 +169,20 @@ impl CompactHasher {
         value.hash(&mut self.0);
     }
 
+    fn add_formatted(&mut self, value: std::fmt::Arguments<'_>) {
+        struct HashWriter<'a>(&'a mut std::collections::hash_map::DefaultHasher);
+        impl std::fmt::Write for HashWriter<'_> {
+            fn write_str(&mut self, value: &str) -> std::fmt::Result {
+                self.0.write(value.as_bytes());
+                Ok(())
+            }
+        }
+        // Match String/str hashing without allocating the formatted String.
+        // Write the prefix-free terminator once, not once per formatter chunk.
+        std::fmt::write(&mut HashWriter(&mut self.0), value).expect("hash writer cannot fail");
+        self.0.write_u8(0xff);
+    }
+
     fn finish(self) -> u64 {
         self.0.finish()
     }
@@ -206,13 +226,13 @@ fn hash_layout_style(style: &Style) -> (u64, u64) {
     }
     measure.add(&bits(style.grow));
     measure.add(&bits(style.shrink));
-    measure.add(&format!(
+    measure.add_formatted(format_args!(
         "{:?}{:?}{:?}",
         style.align_self, style.align_items, style.justify_content
     ));
 
     let mut place = CompactHasher::default();
-    place.add(&format!("{:?}{:?}", style.overflow_x, style.overflow_y));
+    place.add_formatted(format_args!("{:?}{:?}", style.overflow_x, style.overflow_y));
     if let Some(position) = style.absolute_position {
         place.add(&bits(position.x));
         place.add(&bits(position.y));
@@ -286,7 +306,7 @@ fn signatures<Message>(element: &Element<Message>) -> PhaseSignatures {
             content_measure.add(&line_height.map(bits));
             content_measure.add(max_lines);
             paint.add(ellipsis);
-            paint.add(&format!("{outline:?}"));
+            paint.add_formatted(format_args!("{outline:?}"));
             paint.add(&input_value.is_some());
             paint.add(&input_placeholder.is_some());
             paint.add(&input_mask);
@@ -314,16 +334,16 @@ fn signatures<Message>(element: &Element<Message>) -> PhaseSignatures {
         } => {
             content_measure.add(id);
             content_measure.add(generation);
-            content_measure.add(&format!("{presentation:?}"));
+            content_measure.add_formatted(format_args!("{presentation:?}"));
             paint.add(id);
             paint.add(generation);
-            paint.add(&format!("{presentation:?}"));
+            paint.add_formatted(format_args!("{presentation:?}"));
         }
         Kind::VerticalScroll { offset, controlled } => {
             paint.add(&bits(*offset));
             paint.add(controlled);
         }
-        Kind::Grid { columns } => content_measure.add(&format!("{columns:?}")),
+        Kind::Grid { columns } => content_measure.add_formatted(format_args!("{columns:?}")),
         Kind::CustomPaint { paint: callback } => {
             paint.add(&(*callback as usize));
             paint_content_sensitive = true;
@@ -342,7 +362,7 @@ fn signatures<Message>(element: &Element<Message>) -> PhaseSignatures {
             presentation,
         } => {
             paint.add(&bits(*value));
-            paint.add(&format!(
+            paint.add_formatted(format_args!(
                 "{track:?}{fill:?}{thumb:?}{thumb_border:?}{geometry:?}{presentation:?}"
             ));
         }
@@ -366,7 +386,7 @@ fn signatures<Message>(element: &Element<Message>) -> PhaseSignatures {
             paint.add(expanded);
             paint.add(open_generation);
             paint.add(overlay);
-            paint.add(&format!(
+            paint.add_formatted(format_args!(
                 "{background:?}{option_background:?}{foreground:?}{presentation:?}"
             ));
         }
@@ -382,7 +402,7 @@ fn signatures<Message>(element: &Element<Message>) -> PhaseSignatures {
     } else {
         style_measure ^ content_measure.finish()
     };
-    paint.add(&format!(
+    paint.add_formatted(format_args!(
         "{:?}{:?}{:?}{:?}{:?}{:?}{:?}",
         element.style.background,
         element.style.border,
@@ -394,6 +414,7 @@ fn signatures<Message>(element: &Element<Message>) -> PhaseSignatures {
     ));
 
     let mut interaction = CompactHasher::default();
+    interaction.add(&element.virtual_navigation);
     interaction.add(&element.message.is_some());
     interaction.add(&element.context_message.is_some());
     interaction.add(&element.focus_message.is_some());
@@ -420,7 +441,7 @@ fn signatures<Message>(element: &Element<Message>) -> PhaseSignatures {
     semantics.add(&element.style.accessibility_role.is_some());
     semantics.add(&element.style.accessibility_state.is_some());
     semantics.add(&element.style.accessibility_controls.is_some());
-    semantics.add(&format!("{:?}", element.style.semantic_role));
+    semantics.add_formatted(format_args!("{:?}", element.style.semantic_role));
     semantics.add(&element.style.accessibility_hidden);
     semantics.add(&element.style.semantic_decorative);
 
@@ -495,7 +516,8 @@ impl RetainedNodeArena {
     }
 
     pub(crate) fn reconcile<Message>(&mut self, root: &Element<Message>) -> ReconcileStats {
-        let old_nodes = std::mem::take(&mut self.nodes);
+        let mut old_nodes = std::mem::take(&mut self.nodes);
+        let old_count = old_nodes.len();
         let old_root = self.root.take();
         self.last = ReconcileStats::default();
         let mut consumed = HashSet::new();
@@ -509,11 +531,11 @@ impl RetainedNodeArena {
             ),
             0,
             old_root,
-            &old_nodes,
+            &mut old_nodes,
             &mut consumed,
         );
         self.root = Some(root_id);
-        self.last.removed = old_nodes.len().saturating_sub(consumed.len());
+        self.last.removed = old_count.saturating_sub(consumed.len());
         let mut postorder_index = 0;
         self.propagate_descendant_work(root_id, &mut postorder_index);
         self.by_ui_id.clear();
@@ -540,15 +562,18 @@ impl RetainedNodeArena {
         ui_id: UiId,
         position: usize,
         candidate: Option<RetainedNodeId>,
-        old_nodes: &HashMap<RetainedNodeId, RetainedNode>,
+        old_nodes: &mut HashMap<RetainedNodeId, RetainedNode>,
         consumed: &mut HashSet<RetainedNodeId>,
     ) -> RetainedNodeId {
         self.last.visited += 1;
         let kind = kind_tag(&element.kind);
-        let old = candidate.and_then(|id| old_nodes.get(&id));
-        let reusable = old.filter(|node| node.kind == kind && node.identity == identity);
+        let mut old = candidate.and_then(|id| old_nodes.remove(&id));
+        let had_old = old.is_some();
+        let mut reusable = old
+            .as_mut()
+            .filter(|node| node.kind == kind && node.identity == identity);
         let current = signatures(element);
-        let (id, phases, mut dirty) = if let Some(old) = reusable {
+        let (id, phases, mut dirty) = if let Some(old) = reusable.as_deref_mut() {
             consumed.insert(old.id);
             self.last.reused += 1;
             let mut dirty = DirtyPhases::default();
@@ -595,9 +620,11 @@ impl RetainedNodeArena {
             ) {
                 dirty.insert(DirtyPhases::SEMANTICS);
             }
-            (old.id, old.phases.clone(), dirty)
+            // The prior arena is already owned by this reconciliation. Move
+            // retained resources instead of cloning buffers before invalidation.
+            (old.id, std::mem::take(&mut old.phases), dirty)
         } else {
-            if old.is_some() {
+            if had_old {
                 self.last.replaced += 1;
             }
             self.next_id = self.next_id.max(1);
@@ -607,7 +634,9 @@ impl RetainedNodeArena {
             (id, RetainedPhaseData::default(), DirtyPhases::ALL)
         };
 
-        let old_children = reusable.map_or(&[][..], |node| node.children.as_slice());
+        let old_children = reusable
+            .as_ref()
+            .map_or(&[][..], |node| node.children.as_slice());
         let mut keyed = HashMap::new();
         for child_id in old_children {
             let child = &old_nodes[child_id];
@@ -657,6 +686,7 @@ impl RetainedNodeArena {
             children,
             subtree_dirty: dirty,
             subtree_nodes: 1,
+            subtree_layout_clean: false,
             postorder_index: 0,
             phases,
         };
@@ -679,6 +709,9 @@ impl RetainedNodeArena {
             .iter()
             .map(|child| self.nodes[child].subtree_nodes)
             .sum::<usize>();
+        let children_layout_clean = children
+            .iter()
+            .all(|child| self.nodes[child].subtree_layout_clean);
         let node = self.nodes.get_mut(&root).expect("retained node exists");
         if node.dirty.contains(DirtyPhases::CHILDREN) || descendants.contains(DirtyPhases::MEASURE)
         {
@@ -698,7 +731,15 @@ impl RetainedNodeArena {
             );
         }
         node.subtree_dirty = node.dirty.union(descendants);
+        if node.dirty.contains(DirtyPhases::MEASURE) {
+            node.phases.scroll_measurements = None;
+        }
         node.subtree_nodes = subtree_nodes;
+        node.subtree_layout_clean = children_layout_clean
+            && !node.dirty.contains(DirtyPhases::MEASURE)
+            && !node.dirty.contains(DirtyPhases::PLACE)
+            && node.phases.measured.is_some()
+            && node.phases.allocated.is_some();
         node.postorder_index = *postorder_index;
         *postorder_index = postorder_index.saturating_add(1);
         node.subtree_dirty
@@ -710,7 +751,11 @@ impl RetainedNodeArena {
     }
 
     pub(crate) fn capture_layout(&mut self, id: &UiId, measured: Size, allocated: Rect) {
-        if let Some(node) = self.nodes.values_mut().find(|node| &node.ui_id == id) {
+        if let Some(node) = self
+            .by_ui_id
+            .get(id)
+            .and_then(|key| self.nodes.get_mut(key))
+        {
             node.phases.measured = Some(measured);
             node.phases.measured_constraints = Some([
                 allocated.size.width.to_bits(),
@@ -721,7 +766,7 @@ impl RetainedNodeArena {
     }
 
     pub(crate) fn measured_for(&self, id: &UiId, constraints: Size) -> Option<Size> {
-        let node = self.nodes.values().find(|node| &node.ui_id == id)?;
+        let node = self.nodes.get(self.by_ui_id.get(id)?)?;
         (!node.dirty.contains(DirtyPhases::MEASURE)
             && node.phases.measured_constraints
                 == Some([constraints.width.to_bits(), constraints.height.to_bits()]))
@@ -729,16 +774,48 @@ impl RetainedNodeArena {
         .flatten()
     }
 
+    pub(crate) fn scroll_measurement_for(&self, id: &UiId, width: f32) -> Option<Size> {
+        let node = self.nodes.get(self.by_ui_id.get(id)?)?;
+        let constraints = [width.to_bits(), f32::INFINITY.to_bits()];
+        node.phases
+            .scroll_measurements
+            .as_ref()?
+            .iter()
+            .flatten()
+            .find_map(|(key, size)| (*key == constraints).then_some(*size))
+    }
+
+    pub(crate) fn cache_scroll_measurement(&mut self, id: &UiId, width: f32, size: Size) {
+        let Some(key) = self.by_ui_id.get(id) else {
+            return;
+        };
+        let node = self.nodes.get_mut(key).expect("indexed retained node");
+        let entries = node
+            .phases
+            .scroll_measurements
+            .get_or_insert_with(|| Box::new([None, None]));
+        let constraints = [width.to_bits(), f32::INFINITY.to_bits()];
+        let slot = entries
+            .iter()
+            .position(|entry| entry.is_none_or(|(key, _)| key == constraints))
+            .unwrap_or_else(|| {
+                entries.swap(0, 1);
+                0
+            });
+        entries[slot] = Some((constraints, size));
+    }
+
     /// Returns whether measurement and placement records for the complete
     /// declaration subtree remain valid. Callers may reuse geometry only when
     /// the incoming parent allocation also matches the recorded allocation.
     pub(crate) fn subtree_layout_is_clean(&self, id: &UiId) -> bool {
-        let Some(node) = self.nodes.values().find(|node| &node.ui_id == id) else {
-            return false;
-        };
-        self.subtree_layout_is_clean_from(node.id)
+        self.by_ui_id
+            .get(id)
+            .and_then(|key| self.nodes.get(key))
+            .is_some_and(|node| node.subtree_layout_clean)
     }
 
+    #[cfg(test)]
     fn subtree_layout_is_clean_from(&self, id: RetainedNodeId) -> bool {
         let node = &self.nodes[&id];
         !node.dirty.contains(DirtyPhases::MEASURE)
@@ -769,6 +846,11 @@ impl RetainedNodeArena {
                     let _parent = node.parent();
                     node.children.capacity() * std::mem::size_of::<RetainedNodeId>()
                         + node.phases.paint.capacity() * std::mem::size_of::<PaintCommand>()
+                        + node
+                            .phases
+                            .scroll_measurements
+                            .as_ref()
+                            .map_or(0, |cache| std::mem::size_of_val(cache.as_ref()))
                 })
                 .sum::<usize>()
     }
@@ -777,6 +859,32 @@ impl RetainedNodeArena {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn streamed_signature_formatting_matches_allocated_string_hashing() {
+        fn check(arguments: std::fmt::Arguments<'_>) {
+            let mut allocated = CompactHasher::default();
+            let mut streamed = CompactHasher::default();
+            allocated.add(&17u64);
+            streamed.add(&17u64);
+            allocated.add(&arguments.to_string());
+            streamed.add_formatted(arguments);
+            // Include a suffix to catch incorrect per-chunk terminators.
+            allocated.add(&"after");
+            streamed.add(&"after");
+            assert_eq!(allocated.finish(), streamed.finish());
+        }
+        check(format_args!(""));
+        check(format_args!("{}{}{}", "Unicode 🦀", "", "終"));
+        check(format_args!("{:?}", Style::default()));
+        for value in [0.0f32, -0.0, 1.25, f32::INFINITY, f32::NAN] {
+            check(format_args!("{value:?}{:?}{:?}", Some(value), [value; 4]));
+        }
+        for size in [7, 8, 9, 63, 64, 65, 1024] {
+            let text = "x".repeat(size);
+            check(format_args!("{text:?}{text}{:?}", Some(&text)));
+        }
+    }
     use crate::{
         Column, Component, ComponentBuilderExt, CustomPaint, FrameRequest, Grid, Rect, Row,
         StyledText, StyledTextSpan, Text, TextUnderlineStyle, Track, UiFrame, UiStateStore,
@@ -968,6 +1076,37 @@ mod tests {
     }
 
     #[test]
+    fn reconciliation_moves_retained_buffers_instead_of_cloning_them() {
+        let mut arena = RetainedNodeArena::default();
+        let view = keyed_text("leaf", "same");
+        arena.reconcile(&view);
+        let bounds = Rect::new(0.0, 0.0, 80.0, 20.0);
+        let leaf = arena.nodes.values_mut().next().unwrap();
+        leaf.phases.measured = Some(bounds.size);
+        leaf.phases.allocated = Some(bounds);
+        leaf.phases.paint.push(PaintCommand::Fill {
+            rect: bounds,
+            color: 0xff12_3456,
+        });
+        leaf.phases.scroll_measurements = Some(Box::new([
+            Some(([80.0f32.to_bits(), f32::INFINITY.to_bits()], bounds.size)),
+            None,
+        ]));
+        let paint_storage = leaf.phases.paint.as_ptr();
+        let measurement_storage = leaf.phases.scroll_measurements.as_deref().unwrap() as *const _;
+        let stats = arena.reconcile(&view);
+        assert_eq!(stats.reused, 1);
+        assert_eq!(stats.removed, 0);
+        let leaf = arena.nodes().next().unwrap();
+        assert_eq!(leaf.phases.paint.as_ptr(), paint_storage);
+        assert_eq!(
+            leaf.phases.scroll_measurements.as_deref().unwrap() as *const _,
+            measurement_storage
+        );
+        assert_eq!(leaf.phases.paint.len(), 1);
+    }
+
+    #[test]
     fn paint_only_change_does_not_dirty_layout_or_semantics() {
         let mut arena = RetainedNodeArena::default();
         arena.reconcile(
@@ -1016,6 +1155,87 @@ mod tests {
         assert_eq!(leaf.phases.measured, Some(cached_size));
         assert_eq!(leaf.phases.allocated, Some(cached_bounds));
         assert!(leaf.phases.paint.is_empty());
+    }
+
+    #[test]
+    fn indexed_layout_records_follow_keys_and_retire_removed_nodes() {
+        let mut arena = RetainedNodeArena::default();
+        let view = |keys: &[&str]| {
+            Row::new()
+                .children(keys.iter().map(|key| keyed_text(key, key)))
+                .into_element()
+        };
+        let first = view(&["a", "b", "c"]);
+        arena.reconcile(&first);
+        let bounds = Rect::new(0.0, 0.0, 80.0, 20.0);
+        for id in arena.by_ui_id.keys().cloned().collect::<Vec<_>>() {
+            arena.capture_layout(&id, bounds.size, bounds);
+        }
+        arena.reconcile(&first);
+        let removed = arena
+            .nodes()
+            .find(|node| node.ui_id.as_str().ends_with("/b"))
+            .unwrap()
+            .ui_id
+            .clone();
+        assert_eq!(arena.measured_for(&removed, bounds.size), Some(bounds.size));
+        assert_eq!(arena.measured_for(&removed, Size::new(81.0, 20.0)), None);
+        for keys in [&["c", "a", "x"][..], &["a"][..], &[][..]] {
+            arena.reconcile(&view(keys));
+            assert_eq!(arena.by_ui_id.len(), arena.nodes.len());
+            assert_eq!(arena.measured_for(&removed, bounds.size), None);
+            assert!(!arena.subtree_layout_is_clean(&removed));
+            arena.capture_layout(&removed, bounds.size, bounds);
+            assert!(!arena.by_ui_id.contains_key(&removed));
+            for node in arena.nodes() {
+                assert_eq!(
+                    arena.subtree_layout_is_clean(&node.ui_id),
+                    arena.subtree_layout_is_clean_from(node.id)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cached_layout_cleanliness_matches_recursive_oracle_at_scale() {
+        for count in [100, 1_000, 10_000] {
+            let mut arena = RetainedNodeArena::default();
+            let view = Column::new()
+                .children((0..count).map(|index| keyed_text(&format!("item-{index}"), "item")))
+                .into_element();
+            arena.reconcile(&view);
+            let bounds = Rect::new(0.0, 0.0, 80.0, 20.0);
+            for id in arena.by_ui_id.keys().cloned().collect::<Vec<_>>() {
+                arena.capture_layout(&id, bounds.size, bounds);
+            }
+            arena.reconcile(&view);
+            for node in arena.nodes() {
+                assert_eq!(
+                    arena.measured_for(&node.ui_id, bounds.size),
+                    Some(bounds.size)
+                );
+                assert!(arena.subtree_layout_is_clean(&node.ui_id));
+                assert_eq!(
+                    node.subtree_layout_clean,
+                    arena.subtree_layout_is_clean_from(node.id)
+                );
+            }
+            // A missing descendant record must invalidate the cached ancestor result.
+            let leaf = *arena
+                .by_ui_id
+                .values()
+                .find(|id| arena.nodes[id].children.is_empty())
+                .unwrap();
+            arena.nodes.get_mut(&leaf).unwrap().phases.allocated = None;
+            arena.reconcile(&view);
+            for node in arena.nodes() {
+                assert_eq!(
+                    node.subtree_layout_clean,
+                    arena.subtree_layout_is_clean_from(node.id)
+                );
+            }
+            assert!(!arena.nodes[&arena.root.unwrap()].subtree_layout_clean);
+        }
     }
 
     #[test]

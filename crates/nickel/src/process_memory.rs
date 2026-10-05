@@ -196,7 +196,7 @@ pub(crate) fn trim_diagnostics() -> MemoryTrimDiagnostics {
     }
 }
 
-fn trim_snapshot() -> MemoryTrimSnapshot {
+pub(crate) fn trim_snapshot() -> MemoryTrimSnapshot {
     let process = process_memory_snapshot();
     let allocator = allocator_memory_snapshot();
     MemoryTrimSnapshot {

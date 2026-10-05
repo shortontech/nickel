@@ -3,6 +3,8 @@
 use std::{
     cell::RefCell,
     collections::{HashMap, HashSet},
+    hash::{Hash, Hasher},
+    sync::Arc,
 };
 
 use cssparser::{
@@ -64,7 +66,9 @@ pub struct ControlStyle {
     pub bottom: Option<f32>,
     pub top: Option<f32>,
     pub(crate) inherited_text: [bool; 3],
-    pub(crate) custom_properties: HashMap<String, String>,
+    // Computed once for this immutable resolved style, shared by cached returns
+    // and inherited text context. Never mutate a cached parent's variable map.
+    pub(crate) custom_properties: Arc<HashMap<String, String>>,
     pub(crate) ancestors: Vec<(String, Option<String>, Option<String>)>,
 }
 
@@ -78,11 +82,21 @@ struct Selector {
     state: Option<InteractionState>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum InteractionState {
     Hover,
     Active,
     Focus,
+}
+
+impl InteractionState {
+    const fn index(self) -> usize {
+        match self {
+            Self::Hover => 0,
+            Self::Active => 1,
+            Self::Focus => 2,
+        }
+    }
 }
 
 impl Selector {
@@ -983,13 +997,118 @@ struct StyleCacheKey {
     ancestors: Vec<(String, Option<String>, Option<String>)>,
 }
 
+#[derive(Hash)]
+struct StyleCacheLookup<'a> {
+    kind: &'a str,
+    id: Option<&'a str>,
+    classes: Option<&'a str>,
+    inherited: Vec<(&'a str, &'a str)>,
+    ancestors: &'a [(String, Option<String>, Option<String>)],
+}
+
+impl<'a> StyleCacheLookup<'a> {
+    fn new(
+        kind: &'a str,
+        id: Option<&'a str>,
+        classes: Option<&'a str>,
+        properties: &'a HashMap<String, String>,
+        ancestors: &'a [(String, Option<String>, Option<String>)],
+    ) -> Self {
+        let mut inherited = properties
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect::<Vec<_>>();
+        inherited.sort_unstable();
+        Self {
+            kind,
+            id,
+            classes,
+            inherited,
+            ancestors,
+        }
+    }
+
+    fn fingerprint(&self) -> u64 {
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        self.hash(&mut hash);
+        hash.finish()
+    }
+
+    fn to_owned(&self) -> StyleCacheKey {
+        StyleCacheKey {
+            kind: self.kind.into(),
+            id: self.id.map(str::to_owned),
+            classes: self.classes.map(str::to_owned),
+            inherited: self
+                .inherited
+                .iter()
+                .map(|(k, v)| ((*k).into(), (*v).into()))
+                .collect(),
+            ancestors: self.ancestors.to_vec(),
+        }
+    }
+}
+
+impl StyleCacheKey {
+    fn matches(&self, lookup: &StyleCacheLookup<'_>) -> bool {
+        self.kind == lookup.kind
+            && self.id.as_deref() == lookup.id
+            && self.classes.as_deref() == lookup.classes
+            && self.ancestors.as_slice() == lookup.ancestors
+            && self
+                .inherited
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str()))
+                .eq(lookup.inherited.iter().copied())
+    }
+
+    fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self.kind.capacity()
+            + self.id.as_ref().map_or(0, String::capacity)
+            + self.classes.as_ref().map_or(0, String::capacity)
+            + self.inherited.capacity() * std::mem::size_of::<(String, String)>()
+            + self
+                .inherited
+                .iter()
+                .map(|(k, v)| k.capacity() + v.capacity())
+                .sum::<usize>()
+            + self.ancestors.capacity()
+                * std::mem::size_of::<(String, Option<String>, Option<String>)>()
+            + self
+                .ancestors
+                .iter()
+                .map(|(kind, id, classes)| {
+                    kind.capacity()
+                        + id.as_ref().map_or(0, String::capacity)
+                        + classes.as_ref().map_or(0, String::capacity)
+                })
+                .sum::<usize>()
+    }
+}
+
+const INTERACTION_CACHE_ENTRIES: usize = 2048;
+const INTERACTION_CACHE_BYTES: usize = 2 * 1024 * 1024;
+
+#[derive(Clone, Debug, Default)]
+struct InteractionCache {
+    // A fingerprint selects a candidate, never authorizes reuse by itself.
+    // Collisions replace the candidate after exact input comparison.
+    entries: HashMap<(u64, InteractionState), (StyleCacheKey, nickel_ui::InteractionPaint)>,
+    bytes: usize,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct StyleSheet {
     rules: Vec<Rule>,
     palette: Option<ThemePalette>,
     uses_palette: bool,
     reading_direction: ReadingDirection,
-    resolved: RefCell<HashMap<StyleCacheKey, ControlStyle>>,
+    resolved: RefCell<HashMap<u64, (StyleCacheKey, ControlStyle)>>,
+    interaction_rules: [Vec<usize>; 3],
+    interactions: RefCell<InteractionCache>,
+    #[cfg(test)]
+    interaction_rule_visits: std::cell::Cell<usize>,
 }
 
 impl StyleSheet {
@@ -1016,12 +1135,32 @@ impl StyleSheet {
                 return Err("plugin stylesheet has more than 512 rules".into());
             }
         }
+        let mut interaction_rules: [Vec<usize>; 3] = Default::default();
+        for (index, rule) in rules.iter().enumerate() {
+            for state in [
+                InteractionState::Hover,
+                InteractionState::Active,
+                InteractionState::Focus,
+            ] {
+                if rule
+                    .selectors
+                    .iter()
+                    .any(|selector| selector.state == Some(state))
+                {
+                    interaction_rules[state.index()].push(index);
+                }
+            }
+        }
         let sheet = Self {
             rules,
             palette: Some(palette),
             uses_palette: source.contains("--nickel-"),
             reading_direction: ReadingDirection::LeftToRight,
             resolved: RefCell::default(),
+            interaction_rules,
+            interactions: RefCell::default(),
+            #[cfg(test)]
+            interaction_rule_visits: Default::default(),
         };
         sheet.validate()?;
         Ok(sheet)
@@ -1036,6 +1175,7 @@ impl StyleSheet {
         self.reading_direction = direction;
         if changed {
             self.resolved.get_mut().clear();
+            *self.interactions.get_mut() = InteractionCache::default();
         }
         changed
     }
@@ -1046,6 +1186,7 @@ impl StyleSheet {
         }
         self.palette = Some(palette);
         self.resolved.get_mut().clear();
+        *self.interactions.get_mut() = InteractionCache::default();
         Ok(self.uses_palette)
     }
 
@@ -1126,19 +1267,11 @@ impl StyleSheet {
         inherited: &HashMap<String, String>,
         ancestors: &[(String, Option<String>, Option<String>)],
     ) -> ControlStyle {
-        let mut variables = inherited
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect::<Vec<_>>();
-        variables.sort_unstable();
-        let key = StyleCacheKey {
-            kind: kind.into(),
-            id: id.map(str::to_owned),
-            classes: class_name.map(str::to_owned),
-            inherited: variables,
-            ancestors: ancestors.to_vec(),
-        };
-        if let Some(style) = self.resolved.borrow().get(&key) {
+        let lookup = StyleCacheLookup::new(kind, id, class_name, inherited, ancestors);
+        let fingerprint = lookup.fingerprint();
+        if let Some((key, style)) = self.resolved.borrow().get(&fingerprint)
+            && key.matches(&lookup)
+        {
             return style.clone();
         }
         let mut style = ControlStyle {
@@ -1200,12 +1333,13 @@ impl StyleSheet {
                     .ok()
                     .map(|value| (name.clone(), value))
             })
-            .collect();
+            .collect::<HashMap<_, _>>()
+            .into();
         let mut cache = self.resolved.borrow_mut();
         if cache.len() >= 256 {
             cache.clear();
         }
-        cache.insert(key, style.clone());
+        cache.insert(fingerprint, (lookup.to_owned(), style.clone()));
         style
     }
 
@@ -1218,8 +1352,22 @@ impl StyleSheet {
         properties: &HashMap<String, String>,
         ancestors: &[(String, Option<String>, Option<String>)],
     ) -> nickel_ui::InteractionPaint {
+        if self.interaction_rules[state.index()].is_empty() {
+            return nickel_ui::InteractionPaint::default();
+        }
+        let lookup = StyleCacheLookup::new(kind, id, class_name, properties, ancestors);
+        let fingerprint = (lookup.fingerprint(), state);
+        if let Some((key, paint)) = self.interactions.borrow().entries.get(&fingerprint)
+            && key.matches(&lookup)
+        {
+            return *paint;
+        }
         let mut style = ControlStyle::default();
-        for rule in &self.rules {
+        for &index in &self.interaction_rules[state.index()] {
+            let rule = &self.rules[index];
+            #[cfg(test)]
+            self.interaction_rule_visits
+                .set(self.interaction_rule_visits.get() + 1);
             if rule.selectors.iter().any(|selector| {
                 selector.state == Some(state)
                     && selector.matches(kind, id, class_name, Some(state), ancestors)
@@ -1234,7 +1382,7 @@ impl StyleSheet {
                 }
             }
         }
-        nickel_ui::InteractionPaint {
+        let paint = nickel_ui::InteractionPaint {
             background: style.background,
             foreground: style.color,
             border_color: style.border_color,
@@ -1244,7 +1392,29 @@ impl StyleSheet {
             line_height: style.line_height,
             width: style.width,
             height: style.height,
+        };
+        let key = lookup.to_owned();
+        let bytes = key.retained_bytes()
+            + std::mem::size_of::<u64>()
+            + std::mem::size_of::<InteractionState>()
+            + std::mem::size_of::<nickel_ui::InteractionPaint>();
+        if bytes <= INTERACTION_CACHE_BYTES {
+            let mut cache = self.interactions.borrow_mut();
+            if let Some((previous, _)) = cache.entries.remove(&fingerprint) {
+                cache.bytes -= previous.retained_bytes()
+                    + std::mem::size_of::<u64>()
+                    + std::mem::size_of::<InteractionState>()
+                    + std::mem::size_of::<nickel_ui::InteractionPaint>();
+            }
+            if cache.entries.len() >= INTERACTION_CACHE_ENTRIES
+                || cache.bytes + bytes > INTERACTION_CACHE_BYTES
+            {
+                *cache = InteractionCache::default();
+            }
+            cache.bytes += bytes;
+            cache.entries.insert(fingerprint, (key, paint));
         }
+        paint
     }
 
     pub fn resolve_interaction_background(
@@ -1273,29 +1443,18 @@ impl StyleSheet {
         properties: &HashMap<String, String>,
         ancestors: &[(String, Option<String>, Option<String>)],
     ) -> Option<u32> {
-        let mut background = None;
-        for rule in &self.rules {
-            if rule
-                .selectors
-                .iter()
-                .any(|selector| selector.matches(kind, id, class_name, Some(state), ancestors))
-            {
-                for parsed in &rule.declarations {
-                    if let ParsedDeclaration::Property(name, value) = parsed
-                        && matches!(name.as_str(), "background" | "background-color")
-                        && let Ok(value) = resolve_value(value, properties, &mut HashSet::new())
-                        && let Ok(Declaration::Background(color)) = declaration(name, &value)
-                    {
-                        background = Some(color);
-                    }
-                }
-            }
-        }
-        background
+        self.resolve_interaction_paint(kind, id, class_name, state, properties, ancestors)
+            .background
     }
 
     pub fn estimated_retained_bytes(&self) -> u64 {
         let mut bytes = self.rules.capacity() * std::mem::size_of::<Rule>();
+        bytes += self.interactions.borrow().bytes;
+        bytes += self
+            .interaction_rules
+            .iter()
+            .map(|rules| rules.capacity() * std::mem::size_of::<usize>())
+            .sum::<usize>();
         for rule in &self.rules {
             bytes += rule.selectors.capacity() * std::mem::size_of::<Selector>();
             bytes += rule.declarations.capacity() * std::mem::size_of::<ParsedDeclaration>();
@@ -1319,6 +1478,234 @@ impl StyleSheet {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cached_styles_share_immutable_variables_without_sibling_leaks_or_retention() {
+        use super::*;
+        let css = StyleSheet::compile(
+            ":root { --ink: #123456; } .local { --ink: #abcdef; } text { color: var(--ink); }",
+        )
+        .unwrap();
+        let parent = css.resolve("div", None, None);
+        let again = css.resolve("div", None, None);
+        assert!(Arc::ptr_eq(
+            &parent.custom_properties,
+            &again.custom_properties
+        ));
+        let ordinary =
+            css.resolve_with_custom_properties("text", None, None, &parent.custom_properties);
+        let local = css.resolve_with_custom_properties(
+            "text",
+            None,
+            Some("local"),
+            &parent.custom_properties,
+        );
+        assert_eq!(ordinary.color, Some(0xff12_3456));
+        assert_eq!(local.color, Some(0xffab_cdef));
+        assert_eq!(
+            parent.custom_properties.get("--ink").map(String::as_str),
+            Some("#123456")
+        );
+        assert!(!Arc::ptr_eq(
+            &ordinary.custom_properties,
+            &local.custom_properties
+        ));
+        let lifetime = Arc::downgrade(&parent.custom_properties);
+        drop(css);
+        assert_eq!(
+            again.custom_properties.get("--ink"),
+            parent.custom_properties.get("--ink")
+        );
+        drop(parent);
+        drop(again);
+        assert!(
+            lifetime.upgrade().is_none(),
+            "retired style variables must not leak through a global cache"
+        );
+    }
+
+    #[test]
+    fn borrowed_cache_lookup_rejects_collisions_and_accounts_replacements() {
+        use super::*;
+        let source = ":root { --ink: #000; } button { color: var(--ink); } button:hover { background: var(--ink); }";
+        let css = StyleSheet::compile(source).unwrap();
+        let before = HashMap::from([("--ink".into(), "#123456".into())]);
+        let after = HashMap::from([("--ink".into(), "#fff".into())]);
+        let old = StyleCacheLookup::new("button", None, None, &before, &[]).fingerprint();
+        let new = StyleCacheLookup::new("button", None, None, &after, &[]).fingerprint();
+        css.resolve_with_custom_properties("button", None, None, &before);
+        // Force a candidate collision without relying on finding a hash collision.
+        let entry = css.resolved.borrow_mut().remove(&old).unwrap();
+        css.resolved.borrow_mut().insert(new, entry);
+        let cold = StyleSheet::compile(source).unwrap();
+        assert_eq!(
+            css.resolve_with_custom_properties("button", None, None, &after),
+            cold.resolve_with_custom_properties("button", None, None, &after)
+        );
+        assert_eq!(css.resolved.borrow().len(), 1);
+
+        let state = InteractionState::Hover;
+        css.resolve_interaction_paint("button", None, None, state, &before, &[]);
+        let entry = css
+            .interactions
+            .borrow_mut()
+            .entries
+            .remove(&(old, state))
+            .unwrap();
+        css.interactions
+            .borrow_mut()
+            .entries
+            .insert((new, state), entry);
+        assert_eq!(
+            css.resolve_interaction_paint("button", None, None, state, &after, &[]),
+            cold.resolve_interaction_paint("button", None, None, state, &after, &[])
+        );
+        assert_eq!(css.interactions.borrow().entries.len(), 1);
+        assert_eq!(
+            css.interactions.borrow().bytes,
+            cold.interactions.borrow().bytes
+        );
+
+        let forward = HashMap::from([("--a".into(), "1".into()), ("--b".into(), "2".into())]);
+        let reverse = HashMap::from([("--b".into(), "2".into()), ("--a".into(), "1".into())]);
+        let first = StyleCacheLookup::new("button", Some("id"), Some("class"), &forward, &[]);
+        let second = StyleCacheLookup::new("button", Some("id"), Some("class"), &reverse, &[]);
+        assert_eq!(first.fingerprint(), second.fingerprint());
+        assert!(first.to_owned().matches(&second));
+    }
+
+    #[test]
+    fn interaction_cache_preserves_inputs_and_avoids_repeated_rule_visits() {
+        let source = ":root { --ink: #123456; } .parent button:hover { color: var(--ink); } button:active { background: #abcdef; } button:hover { width: 76px; } text { color: #ffffff; }";
+        let mut css = super::StyleSheet::compile(source).unwrap();
+        let parent = vec![("div".into(), None, Some("parent".into()))];
+        let mut properties = std::collections::HashMap::from([("--ink".into(), "#334455".into())]);
+        for state in [
+            super::InteractionState::Hover,
+            super::InteractionState::Active,
+            super::InteractionState::Focus,
+        ] {
+            for ancestors in [&parent[..], &[][..]] {
+                for id in [None, Some("one")] {
+                    for classes in [None, Some("special")] {
+                        let expected = super::StyleSheet::compile(source)
+                            .unwrap()
+                            .resolve_interaction_paint(
+                                "button",
+                                id,
+                                classes,
+                                state,
+                                &properties,
+                                ancestors,
+                            );
+                        let actual = css.resolve_interaction_paint(
+                            "button",
+                            id,
+                            classes,
+                            state,
+                            &properties,
+                            ancestors,
+                        );
+                        assert_eq!(actual, expected);
+                        let visits = css.interaction_rule_visits.get();
+                        assert_eq!(
+                            css.resolve_interaction_paint(
+                                "button",
+                                id,
+                                classes,
+                                state,
+                                &properties,
+                                ancestors
+                            ),
+                            expected
+                        );
+                        assert_eq!(css.interaction_rule_visits.get(), visits);
+                    }
+                }
+            }
+        }
+        properties.insert("--ink".into(), "#778899".into());
+        let changed = css.resolve_interaction_paint(
+            "button",
+            None,
+            None,
+            super::InteractionState::Hover,
+            &properties,
+            &parent,
+        );
+        assert_eq!(changed.foreground, Some(0xff778899));
+        assert_eq!(changed.width, Some(nickel_ui::Length::Px(76.0)));
+        assert_eq!(
+            css.resolve_interaction_paint(
+                "text",
+                None,
+                None,
+                super::InteractionState::Hover,
+                &properties,
+                &parent
+            ),
+            nickel_ui::InteractionPaint::default()
+        );
+        assert!(css.set_reading_direction(nickel_ui::ReadingDirection::RightToLeft));
+        assert!(css.interactions.borrow().entries.is_empty());
+        css.resolve_interaction_paint(
+            "button",
+            None,
+            None,
+            super::InteractionState::Hover,
+            &properties,
+            &parent,
+        );
+        css.set_palette(nickel_core::theme::ThemePalette::from_appearance(
+            nickel_core::theme::Appearance {
+                mode: nickel_core::theme::ThemeMode::Light,
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+        assert!(css.interactions.borrow().entries.is_empty());
+    }
+
+    #[test]
+    fn interaction_cache_is_count_and_payload_bounded() {
+        let css = super::StyleSheet::compile("button:hover { background: #123456; }").unwrap();
+        let mut properties = std::collections::HashMap::new();
+        for index in 0..super::INTERACTION_CACHE_ENTRIES * 2 {
+            let paint = css.resolve_interaction_paint(
+                "button",
+                Some(&index.to_string()),
+                None,
+                super::InteractionState::Hover,
+                &properties,
+                &[],
+            );
+            assert_eq!(paint.background, Some(0xff123456));
+            assert!(css.interactions.borrow().entries.len() <= super::INTERACTION_CACHE_ENTRIES);
+            assert!(css.interactions.borrow().bytes <= super::INTERACTION_CACHE_BYTES);
+        }
+        let entries = css.interactions.borrow().entries.len();
+        properties.insert(
+            "--oversized".into(),
+            "x".repeat(super::INTERACTION_CACHE_BYTES + 1),
+        );
+        assert_eq!(
+            css.resolve_interaction_paint(
+                "button",
+                None,
+                None,
+                super::InteractionState::Hover,
+                &properties,
+                &[]
+            )
+            .background,
+            Some(0xff123456)
+        );
+        assert_eq!(
+            css.interactions.borrow().entries.len(),
+            entries,
+            "oversized keys must not be retained"
+        );
+    }
+
     #[test]
     fn descendant_rules_match_ordered_ancestors_without_leaking() {
         let css = super::StyleSheet::compile("window.launcher button { background: #123456; } window.settings button { background: #abcdef; }").unwrap();

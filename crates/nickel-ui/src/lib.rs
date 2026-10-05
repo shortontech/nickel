@@ -69,10 +69,10 @@ pub use runtime::{
     CompletionFailureKind, ControllerExecutionDisposition, ControllerExecutionEvidence,
     ControllerPollSchedule, DefaultHostAdapter, EffectEvidence, FileDragAction, FileDragEvent,
     FrameOverlay, GlobalAction, HostAdapter, HostBatch, HostChangeToken, HostEvent,
-    HostEventOutcome, HostFailure, HostFailureStage, HostInspection, HostServices, HostTelemetry,
-    MessageEvidence, NativeFrameCorrelation, NormalizedAdmissionBinding,
+    HostEventOutcome, HostFailure, HostFailureStage, HostInputLease, HostInspection, HostServices,
+    HostTelemetry, MessageEvidence, NativeFrameCorrelation, NormalizedAdmissionBinding,
     NormalizedIngressAuthority, NormalizedInputEnvelope, NormalizedRecipientBinding,
-    NormalizedSourceBinding, OutboundFileDrag, OverlayDeclarationFailure, Popover,
+    NormalizedSourceBinding, OutboundFileDrag, OverlayDeclarationFailure, Popover, ScrollAnchor,
     SemanticActionFailure, Shortcut, ShortcutOutcome, Tooltip, UiHost, UiHostViewport, ViewContext,
     run, run_with_adapter,
 };
@@ -123,9 +123,9 @@ pub use ui::{
     SidebarItem, SidebarSection, Slider, SliderField, SourceLocation, Spacer, StartMenuNarrowPane,
     StartMenuShell, StyledText, StyledTextSpan, Surface, SurfaceRole, Switch, SwitchState, TabList,
     Text, TextAlign, TextField, TextLayoutCacheDiagnostics, TextMeasureCacheMode,
-    TextUnderlineStyle, Tone, UiEvent, UiFrame, VerticalScroll, VirtualColumn, VirtualWindow,
-    intrinsic_text_width, search_settings, text_layout_cache_diagnostics,
-    with_text_measure_cache_mode,
+    TextUnderlineStyle, Tone, UiEvent, UiFrame, VerticalScroll, VirtualColumn, VirtualHeightIndex,
+    VirtualNavigation, VirtualWindow, intrinsic_text_width, search_settings,
+    text_layout_cache_diagnostics, with_text_measure_cache_mode,
 };
 pub use ui_declarative_macros::{component, id, ui};
 

@@ -110,6 +110,7 @@ pub struct WifiNetworkStatus {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct NetworkAdapterStatus {
+    pub id: String,
     pub name: String,
     pub description: String,
     pub connected: bool,

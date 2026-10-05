@@ -1,5 +1,6 @@
 // @jsx h
 import "./styles/connectivity.css";
+const deviceKey = device => device.id;
 
 export function Bluetooth() {
     const bluetooth = nickel.bluetooth.get();
@@ -17,7 +18,9 @@ export function Bluetooth() {
         {bluetooth.available && bluetooth.writable !== false && !bluetooth.operations.pair ? <Text wrap={true}>Pair new devices in system settings.</Text> : null}
         {bluetooth.available && bluetooth.writable !== false && !bluetooth.operations.connect && !bluetooth.operations.disconnect ? <Text wrap={true}>Manage device connections in system settings.</Text> : null}
         {bluetooth.available && !bluetooth.devices.length ? <Text>{bluetooth.powered ? "No devices are reported by the Bluetooth service." : "Turn on Bluetooth to use devices."}</Text> : null}
-        {bluetooth.devices.map(device => <Column key={device.id} className="connectivity-card">
+        <VirtualColumn id="settings-bluetooth-devices" items={bluetooth.devices}
+            itemKey={deviceKey} itemHeight={180} gap={16} overscan={96}
+            renderItem={device => <Column key={device.id} className="connectivity-card">
             <Text className="connectivity-name">{device.name || "Unnamed device"}</Text>
             {device.kind ? <Text>{device.kind}</Text> : null}
             {device.batteryPercent !== null && device.batteryPercent !== undefined ? <Text>{"Battery: " + device.batteryPercent + "%"}</Text> : null}
@@ -28,7 +31,7 @@ export function Bluetooth() {
             {device.paired && bluetooth.operations[device.connected ? "disconnect" : "connect"] ? <Button
                 id={"settings-bluetooth-connection/" + device.id} disabled={!bluetooth.powered}
                 onClick={() => device.connected ? nickel.bluetooth.disconnect(device.id) : nickel.bluetooth.connect(device.id)}>{device.connected ? "Disconnect" : "Connect"}</Button> : null}
-        </Column>)}
+        </Column>} />
     </Column>;
 }
 

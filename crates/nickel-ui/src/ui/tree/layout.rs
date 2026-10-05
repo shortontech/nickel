@@ -1,5 +1,22 @@
 use super::*;
 
+fn measure_scroll_content<Message: Clone>(
+    child: &Element<Message>,
+    id: &UiId,
+    width: f32,
+    tree: &mut UiFrame<Message>,
+) -> Size {
+    if let Some(size) = tree.retained_nodes.scroll_measurement_for(id, width) {
+        tree.scroll_content_measurements_reused += 1;
+        return size;
+    }
+    tree.scroll_content_measurements += 1;
+    let size = measure_element(child, Constraints::loose(Size::new(width, f32::INFINITY)));
+    tree.retained_nodes
+        .cache_scroll_measurement(id, width, size);
+    size
+}
+
 pub(super) fn layout_element<Message: Clone>(
     element: &Element<Message>,
     id: &UiId,
@@ -66,6 +83,7 @@ pub(super) fn layout_element<Message: Clone>(
         interaction,
         auto_focus: element.style.auto_focus,
         navigation_scope: element.navigation_scope.clone(),
+        virtual_navigation: element.virtual_navigation.clone(),
         adjustment_step: element.adjustment_step,
         controller_value: match &element.kind {
             Kind::Slider { value, .. } => Some(*value),
@@ -517,9 +535,11 @@ pub(super) fn layout_element<Message: Clone>(
             let requested_offset = *offset;
             let viewport = rect.inset(element.style.padding);
             let initial_size = element.children.first().map(|child| {
-                measure_element(
+                measure_scroll_content(
                     child,
-                    Constraints::loose(Size::new(viewport.size.width, f32::INFINITY)),
+                    &resolved_child_id(id, child, 0),
+                    viewport.size.width,
+                    tree,
                 )
             });
             let reserves_scrollbar =
@@ -545,10 +565,20 @@ pub(super) fn layout_element<Message: Clone>(
                     .unwrap_or_else(|| Rect::new(viewport.origin.x, viewport.origin.y, 0.0, 0.0))
             });
             if let Some(child) = element.children.first() {
-                let content_size = measure_element(
-                    child,
-                    Constraints::loose(Size::new(content_viewport.size.width, f32::INFINITY)),
-                );
+                // Only a changed width can make the second measurement differ.
+                // This also covers zero-width scrollbar gutters: reserving a
+                // scrollbar must not force a duplicate whole-content walk.
+                let content_size = if content_viewport.size.width == viewport.size.width {
+                    tree.scroll_content_measurements_reused += 1;
+                    initial_size.expect("the existing child was measured above")
+                } else {
+                    measure_scroll_content(
+                        child,
+                        &resolved_child_id(id, child, 0),
+                        content_viewport.size.width,
+                        tree,
+                    )
+                };
                 let content_height = content_size.height.max(viewport.size.height);
                 let offset =
                     requested_offset.clamp(0.0, (content_height - viewport.size.height).max(0.0));

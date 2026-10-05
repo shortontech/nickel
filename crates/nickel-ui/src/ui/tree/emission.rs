@@ -1151,6 +1151,7 @@ pub(super) fn emit_element<Message: Clone>(
                         hit_stack: None,
                         interaction: InteractionState::default(),
                         auto_focus: false,
+                        virtual_navigation: None,
                         navigation_scope: None,
                         adjustment_step: 0.05,
                         controller_value: None,

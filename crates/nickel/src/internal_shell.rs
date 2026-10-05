@@ -64,7 +64,10 @@ pub(crate) struct InternalShellSurface {
     pub role: SurfaceRole,
     pub plugin: Option<nickel_core::plugins::PluginSurfaceKey>,
     pub output: Option<String>,
+    /// Package-requested geometry, independent of the native viewport.
     pub size: (u32, u32),
+    /// Last compositor-owned logical viewport for this surface lifetime.
+    viewport_size: (u32, u32),
     pub scene_generation: u64,
     pub commands_copied: u64,
 }
@@ -147,6 +150,41 @@ pub(crate) struct InternalShellCoordinator {
 }
 
 impl InternalShellCoordinator {
+    /// Host-step samples only: the in-process compositor presenter has separate
+    /// diagnostics, so do not manufacture present timings or allocation counts.
+    pub(crate) fn host_runtime_diagnostics(
+        &self,
+    ) -> nickel_session_protocol::ShellRuntimeDiagnostics {
+        let (input_to_message_us, input_to_frame_us, layout_us, paint_list_us, scheduled_wakeups) =
+            self.shell.host_runtime_samples();
+        let host_phases = nickel_session_protocol::HostPhaseDistributions::from_samples(
+            &input_to_message_us,
+            &input_to_frame_us,
+            &layout_us,
+            &paint_list_us,
+            &[],
+            &[],
+        );
+        nickel_session_protocol::ShellRuntimeDiagnostics {
+            host_phase_samples_available: !input_to_frame_us.is_empty(),
+            input_to_message_us,
+            input_to_frame_us,
+            layout_us,
+            paint_list_us,
+            scheduled_wakeups,
+            host_phases,
+            frame_allocations: nickel_session_protocol::AllocationMeasurement {
+                count: None,
+                sample_count: 0,
+                scope: nickel_session_protocol::AllocationScope::Process,
+                unavailable_reason: Some(
+                    "compositor presenter allocations not sampled here".into(),
+                ),
+            },
+            ..Default::default()
+        }
+    }
+
     pub(crate) fn panel_edge(&self) -> PanelEdge {
         self.panel_edge
     }
@@ -375,6 +413,10 @@ impl InternalShellCoordinator {
         for (role, plugin, output, size) in desired {
             let key = (role, plugin.clone(), output.clone());
             if let Some(mut surface) = existing.remove(&key) {
+                // Follow defaults only until native placement overrides them.
+                if surface.viewport_size == surface.size {
+                    surface.viewport_size = size;
+                }
                 surface.size = size;
                 self.indices.insert(key, self.entries.len());
                 self.entries.push(surface);
@@ -448,6 +490,7 @@ impl InternalShellCoordinator {
             plugin,
             output,
             size,
+            viewport_size: size,
             scene_generation: 0,
             commands_copied: 0,
         });
@@ -582,10 +625,11 @@ impl InternalShellCoordinator {
         let Some(surface) = self.entries.iter_mut().find(|surface| surface.id == id) else {
             return false;
         };
-        if surface.size == size {
+        if surface.size == size && surface.viewport_size == size {
             return false;
         }
         surface.size = size;
+        surface.viewport_size = size;
         if let Some(host) = self.surfaces.get_mut(id) {
             host.step(HostBatch {
                 surface_size: Some(size),
@@ -687,11 +731,16 @@ impl InternalShellCoordinator {
     pub(crate) fn take_pointer_paint_scene(
         &mut self,
         id: InternalSurfaceId,
+        changed: bool,
     ) -> Option<Vec<PaintCommand>> {
         let surface = self.entries.iter_mut().find(|surface| surface.id == id)?;
         let commands = self
             .shell
-            .take_plugin_pointer_paint(surface.plugin.as_ref()?)?;
+            .take_plugin_pointer_paint(surface.plugin.as_ref()?, changed)?;
+        // Still acknowledge the fast path, without copying an unchanged scene.
+        if !changed {
+            return Some(commands);
+        }
         surface.scene_generation = surface.scene_generation.saturating_add(1);
         surface.commands_copied = surface
             .commands_copied
@@ -700,7 +749,11 @@ impl InternalShellCoordinator {
     }
 
     pub fn scene(&mut self, id: InternalSurfaceId) -> Option<Vec<PaintCommand>> {
-        let size = self.entries.iter().find(|surface| surface.id == id)?.size;
+        let size = self
+            .entries
+            .iter()
+            .find(|surface| surface.id == id)?
+            .viewport_size;
         self.scene_at_size(id, size)
     }
 
@@ -715,6 +768,17 @@ impl InternalShellCoordinator {
     ) -> Option<Vec<PaintCommand>> {
         self.select_desktop_viewport(id)?;
         let surface = self.entries.iter_mut().find(|surface| surface.id == id)?;
+        if surface.viewport_size != size {
+            tracing::debug!(
+                surface = ?id,
+                role = ?surface.role,
+                requested_size = ?surface.size,
+                previous_viewport = ?surface.viewport_size,
+                native_size = ?size,
+                "update internal shell native viewport from scene placement"
+            );
+        }
+        surface.viewport_size = size;
         let commands = if let Some(key) = surface.plugin.as_ref() {
             self.shell.plugin_surface_scene_for_output(
                 key,
@@ -776,6 +840,9 @@ impl InternalShellCoordinator {
             .filter(|(surface, was_visible)| {
                 self.visible(surface.id) != *was_visible
                     || self.redraws_surface(surface, &outcome.redraw)
+                    || (surface.role == SurfaceRole::Desktop
+                        && self.visible(surface.id)
+                        && self.shell.desktop_presentation_dirty())
                     || (outcome.visibility_changed && self.is_taskbar_surface(surface))
             })
             .map(|(surface, _)| surface.id)
@@ -1016,12 +1083,16 @@ impl InternalShellCoordinator {
                 self.shell.plugin_panel_host_window_focus_for(
                     key,
                     focused,
-                    entry.size.0,
-                    entry.size.1,
+                    entry.viewport_size.0,
+                    entry.viewport_size.1,
                 )
             } else {
-                self.shell
-                    .shell_role_host_ui(entry.role, event, entry.size.0, entry.size.1)
+                self.shell.shell_role_host_ui(
+                    entry.role,
+                    event,
+                    entry.viewport_size.0,
+                    entry.viewport_size.1,
+                )
             };
         }
         if desktop_surface && batch.window_focused == Some(false) {
@@ -1042,8 +1113,8 @@ impl InternalShellCoordinator {
                 nickel_input::InputEvent::FocusLost {
                     order: nickel_input::EventOrder(0),
                 },
-                entry.size.0,
-                entry.size.1,
+                entry.viewport_size.0,
+                entry.viewport_size.1,
             );
         }
         let controller_authority = batch.controller_authority;
@@ -1083,17 +1154,18 @@ impl InternalShellCoordinator {
                     self.shell.plugin_panel_host_controller_for(
                         key,
                         action,
-                        entry.size.0,
-                        entry.size.1,
+                        entry.viewport_size.0,
+                        entry.viewport_size.1,
                     )
                 } else {
                     match entry.role {
                         SurfaceRole::Lock => self.shell.lock_host_controller(action),
                         SurfaceRole::Launcher => false,
-                        SurfaceRole::ControlCenter => {
-                            self.shell
-                                .control_controller(action, entry.size.0, entry.size.1)
-                        }
+                        SurfaceRole::ControlCenter => self.shell.control_controller(
+                            action,
+                            entry.viewport_size.0,
+                            entry.viewport_size.1,
+                        ),
                         SurfaceRole::WindowPreview => self.shell.preview_controller(action),
 
                         SurfaceRole::WindowContextMenu => false,
@@ -1109,8 +1181,8 @@ impl InternalShellCoordinator {
             if entry.role == SurfaceRole::Screenshot {
                 changed |= self.shell.screenshot_host_event_authorized(
                     event,
-                    entry.size.0,
-                    entry.size.1,
+                    entry.viewport_size.0,
+                    entry.viewport_size.1,
                     normalized_authority,
                 );
                 continue;
@@ -1125,7 +1197,7 @@ impl InternalShellCoordinator {
                 dependent_roles.extend([SurfaceRole::Taskbar, SurfaceRole::OnScreenKeyboard]);
                 let mut outcome = self.shell.control_host_event_authorized(
                     event,
-                    entry.size,
+                    entry.viewport_size,
                     batch.clipboard_text_limit,
                     normalized_authority,
                 );
@@ -1146,8 +1218,8 @@ impl InternalShellCoordinator {
                 // Preserve the press-time recipient lease through native release.
                 changed |= self.shell.keyboard_host_event_authorized(
                     event,
-                    entry.size.0,
-                    entry.size.1,
+                    entry.viewport_size.0,
+                    entry.viewport_size.1,
                     normalized_authority,
                 );
                 continue;
@@ -1181,8 +1253,8 @@ impl InternalShellCoordinator {
                     changed |= self.shell.plugin_panel_host_input_for(
                         key,
                         input,
-                        entry.size.0,
-                        entry.size.1,
+                        entry.viewport_size.0,
+                        entry.viewport_size.1,
                     );
                     continue;
                 }
@@ -1194,9 +1266,11 @@ impl InternalShellCoordinator {
                             nickel_ui::HostEvent::NormalizedIngress(envelope) => envelope.input,
                             _ => unreachable!(),
                         };
-                        changed |= self
-                            .shell
-                            .lock_host_input(input, entry.size.0, entry.size.1);
+                        changed |= self.shell.lock_host_input(
+                            input,
+                            entry.viewport_size.0,
+                            entry.viewport_size.1,
+                        );
                     }
                     SurfaceRole::WindowPreview => {
                         dependent_roles.extend([SurfaceRole::Taskbar]);
@@ -1209,8 +1283,8 @@ impl InternalShellCoordinator {
                     SurfaceRole::Notification => {
                         changed |= self.shell.notification_host_event_authorized(
                             event,
-                            entry.size.0,
-                            entry.size.1,
+                            entry.viewport_size.0,
+                            entry.viewport_size.1,
                             normalized_authority,
                         );
                     }
@@ -1225,7 +1299,7 @@ impl InternalShellCoordinator {
                         .plugin_surface_host_event(
                             key,
                             nickel_ui::HostEvent::Shortcut(shortcut),
-                            entry.size,
+                            entry.viewport_size,
                             batch.clipboard_text_limit,
                             None,
                         )
@@ -1234,8 +1308,8 @@ impl InternalShellCoordinator {
                     changed |= self.shell.shell_role_host_shortcut(
                         entry.role,
                         shortcut,
-                        entry.size.0,
-                        entry.size.1,
+                        entry.viewport_size.0,
+                        entry.viewport_size.1,
                     );
                 }
                 continue;
@@ -1278,16 +1352,24 @@ impl InternalShellCoordinator {
             let outcome = match entry.role {
                 SurfaceRole::ControlCenter => Some(self.shell.control_host_event(
                     nickel_ui::HostEvent::Ui(event),
-                    entry.size,
+                    entry.viewport_size,
                     batch.clipboard_text_limit,
                 )),
                 _ => {
                     changed |= if let Some(key) = entry.plugin.as_ref() {
-                        self.shell
-                            .plugin_panel_host_ui_for(key, event, entry.size.0, entry.size.1)
+                        self.shell.plugin_panel_host_ui_for(
+                            key,
+                            event,
+                            entry.viewport_size.0,
+                            entry.viewport_size.1,
+                        )
                     } else {
-                        self.shell
-                            .shell_role_host_ui(entry.role, event, entry.size.0, entry.size.1)
+                        self.shell.shell_role_host_ui(
+                            entry.role,
+                            event,
+                            entry.viewport_size.0,
+                            entry.viewport_size.1,
+                        )
                     };
                     None
                 }
@@ -1313,6 +1395,9 @@ impl InternalShellCoordinator {
             if self.visible(surface.id) != was_visible
                 || (visibility_changed && self.is_taskbar_surface(surface))
                 || (changed && self.redraws_surface(surface, &dependent_roles))
+                || (surface.role == SurfaceRole::Desktop
+                    && self.visible(surface.id)
+                    && self.shell.desktop_presentation_dirty())
             {
                 changes.push(surface.id);
             }
@@ -1779,7 +1864,7 @@ mod tests {
     }
 
     #[test]
-    fn reserved_launcher_focus_loss_does_not_dismiss_selected_window() {
+    fn launcher_focus_loss_dismisses_launcher_but_preserves_settings() {
         with_package_runtime_stack(|| {
             #[derive(Default)]
             struct RecordingHost(std::sync::Mutex<Vec<ShellCommand>>);
@@ -1801,13 +1886,29 @@ mod tests {
                 scale: 1.0,
             }]);
             coordinator.apply_launcher_visibility(true);
+            coordinator
+                .shell
+                .show_plugin_window("nickel-default", "settings")
+                .unwrap();
             host.0.lock().unwrap().clear();
 
-            assert!(!coordinator.dismiss_ephemeral_on_focus_loss(SurfaceRole::Launcher));
-            assert!(coordinator.shell.launcher_intent_visible());
+            assert!(coordinator.dismiss_ephemeral_on_focus_loss(SurfaceRole::Launcher));
+            assert!(!coordinator.shell.launcher_intent_visible());
+            let settings = coordinator.shell.active_shell_surface_key("settings");
+            assert!(
+                coordinator
+                    .plugin_surfaces()
+                    .iter()
+                    .any(|(key, _)| key == &settings)
+            );
             assert!(coordinator.surface(SurfaceRole::Launcher, None).is_none());
             assert!(
-                host.0.lock().unwrap().is_empty(),
+                !host
+                    .0
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|command| matches!(command, ShellCommand::RestoreApplicationFocus)),
                 "focus loss must not restore the window displaced by launcher activation"
             );
         });
@@ -2363,6 +2464,149 @@ mod tests {
                         command, PaintCommand::Text { text, .. } if text == "konsole"
                     ))
             );
+        });
+    }
+
+    #[test]
+    fn plugin_window_motion_preserves_a_distinct_native_viewport() {
+        with_package_runtime_stack(|| {
+            use nickel_input::{DeviceId, EventOrder, InputEvent, Point, PointerEvent};
+
+            let mut coordinator = coordinator();
+            coordinator
+                .shell
+                .show_plugin_window("nickel-default", "settings")
+                .unwrap();
+            let outputs = [InternalOutput {
+                x: 0,
+                y: 0,
+                name: "nested".into(),
+                width: 1920,
+                height: 1080,
+                scale: 1.0,
+            }];
+            coordinator.set_outputs(&outputs);
+            let key = coordinator.shell.active_shell_surface_key("settings");
+            let entry = coordinator
+                .entries
+                .iter()
+                .find(|entry| entry.plugin.as_ref() == Some(&key))
+                .unwrap()
+                .clone();
+            for width in [entry.size.0 - 5, entry.size.0 + 5, entry.size.0] {
+                let viewport = (width, entry.size.1);
+                coordinator.scene_at_size(entry.id, viewport).unwrap();
+                coordinator.set_outputs(&outputs);
+                assert_eq!(
+                    coordinator
+                        .entries
+                        .iter()
+                        .find(|surface| surface.id == entry.id)
+                        .unwrap()
+                        .size,
+                    entry.size
+                );
+                coordinator.step_slot_changes(
+                    entry.id,
+                    HostBatch {
+                        window_focused: Some(true),
+                        ..Default::default()
+                    },
+                );
+                let target = coordinator
+                    .shell
+                    .plugin_panel_host_ref(&key)
+                    .unwrap()
+                    .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                        role: nickel_ui::SemanticRole::Button,
+                        name: "Appearance".into(),
+                    })
+                    .unwrap();
+                let mut previous_generation = None;
+                for tick in 0..5 {
+                    let samples_before = coordinator
+                        .host_runtime_diagnostics()
+                        .input_to_frame_us
+                        .len();
+                    let changes = coordinator.step_slot_changes(
+                        entry.id,
+                        HostBatch {
+                            events: vec![nickel_ui::HostEvent::Normalized {
+                                input: InputEvent::Pointer(PointerEvent::Motion {
+                                    device: DeviceId(1),
+                                    order: EventOrder(tick + 1),
+                                    position: Point {
+                                        x: f64::from(target.bounds.origin.x) + 20.0 + tick as f64,
+                                        y: f64::from(target.bounds.origin.y) + 15.0,
+                                    },
+                                    delta: None,
+                                }),
+                                clipboard_text: None,
+                            }],
+                            ..Default::default()
+                        },
+                    );
+                    let diagnostics = coordinator.host_runtime_diagnostics();
+                    assert_eq!(diagnostics.input_to_frame_us.len(), samples_before + 1);
+                    assert!(diagnostics.host_phase_samples_available);
+                    assert_eq!(diagnostics.validate(), Ok(()));
+                    let before_copies = coordinator
+                        .entries
+                        .iter()
+                        .find(|surface| surface.id == entry.id)
+                        .unwrap()
+                        .commands_copied;
+                    // Startup desktop paint is intentionally still pending in
+                    // this fixture. A sibling invalidation must not make an
+                    // unchanged Settings pointer sample copy its scene.
+                    assert!(changes.iter().any(|id| {
+                        coordinator.entries.iter().any(|surface| {
+                            surface.id == *id && surface.role == SurfaceRole::Desktop
+                        })
+                    }));
+                    if coordinator
+                        .take_pointer_paint_scene(entry.id, changes.contains(&entry.id))
+                        .is_none()
+                        && changes.contains(&entry.id)
+                    {
+                        coordinator.scene(entry.id).unwrap();
+                    }
+                    let host = coordinator.shell.plugin_panel_host_ref(&key).unwrap();
+                    assert_eq!(host.render_frame().logical_size, viewport);
+                    let generation = host.inspect().frame_generation;
+                    if let Some(previous) = previous_generation {
+                        assert_eq!(generation, previous, "same-target motion rebuilt the frame");
+                        assert_eq!(
+                            coordinator
+                                .entries
+                                .iter()
+                                .find(|surface| surface.id == entry.id)
+                                .unwrap()
+                                .commands_copied,
+                            before_copies,
+                            "same-target motion copied paint commands"
+                        );
+                    }
+                    previous_generation = Some(generation);
+                }
+                coordinator.scene(entry.id).unwrap();
+                coordinator.step_slot_changes(
+                    entry.id,
+                    HostBatch {
+                        window_focused: Some(false),
+                        ..Default::default()
+                    },
+                );
+                assert_eq!(
+                    coordinator
+                        .shell
+                        .plugin_panel_host_ref(&key)
+                        .unwrap()
+                        .render_frame()
+                        .logical_size,
+                    viewport
+                );
+            }
         });
     }
 

@@ -1,4 +1,169 @@
     #[test]
+    fn application_catalog_shared_projection_reuses_values_and_checks_live_authority() {
+        with_package_runtime_stack(|| {
+            use nickel_core::plugins::PluginCapability;
+            let mut shell = LiveShell::new().unwrap();
+            shell.launcher = crate::launcher::Launcher::new((0..256).map(|index| crate::model::Application::new(format!("fixture-{index}"),format!("Fixture {index}"),None,None,None)).collect());
+            let first = shell.external_plugin_applications_shared("nickel-default").unwrap();
+            let builds = shell.application_catalog_builds;
+            let before = crate::allocation_counter::thread_allocation_operations();
+            for _ in 0..128 {
+                let next = shell.external_plugin_applications_shared("nickel-default").unwrap();
+                assert!(Arc::ptr_eq(&first, &next));
+            }
+            assert_eq!(crate::allocation_counter::thread_allocation_operations(), before, "unchanged catalog reads must not deep-copy the inventory");
+            assert_eq!(shell.application_catalog_builds, builds);
+            shell.launcher = crate::launcher::Launcher::new(vec![crate::model::Application::new("replacement".into(), "Replacement".into(), None, None, None)]);
+            let replacement = shell.external_plugin_applications_shared("nickel-default").unwrap();
+            assert!(!Arc::ptr_eq(&first, &replacement));
+            assert_eq!(replacement[0]["name"], "Replacement");
+            assert_eq!(first.as_array().unwrap().len(), 256, "held snapshots remain immutable");
+            shell.windows = vec![crate::model::OpenWindow {
+                id: crate::model::WindowId(71),
+                application_id: Some(crate::model::ApplicationId::new("running-only")),
+                active: true,
+                title: "Running title".into(),
+                state: crate::model::WindowState::default(),
+            }];
+            let running = shell.external_plugin_applications_shared("nickel-default").unwrap();
+            assert!(running.as_array().unwrap().iter().any(|item| item["name"] == "Running title"));
+            shell.windows[0].title = "Changed title".into();
+            let renamed = shell.external_plugin_applications_shared("nickel-default").unwrap();
+            assert!(!Arc::ptr_eq(&running, &renamed));
+            assert!(renamed.as_array().unwrap().iter().any(|item| item["name"] == "Changed title"));
+            shell.external_plugin_packages.get_mut("nickel-default").unwrap().manifest.capabilities.retain(|capability| *capability != PluginCapability::WindowsRead);
+            let restricted = shell.external_plugin_applications_shared("nickel-default").unwrap();
+            assert_eq!(restricted.as_array().unwrap().len(), 1);
+            shell.external_plugin_packages.get_mut("nickel-default").unwrap().manifest.capabilities.retain(|capability| *capability != PluginCapability::ApplicationsRead);
+            assert!(shell.external_plugin_applications_shared("nickel-default").is_none());
+        });
+    }
+
+    #[test]
+    fn application_icon_projection_admits_virtual_rows_and_schedules_geometry_followup() {
+        with_package_runtime_stack(|| {
+            let mut package = nickel_core::plugins::PluginPackage::load(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/plugins/example-surface-dialog")).unwrap();
+            package.manifest.capabilities.push(nickel_core::plugins::PluginCapability::ApplicationsRead);
+            package.source = "function App() { const apps=nickel.applications.list(); return h(Window,{width:300,height:200,title:'Virtual icons'},h(ScrollView,{id:'scroll',height:160},h(VirtualColumn,{id:'apps',items:apps,itemKey:app=>app.id,itemHeight:20,overscan:40,renderItem:app=>h(Button,{id:app.id,icon:app.icon,iconSize:64,showLabel:false,onClick:()=>{}},app.name)}))); }".into();
+            let surface = package.manifest.surfaces.iter().find(|surface| surface.id == "home").unwrap().clone();
+            let key = nickel_core::plugins::PluginSurfaceKey {plugin_id:package.manifest.id.clone(),surface_id:surface.id.clone()};
+            let application = crate::plugin_panel::PluginPanelApplication::from_package_surface(&package, &Default::default(), &surface).unwrap();
+            let mut shell = LiveShell::new().unwrap();
+            shell.launcher = crate::launcher::Launcher::new((0..256).map(|index| crate::model::Application::new(format!("fixture-{index}"),format!("Fixture {index}"),None,None,None)).collect());
+            shell.launcher_icons = crate::launcher_icon_cache::LauncherIconCache::new();
+            shell.plugin_registry.register(package.manifest.clone()).unwrap();
+            shell.plugin_registry.set_enabled(&key.plugin_id, true).unwrap();
+            shell.plugin_registry.mark_running(&key.plugin_id).unwrap();
+            shell.external_plugin_packages.insert(key.plugin_id.clone(), nickel_core::plugins::PluginPackageSource::embedded(package));
+            shell.plugin_surface_hosts.insert(key.clone(), (surface, nickel_ui::UiHost::new(application, 300, 200)));
+            shell.plugin_panel_scene(&key, 300, 200).unwrap();
+            let entries = shell.launcher_icons.diagnostics().entries;
+            assert!(entries > 0 && entries < 24, "resolved {entries} icons before native row admission");
+            assert!(shell.plugin_image_deadlines.contains_key(&key), "geometry-changing artwork must schedule remaining demand");
+            let mut followups = 0;
+            while let Some(deadline) = shell.plugin_image_deadlines.get(&key).copied() {
+                assert!(followups < 8, "artwork/virtual geometry failed to converge");
+                assert!(shell.poll_deadlines(deadline).redraw.contains(&SurfaceRole::Panel));
+                shell.plugin_panel_scene(&key, 300, 200).unwrap();
+                followups += 1;
+            }
+            let host = &shell.plugin_surface_hosts[&key].1;
+            assert!(host.application().application_image_demand().len() <= 6);
+            assert!(host.resolved_layout().nodes().len() < 100);
+            let cached = shell.launcher_icons.diagnostics().entries;
+            for _ in 0..16 { shell.plugin_panel_scene(&key, 300, 200).unwrap(); }
+            assert_eq!(shell.launcher_icons.diagnostics().entries, cached);
+            assert!(!shell.plugin_image_deadlines.contains_key(&key));
+            assert!(shell.close_plugin_window(&key).unwrap());
+            assert!(!shell.plugin_surface_hosts.contains_key(&key));
+            assert!(!shell.plugin_image_deadlines.contains_key(&key));
+        });
+    }
+
+    #[test]
+    fn application_icon_projection_does_not_resolve_unused_inventory() {
+        with_package_runtime_stack(|| {
+            let mut package = nickel_core::plugins::PluginPackage::load(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/plugins/example-surface-dialog")).unwrap();
+            package.manifest.capabilities.push(nickel_core::plugins::PluginCapability::ApplicationsRead);
+            package.source = "function App() { const [show,setShow]=useState(false); const app=show ? nickel.applications.list()[0] : null; return h(Window,{width:300,height:200,title:'Icon demand fixture'},h(Column,null,h(Button,{id:'toggle',onClick:()=>setShow(!show)},'Toggle icon'),app ? h(Image,{asset:app.icon,width:32,height:32}) : h(Text,null,'Keyboard shortcuts'))); }".into();
+            let surface = package.manifest.surfaces.iter().find(|surface| surface.id == "home").unwrap().clone();
+            let key = nickel_core::plugins::PluginSurfaceKey {plugin_id:package.manifest.id.clone(),surface_id:surface.id.clone()};
+            let application = crate::plugin_panel::PluginPanelApplication::from_package_surface(&package, &Default::default(), &surface).unwrap();
+            let mut shell = LiveShell::new().unwrap();
+            shell.launcher = crate::launcher::Launcher::new((0..256).map(|index| crate::model::Application::new(format!("fixture-{index}"),format!("Fixture {index}"),None,None,None)).collect());
+            shell.launcher_icons = crate::launcher_icon_cache::LauncherIconCache::new();
+            shell.plugin_registry.register(package.manifest.clone()).unwrap();
+            shell.plugin_registry.set_enabled(&key.plugin_id, true).unwrap();
+            shell.plugin_registry.mark_running(&key.plugin_id).unwrap();
+            shell.external_plugin_packages.insert(key.plugin_id.clone(), nickel_core::plugins::PluginPackageSource::embedded(package));
+            shell.plugin_surface_hosts.insert(key.clone(), (surface, nickel_ui::UiHost::new(application, 300, 200)));
+            let started = Instant::now();
+            let before = crate::allocation_counter::thread_allocation_operations();
+            for _ in 0..16 { shell.plugin_panel_scene(&key, 300, 200).unwrap(); }
+            eprintln!("unused_application_icons: scenes=16 inventory=256 cache_entries={} elapsed_ns={} allocations={}", shell.launcher_icons.diagnostics().entries, started.elapsed().as_nanos(), crate::allocation_counter::thread_allocation_operations()-before);
+            assert_eq!(shell.launcher_icons.diagnostics().entries, 0, "a page without application images must not enqueue or retain inventory icons");
+            for expected in [1, 1] {
+                let host = &mut shell.plugin_surface_hosts.get_mut(&key).unwrap().1;
+                let target = host.query_unique(&nickel_ui::SemanticSelector::RoleAndName {role:nickel_ui::SemanticRole::Button,name:"Toggle icon".into()}).unwrap();
+                host.perform_semantic_action(target.id, nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate));
+                shell.plugin_panel_scene(&key, 300, 200).unwrap();
+                assert_eq!(shell.launcher_icons.diagnostics().entries, expected, "only the admitted icon may enter the cache");
+            }
+            assert!(!shell.plugin_surface_hosts[&key].1.application().has_application_images());
+        });
+    }
+
+    #[test]
+    fn wallpaper_preview_completion_redraws_live_consumer_and_revocation_removes_pixels() {
+        with_package_runtime_stack(|| {
+            use nickel_ui::backend::PaintCommand;
+            let directory = tempfile::tempdir().unwrap();
+            RgbaImage::from_pixel(160, 90, Rgba([31, 63, 95, 255]))
+                .save(directory.path().join("fixture.png")).unwrap();
+            let catalog = crate::wallpaper_selection::Catalog::discover_fixture(directory.path());
+            let asset = format!("wallpaper:{}", catalog.choices(None)[0].id);
+            let mut package = nickel_core::plugins::PluginPackage::load(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/plugins/example-surface-dialog")).unwrap();
+            package.manifest.capabilities.push(nickel_core::plugins::PluginCapability::WallpaperRead);
+            package.source = format!("function App() {{ return h(Window, {{width:300,height:200,title:'Preview fixture'}}, h(Image, {{asset:{},width:160,height:90}})); }}", serde_json::to_string(&asset).unwrap());
+            let surface = package.manifest.surfaces.iter().find(|surface| surface.id == "home").unwrap().clone();
+            let key = nickel_core::plugins::PluginSurfaceKey {plugin_id:package.manifest.id.clone(),surface_id:surface.id.clone()};
+            let application = crate::plugin_panel::PluginPanelApplication::from_package_surface(&package, &Default::default(), &surface).unwrap();
+            let mut shell = LiveShell::new().unwrap();
+            shell.plugin_registry.register(package.manifest.clone()).unwrap();
+            shell.plugin_registry.set_enabled(&key.plugin_id, true).unwrap();
+            shell.plugin_registry.mark_running(&key.plugin_id).unwrap();
+            shell.external_plugin_packages.insert(key.plugin_id.clone(), nickel_core::plugins::PluginPackageSource::embedded(package));
+            // Seed the ordinary read-only observation first, then replace only
+            // its native approved catalog with an isolated fixture catalog.
+            shell.appearance_capabilities.snapshot("wallpaper");
+            shell.appearance_capabilities.previews.set_catalog(catalog);
+            shell.plugin_surface_hosts.insert(key.clone(), (surface, nickel_ui::UiHost::new(application, 300, 200)));
+            let initial = shell.plugin_panel_scene(&key, 300, 200).unwrap();
+            assert!(!initial.iter().any(|command| matches!(command, PaintCommand::Image {id,..} if *id >= 64000 && *id < 64128)));
+            assert!(shell.host_deadline_sources().iter().any(|(name,_)| *name == "wallpaper-previews"));
+            let timeout = Instant::now() + Duration::from_secs(5);
+            let mut redrawn = false;
+            while let Some(deadline) = shell.appearance_capabilities.previews.next_deadline() {
+                assert!(Instant::now() < timeout);
+                redrawn |= shell.poll_deadlines(deadline).redraw.contains(&SurfaceRole::Panel);
+                std::thread::yield_now();
+            }
+            assert!(redrawn, "preview completion must wake its native consumer");
+            let loaded = shell.plugin_panel_scene(&key, 300, 200).unwrap();
+            assert!(loaded.iter().any(|command| matches!(command, PaintCommand::Image {id,..} if *id >= 64000 && *id < 64128)));
+            assert!(shell.plugin_surface_hosts[&key].1.application().has_wallpaper_images());
+            // The package manifest is the same authority consulted by resource
+            // projection; a stale registry copy must not keep decoding enabled.
+            shell.external_plugin_packages.get_mut(&key.plugin_id).unwrap().manifest.capabilities.retain(|capability| *capability != nickel_core::plugins::PluginCapability::WallpaperRead);
+            let revoked = shell.plugin_panel_scene(&key, 300, 200).unwrap();
+            assert!(!revoked.iter().any(|command| matches!(command, PaintCommand::Image {id,..} if *id >= 64000 && *id < 64128)));
+            assert!(!shell.plugin_surface_hosts[&key].1.application().has_wallpaper_images());
+            assert!(shell.appearance_capabilities.previews.images().is_empty());
+            assert!(shell.appearance_capabilities.previews.next_deadline().is_none());
+        });
+    }
+
+    #[test]
     fn full_preview_refresh_moves_provider_pixels_and_preserves_unchanged_identity() {
         with_package_runtime_stack(|| {
         let mut shell = LiveShell::new().unwrap();

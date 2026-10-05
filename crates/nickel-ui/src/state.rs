@@ -272,6 +272,8 @@ pub(crate) struct TextContextSession {
 
 #[derive(Clone, Debug)]
 pub struct UiStateStore {
+    pub(crate) virtual_boundary: Option<(UiId, u64, bool)>,
+    pub(crate) virtual_focus: Option<(UiId, u64, usize)>,
     // Async editor effects lease focus transitions, not only a reusable UiId.
     focus_generation: u64,
     pub(crate) clipboard_text_limit: Option<usize>,
@@ -306,6 +308,8 @@ impl UiStateStore {
         let now = Instant::now();
         Self {
             focus_generation: 0,
+            virtual_boundary: None,
+            virtual_focus: None,
             clipboard_text_limit: None,
             clipboard_rejected: false,
             durable: DurableNodeState {
@@ -829,6 +833,8 @@ impl UiStateStore {
     }
 
     pub fn focus_lost(&mut self) -> Invalidation {
+        self.virtual_boundary = None;
+        self.virtual_focus = None;
         self.focus_generation = self.focus_generation.wrapping_add(1);
         let pressed = self.pointer.pressed.take().is_some();
         let captured = self.pointer.captured.take().is_some();
@@ -856,6 +862,8 @@ impl UiStateStore {
     }
 
     pub fn destroy(&mut self) {
+        self.virtual_boundary = None;
+        self.virtual_focus = None;
         self.durable.entries.clear();
         self.set_focus(None);
         self.pointer.hovered = None;

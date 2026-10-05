@@ -1,3 +1,4 @@
 column.plugins-page { gap: 12px; padding: 16px; }
 column.plugin-card { gap: 8px; padding: 12px; background: var(--nickel-surface); border-radius: var(--nickel-radius-card); }
 text.plugin-title { font-size: 18px; color: var(--nickel-text); }
+.plugins-page button { color: var(--nickel-text); }

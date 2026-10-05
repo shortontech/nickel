@@ -2,6 +2,7 @@
 import "./styles/settings.css";
 import { SettingsCollection } from "./SettingsCollection.tsx";
 import { SettingShortcut } from "./SettingShortcut.tsx";
+import { useSettingDraft } from "./SettingsDrafts.tsx";
 
 function settingValue(setting) {
     const value = typeof setting.value === "function" ? setting.value() : setting.value;
@@ -21,7 +22,10 @@ export function SettingControl(props) {
             {setting.fields.map(field => <Column key={field.id} className="settings-group-field">
                 <Text>{field.label}</Text>
                 {field.description ? <Text wrap={true}>{field.description}</Text> : null}
-                <Control controlId={controlId + "/" + field.id} setting={{...field,
+                <Control controlId={controlId + "/" + field.id}
+                    draftState={props.draftState?.[field.id]?.type === field.type ? props.draftState[field.id].state : undefined}
+                    onDraftChange={props.onDraftChange ? next => props.onDraftChange({...props.draftState,[field.id]:{type:field.type,state:next}}) : undefined}
+                    setting={{...field,
                     providerPackage:setting.providerPackage,
                     value:values[field.id] === undefined ? field.defaultValue : values[field.id],
                     onChange:next => change({...values, [field.id]:next})}} />
@@ -29,7 +33,8 @@ export function SettingControl(props) {
         </Column>;
     }
     if (setting.type === "repeated") {
-        return <SettingsCollection setting={setting} value={value} controlId={controlId} onChange={change} />;
+        return <SettingsCollection setting={setting} value={value} controlId={controlId} onChange={change}
+            draftState={props.draftState} onDraftChange={props.onDraftChange} />;
     }
     if (setting.type === "switch") {
         return <Switch id={controlId} state={value ? "on" : "off"}
@@ -49,7 +54,8 @@ export function SettingControl(props) {
             allowAlpha={setting.allowAlpha} onChange={change} />;
     }
     if (setting.type === "text" || setting.type === "number") {
-        return <SettingInput setting={setting} value={value} controlId={controlId} onChange={change} />;
+        return <SettingInput setting={setting} value={value} controlId={controlId} onChange={change}
+            draftState={props.draftState} onDraftChange={props.onDraftChange} />;
     }
     if (setting.type === "shortcut") {
         return <SettingShortcut setting={setting} value={value} controlId={controlId} onChange={change} />;
@@ -60,10 +66,10 @@ export function SettingControl(props) {
     return <Text>{value === undefined || value === null ? "" : String(value)}</Text>;
 }
 
-function SettingInput({setting, value, controlId, onChange}) {
+function SettingInput({setting, value, controlId, onChange, draftState, onDraftChange}) {
     const source = String(value === undefined || value === null ? "" : value);
-    const [draft, setDraft] = useState({source, text:source});
-    const text = draft.source === source ? draft.text : source;
+    const [localText, setText] = useSettingDraft(source, controlId, setting.type);
+    const text = draftState?.source === source ? draftState.text : localText;
     const number = Number(text);
     const valid = setting.type === "number"
         ? text.trim() !== "" && Number.isFinite(number) && number >= setting.min && number <= setting.max
@@ -71,7 +77,10 @@ function SettingInput({setting, value, controlId, onChange}) {
     return <Column className="settings-input">
         <Row className="settings-input-actions">
             <TextField id={controlId} value={text} accessibilityLabel={setting.label}
-                onChange={next => setDraft({source, text:next})} />
+                onChange={next => {
+                    setText(next);
+                    if (onDraftChange) onDraftChange({source,text:next});
+                }} />
             <Button id={controlId + "/apply"} disabled={!valid} onClick={() => {
                 if (valid) onChange(setting.type === "number" ? number : text);
             }}>Apply</Button>
@@ -128,7 +137,8 @@ function centeredWorkAreaSize(outputs) {
     const output = outputs.find(item => item.primary) || outputs[0];
     const geometry = output?.geometry;
     const workArea = output?.work_area;
-    if (!geometry || !workArea) return {width:900, height:600};
+    // Match the declared Settings surface until native output data is available.
+    if (!geometry || !workArea) return {width:1100, height:800};
 
     const centeredLimit = (screenSize, workStart, workSize) => Math.max(320, Math.min(
         screenSize,

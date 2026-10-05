@@ -2,6 +2,8 @@
 import { arrangement, snapPlacement } from "./display-layout.js";
 import "./styles/displays.css";
 
+const modeKey = mode => mode.width + "x" + mode.height + "@" + mode.refresh_millihz;
+
 function ApplicationScaleControls() {
     const snapshot = nickel.displays.getApplicationScale();
     if (!snapshot.available) return <Text wrap={true}>{snapshot.reason || "Application UI scale is unavailable."}</Text>;
@@ -37,7 +39,8 @@ export function Displays() {
     const selectedName = selection.revision === navigationRevision ? selection.name : navigation.output || selection.name;
     const select = name => setSelection({revision:navigationRevision, name});
     const draftState = useRef(null);
-    const setDraft = next => { draftState.current = next; };
+    const [, refreshDraft] = useState(0);
+    const setDraft = next => { draftState.current = next; refreshDraft(version => version + 1); };
     const drag = useRef(null);
     const revision = snapshot.revision || JSON.stringify(outputs);
     if (draftState.current && draftState.current.revision !== revision) draftState.current = null;
@@ -78,11 +81,13 @@ export function Displays() {
             onClick={()=>update(selected.name,{enabled:!selected.enabled})}/></Row>
         <Text>Resolution and refresh rate</Text>
         <Column className="display-modes">
-            {(selected.modes || []).map((mode,index)=><Button key={mode.width+"x"+mode.height+"@"+mode.refresh_millihz} id={"display-mode-"+index}
+            <VirtualColumn id={"display-modes-" + selected.name} items={selected.modes || []}
+                itemKey={modeKey} itemHeight={36} gap={12} overscan={96}
+                renderItem={(mode,index)=><Button key={modeKey(mode)} id={"display-mode-"+index}
                 state={JSON.stringify(mode)===JSON.stringify(selected.current_mode)?"selected":"unselected"}
                 onClick={()=>update(selected.name,{current_mode:mode})}>
                 {mode.width+" × "+mode.height+" · "+(mode.refresh_millihz/1000).toFixed(2)+" Hz"}
-            </Button>)}
+            </Button>} />
         </Column>
         {snapshot.operations?.setOrientation ? <Column className="display-modes">
             <Text>Orientation</Text>

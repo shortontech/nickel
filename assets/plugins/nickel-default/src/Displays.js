@@ -1,6 +1,7 @@
 // @jsx h
 import { arrangement, snapPlacement } from "./display-layout.js";
 import "./styles/displays.css";
+const modeKey = mode => mode.width + "x" + mode.height + "@" + mode.refresh_millihz;
 function ApplicationScaleControls() {
     const snapshot = nickel.displays.getApplicationScale();
     if (!snapshot.available)
@@ -31,7 +32,8 @@ export function Displays() {
     const selectedName = selection.revision === navigationRevision ? selection.name : navigation.output || selection.name;
     const select = name => setSelection({ revision: navigationRevision, name });
     const draftState = useRef(null);
-    const setDraft = next => { draftState.current = next; };
+    const [, refreshDraft] = useState(0);
+    const setDraft = next => { draftState.current = next; refreshDraft(version => version + 1); };
     const drag = useRef(null);
     const revision = snapshot.revision || JSON.stringify(outputs);
     if (draftState.current && draftState.current.revision !== revision)
@@ -79,7 +81,8 @@ export function Displays() {
             h(Text, null, "Enabled"),
             h(Switch, { id: "display-enabled", accessibilityLabel: "Enable display", state: selected.enabled ? "on" : "off", onClick: () => update(selected.name, { enabled: !selected.enabled }) })),
         h(Text, null, "Resolution and refresh rate"),
-        h(Column, { className: "display-modes" }, (selected.modes || []).map((mode, index) => h(Button, { key: mode.width + "x" + mode.height + "@" + mode.refresh_millihz, id: "display-mode-" + index, state: JSON.stringify(mode) === JSON.stringify(selected.current_mode) ? "selected" : "unselected", onClick: () => update(selected.name, { current_mode: mode }) }, mode.width + " × " + mode.height + " · " + (mode.refresh_millihz / 1000).toFixed(2) + " Hz"))),
+        h(Column, { className: "display-modes" },
+            h(VirtualColumn, { id: "display-modes-" + selected.name, items: selected.modes || [], itemKey: modeKey, itemHeight: 36, gap: 12, overscan: 96, renderItem: (mode, index) => h(Button, { key: modeKey(mode), id: "display-mode-" + index, state: JSON.stringify(mode) === JSON.stringify(selected.current_mode) ? "selected" : "unselected", onClick: () => update(selected.name, { current_mode: mode }) }, mode.width + " × " + mode.height + " · " + (mode.refresh_millihz / 1000).toFixed(2) + " Hz") })),
         snapshot.operations?.setOrientation ? h(Column, { className: "display-modes" },
             h(Text, null, "Orientation"),
             [{ id: "normal", label: "Landscape" }, { id: "rotate90", label: "Portrait" }, { id: "rotate180", label: "Landscape flipped" }, { id: "rotate270", label: "Portrait flipped" }].map(orientation => h(Button, { key: orientation.id, id: "display-orientation-" + orientation.id, state: selected.transform === orientation.id ? "selected" : "unselected", onClick: () => update(selected.name, { transform: orientation.id }) }, orientation.label))) : null,

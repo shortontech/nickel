@@ -3,6 +3,9 @@ import { fromHsv, toHexColor } from "./colors.js";
 import "./styles/appearance.css";
 
 const defaults = {theme:"system", accent_hue:null, accent_intensity:null, reduce_transparency:false, animations:"normal"};
+const wallpaperKey = image => image.id;
+// Estimates only: native layout corrects these for the current font, width, and scale.
+const wallpaperHeight = image => image.previewAsset ? 126 : 36;
 
 export function Appearance() {
     const appearance = nickel.appearance.get();
@@ -75,11 +78,13 @@ export function Appearance() {
                 <Button id="appearance-wallpaper-choose" disabled={!wallpaper.writable || !wallpaper.chooser?.available || wallpaper.chooser.pending}
                     onClick={() => nickel.wallpaper.chooseImage()}>{wallpaper.chooser?.pending ? "Choosing image…" : "Choose image…"}</Button>
                 {wallpaper.chooser?.result ? <Text wrap={true}>{wallpaper.chooser.result.reason || ({applied:"Wallpaper applied",cancelled:"Image choice cancelled"})[wallpaper.chooser.result.status] || ""}</Text> : null}
-                {wallpaper.images.map((image,index) => <Column key={image.id}>
+                <VirtualColumn id="appearance-wallpapers" items={wallpaper.images}
+                    itemKey={wallpaperKey} itemHeight={wallpaperHeight} overscan={96}
+                    renderItem={(image,index) => <Column key={image.id}>
                     {image.previewAsset ? <Image asset={image.previewAsset} width={160} height={90} fit="cover" /> : null}
                     <Button key={image.id} id={"appearance-wallpaper-" + image.id}
                     disabled={!wallpaper.writable} onClick={() => nickel.wallpaper.selectImage(image.id)}>
-                    {(image.label || "Wallpaper " + (index + 1)) + (image.configured ? " · Current" : "")}</Button></Column>)}
+                    {(image.label || "Wallpaper " + (index + 1)) + (image.configured ? " · Current" : "")}</Button></Column>} />
                 <Button id="appearance-wallpaper-remove" disabled={!wallpaper.writable}
                     onClick={() => nickel.wallpaper.resetCustomImage()}>Use default wallpaper</Button>
             </Column>}

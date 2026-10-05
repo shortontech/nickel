@@ -238,6 +238,9 @@ pub struct AccessibilityNode {
     pub focused: bool,
     pub controller_selected: bool,
     pub navigation_depth: usize,
+    /// One-based row position and total logical rows in the nearest virtual
+    /// collection. Derived from native admission, never from package labels.
+    pub collection_position: Option<(usize, usize)>,
     pub value: Option<SemanticValueSnapshot>,
 }
 
@@ -295,6 +298,7 @@ pub struct ResolvedNode {
     pub interaction: InteractionState,
     pub auto_focus: bool,
     pub navigation_scope: Option<crate::NavigationScope>,
+    pub virtual_navigation: Option<super::VirtualNavigation>,
     pub adjustment_step: f32,
     pub controller_value: Option<f32>,
     pub accessibility_label: Option<String>,
@@ -407,6 +411,10 @@ pub struct FrameResourceDiagnostics {
     pub nodes_measured: usize,
     /// Extra text measurements performed solely for requested layout diagnostics.
     pub diagnostic_text_measurements: usize,
+    /// Whole-content intrinsic measurement queries made by vertical scroll layout.
+    pub scroll_content_measurements: usize,
+    /// Duplicate queries avoided because scrollbar reservation did not change width.
+    pub scroll_content_measurements_reused: usize,
     /// Resolver nodes whose placement actually executed for this frame.
     pub nodes_placed: usize,
     pub paint_nodes_executed: usize,
@@ -430,6 +438,9 @@ pub(crate) struct RetainedPaintWork {
     pub rebuilt_fragments: usize,
     pub reused_fragments: usize,
     pub damage_rects: usize,
+    pub interaction_records_saved: usize,
+    pub vector_bytes_before: usize,
+    pub vector_bytes_after: usize,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -525,6 +536,8 @@ pub struct UiFrame<Message = String> {
     retained_layout: HashMap<UiId, ResolvedNode>,
     nodes_measured: usize,
     diagnostic_text_measurements: usize,
+    scroll_content_measurements: usize,
+    scroll_content_measurements_reused: usize,
     nodes_placed: usize,
     paint_nodes_executed: usize,
     paint_nodes_reused: usize,
@@ -534,6 +547,7 @@ pub struct UiFrame<Message = String> {
     semantic_nodes_reused: usize,
     declaration_root: Option<Element<Message>>,
     declaration_root_id: Option<UiId>,
+    pointer_position_affects_geometry: bool,
     commands: Vec<PaintCommand>,
     paint_fragments: Vec<PaintFragment>,
     /// Logical old/new paint bounds for a proven-safe retained update. `None`
@@ -580,6 +594,8 @@ impl<Message> Default for UiFrame<Message> {
             retained_layout: HashMap::new(),
             nodes_measured: 0,
             diagnostic_text_measurements: 0,
+            scroll_content_measurements: 0,
+            scroll_content_measurements_reused: 0,
             nodes_placed: 0,
             paint_nodes_executed: 0,
             paint_nodes_reused: 0,
@@ -589,6 +605,7 @@ impl<Message> Default for UiFrame<Message> {
             semantic_nodes_reused: 0,
             declaration_root: None,
             declaration_root_id: None,
+            pointer_position_affects_geometry: false,
             commands: Vec::new(),
             paint_fragments: Vec::new(),
             paint_damage: None,
@@ -656,7 +673,14 @@ fn paint_refresh_preserves_geometry<Message>(element: &Element<Message>) -> bool
             .all(paint_refresh_preserves_geometry)
 }
 
+#[cfg(test)]
+thread_local! {
+    static POINTER_GEOMETRY_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn pointer_position_affects_geometry<Message>(element: &Element<Message>) -> bool {
+    #[cfg(test)]
+    POINTER_GEOMETRY_VISITS.with(|visits| visits.set(visits.get() + 1));
     element.style.proximity_magnification.is_some()
         || element
             .children
@@ -674,14 +698,54 @@ fn independent_output_reuse_safe<Message>(element: &Element<Message>) -> bool {
         && element.children.iter().all(independent_output_reuse_safe)
 }
 
+fn declared_child_matches(relative_target: &str, explicit_id: Option<&UiId>, index: usize) -> bool {
+    if let Some(id) = explicit_id {
+        return relative_target
+            .strip_prefix(id.as_str())
+            .is_some_and(|suffix| suffix.is_empty() || suffix.starts_with('/'));
+    }
+    let segment = relative_target.split('/').next().unwrap_or_default();
+    let Some(digits) = segment.strip_prefix('#') else {
+        return false;
+    };
+    // Match precisely the canonical `#{index}` spelling without allocating it
+    // for every anonymous sibling. Parsing alone would admit leading zeros/+.
+    !digits.is_empty()
+        && (digits == "0" || !digits.starts_with('0'))
+        && digits.bytes().all(|byte| byte.is_ascii_digit())
+        && digits.parse::<usize>() == Ok(index)
+}
+
 fn find_declared_element<Message: Clone>(
     element: &Element<Message>,
     id: &UiId,
     target: &UiId,
     inherited_foreground: Option<Color>,
+    state: &UiStateStore,
 ) -> Option<(Element<Message>, Option<Color>)> {
     if id == target {
         return Some((element.clone(), inherited_foreground));
+    }
+    // Every declaration child is scoped below its parent. Reject unrelated
+    // branches before constructing any descendant IDs or resolving inheritance.
+    // Check the separator too: `row-1` is not an ancestor of `row-10`.
+    let relative_target = target
+        .as_str()
+        .strip_prefix(id.as_str())
+        .and_then(|suffix| suffix.strip_prefix('/'))?;
+    // An active ancestor can project interaction paint into its descendants.
+    // Until that inherited projection has its own retained record, use the
+    // cold path instead of reconstructing a child from incomplete style inputs.
+    if state.hovered() == Some(id)
+        || state.pressed() == Some(id)
+        || (state.window_focused()
+            && (state.focused() == Some(id)
+                || state.navigation().controller_selected() == Some(id)
+                || (state.input_modality() == InputModality::Controller
+                    && (state.navigation().controller_scope() == Some(id)
+                        || state.navigation().controller_pane() == Some(id)))))
+    {
+        return None;
     }
     let foreground = element.style.foreground.or(inherited_foreground);
     element
@@ -689,15 +753,22 @@ fn find_declared_element<Message: Clone>(
         .iter()
         .enumerate()
         .find_map(|(index, child)| {
+            if !declared_child_matches(relative_target, child.id.as_ref(), index) {
+                return None;
+            }
             let child_id = child.id.as_ref().map_or_else(
                 || id.scoped(format!("#{index}")),
                 |child_id| id.scoped(child_id.as_str()),
             );
-            find_declared_element(child, &child_id, target, foreground)
+            find_declared_element(child, &child_id, target, foreground, state)
         })
 }
 
 impl<Message: Clone> UiFrame<Message> {
+    pub(crate) fn retained_declaration(&self) -> Option<Element<Message>> {
+        self.declaration_root.clone()
+    }
+
     fn open_primary_overlay(
         &self,
         state: &mut UiStateStore,
@@ -877,6 +948,7 @@ impl<Message: Clone> UiFrame<Message> {
             hit_stack: None,
             interaction: InteractionState::default(),
             auto_focus: false,
+            virtual_navigation: None,
             navigation_scope: Some(crate::NavigationScope::group()),
             adjustment_step: 0.05,
             controller_value: None,
@@ -1236,6 +1308,7 @@ impl<Message: Clone> UiFrame<Message> {
                 hit_stack: Some(self.hits.len()),
                 interaction,
                 auto_focus: false,
+                virtual_navigation: None,
                 navigation_scope: (!item.children.is_empty()).then(|| {
                     crate::NavigationScope::group().traversal(crate::NavigationTraversal::Vertical)
                 }),
@@ -1306,6 +1379,7 @@ impl<Message: Clone> UiFrame<Message> {
                 focused: interaction.focused,
                 controller_selected: interaction.controller_selected,
                 navigation_depth: depth,
+                collection_position: None,
                 value: None,
             });
             if active_submenu.is_some_and(|(active, _)| active == index) {
@@ -1362,6 +1436,7 @@ impl<Message: Clone> UiFrame<Message> {
             hit_stack: None,
             interaction: InteractionState::default(),
             auto_focus: false,
+            virtual_navigation: None,
             navigation_scope: Some(
                 crate::NavigationScope::group().traversal(crate::NavigationTraversal::Vertical),
             ),
@@ -1398,6 +1473,7 @@ impl<Message: Clone> UiFrame<Message> {
             focused: false,
             controller_selected: false,
             navigation_depth: depth + 1,
+            collection_position: None,
             value: None,
         });
         let descendant = self.emit_overlay_menu_items(
@@ -1522,6 +1598,7 @@ impl<Message: Clone> UiFrame<Message> {
             hit_stack: None,
             interaction: InteractionState::default(),
             auto_focus: false,
+            virtual_navigation: None,
             navigation_scope: Some(crate::NavigationScope::group()),
             adjustment_step: 0.05,
             controller_value: None,
@@ -1553,6 +1630,7 @@ impl<Message: Clone> UiFrame<Message> {
             focused: false,
             controller_selected: false,
             navigation_depth: 1,
+            collection_position: None,
             value: None,
         });
         if menu.focus == crate::OverlayFocusPolicy::FirstItem
@@ -1834,6 +1912,10 @@ impl<Message: Clone> UiFrame<Message> {
         state.begin_geometry_animation_frame();
         apply_transient_state(&mut root, &root_id, state);
         let mut tree = Self {
+            // This property belongs to the immutable declaration, not the
+            // pointer position. Re-evaluating it on motion walks offscreen and
+            // unrelated descendants even when the frame remains unchanged.
+            pointer_position_affects_geometry: pointer_position_affects_geometry(&declaration_root),
             declaration_root: Some(declaration_root),
             declaration_root_id: Some(root_id.clone()),
             diagnostics_enabled: diagnostics,
@@ -1948,19 +2030,15 @@ impl<Message: Clone> UiFrame<Message> {
         &mut self,
         state: &mut UiStateStore,
     ) -> Option<RetainedPaintWork> {
-        let (Some(mut root), Some(root_id)) = (
-            self.declaration_root.clone(),
-            self.declaration_root_id.clone(),
+        let (Some(root), Some(root_id)) = (
+            self.declaration_root.as_ref(),
+            self.declaration_root_id.as_ref(),
         ) else {
             return None;
         };
         if self.active_overlay.is_some() || state.text_context().is_some() {
             return None;
         }
-        if !paint_refresh_preserves_geometry(&root) {
-            return None;
-        }
-
         let changed = self
             .resolved
             .nodes
@@ -1975,9 +2053,6 @@ impl<Message: Clone> UiFrame<Message> {
         if changed.is_empty() {
             return None;
         }
-        apply_transient_state(&mut root, &root_id, state);
-        self.apply_interaction_state(state);
-        self.prepare_selection_paints(state);
         let changed = changed
             .iter()
             .filter(|candidate| {
@@ -1987,16 +2062,34 @@ impl<Message: Clone> UiFrame<Message> {
             })
             .cloned()
             .collect::<Vec<_>>();
+        // Validate and clone only affected declaration subtrees, before mutating
+        // frame records. Unrelated offscreen editors/dropdowns cannot make a
+        // geometry-neutral button hover require a full declaration and layout.
+        let mut updates = changed
+            .iter()
+            .map(|id| {
+                let (element, foreground) = find_declared_element(root, root_id, id, None, state)?;
+                if !paint_refresh_preserves_geometry(&element) {
+                    return None;
+                }
+                Some((id.clone(), element, foreground, self.node_index(id)?))
+            })
+            .collect::<Option<Vec<_>>>()?;
+        for (id, element, _, _) in &mut updates {
+            apply_transient_state(element, id, state);
+        }
+        let vector_bytes_before = self.resource_vector_bytes();
+        self.apply_interaction_state(state);
+        self.prepare_selection_paints(state);
         let total_fragments = self.paint_fragments.len();
         let mut rebuilt_fragments = 0usize;
         let mut emitted_commands = 0usize;
+        let mut interaction_records_saved = 0usize;
         let mut damage = Vec::new();
-        for id in changed {
-            let (element, inherited_foreground) =
-                find_declared_element(&root, &root_id, &id, None)?;
-            let node_index = self.resolved.nodes.iter().position(|node| node.id == id)?;
-            let (commands, fragments) =
+        for (id, element, inherited_foreground, node_index) in updates {
+            let (commands, fragments, saved_records) =
                 self.emit_retained_subtree(&element, node_index, inherited_foreground)?;
+            interaction_records_saved = interaction_records_saved.saturating_add(saved_records);
             rebuilt_fragments = rebuilt_fragments.saturating_add(fragments.len());
             emitted_commands = emitted_commands.saturating_add(commands.len());
             let (old_bounds, new_bounds) = self.splice_paint_fragment(&id, commands, fragments)?;
@@ -2015,6 +2108,9 @@ impl<Message: Clone> UiFrame<Message> {
             rebuilt_fragments,
             reused_fragments: total_fragments.saturating_sub(rebuilt_fragments),
             damage_rects,
+            interaction_records_saved,
+            vector_bytes_before,
+            vector_bytes_after: self.resource_vector_bytes(),
         })
     }
 
@@ -2036,6 +2132,13 @@ impl<Message: Clone> UiFrame<Message> {
                     .get(&id)
                     .filter(|node| {
                         node.clip == self.resolved.nodes[node_index].clip
+                            // Emission omits clipped paint and clips hit records.
+                            // Translating those records under a stationary clip
+                            // cannot reveal previously omitted content or repair
+                            // partially clipped hits. Re-emit the affected subtree.
+                            && (node.clip.is_none()
+                                || node.allocated.origin
+                                    == self.resolved.nodes[node_index].allocated.origin)
                             && approximately_same_size(
                                 node.allocated.size,
                                 self.resolved.nodes[node_index].allocated.size,
@@ -2271,7 +2374,7 @@ impl<Message: Clone> UiFrame<Message> {
         element: &Element<Message>,
         node_index: usize,
         inherited_foreground: Option<Color>,
-    ) -> Option<(Vec<PaintCommand>, Vec<PaintFragment>)> {
+    ) -> Option<(Vec<PaintCommand>, Vec<PaintFragment>, usize)> {
         let command_start = self.commands.len();
         let fragment_start = self.paint_fragments.len();
         let hit_len = self.hits.len();
@@ -2279,12 +2382,17 @@ impl<Message: Clone> UiFrame<Message> {
         let context_len = self.context_messages.len();
         let focus_len = self.focus_messages.len();
         let text_input_len = self.text_inputs.len();
-        let hit_stacks = self
-            .resolved
-            .nodes
-            .iter()
-            .map(|node| node.hit_stack)
-            .collect::<Vec<_>>();
+        // Coupled container emission may temporarily touch interaction records,
+        // but it can only touch this subtree. Do not copy every unrelated and
+        // offscreen node's hit-stack entry for a local hover update.
+        let mut pending = vec![node_index];
+        let mut hit_stacks = Vec::new();
+        while let Some(index) = pending.pop() {
+            let node = &self.resolved.nodes[index];
+            hit_stacks.push((index, node.hit_stack));
+            pending.extend(node.children.iter().copied());
+        }
+        let saved_records = hit_stacks.len();
 
         emit_element(
             element,
@@ -2308,10 +2416,10 @@ impl<Message: Clone> UiFrame<Message> {
         self.context_messages.truncate(context_len);
         self.focus_messages.truncate(focus_len);
         self.text_inputs.truncate(text_input_len);
-        for (node, hit_stack) in self.resolved.nodes.iter_mut().zip(hit_stacks) {
-            node.hit_stack = hit_stack;
+        for (index, hit_stack) in hit_stacks {
+            self.resolved.nodes[index].hit_stack = hit_stack;
         }
-        Some((commands, fragments))
+        Some((commands, fragments, saved_records))
     }
 
     fn splice_paint_fragment(
@@ -2711,6 +2819,9 @@ impl<Message: Clone> UiFrame<Message> {
         intent: InteractionIntent,
     ) -> Result<EventOutcome<Message>, SemanticActionError> {
         let direct_target = match &intent {
+            InteractionIntent::Event(UiEvent::AccessibilityRevealVirtualRow {
+                collection, ..
+            }) => Some(collection),
             InteractionIntent::Invoke { target, .. }
             | InteractionIntent::Event(
                 UiEvent::AccessibilityFocus(target)
@@ -3249,8 +3360,11 @@ impl<Message: Clone> UiFrame<Message> {
         }
     }
 
-    pub fn resource_diagnostics(&self) -> FrameResourceDiagnostics {
-        let vector_bytes = self.commands.capacity() * std::mem::size_of::<PaintCommand>()
+    // A retained paint refresh may grow output-vector capacity, but it does not
+    // replace resolved child lists, accessibility strings, or retained arena
+    // records. Their byte contributions remain owned by the current frame.
+    fn resource_vector_bytes(&self) -> usize {
+        self.commands.capacity() * std::mem::size_of::<PaintCommand>()
             + self.paint_fragments.capacity() * std::mem::size_of::<PaintFragment>()
             + self.hits.capacity() * std::mem::size_of::<HitRegion<Message>>()
             + self.messages.capacity() * std::mem::size_of::<MessageRegion<Message>>()
@@ -3261,7 +3375,11 @@ impl<Message: Clone> UiFrame<Message> {
             + self.grids.capacity() * std::mem::size_of::<ResolvedGrid>()
             + self.accessibility.capacity() * std::mem::size_of::<AccessibilityNode>()
             + self.resolved.nodes.capacity() * std::mem::size_of::<ResolvedNode>()
-            + self.diagnostics.capacity() * std::mem::size_of::<LayoutDiagnostic>();
+            + self.diagnostics.capacity() * std::mem::size_of::<LayoutDiagnostic>()
+    }
+
+    pub fn resource_diagnostics(&self) -> FrameResourceDiagnostics {
+        let vector_bytes = self.resource_vector_bytes();
         let node_children = self
             .resolved
             .nodes
@@ -3305,6 +3423,8 @@ impl<Message: Clone> UiFrame<Message> {
             retained_nodes_replaced: retained.replaced,
             nodes_measured: self.nodes_measured,
             diagnostic_text_measurements: self.diagnostic_text_measurements,
+            scroll_content_measurements: self.scroll_content_measurements,
+            scroll_content_measurements_reused: self.scroll_content_measurements_reused,
             nodes_placed: self.nodes_placed,
             paint_nodes_executed: self.paint_nodes_executed,
             paint_nodes_reused: self.paint_nodes_reused,
@@ -3546,6 +3666,25 @@ impl<Message: Clone> UiFrame<Message> {
             .iter()
             .find(|scroll| scroll.message.as_ref() == Some(message))
             .map(|scroll| scroll.extent)
+    }
+
+    pub(crate) fn scroll_anchor_geometry(
+        &self,
+        target: &UiId,
+    ) -> Option<(UiId, f32, ScrollExtent, bool)> {
+        let node = self.resolved.find(target)?;
+        let scroll = self
+            .scrolls
+            .iter()
+            .filter(|scroll| scroll.id != *target && self.is_descendant_or_self(&scroll.id, target))
+            .max_by_key(|scroll| scroll.id.as_str().len())?;
+        let visible = rects_intersect(node.allocated, scroll.clip);
+        Some((
+            scroll.id.clone(),
+            node.allocated.origin.y - scroll.rect.origin.y,
+            scroll.extent,
+            visible,
+        ))
     }
 
     pub fn scroll_viewport(&self, message: &Message) -> Option<Rect>
@@ -3803,6 +3942,12 @@ impl<Message: Clone> UiFrame<Message> {
     }
 
     fn reduce_event(&self, state: &mut UiStateStore, event: UiEvent) -> EventOutcome<Message> {
+        // Only passive motion/timers may outlive an unfinished logical jump.
+        // Another deliberate input replaces it, never activating a later row.
+        if !matches!(event, UiEvent::PointerMoved(_) | UiEvent::CaretBlink) {
+            state.virtual_boundary = None;
+            state.virtual_focus = None;
+        }
         let mut outcome = EventOutcome::default();
         let intrinsically_handled = matches!(
             event,
@@ -3857,12 +4002,8 @@ impl<Message: Clone> UiFrame<Message> {
                         ((point.x - hit.rect.origin.x) / hit.rect.size.width.max(1.0))
                             .clamp(0.0, 1.0)
                     });
-                let position_affects_geometry = self
-                    .declaration_root
-                    .as_ref()
-                    .is_some_and(pointer_position_affects_geometry);
                 let pointer_invalidation = match state.set_pointer_position(point, hover_fraction) {
-                    _ if !position_affects_geometry => Invalidation::None,
+                    _ if !self.pointer_position_affects_geometry => Invalidation::None,
                     Invalidation::Layout
                         if self
                             .declaration_root
@@ -4647,9 +4788,46 @@ impl<Message: Clone> UiFrame<Message> {
                     .filter(|id| self.is_dropdown(id))
                     .map_or(Invalidation::None, |id| state.set_dropdown_open(id, true))
             }
+            UiEvent::AccessibilityRevealVirtualRow {
+                collection,
+                revision,
+                ordinal,
+                leading,
+                height,
+            } => {
+                if let Some(column) = self.resolved.find(&collection)
+                    && column.virtual_navigation.as_ref().is_some_and(|logical| {
+                        logical.revision == revision && ordinal < logical.count
+                    })
+                    && self.virtual_navigation_allowed(state, &collection)
+                    && leading.is_finite()
+                    && leading >= 0.0
+                    && height.is_finite()
+                    && height > 0.0
+                    && leading + height <= column.allocated.size.height + 1.0
+                {
+                    state.virtual_focus = Some((collection.clone(), revision, ordinal));
+                    let mut target = column.allocated;
+                    target.origin.y += leading;
+                    // A logical row can contain an entire nested collection.
+                    // Reveal its beginning rather than the bottom of a row
+                    // taller than the viewport before selecting a descendant.
+                    target.size.height =
+                        height.min(column.clip.map_or(height, |clip| clip.size.height));
+                    self.reveal_controller_rect(state, &collection, target)
+                        .merge(self.reconcile_virtual_focus(state))
+                } else {
+                    Invalidation::None
+                }
+            }
             UiEvent::AccessibilityFocus(id) => {
-                if self.hits.iter().any(|hit| hit.id == id) {
-                    state.set_focus(Some(id))
+                // A declared focus target can be outside its ancestor clip and
+                // therefore absent from the hit list. Reveal it through native
+                // scrolling before requiring a visible hit region.
+                if self.hits.iter().any(|hit| hit.id == id) || self.focus_targets().contains(&&id) {
+                    state
+                        .set_focus(Some(id.clone()))
+                        .merge(self.reveal_controller_target(state, &id))
                 } else {
                     Invalidation::None
                 }
@@ -5347,11 +5525,158 @@ impl<Message: Clone> UiFrame<Message> {
         self.select_controller_from(state, direction, ids)
     }
 
+    fn virtual_navigation_allowed(&self, state: &UiStateStore, id: &UiId) -> bool {
+        state
+            .navigation()
+            .controller_scope()
+            .or_else(|| state.navigation().controller_pane())
+            .is_none_or(|scope| self.is_descendant_or_self(scope, id))
+            && self
+                .active_interaction_overlay()
+                .is_none_or(|overlay| self.is_descendant_or_self(overlay.as_ui_id(), id))
+    }
+
     fn move_controller_boundary(&self, state: &mut UiStateStore, end: bool) -> Invalidation {
         let ids = self.controller_targets(state);
         let target = if end { ids.last() } else { ids.first() };
+        if let Some(target) = target
+            // Resolved nodes are parent-first. Cross an omitted outer range
+            // before navigating an inner list in a row that will be retired.
+            && let Some(column) = self.resolved.nodes.iter().find(|node| {
+                node.virtual_navigation.as_ref().is_some_and(|logical| {
+                    logical.count > 0
+                        && if end { logical.range.end < logical.count } else { logical.range.start > 0 }
+                })
+                    && self.is_descendant_or_self(&node.id, target)
+                    && self.virtual_navigation_allowed(state, &node.id)
+            })
+            && let Some(logical) = &column.virtual_navigation
+        {
+            state.virtual_boundary = Some((column.id.clone(), logical.revision, end));
+            let mut boundary = column.allocated;
+            if end {
+                boundary.origin.y += (boundary.size.height - 1.0).max(0.0);
+            }
+            boundary.size.height = 1.0;
+            return self.reveal_controller_rect(state, &column.id, boundary);
+        }
         target.cloned().map_or(Invalidation::None, |target| {
             self.select_controller_id(state, target)
+        })
+    }
+
+    /// Complete only after native admission publishes the requested boundary.
+    /// Metadata is constant-size; this never visits omitted logical rows.
+    pub(crate) fn reconcile_virtual_boundary(&self, state: &mut UiStateStore) -> Invalidation {
+        let focus = self.reconcile_virtual_focus(state);
+        if focus != Invalidation::None {
+            return focus;
+        }
+        let Some((id, revision, end)) = state.virtual_boundary.clone() else {
+            return Invalidation::None;
+        };
+        if !self.virtual_navigation_allowed(state, &id) {
+            state.virtual_boundary = None;
+            return Invalidation::None;
+        }
+        let Some(column) = self.resolved.find(&id) else {
+            state.virtual_boundary = None;
+            return Invalidation::None;
+        };
+        let Some(logical) = column
+            .virtual_navigation
+            .as_ref()
+            .filter(|logical| logical.revision == revision && logical.count > 0)
+        else {
+            state.virtual_boundary = None;
+            return Invalidation::None;
+        };
+        if if end {
+            logical.range.end < logical.count
+        } else {
+            logical.range.start > 0
+        } {
+            return Invalidation::None;
+        }
+        if !self
+            .controller_targets(state)
+            .iter()
+            .any(|target| self.is_descendant_or_self(&id, target))
+            && self.resolved.nodes.iter().any(|node| {
+                node.id != id
+                    && self.is_descendant_or_self(&id, &node.id)
+                    && node
+                        .virtual_navigation
+                        .as_ref()
+                        .is_some_and(|logical| logical.count > 0 && logical.range.is_empty())
+            })
+        {
+            // Newly admitted outer rows can publish their inner source before
+            // the inner source's first viewport feedback constructs controls.
+            return Invalidation::None;
+        }
+        state.virtual_boundary = None;
+        // An admitted outer row may itself contain an omitted inner range.
+        // Re-enter the same native policy, not an activation or synthetic key.
+        self.move_controller_boundary(state, end)
+    }
+
+    fn reconcile_virtual_focus(&self, state: &mut UiStateStore) -> Invalidation {
+        let Some((id, revision, ordinal)) = state.virtual_focus.clone() else {
+            return Invalidation::None;
+        };
+        let Some(column) = self.resolved.find(&id).filter(|column| {
+            self.virtual_navigation_allowed(state, &id)
+                && column
+                    .virtual_navigation
+                    .as_ref()
+                    .is_some_and(|logical| logical.revision == revision && ordinal < logical.count)
+        }) else {
+            state.virtual_focus = None;
+            return Invalidation::None;
+        };
+        let logical = column
+            .virtual_navigation
+            .as_ref()
+            .expect("validated navigation");
+        if !logical.range.contains(&ordinal) {
+            return Invalidation::None;
+        }
+        let row = column
+            .children
+            .get(1)
+            .and_then(|visible| {
+                self.resolved.nodes[*visible]
+                    .children
+                    .get(ordinal - logical.range.start)
+            })
+            .map(|row| &self.resolved.nodes[*row].id);
+        let target = row.and_then(|row| {
+            self.focus_targets()
+                .into_iter()
+                .find(|target| self.is_descendant_or_self(row, target))
+                .cloned()
+        });
+        if target.is_none()
+            && row.is_some_and(|row| {
+                self.resolved.nodes.iter().any(|node| {
+                    self.is_descendant_or_self(row, &node.id)
+                        && node
+                            .virtual_navigation
+                            .as_ref()
+                            .is_some_and(|logical| logical.count > 0 && logical.range.is_empty())
+                })
+            })
+        {
+            // Outer admission can precede its inner viewport feedback. Keep
+            // the revision-scoped intent until the ordinary pipeline settles.
+            return Invalidation::None;
+        }
+        state.virtual_focus = None;
+        target.map_or(Invalidation::None, |target| {
+            state
+                .set_focus(Some(target.clone()))
+                .merge(self.reveal_controller_target(state, &target))
         })
     }
 
@@ -6030,6 +6355,15 @@ impl<Message: Clone> UiFrame<Message> {
         let Some(target) = self.controller_rect(selected) else {
             return Invalidation::None;
         };
+        self.reveal_controller_rect(state, selected, target)
+    }
+
+    fn reveal_controller_rect(
+        &self,
+        state: &mut UiStateStore,
+        selected: &UiId,
+        target: Rect,
+    ) -> Invalidation {
         let declared_owner = state
             .navigation()
             .controller_scope()
@@ -6037,14 +6371,15 @@ impl<Message: Clone> UiFrame<Message> {
             .and_then(|scope| self.scope_policy(scope))
             .and_then(|scope| scope.scroll_owner.as_ref());
         for scroll in self.scrolls.iter().rev().filter(|scroll| {
-            declared_owner.is_none_or(|owner| {
-                &scroll.id == owner
-                    || scroll
-                        .id
-                        .as_str()
-                        .strip_suffix(owner.as_str())
-                        .is_some_and(|prefix| prefix.ends_with('/'))
-            })
+            self.is_descendant_or_self(&scroll.id, selected)
+                && declared_owner.is_none_or(|owner| {
+                    &scroll.id == owner
+                        || scroll
+                            .id
+                            .as_str()
+                            .strip_suffix(owner.as_str())
+                            .is_some_and(|prefix| prefix.ends_with('/'))
+                })
         }) {
             let overlaps_horizontally = target.origin.x
                 < scroll.rect.origin.x + scroll.rect.size.width
@@ -6415,6 +6750,29 @@ impl<Message: Clone> UiFrame<Message> {
         }
         let mut executed = 0usize;
         let mut reused = 0usize;
+        // VirtualColumn consists of leading spacer, admitted rows column and
+        // trailing spacer. Assign logical ordinals only to admitted row roots,
+        // then inherit through their descendants; nested row roots override.
+        let mut collection_positions = vec![None; self.resolved.nodes.len()];
+        for node in &self.resolved.nodes {
+            if let Some(logical) = &node.virtual_navigation
+                && let Some(visible) = node.children.get(1)
+            {
+                for (offset, row) in self.resolved.nodes[*visible].children.iter().enumerate() {
+                    let ordinal = logical.range.start.saturating_add(offset);
+                    if ordinal < logical.range.end && ordinal < logical.count {
+                        collection_positions[*row] = Some((ordinal + 1, logical.count));
+                    }
+                }
+            }
+        }
+        for index in 0..self.resolved.nodes.len() {
+            if collection_positions[index].is_none()
+                && let Some(parent) = self.semantic_parents[index]
+            {
+                collection_positions[index] = collection_positions[parent];
+            }
+        }
         self.accessibility = self
             .resolved
             .nodes
@@ -6448,7 +6806,11 @@ impl<Message: Clone> UiFrame<Message> {
                             .accessibility_indices
                             .get(&node.id)
                             .and_then(|index| previous.accessibility.get(*index))
-                            .filter(|cached| cached.id == node.id && cached.parent == parent)
+                            .filter(|cached| {
+                                cached.id == node.id
+                                    && cached.parent == parent
+                                    && cached.collection_position == collection_positions[index]
+                            })
                     })
                 {
                     reused = reused.saturating_add(1);
@@ -6475,6 +6837,7 @@ impl<Message: Clone> UiFrame<Message> {
                     focused: node.interaction.focused,
                     controller_selected: node.interaction.controller_selected,
                     navigation_depth: self.navigation_depth_for_index(index),
+                    collection_position: collection_positions[index],
                     value: node.semantic_value.clone(),
                 })
             })

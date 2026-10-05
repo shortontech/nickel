@@ -4,7 +4,7 @@ const __nickelPublicComponents = new Map();
 // public merely because package code shares this lexical runtime context.
 const __nickelPublicRuntimeGlobals = Object.freeze([
     'Window','Fragment','FixedWindow','Panel','Box','Layer','Div','Badge','Row','Column',
-    'ScrollView','Text','Image','ImageButton','Progress','Slider','Switch','Checkbox',
+    'ScrollView','VirtualColumn','Text','Image','ImageButton','Progress','Slider','Switch','Checkbox',
     'ColorSwatch','Select','Option','TextField','Button','Spacer','Slot','Dialog','Menu',
     'MenuItem','ErrorBoundary','NickelStores','registerSetting','registerSettingsPage',
     'readPluginSettings','readSettingsPages','readPluginSettingsPages','nickel','useWindows',
@@ -79,6 +79,54 @@ const Badge = 'badge';
 const Row = 'row';
 const Column = 'column';
 const ScrollView = 'scroll-view';
+// Key the component scope as well as its native wrapper. A native-only key
+// does not isolate hook slots in renderItem's component descendants: changing
+// the admitted slice would otherwise transfer nested window state to a sibling.
+function __NickelVirtualRow({children}) {
+    return h('column', null, ...children);
+}
+function VirtualColumn(props) {
+    const source = useMemo(() => {
+        if (!Array.isArray(props.items) || props.items.length > 10000)
+            throw new Error('VirtualColumn needs at most 10000 items');
+        if (typeof props.itemKey !== 'function' || typeof props.renderItem !== 'function')
+            throw new Error('VirtualColumn needs itemKey and renderItem');
+        const keys = props.items.map((item, index) => String(props.itemKey(item, index)));
+        if (keys.some(key => !key || key.length > 512) || new Set(keys).size !== keys.length)
+            throw new Error('VirtualColumn needs unique bounded item keys');
+        const heights = props.items.map((item, index) => typeof props.itemHeight === 'function'
+            ? props.itemHeight(item, index) : props.itemHeight);
+        if (heights.some(height => !Number.isFinite(height) || height < 1 || height > 8192))
+            throw new Error('VirtualColumn needs finite positive item heights');
+        const uniform = heights.length === 0 || heights.every(height => height === heights[0]);
+        return {keys, geometry:uniform ? {keys, count:heights.length, height:heights[0] ?? 1} : {keys, heights}};
+    }, [props.items, props.itemKey, props.itemHeight, props.gap]);
+    const [window, setWindow] = useState({source:null, start:0, end:0, reference:null});
+    // Keep the previous native-selected slice provisionally during source
+    // replacement. Clearing it would retire surviving row focus/capture before
+    // native feedback can acknowledge the new source. Cold mounts stay empty.
+    const current = window.source === source ? window : {
+        start:Math.min(window.start, source.keys.length),
+        end:Math.min(window.end, source.keys.length)
+    };
+    const onWindow = value => {
+        const next = JSON.parse(value);
+        if (!Number.isInteger(next.start) || !Number.isInteger(next.end)
+            || next.start < 0 || next.start > next.end || next.end > source.keys.length)
+            throw new Error('Invalid native virtual window');
+        if (!Number.isSafeInteger(next.source) || next.source <= 0)
+            throw new Error('Invalid native virtual source acknowledgement');
+        const reference = next.source;
+        setWindow(previous => previous.source === source && previous.start === next.start && previous.end === next.end && previous.reference === reference
+            ? previous : {source, start:next.start, end:next.end, reference});
+    };
+    const rows = [];
+    for (let index = current.start; index < current.end; index++)
+        rows.push(h(__NickelVirtualRow, {key:source.keys[index]}, props.renderItem(props.items[index], index)));
+    return h('div', {id:props.id, className:props.className, onChange:onWindow,
+        collection:{...(current.reference ? {source:current.reference} : source.geometry), gap:props.gap ?? 0, overscan:props.overscan ?? 96,
+            start:current.start, end:current.end}}, rows);
+}
 const Text = 'text';
 const Image = 'image';
 const ImageButton = 'image-button';
@@ -131,8 +179,19 @@ let __retainedComponentChildren = new Map();
 let __currentComponent = null;
 let __componentExecutionStack = [];
 let __hookIndex = 0;
-let __handlers = [];
-let __previousHandlers = [];
+class __NickelHandlers extends Map {
+    // Retiring a row releases its closure without recycling an issued action.
+    // Transaction copies scale with live entries, not the highest issued ID.
+    constructor(previous) { super(previous); this.nextAction=previous?.nextAction??0; }
+    get length() { return this.size; }
+    slice() { return new __NickelHandlers(this); }
+    allocate() {
+        if(this.nextAction>=Number.MAX_SAFE_INTEGER)throw Error('component handler identity exhausted');
+        return this.nextAction++;
+    }
+}
+let __handlers = new __NickelHandlers();
+let __previousHandlers = new __NickelHandlers();
 let __handlerSlots = new Map();
 const __handlerBindings = new WeakSet();
 const __virtualNativeNodes = new WeakSet();
@@ -150,7 +209,8 @@ let __runtimeNativeMutations = [];
 let __developerDiagnostics = [];
 const __mountProfiles = new Map();
 let __runtimeCounters = {renders:0,executed:0,reused:0,nativeNodesMaterialized:0,
-    effectsScheduled:0,effectsRun:0,cleanups:0,failures:0,storeChanges:0,nativeMutations:0};
+    effectsScheduled:0,effectsRun:0,cleanups:0,failures:0,storeChanges:0,nativeMutations:0,
+    mountBaseUploads:0,mountBaseReuses:0};
 let __incrementalRender = false;
 let __patchOnlyRender = false;
 let __effects = [];
@@ -173,16 +233,16 @@ function __nickelErrorMessage(error) {
     try { return String(error?.message ?? error).slice(0, 512); }
     catch (_) { return 'unprintable component failure'; }
 }
-function __nickelRecordBoundaryFailure(boundary, phase, error) {
+function __nickelRecordBoundaryFailure(boundary, phase, error, surface = __activeSurface, state = null) {
     const message = __nickelErrorMessage(error);
     const previous = __boundaryDiagnostics[__boundaryDiagnostics.length - 1];
-    if (previous && previous.surface === __activeSurface && previous.boundary === boundary
+    if (previous && previous.surface === surface && previous.boundary === boundary
         && previous.phase === phase && previous.message === message) {
         previous.occurrences = Math.min(65535, previous.occurrences + 1); return;
     }
     if (__boundaryDiagnostics.length === __MAX_BOUNDARY_DIAGNOSTICS) __boundaryDiagnostics.shift();
     const stack = [];
-    for (const [path, record] of __componentRecords) {
+    for (const [path, record] of state?.records ?? __componentRecords) {
         if (boundary !== path && !boundary.startsWith(`${path}/`)) continue;
         const metadata = __nickelComponentMetadata.get(record.kind);
         stack.push({path,module:metadata?.module ?? null,export:metadata?.export ?? record.kind?.name ?? null});
@@ -190,25 +250,29 @@ function __nickelRecordBoundaryFailure(boundary, phase, error) {
     if (error?.__nickelComponent && !stack.some(entry => entry.path === error.__nickelComponent.path))
         stack.push(error.__nickelComponent);
     __runtimeCounters.failures++;
-    __boundaryDiagnostics.push({package:__nickelPackageOwner,surface:__activeSurface,mount:__surfaceStore.snapshot.mountId,
+    __boundaryDiagnostics.push({package:__nickelPackageOwner,surface,mount:(state?.surfaceStore ?? __surfaceStore).snapshot.mountId,
         boundary,phase,message,hookIndex:__hookIndex,stack,occurrences:1});
 }
-function __nickelNearestBoundary(owner) {
+function __nickelNearestBoundary(owner, records = __componentRecords) {
     if (typeof owner !== 'string') return null;
     let candidate = null;
-    for (const [path, record] of __componentRecords) {
+    for (const [path, record] of records) {
         if (!record.boundary || (owner !== path && !owner.startsWith(`${path}/`))) continue;
         if (candidate === null || path.length > candidate.length) candidate = path;
     }
     return candidate;
 }
-function __nickelCaptureFailure(owner, error, phase) {
-    const boundary = __nickelNearestBoundary(owner);
+function __nickelCaptureFailure(owner, error, phase, surface = __activeSurface) {
+    const state = surface === __activeSurface
+        ? {records:__componentRecords, dirty:__dirtyComponents, surfaceStore:__surfaceStore}
+        : __surfaceStates.get(surface);
+    if (!state) return false;
+    const boundary = __nickelNearestBoundary(owner, state.records);
     if (boundary === null) return false;
-    const record = __componentRecords.get(boundary);
-    __componentRecords.set(boundary, {...record, boundaryError:error});
-    __dirtyComponents.add(boundary);
-    __nickelRecordBoundaryFailure(boundary, phase, error);
+    const record = state.records.get(boundary);
+    state.records.set(boundary, {...record, boundaryError:error});
+    state.dirty.add(boundary);
+    __nickelRecordBoundaryFailure(boundary, phase, error, surface, state);
     return true;
 }
 // Native validation happens after JavaScript has produced a candidate patch.
@@ -333,7 +397,24 @@ function __nickelSelectedStoreEntry(hooks,slot,kind,selector,store) {
     if(entry.kind!==kind)throw Error('hook order changed');
     return entry;
 }
+function __nickelRetainedCounts() {
+    // Counts only, never component data or closures. The selected surface's
+    // saved entry can be stale/aliased; count its current state exactly once.
+    const counts={surfaces:0,hookComponents:0,hookSlots:0,componentRecords:0,
+        handlerEntries:0,previousHandlerEntries:0,handlerSlots:0};
+    function add(hooks,records,handlers,previousHandlers,slots) {
+        counts.surfaces++;counts.hookComponents+=hooks.size;
+        for(const entries of hooks.values())counts.hookSlots+=entries.length;
+        counts.componentRecords+=records.size;counts.handlerEntries+=handlers.size;
+        counts.previousHandlerEntries+=previousHandlers.size;counts.handlerSlots+=slots.size;
+    }
+    if(__activeSurface)add(__componentHooks,__componentRecords,__handlers,__previousHandlers,__handlerSlots);
+    for(const [id,state] of __surfaceStates)if(id!==__activeSurface)
+        add(state.hooks,state.records,state.handlers,state.previousHandlers,state.handlerSlots);
+    return counts;
+}
 function __nickelRuntimeDiagnostics() { return JSON.stringify({counters:__runtimeCounters,reasons:__runtimeReasons,
+    retained:__nickelRetainedCounts(),
     storeChanges:__runtimeStoreChanges,nativeMutations:__runtimeNativeMutations,
     developerDiagnostics:__developerDiagnostics,profiles:Array.from(__mountProfiles.values())}); }
 let __windowsStore = {generation:0, snapshot:Object.freeze([])};
@@ -388,6 +469,18 @@ function __nickelRegisterSurfaceApp(id, component, identity = null) {
     __surfaceAppIdentities.set(id, {...(identity ?? {owner:null,module:null,export:null,signature:null}),component});
 }
 
+// Native composition mounts select already-loaded components as data. Keep
+// lookup inside App so provider replacement and page retirement remain live.
+function __nickelRegisterComponentSurface(id, selection, registeredPage) {
+    if (typeof selection !== 'string' || typeof registeredPage !== 'boolean')
+        throw Error('invalid component surface selection');
+    __nickelRegisterSurfaceApp(id, function App() {
+        const {children, ...props} = __nickelHydrateComponentProps(nickel.data.__componentProps);
+        return h(registeredPage ? __nickelRegisteredPageComponent(selection) : nickel.component(selection),
+            props, ...(children ?? []));
+    });
+}
+
 function __nickelReplaceSurfaceApp(id, component, identity) {
     if (typeof id !== 'string' || !__surfaceApps.has(id) || typeof component !== 'function')
         throw Error('hot replacement target is unavailable');
@@ -404,11 +497,11 @@ function __nickelReplaceSurfaceApp(id, component, identity) {
         if (state?.hooks) __nickelCleanupHooks(state.hooks);
         if (id === __activeSurface) {
             __componentHooks = new Map(); __componentRecords = new Map();
-            __handlers = []; __previousHandlers = []; __handlerSlots = new Map();
+            __handlers = new __NickelHandlers(); __previousHandlers = new __NickelHandlers(); __handlerSlots = new Map();
             __effects = []; __dirtyComponents = new Set();
         } else if (state) {
-            state.hooks = new Map(); state.records = new Map(); state.handlers = [];
-            state.previousHandlers = []; state.handlerSlots = new Map(); state.effects = []; state.dirty = new Set();
+            state.hooks = new Map(); state.records = new Map(); state.handlers = new __NickelHandlers();
+            state.previousHandlers = new __NickelHandlers(); state.handlerSlots = new Map(); state.effects = []; state.dirty = new Set();
         }
     }
     __surfaceApps.set(id, component);
@@ -541,7 +634,8 @@ function __nickelRetireSettings() {
 
 function __nickelResource(name, fallback) {
     __nickelMarkResourceRead(name);
-    return JSON.parse(JSON.stringify(__nickelData[name] === undefined ? fallback : __nickelData[name]));
+    const value = __nickelProjectionField(__nickelData, name);
+    return JSON.parse(JSON.stringify(value === undefined ? fallback : value));
 }
 function __nickelMarkResourceRead(name) {
     if (__currentComponent === null) return;
@@ -870,6 +964,7 @@ const nickel = Object.freeze({
     }),
     displays: Object.freeze({
         get() {
+            __nickelMarkResourceRead('displays');
             const snapshot = __nickelData.displays;
             return snapshot === undefined ? undefined : JSON.parse(JSON.stringify(snapshot));
         },
@@ -912,11 +1007,53 @@ const nickel = Object.freeze({
     get data() { return __nickelData; }
 });
 
+// Immutable native mount inventories never escape directly. Compatibility
+// fields are copied lazily on first public read; private resource reads can
+// continue to clone the host value without exposing that retained inventory.
+const __mountDataProjections = new WeakMap();
+let __mountDataBase = null;
+function __nickelCloneProjection(value) {
+    if (value === null || typeof value !== 'object') return value;
+    if (Array.isArray(value)) return value.map(__nickelCloneProjection);
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, __nickelCloneProjection(item)]));
+}
+function __nickelProjectionField(data, name) {
+    const projection = __mountDataProjections.get(data);
+    return projection ? (projection.exposed.has(name) ? projection.exposed.get(name) : projection.source[name]) : data[name];
+}
+function __nickelSetMountData({base, surface, hasSurface, props}) {
+    if (base !== null) {
+        __mountDataBase = base;
+        __runtimeCounters.mountBaseUploads++;
+    } else {
+        __runtimeCounters.mountBaseReuses++;
+    }
+    if (__mountDataBase === null) throw Error('mount inventory is unavailable');
+    const source = {...__mountDataBase, __componentProps:props};
+    if (hasSurface) source.surface = surface;
+    const exposed = new Map();
+    const data = {};
+    for (const key of Object.keys(source).sort()) {
+        Object.defineProperty(data, key, {enumerable:true, get() {
+            if (!exposed.has(key)) exposed.set(key, __nickelCloneProjection(source[key]));
+            return exposed.get(key);
+        }});
+    }
+    __mountDataProjections.set(data, {source, exposed});
+    __nickelPublishData(data);
+}
 function __nickelSetData(data) {
+    __mountDataBase = null;
+    __nickelPublishData(data);
+}
+function __nickelPublishData(data) {
     const changed = new Map();
     const fieldChanged = name => {
-        if (!changed.has(name)) changed.set(name,
-            JSON.stringify(__nickelData[name]) !== JSON.stringify(data[name]));
+        if (!changed.has(name)) {
+            const previous = __nickelProjectionField(__nickelData, name);
+            const next = __nickelProjectionField(data, name);
+            changed.set(name, !Object.is(previous, next) && JSON.stringify(previous) !== JSON.stringify(next));
+        }
         return changed.get(name);
     };
     const dirtyConsumers = (records, dirty) => {
@@ -982,9 +1119,12 @@ function __nickelForEachSurfaceHooks(visit) {
         if (state.hooks !== __componentHooks) visit(state.hooks, state.dirty);
 }
 
-function __nickelSetWindowsStore(value) {
+function __nickelValidateWindowsStorePublication() {
     if (__pendingRender !== null || __pendingEvent !== null)
         throw Error('cannot publish windows store during a render or event');
+}
+function __nickelSetWindowsStore(value) {
+    __nickelValidateWindowsStorePublication();
     const before=__nickelDirtyComponentCount(), windows = __nickelWindowSnapshot(value);
     const previous = __windowsStore.snapshot;
     if (previous.length === windows.length && previous.every((window, index) => window === windows[index]))
@@ -1576,8 +1716,8 @@ function __nickelSelectSurface(id) {
     const state = __surfaceStates.get(id);
     __componentHooks = state?.hooks ?? new Map();
     __componentRecords = state?.records ?? new Map();
-    __handlers = state?.handlers ?? [];
-    __previousHandlers = state?.previousHandlers ?? [];
+    __handlers = state?.handlers ?? new __NickelHandlers();
+    __previousHandlers = state?.previousHandlers ?? new __NickelHandlers();
     __handlerSlots = state?.handlerSlots ?? new Map();
     __effects = state?.effects ?? [];
     __dirtyComponents = state?.dirty ?? new Set();
@@ -1607,8 +1747,8 @@ function __nickelDropSurface(id) {
     if (id !== __activeSurface) return;
     __componentHooks = new Map();
     __componentRecords = new Map();
-    __handlers = [];
-    __previousHandlers = [];
+    __handlers = new __NickelHandlers();
+    __previousHandlers = new __NickelHandlers();
     __handlerSlots = new Map();
     __effects = [];
     __dirtyComponents = new Set();
@@ -1638,19 +1778,25 @@ function __nickelTakeEffects() {
 function useState(initial) {
     if (__currentComponent === null) throw Error('useState requires a component');
     const owner = __currentComponent;
+    const surface = __activeSurface;
     const slot = __hookIndex++;
     const hooks = __componentHooks.get(owner);
     if (!hooks[slot]) {
         const entry = {kind: 'state', value: typeof initial === 'function' ? initial() : initial, set: null};
         entry.set = next => {
-            const current = __componentHooks.get(owner)?.[slot];
-            if (!current || current.kind !== 'state') return;
+            const state = surface === __activeSurface
+                ? {hooks:__componentHooks, dirty:__dirtyComponents}
+                : __surfaceStates.get(surface);
+            const current = state?.hooks.get(owner)?.[slot];
+            // Surface IDs and component paths can be reused after retirement.
+            // Only this exact accepted hook lifetime may receive the update.
+            if (!current || current.kind !== 'state' || current.set !== entry.set) return;
             if (__currentComponent !== null)
                 throw Error('state updates are not allowed during component render');
             const value = typeof next === 'function' ? next(current.value) : next;
             if (!Object.is(value, current.value)) {
                 current.value = value;
-                __dirtyComponents.add(owner);
+                state.dirty.add(owner);
             }
         };
         hooks[slot] = entry;
@@ -1665,24 +1811,28 @@ function useReducer(reducer, initialArg, init) {
     if (typeof reducer !== 'function') throw TypeError('useReducer requires a reducer');
     if (init !== undefined && typeof init !== 'function') throw TypeError('useReducer initializer must be a function');
     const owner = __currentComponent;
+    const surface = __activeSurface;
     const slot = __hookIndex++;
     const hooks = __componentHooks.get(owner);
     if (!hooks[slot]) {
         const entry = {kind: 'reducer', value: init === undefined ? initialArg : init(initialArg), reducer, dispatch: null};
         entry.dispatch = action => {
-            const current = __componentHooks.get(owner)?.[slot];
-            if (!current || current.kind !== 'reducer') return;
+            const state = surface === __activeSurface
+                ? {hooks:__componentHooks, dirty:__dirtyComponents}
+                : __surfaceStates.get(surface);
+            const current = state?.hooks.get(owner)?.[slot];
+            if (!current || current.kind !== 'reducer' || current.dispatch !== entry.dispatch) return;
             if (__currentComponent !== null)
                 throw Error('reducer updates are not allowed during component render');
             let value;
             try { value = current.reducer(current.value, action); }
             catch (error) {
-                if (__nickelCaptureFailure(owner, error, 'reducer')) return;
+                if (__nickelCaptureFailure(owner, error, 'reducer', surface)) return;
                 throw error;
             }
             if (!Object.is(value, current.value)) {
                 current.value = value;
-                __dirtyComponents.add(owner);
+                state.dirty.add(owner);
             }
         };
         hooks[slot] = entry;
@@ -2100,21 +2250,25 @@ function __nickelMaterializeVirtual(value, path = 'root') {
         const handler = value.handler, owner = value.owner;
         let action = __handlerSlots.get(path);
         if (action === undefined) {
-            action = __handlers.length;
+            action = __handlers.allocate();
             __handlerSlots.set(path, action);
         }
-        __handlers[action] = input => {
+        __handlers.set(action, input => {
             try { return handler(input); }
             catch (error) {
                 if (!__nickelCaptureFailure(owner, error, 'event')) throw error;
             }
-        };
+        });
         return action;
     }
     if (__nickelIsComponentDeclaration(value))
         throw Error('unresolved component declaration reached native materialization');
-    if (Array.isArray(value)) return value.map((item, index) =>
-        __nickelMaterializeVirtual(item, `${path}/#${index}`));
+    if (Array.isArray(value)) {
+        const node = value.map((item, index) =>
+            __nickelMaterializeVirtual(item, `${path}/#${index}`));
+        __nativeMaterializations.set(value, {node,path});
+        return node;
+    }
     if (value && typeof value === 'object') {
         // A retained virtual native node already has an admitted immutable
         // native representation. Key-derived paths stay stable across list
@@ -2173,7 +2327,7 @@ const __nickelNativeProps = new Set([
     'selectedBackground','accent','complement','item','count','hue','custom','asset','fit',
     'accessibilityLabel','role','aria-label','aria-checked','aria-selected','state','disabled','icon',
     'description','showLabel','iconSize','iconPlacement','value','placeholder','secure','autoFocus',
-    'wrap','maxLines','percent'
+    'wrap','maxLines','percent','collection'
 ]);
 
 function h(kind, props, ...children) {
@@ -2326,7 +2480,7 @@ function __nickelRender(component = __nickelActiveEntry(), patchOnly = false) {
     __componentRecords = new Map(__componentRecords);
     __incrementalRender = __dirtyComponents.size > 0;
     __patchOnlyRender = patchOnly;
-    __handlers = patchOnly ? previousHandlers.slice() : [];
+    __handlers = patchOnly ? previousHandlers.slice() : new __NickelHandlers();
     __previousHandlers = previousHandlers;
     if (!patchOnly) __handlerSlots = new Map();
     __listKeyErrors = [];
@@ -2389,7 +2543,31 @@ function __nickelDirtyNativePatch(previousRecords) {
         const previous=previousRecords.get(path), current=__componentRecords.get(path);
         if (!previous?.native || !previous.nativePath || !current)
             throw Error('dirty native ownership boundary disappeared');
+        let hostRoot;
+        for (let ancestor = path; ancestor; ) {
+            const record = previousRecords.get(ancestor);
+            if (record?.nativePath === 'root' && Array.isArray(record.native)) {
+                hostRoot = record.native.find(root => root?.kind === 'window'
+                    && root.id === __surfaceStore.snapshot.id)?.__nativeId;
+                break;
+            }
+            const identity = ancestor.lastIndexOf('/');
+            const component = identity < 0 ? -1 : ancestor.lastIndexOf('/', identity - 1);
+            ancestor = component < 0 ? null : ancestor.slice(0, component);
+        }
+        if (hostRoot && previous.nativePath !== 'root'
+            && previous.nativePath !== hostRoot
+            && !previous.nativePath.startsWith(`${hostRoot}/`)) {
+            // Keep the last admitted boundary so another hidden update does
+            // not escalate to materializing the complete fragment.
+            __componentRecords.set(path, {...current,native:previous.native,
+                nativePath:previous.nativePath});
+            __nickelRefreshNativeAncestors(previousRecords,path,
+                previous.nativePath,previous.native);
+            continue;
+        }
         const next=__nickelMaterializeVirtual(current.output,previous.nativePath);
+        __nickelRetireBoundaryHandlers(previous.native,next);
         const patch=__nickelNativePatch(previous.native,next);
         operations.push(...patch.operations);nodesVisited+=patch.counters.nodesVisited;
         __nickelRefreshNativeAncestors(previousRecords,path,previous.nativePath,next);
@@ -2404,6 +2582,23 @@ function __nickelDirtyNativePatch(previousRecords) {
 // A leaf patch also changes the accepted native snapshot held by every
 // component boundary above it. Refresh those snapshots with path-copying so a
 // later ancestor update still has an exact, rollback-safe comparison base.
+function __nickelRetireBoundaryHandlers(previous,next) {
+    const live=new Set();
+    function visit(value,slot) {
+        if(!value||typeof value!=='object')return;
+        if(Array.isArray(value)) {for(const child of value)visit(child,slot);return;}
+        for(const key of Object.values(value.__handlerSlots??{}))slot(key);
+        for(const child of value.children??[])visit(child,slot);
+    }
+    visit(next,slot=>live.add(slot));
+    visit(previous,slot=>{
+        if(!live.has(slot)) {
+            const action=__handlerSlots.get(slot);
+            __handlerSlots.delete(slot);__handlers.delete(action);
+        }
+    });
+}
+
 function __nickelRefreshNativeAncestors(previousRecords, boundary, target, replacement) {
     function replace(value) {
         if (!value || typeof value !== 'object') return [false,value];
@@ -2521,6 +2716,22 @@ function __nickelNativePatch(previous, next) {
     }
     function walk(left, right) {
         visited++;
+        if (Array.isArray(left) && Array.isArray(right)) {
+            // A package fragment is represented by a separate native host for
+            // each window. Its component owns the array, not a synthetic node.
+            // Keep the root topology stable and patch only this host's window.
+            const id = __surfaceStore.snapshot.id;
+            if (!id || left.length !== right.length || left.some((root,index) =>
+                root?.kind !== right[index]?.kind || root?.id !== right[index]?.id
+                || root?.__nativeId !== right[index]?.__nativeId))
+                throw Error('native fragment patch requires stable window topology');
+            const before = left.filter(root => root?.kind === 'window' && root.id === id);
+            const after = right.filter(root => root?.kind === 'window' && root.id === id);
+            if (before.length !== 1 || after.length !== 1)
+                throw Error('native fragment patch has no unique host window');
+            walk(before[0], after[0]);
+            return;
+        }
         if (!left || !right || typeof left !== 'object' || typeof right !== 'object'
             || Array.isArray(left) || Array.isArray(right)
             || left.__nativeId !== right.__nativeId || left.kind !== right.kind) {
@@ -2589,7 +2800,7 @@ function __nickelDispatchBatch(events, previous = false) {
         effectsLength, effects: __effects.slice(), dirty:new Set(__dirtyComponents)};
     try {
         for (const [action, value] of events) {
-            const handler = (previous ? __previousHandlers : __handlers)[action];
+            const handler = (previous ? __previousHandlers : __handlers).get(action);
             if (handler) handler(value);
         }
         return __nickelRender();
@@ -2611,7 +2822,7 @@ function __nickelDispatchBatchScheduled(events, previous = false) {
         effectsLength, effects:__effects.slice(), dirty:new Set(__dirtyComponents)};
     try {
         for (const [action, value] of events) {
-            const handler = (previous ? __previousHandlers : __handlers)[action];
+            const handler = (previous ? __previousHandlers : __handlers).get(action);
             if (handler) handler(value);
         }
         const dirty = Array.from(__dirtyComponents);
@@ -2633,7 +2844,7 @@ function __nickelDispatchBatchPatched(events, previous = false) {
         effectsLength, effects:__effects.slice(), dirty:new Set(__dirtyComponents)};
     try {
         for (const [action, value] of events) {
-            const handler = (previous ? __previousHandlers : __handlers)[action];
+            const handler = (previous ? __previousHandlers : __handlers).get(action);
             if (handler) handler(value);
         }
         const dirty = Array.from(__dirtyComponents);
@@ -2657,10 +2868,21 @@ function __nickelDispatchSlotsPatched(events, previous = false) {
 function __nickelReconciliationRequest() {
     return JSON.stringify({requested:__dirtyComponents.size > 0, dirty:Array.from(__dirtyComponents)});
 }
+function __nickelConsumeReconciliation() { __dirtyComponents.clear(); }
 
 // Native composition checkpoints cover bootstrap-owned presentation state.
 // They deliberately do not snapshot package globals or closure-captured values.
 let __compositionCheckpoint = null;
+function __nickelPlatformMaintenanceReady() {
+    return __compositionCheckpoint === null && __pendingRender === null && __pendingEvent === null;
+}
+function __nickelSurfaceWorkPending(id) {
+    if (!__nickelPlatformMaintenanceReady()) throw Error('surface work query requires an idle runtime');
+    const state = id === __activeSurface
+        ? {dirty:__dirtyComponents, effects:__effects}
+        : __surfaceStates.get(id);
+    return !!state && (state.dirty.size > 0 || state.effects.length > 0);
+}
 function __nickelBeginCheckpoint() {
     if (__compositionCheckpoint !== null || __pendingRender !== null || __pendingEvent !== null) throw Error('checkpoint already pending');
     const seen = new Map();

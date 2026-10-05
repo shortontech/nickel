@@ -14,9 +14,7 @@ use nickel_core::package_composition::PackageIdentity;
 use nickel_core::plugins::{
     PluginCapability, PluginManifest, PluginPackage, PluginSurface, PluginSurfaceKind,
 };
-use nickel_plugin_presentation::components::{
-    PanelNode, RetainedPanelTree, render_retained_panel, render_retained_panel_validated,
-};
+use nickel_plugin_presentation::components::{PanelNode, RetainedPanelTree, render_retained_panel};
 pub use nickel_plugin_presentation::components::{PluginImages, PluginMessage};
 #[cfg(test)]
 use nickel_plugin_runtime::NativePatchCounters;
@@ -40,6 +38,18 @@ use nickel_ui::{
 use nickel_ui::{Point, SemanticRole};
 use serde_json::Value;
 
+/// Advance a native plugin host, including viewport feedback and bounded
+/// virtual-row measurement. Embedders must use this instead of stepping the
+/// generic UI host alone: virtual collections initially contain no row trees.
+/// Continue servicing the returned native deadline when convergence is pending.
+pub fn step_host(
+    host: &mut nickel_ui::UiHost<PluginPanelApplication>,
+    data: Option<String>,
+    batch: nickel_ui::HostBatch,
+) -> Result<(nickel_ui::HostEventOutcome, u64), String> {
+    crate::live_shell::step_plugin_host(host, data, batch)
+}
+
 use nickel_core::display_projection::ProjectionMode;
 use nickel_plugin_presentation::css::StyleSheet;
 
@@ -47,6 +57,16 @@ use crate::window_preview::PreviewAction;
 
 const MAX_EFFECT_RECONCILIATIONS: usize = 16;
 static NEXT_DIAGNOSTIC_MOUNT: AtomicU64 = AtomicU64::new(1);
+static NEXT_NATIVE_TEXT_REVISION: AtomicU64 = AtomicU64::new(1);
+
+fn allocate_native_text_revision(counter: &AtomicU64) -> Option<u64> {
+    // Exhaustion disables this optimization instead of aliasing an older source.
+    counter
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+            value.checked_add(1)
+        })
+        .ok()
+}
 
 pub fn manifest() -> &'static PluginManifest {
     static MANIFEST: OnceLock<PluginManifest> = OnceLock::new();
@@ -138,6 +158,8 @@ pub fn enabled() -> bool {
     std::env::var_os("NICKEL_DEV_PLUGIN_PANEL").is_some()
 }
 
+type WallpaperDemandCache = Option<(u64, nickel_ui::Rect, Arc<Vec<String>>)>;
+
 pub struct PluginPanelApplication {
     runtime: std::rc::Rc<std::cell::RefCell<JsxRuntime>>,
     accepted: RetainedPanelTree,
@@ -158,6 +180,17 @@ pub struct PluginPanelApplication {
     composition: Option<CompositionPanelState>,
     surface_snapshot: Value,
     diagnostic_mount: u64,
+    native_text_revision: std::cell::Cell<Option<(u64, u64, Option<u64>)>>,
+    virtual_feedback_generation: std::cell::Cell<Option<(u64, u64, nickel_ui::Rect)>>,
+    virtual_collection_presence: std::cell::Cell<Option<(u64, bool)>>,
+    wallpaper_demand_cache: std::cell::RefCell<WallpaperDemandCache>,
+    application_image_demand_cache:
+        std::cell::RefCell<Option<(u64, Arc<std::collections::BTreeSet<String>>)>>,
+    virtual_measurement_epoch: u64,
+    virtual_work_pending: bool,
+    #[cfg(test)]
+    maintenance_owner_cursor: usize,
+    virtual_measurement_generation: Option<(u64, u64, u64, nickel_ui::Rect, f32)>,
     pending_frame_correlation: Option<nickel_ui::NativeFrameCorrelation>,
     #[cfg(test)]
     diagnostic_patch_operations: u64,
@@ -686,15 +719,16 @@ impl PluginPanelApplication {
         host.consume_mount_reconciliation(&state.mount)?;
         let (rendered, ()) =
             host.render_expanded_validated(&state.mount, &serde_json::json!({}), |value| {
-                RetainedPanelTree::admit(
-                    value,
-                    &self.manifest,
-                    self.expected_surface_id.as_deref(),
-                    0,
-                )
-                .map(|_| ())
+                self.accepted
+                    .readmit(
+                        value,
+                        &self.manifest,
+                        self.expected_surface_id.as_deref(),
+                        0,
+                    )
+                    .map(|_| ())
             })?;
-        self.accepted = RetainedPanelTree::admit(
+        self.accepted = self.accepted.readmit(
             &rendered.node,
             &self.manifest,
             self.expected_surface_id.as_deref(),
@@ -922,6 +956,16 @@ impl PluginPanelApplication {
             }),
             surface_snapshot,
             diagnostic_mount: NEXT_DIAGNOSTIC_MOUNT.fetch_add(1, Ordering::Relaxed),
+            native_text_revision: std::cell::Cell::new(None),
+            virtual_feedback_generation: std::cell::Cell::new(None),
+            virtual_collection_presence: std::cell::Cell::new(None),
+            wallpaper_demand_cache: Default::default(),
+            application_image_demand_cache: Default::default(),
+            virtual_measurement_epoch: 0,
+            virtual_work_pending: false,
+            #[cfg(test)]
+            maintenance_owner_cursor: 0,
+            virtual_measurement_generation: None,
             pending_frame_correlation: None,
             #[cfg(test)]
             diagnostic_patch_operations: 0,
@@ -1001,6 +1045,7 @@ impl PluginPanelApplication {
             .collect::<Result<_, String>>()?;
         drop(host);
         self.stylesheet = stylesheet;
+        self.virtual_measurement_epoch = self.virtual_measurement_epoch.wrapping_add(1);
         self.sync_images(images);
         // Contributor membership changes can remove nested ownership
         // boundaries. Re-admit the complete surface while the departing owner
@@ -1027,7 +1072,7 @@ impl PluginPanelApplication {
         let serialized =
             serde_json::to_string(&state.snapshots[&active]).map_err(|error| error.to_string())?;
         drop(host);
-        self.sync_serialized_data_inner(serialized, true)
+        self.sync_serialized_data_inner(serialized, true, None)
     }
 
     pub(crate) fn shared_composition_runtime(
@@ -1226,30 +1271,40 @@ impl PluginPanelApplication {
     /// regardless of which surface or first-party plugin consumes it.
     pub fn sync_data(&mut self, data: &Value) -> Result<bool, String> {
         let serialized = data.to_string();
-        self.sync_serialized_data(serialized)
+        let parsed = (self.composition.is_some()
+            && self.projection_data.as_deref() != Some(serialized.as_str()))
+        .then(|| data.clone());
+        self.sync_serialized_data_inner(serialized, false, parsed)
     }
 
     /// Refreshes every sibling surface after shared Settings snapshots change.
     pub(crate) fn refresh_settings_render(&mut self) -> Result<bool, String> {
         let serialized = self.projection_data.clone().unwrap_or_else(|| "{}".into());
-        self.sync_serialized_data_inner(serialized, true)
+        self.sync_serialized_data_inner(serialized, true, self.projection_value.clone())
     }
 
     pub(crate) fn sync_serialized_data(&mut self, serialized: String) -> Result<bool, String> {
-        self.sync_serialized_data_inner(serialized, false)
+        self.sync_serialized_data_inner(serialized, false, None)
     }
 
     fn sync_serialized_data_inner(
         &mut self,
         serialized: String,
         force: bool,
+        parsed: Option<Value>,
     ) -> Result<bool, String> {
         if !force && self.projection_data.as_deref() == Some(serialized.as_str()) {
             return Ok(false);
         }
+        self.virtual_measurement_epoch = self.virtual_measurement_epoch.wrapping_add(1);
         if let Some(state) = &mut self.composition {
-            let data: Value =
-                serde_json::from_str(&serialized).map_err(|error| error.to_string())?;
+            // Native field updates already own the validated JSON value. Keep
+            // the serialized mirror for legacy consumers, but do not parse our
+            // own serialization back into another allocation-heavy snapshot.
+            let data: Value = match parsed {
+                Some(data) => data,
+                None => serde_json::from_str(&serialized).map_err(|error| error.to_string())?,
+            };
             let mut host = state.host.borrow_mut();
             let owner = host.resolution().active.clone();
             let accepted_tree = self.accepted.clone();
@@ -1262,6 +1317,9 @@ impl PluginPanelApplication {
                 &accepted_source,
                 |patch, _, generation| {
                     let mut candidate = accepted_tree.clone();
+                    if patch.operations.is_empty() {
+                        return Ok(candidate);
+                    }
                     let transport_bytes = serde_json::to_vec(patch)
                         .map_err(|error| error.to_string())?
                         .len();
@@ -1346,15 +1404,17 @@ impl PluginPanelApplication {
                 &format!("plugin-surface:{}", self.runtime_surface_id),
                 &surface,
             )?;
-            let result = render_retained_panel_validated(
-                &mut runtime,
-                &self.manifest,
-                self.expected_surface_id.as_deref(),
-                "__nickelRender()",
-                &self.stylesheet,
-                generation,
-                &mut validation_rejected,
-            );
+            let result = runtime.render_current(|value| {
+                self.accepted
+                    .readmit_validated(
+                        value,
+                        &self.manifest,
+                        self.expected_surface_id.as_deref(),
+                        &self.stylesheet,
+                        generation,
+                    )
+                    .inspect_err(|_| validation_rejected = true)
+            });
             if result.is_err() {
                 runtime.set_data(&previous_data)?;
             }
@@ -1465,6 +1525,16 @@ impl PluginPanelApplication {
             composition: None,
             surface_snapshot,
             diagnostic_mount: NEXT_DIAGNOSTIC_MOUNT.fetch_add(1, Ordering::Relaxed),
+            native_text_revision: std::cell::Cell::new(None),
+            virtual_feedback_generation: std::cell::Cell::new(None),
+            virtual_collection_presence: std::cell::Cell::new(None),
+            wallpaper_demand_cache: Default::default(),
+            application_image_demand_cache: Default::default(),
+            virtual_measurement_epoch: 0,
+            virtual_work_pending: false,
+            #[cfg(test)]
+            maintenance_owner_cursor: 0,
+            virtual_measurement_generation: None,
             pending_frame_correlation: None,
             #[cfg(test)]
             diagnostic_patch_operations: 0,
@@ -1481,11 +1551,19 @@ impl PluginPanelApplication {
         &mut self,
         palette: nickel_core::theme::ThemePalette,
     ) -> Result<bool, String> {
-        self.stylesheet.set_palette(palette)
+        let changed = self.stylesheet.set_palette(palette)?;
+        if changed {
+            self.virtual_measurement_epoch = self.virtual_measurement_epoch.wrapping_add(1);
+        }
+        Ok(changed)
     }
 
     pub fn sync_reading_direction(&mut self, direction: nickel_ui::ReadingDirection) -> bool {
-        self.stylesheet.set_reading_direction(direction)
+        let changed = self.stylesheet.set_reading_direction(direction);
+        if changed {
+            self.virtual_measurement_epoch = self.virtual_measurement_epoch.wrapping_add(1);
+        }
+        changed
     }
 
     pub fn sync_images(&mut self, images: PluginImages) -> bool {
@@ -1497,6 +1575,7 @@ impl PluginPanelApplication {
             });
         if changed {
             self.images = images;
+            self.virtual_measurement_epoch = self.virtual_measurement_epoch.wrapping_add(1);
         }
         changed
     }
@@ -1507,6 +1586,247 @@ impl PluginPanelApplication {
             .retain(|key, _| !key.starts_with("application:") && !key.starts_with("wallpaper:"));
         combined.extend(images);
         self.sync_images(combined)
+    }
+
+    pub(crate) fn has_wallpaper_images(&self) -> bool {
+        self.images
+            .range::<str, _>((
+                std::ops::Bound::Included("wallpaper:"),
+                std::ops::Bound::Unbounded,
+            ))
+            .next()
+            .is_some_and(|(key, _)| key.starts_with("wallpaper:"))
+    }
+
+    pub(crate) fn has_application_images(&self) -> bool {
+        self.images
+            .range::<str, _>((
+                std::ops::Bound::Included("application:"),
+                std::ops::Bound::Unbounded,
+            ))
+            .next()
+            .is_some_and(|(key, _)| key.starts_with("application:"))
+    }
+
+    pub(crate) fn application_image_demand(&self) -> Arc<std::collections::BTreeSet<String>> {
+        let generation = self.accepted.generation();
+        let mut cache = self.application_image_demand_cache.borrow_mut();
+        if let Some((accepted, assets)) = &*cache
+            && *accepted == generation
+        {
+            return Arc::clone(assets);
+        }
+        let assets = Arc::new(self.accepted.node().application_image_assets());
+        *cache = Some((generation, Arc::clone(&assets)));
+        assets
+    }
+
+    pub(crate) fn wallpaper_preview_demand(
+        &self,
+        layout: &nickel_ui::ResolvedLayout,
+        viewport: nickel_ui::Rect,
+    ) -> Arc<Vec<String>> {
+        if self.virtual_work_pending {
+            return Arc::new(Vec::new());
+        }
+        let generation = self.accepted.generation();
+        let mut cache = self.wallpaper_demand_cache.borrow_mut();
+        if let Some((accepted, cached_viewport, assets)) = &*cache
+            && *accepted == generation
+            && *cached_viewport == viewport
+        {
+            return Arc::clone(assets);
+        }
+        let assets = Arc::new(
+            self.accepted
+                .node()
+                .visible_wallpaper_assets(layout, viewport),
+        );
+        *cache = Some((generation, viewport, Arc::clone(&assets)));
+        assets
+    }
+
+    pub(crate) fn has_virtual_collections(&self) -> bool {
+        let generation = self.accepted.generation();
+        match self.virtual_collection_presence.get() {
+            Some((cached, present)) if cached == generation => present,
+            _ => {
+                let present = self.accepted.node().contains_virtual_collection();
+                self.virtual_collection_presence
+                    .set(Some((generation, present)));
+                present
+            }
+        }
+    }
+
+    pub(crate) fn virtual_collection_feedback(
+        &self,
+        generation: u64,
+        layout: &nickel_ui::ResolvedLayout,
+        viewport: nickel_ui::Rect,
+    ) -> Result<Vec<PluginMessage>, String> {
+        let generation_present = self.accepted.generation();
+        if !self.has_virtual_collections() {
+            return Ok(Vec::new());
+        }
+        let key = (generation, generation_present, viewport);
+        if self.virtual_feedback_generation.get() == Some(key) {
+            return Ok(Vec::new());
+        }
+        let feedback = self
+            .accepted
+            .node()
+            .virtual_collection_feedback(layout, viewport)?;
+        // A query is not acknowledgement of delivery. Only cache a settled
+        // result; pending callbacks and errors must remain retryable. Include
+        // accepted source and viewport, not just the host-local frame counter.
+        self.virtual_feedback_generation
+            .set(feedback.is_empty().then_some(key));
+        Ok(feedback)
+    }
+
+    pub(crate) fn virtual_measurements(
+        &self,
+        generation: u64,
+        layout: &nickel_ui::ResolvedLayout,
+        viewport: nickel_ui::Rect,
+        scale: f32,
+    ) -> Result<Vec<nickel_plugin_presentation::components::VirtualCollectionMeasurements>, String>
+    {
+        let accepted = self.accepted.generation();
+        if self
+            .virtual_collection_presence
+            .get()
+            .map(|(generation, _)| generation)
+            != Some(accepted)
+        {
+            self.virtual_collection_presence.set(Some((
+                accepted,
+                self.accepted.node().contains_virtual_collection(),
+            )));
+        }
+        if self.virtual_measurement_generation
+            == Some((
+                generation,
+                accepted,
+                self.virtual_measurement_epoch,
+                viewport,
+                scale,
+            ))
+            || self.virtual_collection_presence.get() == Some((accepted, false))
+        {
+            return Ok(Vec::new());
+        }
+        self.accepted.node().virtual_collection_measurements(layout)
+    }
+
+    pub(crate) fn apply_virtual_measurements(
+        &mut self,
+        generation: u64,
+        viewport: nickel_ui::Rect,
+        scale: f32,
+        measurements: &[nickel_plugin_presentation::components::VirtualCollectionMeasurements],
+    ) -> Result<bool, String> {
+        let changed = self.accepted.apply_virtual_measurements(
+            measurements,
+            scale,
+            self.virtual_measurement_epoch,
+        )?;
+        self.virtual_measurement_generation = Some((
+            generation,
+            self.accepted.generation(),
+            self.virtual_measurement_epoch,
+            viewport,
+            scale,
+        ));
+        Ok(changed)
+    }
+
+    pub(crate) fn deliver_virtual_feedback(&mut self, feedback: Vec<PluginMessage>) {
+        // Native range selection changes materialization, not the row template.
+        let epoch = self.virtual_measurement_epoch;
+        nickel_ui::Application::update_messages(self, feedback);
+        self.virtual_measurement_epoch = epoch;
+    }
+
+    pub(crate) fn virtual_anchor_candidates(
+        &self,
+        layout: &nickel_ui::ResolvedLayout,
+    ) -> Result<Vec<nickel_ui::UiId>, String> {
+        if !self.accepted.node().contains_virtual_collection() {
+            return Ok(Vec::new());
+        }
+        Ok(self
+            .accepted
+            .node()
+            .virtual_collection_measurements(layout)?
+            .into_iter()
+            .filter_map(|batch| batch.anchor)
+            .collect())
+    }
+
+    pub fn virtual_key_focus_event(
+        &self,
+        collection: &nickel_ui::UiId,
+        revision: u64,
+        key: &str,
+        layout: &nickel_ui::ResolvedLayout,
+    ) -> Result<nickel_ui::UiEvent, String> {
+        self.accepted
+            .node()
+            .virtual_key_focus_event(collection, revision, key, layout)
+    }
+
+    pub(crate) fn capture_virtual_targets(
+        &self,
+        target: &nickel_ui::UiId,
+        layout: &nickel_ui::ResolvedLayout,
+    ) -> Result<Vec<nickel_plugin_presentation::components::VirtualCollectionTarget>, String> {
+        self.accepted.node().capture_virtual_targets(target, layout)
+    }
+
+    pub(crate) fn preserve_virtual_targets(
+        &mut self,
+        targets: &[nickel_plugin_presentation::components::VirtualCollectionTarget],
+    ) {
+        if targets.is_empty() {
+            return;
+        }
+        // Bound synchronous repair like ordinary viewport feedback. Each pass
+        // can expose another admitted nested collection; no offscreen row tree
+        // is retained merely to recover its old focus target.
+        for _ in 0..8 {
+            let feedback = self.accepted.node().virtual_target_feedback(targets);
+            if feedback.is_empty() {
+                break;
+            }
+            self.deliver_virtual_feedback(feedback);
+        }
+    }
+
+    pub(crate) fn begin_virtual_target_repair(
+        &mut self,
+        targets: &[nickel_plugin_presentation::components::VirtualCollectionTarget],
+    ) {
+        self.accepted.begin_virtual_target_repair(targets);
+    }
+
+    pub(crate) fn end_virtual_target_repair(&mut self) {
+        self.accepted.end_virtual_target_repair();
+    }
+
+    pub(crate) fn snapshot_will_change(&self, serialized: &str) -> bool {
+        self.projection_data.as_deref() != Some(serialized)
+    }
+
+    pub(crate) fn set_virtual_work_pending(&mut self, pending: bool) -> bool {
+        let changed = self.virtual_work_pending != pending;
+        self.virtual_work_pending = pending;
+        changed
+    }
+
+    pub(crate) fn virtual_work_pending(&self) -> bool {
+        self.virtual_work_pending
     }
 
     pub fn retained_image_bytes(&self) -> u64 {
@@ -1562,9 +1882,15 @@ impl PluginPanelApplication {
             .as_object_mut()
             .ok_or("external plugin projection must be an object")?;
         for (field, value) in fields {
-            object.insert((*field).into(), (*value).clone());
+            if object.get(*field) != Some(*value) {
+                object.insert((*field).into(), (*value).clone());
+            }
         }
-        self.sync_data(&data)
+        if self.composition.is_some() {
+            self.sync_serialized_data_inner(data.to_string(), false, Some(data))
+        } else {
+            self.sync_data(&data)
+        }
     }
 
     fn validate_host_fields(
@@ -1766,6 +2092,356 @@ impl PluginPanelApplication {
             self.refresh_composition_snapshots()?;
         }
         Ok(changed)
+    }
+
+    /// One bounded owner batch at a host-owned idle safe point. The host must
+    /// schedule other dirty surfaces sharing the serviced runtime separately.
+    /// GC-only work must not request layout or paint reconstruction.
+    #[cfg(test)]
+    pub(crate) fn service_idle_platform_tasks(&mut self) -> Result<bool, String> {
+        let serviced = if let Some(state) = &self.composition {
+            let mut host = state.host.borrow_mut();
+            host.service_next_pending_platform_owner(&mut self.maintenance_owner_cursor)?
+                .map_or(0, |(_, count)| count)
+        } else {
+            self.runtime.borrow_mut().service_platform_tasks()?
+        };
+        if serviced == 0 {
+            return Ok(false);
+        }
+        self.reconcile_idle_work()
+    }
+
+    /// Admit already pending work for this panel without servicing more tasks.
+    /// Shared-runtime sibling surfaces use this after another host services
+    /// their owner. Clean surfaces retain their accepted native generation.
+    pub(crate) fn reconcile_idle_work(&mut self) -> Result<bool, String> {
+        if !self.idle_work_pending()? {
+            return Ok(false);
+        }
+        let generation = self.accepted.generation();
+        let transient = self.pending_transient.clone();
+        self.dispatch_validated_events(Vec::new());
+        if let Some(error) = self.last_error() {
+            return Err(error.to_owned());
+        }
+        Ok(self.accepted.generation() != generation || self.pending_transient != transient)
+    }
+
+    pub(crate) fn idle_work_pending(&mut self) -> Result<bool, String> {
+        if let Some(state) = &self.composition {
+            state.host.borrow().mount_work_pending(&state.mount)
+        } else {
+            self.runtime
+                .borrow_mut()
+                .surface_work_pending(&self.runtime_surface_id)
+        }
+    }
+
+    pub(crate) fn uses_runtime(
+        &self,
+        runtime: &std::rc::Rc<std::cell::RefCell<JsxRuntime>>,
+    ) -> bool {
+        if let Some(state) = &self.composition {
+            let host = state.host.borrow();
+            host.participating_owners().any(|owner| {
+                host.shared_owner_runtime(owner)
+                    .is_ok_and(|candidate| std::rc::Rc::ptr_eq(&candidate, runtime))
+            })
+        } else {
+            std::rc::Rc::ptr_eq(&self.runtime, runtime)
+        }
+    }
+
+    // Shared admission path for input and eventual idle reconciliation.
+    // An empty batch still validates pending effects and dirty components.
+    fn dispatch_validated_events(&mut self, events: Vec<Value>) {
+        let previous_generation = self.accepted.generation();
+        let previous_accepted = self.accepted.clone();
+        let previous_effects_len = self.effects.len();
+        let previous_transient = self.pending_transient.clone();
+        let composition_previous_events =
+            self.composition.as_ref().map(|state| state.events.clone());
+        let composition_previous_native = self.composition.as_ref().map(|_| {
+            (
+                self.accepted.clone(),
+                self.effects.clone(),
+                self.pending_transient.clone(),
+            )
+        });
+        let mut validation_rejected = false;
+        let mut native_failure = None;
+        #[cfg(test)]
+        let applied_patch = std::cell::Cell::new(None);
+        let (rendered, effects) = if let Some(state) = &mut self.composition {
+            let result = (|| {
+                let events = events
+                    .iter()
+                    .filter_map(|event| {
+                        let action = match event[0].as_u64() {
+                            Some(action) => action,
+                            None => return Some(Err("invalid host action".into())),
+                        };
+                        // Resource publication can admit a newer frame between
+                        // the press and release (or while a removed control's
+                        // blur callback is unwinding). The native host is then
+                        // allowed to finish the old transition, but its token
+                        // no longer grants execution in the current event
+                        // table. Reject that bounded callback locally instead
+                        // of turning ordinary stale input into package failure.
+                        let handle = state.events.get(&action)?.clone();
+                        Some(Ok((handle, event.get(1).cloned().unwrap_or(Value::Null))))
+                    })
+                    .collect::<Result<Vec<_>, String>>()?;
+                let mut host = state.host.borrow_mut();
+                let accepted_tree = self.accepted.clone();
+                let accepted_source = accepted_tree.source().clone();
+                let outcome = host.dispatch_expanded_batch_scheduled_pending_validated(
+                    &state.mount,
+                    &events,
+                    &state.events,
+                    &accepted_source,
+                    |patch, _, generation| {
+                        let mut candidate = accepted_tree.clone();
+                        if patch.operations.is_empty() {
+                            return Ok(candidate);
+                        }
+                        let transport_bytes = serde_json::to_vec(patch)
+                            .map_err(|error| error.to_string())?
+                            .len();
+                        #[cfg(test)]
+                        applied_patch.set(Some((
+                            patch.operations.len() as u64,
+                            transport_bytes as u64,
+                            patch.counters,
+                        )));
+                        candidate.apply_patch(
+                            patch,
+                            &self.manifest,
+                            self.expected_surface_id.as_deref(),
+                            &self.stylesheet,
+                            generation,
+                            transport_bytes,
+                        )?;
+                        Ok(candidate)
+                    },
+                )?;
+                let accepted = match outcome {
+                    ScheduledExpandedBatch::Unchanged => None,
+                    ScheduledExpandedBatch::Rendered { rendered, .. } => {
+                        let generation = rendered.generation();
+                        state.events = rendered.events;
+                        Some(self.accepted.readmit(
+                            &rendered.node,
+                            &self.manifest,
+                            self.expected_surface_id.as_deref(),
+                            generation,
+                        )?)
+                    }
+                    ScheduledExpandedBatch::Patched {
+                        events, validated, ..
+                    } => {
+                        state.events = events;
+                        Some(validated)
+                    }
+                };
+                let effects = host
+                    .take_effects()
+                    .into_iter()
+                    .map(|effect| {
+                        host.validate_effect(&effect)?;
+                        let manifest = state
+                            .manifests
+                            .get(effect.owner())
+                            .ok_or("effect owner is not installed")?
+                            .clone();
+                        Ok((manifest, effect.value().clone()))
+                    })
+                    .collect::<Result<Vec<_>, String>>()?;
+                Ok((accepted, effects))
+            })();
+            match result {
+                Ok((node, effects)) => (Ok(node), Ok(effects)),
+                Err(error) => (Err(error), Ok(Vec::new())),
+            }
+        } else {
+            let generation = self.next_generation;
+            self.next_generation = self.next_generation.saturating_add(1);
+            {
+                let mut runtime = self.runtime.borrow_mut();
+                if let Err(error) = runtime.select_surface(&self.runtime_surface_id) {
+                    self.runtime_failure = Some(error.clone());
+                    self.last_error = Some(error);
+                    return;
+                }
+                let rendered = runtime
+                    .dispatch_batch_patched(events, self.dispatch_removed_focus)
+                    .and_then(|outcome| match outcome {
+                        ScheduledPatch::Unchanged => Ok(None),
+                        ScheduledPatch::Patched {
+                            patch,
+                            dirty_components,
+                            transport_bytes,
+                            ..
+                        } => {
+                            #[cfg(test)]
+                            applied_patch.set(Some((
+                                patch.operations.len() as u64,
+                                transport_bytes as u64,
+                                patch.counters,
+                            )));
+                            if patch.operations.is_empty() {
+                                // Hook state can reconcile without changing
+                                // this host's native presentation.
+                                return Ok(None);
+                            }
+                            let mut candidate = self.accepted.clone();
+                            let application_started = Instant::now();
+                            let accepted = candidate.apply_patch(
+                                &patch,
+                                &self.manifest,
+                                self.expected_surface_id.as_deref(),
+                                &self.stylesheet,
+                                generation,
+                                transport_bytes,
+                            );
+                            let application_micros = application_started
+                                .elapsed()
+                                .as_micros()
+                                .min(u128::from(u64::MAX))
+                                as u64;
+                            runtime
+                                .report_typed_patch_apply(application_micros, accepted.is_ok())?;
+                            accepted.inspect_err(|error| {
+                                validation_rejected = true;
+                                native_failure = Some((dirty_components, error.clone()));
+                            })?;
+                            Ok(Some(candidate))
+                        }
+                    });
+                let effects = runtime.take_effects();
+                (
+                    rendered,
+                    effects.map(|effects| {
+                        effects
+                            .into_iter()
+                            .map(|effect| (self.manifest.clone(), effect))
+                            .collect::<Vec<_>>()
+                    }),
+                )
+            }
+        };
+        #[cfg(test)]
+        if let Some((operations, transport_bytes, counters)) = applied_patch.get() {
+            self.diagnostic_patch_operations =
+                self.diagnostic_patch_operations.saturating_add(operations);
+            self.diagnostic_patch_transport_bytes = self
+                .diagnostic_patch_transport_bytes
+                .saturating_add(transport_bytes);
+            self.diagnostic_patch_counters.nodes_visited = self
+                .diagnostic_patch_counters
+                .nodes_visited
+                .saturating_add(counters.nodes_visited);
+            self.diagnostic_patch_counters.nodes_mutated = self
+                .diagnostic_patch_counters
+                .nodes_mutated
+                .saturating_add(counters.nodes_mutated);
+            self.diagnostic_patch_counters.local_materializations = self
+                .diagnostic_patch_counters
+                .local_materializations
+                .saturating_add(counters.local_materializations);
+            self.diagnostic_patch_counters.expansion_nodes = self
+                .diagnostic_patch_counters
+                .expansion_nodes
+                .saturating_add(counters.expansion_nodes);
+            self.diagnostic_patch_counters.tree_bytes = self
+                .diagnostic_patch_counters
+                .tree_bytes
+                .saturating_add(counters.tree_bytes);
+        }
+        self.apply_rendered_effects(rendered, effects, validation_rejected);
+        let candidate_accepted = self.accepted.clone();
+        let candidate_effects = self.effects.split_off(previous_effects_len);
+        let candidate_transient = self.pending_transient.clone();
+        self.accepted = previous_accepted;
+        self.pending_transient = previous_transient;
+        if let Some(state) = &mut self.composition {
+            let accepted = self.last_error.is_none();
+            let mut host = state.host.borrow_mut();
+            if host.transaction_pending()
+                && let Err(error) = host.finish_transaction(accepted)
+            {
+                self.runtime_failure = Some(error.clone());
+                self.last_error = Some(error);
+            }
+            if self.last_error.is_some() {
+                if let Some((accepted, effects, transient)) = composition_previous_native {
+                    self.accepted = accepted;
+                    self.effects = effects;
+                    self.pending_transient = transient;
+                }
+                if let Some(events) = composition_previous_events {
+                    state.events = events;
+                }
+                // Supported bootstrap state and queued effects were restored;
+                // package globals and closure mutations are outside this contract.
+            } else {
+                self.accepted = candidate_accepted;
+                self.effects.extend(candidate_effects);
+                self.pending_transient = candidate_transient;
+            }
+            drop(host);
+            if self.last_error.is_none()
+                && let Err(error) = self.reconcile_passive_effects()
+            {
+                self.runtime_failure = Some(error.clone());
+                self.last_error = Some(error);
+            }
+            self.mark_frame_correlation(previous_generation);
+            return;
+        }
+
+        let accepted = self.last_error.is_none();
+        let finalize = {
+            let mut runtime = self.runtime.borrow_mut();
+            runtime
+                .finish_patch_render(accepted)
+                .and_then(|()| runtime.finish_event(accepted))
+        };
+        if let Err(error) = finalize {
+            self.runtime_failure = Some(error.clone());
+            self.last_error = Some(error);
+        } else if let Some((owners, error)) = native_failure {
+            let captured = {
+                let mut runtime = self.runtime.borrow_mut();
+                runtime
+                    .select_surface(&self.runtime_surface_id)
+                    .and_then(|()| runtime.capture_native_failure(&owners, &error))
+            };
+            match captured {
+                Ok(boundaries) if !boundaries.is_empty() => {
+                    self.last_error = None;
+                    if let Err(error) = self.reconcile_passive_effects() {
+                        self.runtime_failure = Some(error.clone());
+                        self.last_error = Some(error);
+                    }
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    self.runtime_failure = Some(error.clone());
+                    self.last_error = Some(error);
+                }
+            }
+        } else if self.last_error.is_none() {
+            self.accepted = candidate_accepted;
+            self.effects.extend(candidate_effects);
+            self.pending_transient = candidate_transient;
+            if let Err(error) = self.reconcile_passive_effects() {
+                self.runtime_failure = Some(error.clone());
+                self.last_error = Some(error);
+            }
+        }
+        self.mark_frame_correlation(previous_generation);
     }
 
     fn apply_rendered_effects(
@@ -2534,7 +3210,11 @@ impl PluginPanelApplication {
                                 }
                             }
                         }
-                        Some("plugins.confirmShell" | "plugins.revertShell") => {
+                        _ if matches!(
+                            effect.get("type").and_then(Value::as_str),
+                            Some("plugins.confirmShell" | "plugins.revertShell")
+                        ) =>
+                        {
                             let request =
                                 crate::plugins_capabilities::ShellPreviewDecision::parse(&effect)
                                     .and_then(|request| {
@@ -2568,7 +3248,9 @@ impl PluginPanelApplication {
                                 }
                             }
                         }
-                        Some("plugins.selectShell") => {
+                        _ if effect.get("type").and_then(Value::as_str)
+                            == Some("plugins.selectShell") =>
+                        {
                             let request =
                                 crate::plugins_capabilities::ShellSelectionEffect::parse(&effect)
                                     .and_then(|request| {
@@ -2602,7 +3284,9 @@ impl PluginPanelApplication {
                                 }
                             }
                         }
-                        Some("plugins.setSetting") => {
+                        _ if effect.get("type").and_then(Value::as_str)
+                            == Some("plugins.setSetting") =>
+                        {
                             let request =
                                 crate::plugins_capabilities::PluginsSettingEffect::parse(&effect)
                                     .and_then(|request| {
@@ -3124,6 +3808,9 @@ impl PluginPanelApplication {
                     &accepted_source,
                     |patch, _, generation| {
                         let mut candidate = accepted_tree.clone();
+                        if patch.operations.is_empty() {
+                            return Ok(candidate);
+                        }
                         let transport_bytes = serde_json::to_vec(patch)
                             .map_err(|error| error.to_string())?
                             .len();
@@ -3144,7 +3831,7 @@ impl PluginPanelApplication {
                         return Ok(changed);
                     }
                     ScheduledExpandedBatch::Rendered { rendered, .. } => {
-                        let candidate = RetainedPanelTree::admit(
+                        let candidate = self.accepted.readmit(
                             &rendered.node,
                             &self.manifest,
                             self.expected_surface_id.as_deref(),
@@ -3170,8 +3857,8 @@ impl PluginPanelApplication {
                     } => {
                         host.finish_transaction(true)?;
                         state.events = events;
+                        changed |= self.accepted.generation() != validated.generation();
                         self.accepted = validated;
-                        changed = true;
                         None
                     }
                 }
@@ -3180,7 +3867,7 @@ impl PluginPanelApplication {
                 let outcome = {
                     let mut runtime = self.runtime.borrow_mut();
                     runtime.select_surface(&self.runtime_surface_id)?;
-                    runtime.dispatch_patched("__nickelDispatchBatchPatched([], false)")
+                    runtime.dispatch_batch_patched(Vec::new(), false)
                 };
                 match outcome {
                     Ok(ScheduledPatch::Unchanged) => {
@@ -3213,6 +3900,7 @@ impl PluginPanelApplication {
                         runtime.finish_patch_render(accepted.is_ok())?;
                         runtime.finish_event(accepted.is_ok())?;
                         match accepted {
+                            Ok(_) if patch.operations.is_empty() => None,
                             Ok(_) => {
                                 self.next_generation = generation.saturating_add(1);
                                 changed = true;
@@ -3284,6 +3972,16 @@ impl PluginPanelApplication {
             composition: None,
             surface_snapshot: serde_json::json!({}),
             diagnostic_mount: NEXT_DIAGNOSTIC_MOUNT.fetch_add(1, Ordering::Relaxed),
+            native_text_revision: std::cell::Cell::new(None),
+            virtual_feedback_generation: std::cell::Cell::new(None),
+            virtual_collection_presence: std::cell::Cell::new(None),
+            wallpaper_demand_cache: Default::default(),
+            application_image_demand_cache: Default::default(),
+            virtual_measurement_epoch: 0,
+            virtual_work_pending: false,
+            #[cfg(test)]
+            maintenance_owner_cursor: 0,
+            virtual_measurement_generation: None,
             pending_frame_correlation: None,
             #[cfg(test)]
             diagnostic_patch_operations: 0,
@@ -3378,6 +4076,22 @@ impl nickel_ui::Application for PluginPanelApplication {
         self.update_messages(vec![message]);
     }
 
+    fn poll_interval(&self) -> Option<std::time::Duration> {
+        self.virtual_work_pending
+            .then_some(std::time::Duration::from_millis(16))
+    }
+
+    fn poll(&mut self) -> bool {
+        match self.reconcile_idle_work() {
+            Ok(changed) => changed,
+            Err(error) => {
+                self.runtime_failure = Some(error.clone());
+                self.last_error = Some(error);
+                false
+            }
+        }
+    }
+
     fn update_removed_focus(&mut self, message: Self::Message) {
         self.dispatch_removed_focus = true;
         self.update_messages(vec![message]);
@@ -3385,6 +4099,12 @@ impl nickel_ui::Application for PluginPanelApplication {
     }
 
     fn update_messages(&mut self, messages: Vec<Self::Message>) {
+        if messages
+            .iter()
+            .any(|message| !matches!(message, PluginMessage::Scroll))
+        {
+            self.virtual_measurement_epoch = self.virtual_measurement_epoch.wrapping_add(1);
+        }
         let events = messages
             .into_iter()
             .filter_map(|message| match message {
@@ -3436,286 +4156,7 @@ impl nickel_ui::Application for PluginPanelApplication {
         if events.is_empty() {
             return;
         }
-        let previous_generation = self.accepted.generation();
-        let previous_accepted = self.accepted.clone();
-        let previous_effects_len = self.effects.len();
-        let previous_transient = self.pending_transient.clone();
-        let composition_previous_events =
-            self.composition.as_ref().map(|state| state.events.clone());
-        let composition_previous_native = self.composition.as_ref().map(|_| {
-            (
-                self.accepted.clone(),
-                self.effects.clone(),
-                self.pending_transient.clone(),
-            )
-        });
-        let mut validation_rejected = false;
-        let mut native_failure = None;
-        #[cfg(test)]
-        let composition_patch = std::cell::Cell::new(None);
-        let (rendered, effects) = if let Some(state) = &mut self.composition {
-            let result = (|| {
-                let events = events
-                    .iter()
-                    .filter_map(|event| {
-                        let action = match event[0].as_u64() {
-                            Some(action) => action,
-                            None => return Some(Err("invalid host action".into())),
-                        };
-                        // Resource publication can admit a newer frame between
-                        // the press and release (or while a removed control's
-                        // blur callback is unwinding). The native host is then
-                        // allowed to finish the old transition, but its token
-                        // no longer grants execution in the current event
-                        // table. Reject that bounded callback locally instead
-                        // of turning ordinary stale input into package failure.
-                        let handle = state.events.get(&action)?.clone();
-                        Some(Ok((handle, event.get(1).cloned().unwrap_or(Value::Null))))
-                    })
-                    .collect::<Result<Vec<_>, String>>()?;
-                let mut host = state.host.borrow_mut();
-                let accepted_tree = self.accepted.clone();
-                let accepted_source = accepted_tree.source().clone();
-                let outcome = host.dispatch_expanded_batch_scheduled_pending_validated(
-                    &state.mount,
-                    &events,
-                    &state.events,
-                    &accepted_source,
-                    |patch, _, generation| {
-                        let mut candidate = accepted_tree.clone();
-                        let transport_bytes = serde_json::to_vec(patch)
-                            .map_err(|error| error.to_string())?
-                            .len();
-                        #[cfg(test)]
-                        composition_patch.set(Some((
-                            patch.operations.len() as u64,
-                            transport_bytes as u64,
-                            patch.counters,
-                        )));
-                        candidate.apply_patch(
-                            patch,
-                            &self.manifest,
-                            self.expected_surface_id.as_deref(),
-                            &self.stylesheet,
-                            generation,
-                            transport_bytes,
-                        )?;
-                        Ok(candidate)
-                    },
-                )?;
-                let accepted = match outcome {
-                    ScheduledExpandedBatch::Unchanged => None,
-                    ScheduledExpandedBatch::Rendered { rendered, .. } => {
-                        let generation = rendered.generation();
-                        state.events = rendered.events;
-                        Some(RetainedPanelTree::admit(
-                            &rendered.node,
-                            &self.manifest,
-                            self.expected_surface_id.as_deref(),
-                            generation,
-                        )?)
-                    }
-                    ScheduledExpandedBatch::Patched {
-                        events, validated, ..
-                    } => {
-                        state.events = events;
-                        Some(validated)
-                    }
-                };
-                let effects = host
-                    .take_effects()
-                    .into_iter()
-                    .map(|effect| {
-                        host.validate_effect(&effect)?;
-                        let manifest = state
-                            .manifests
-                            .get(effect.owner())
-                            .ok_or("effect owner is not installed")?
-                            .clone();
-                        Ok((manifest, effect.value().clone()))
-                    })
-                    .collect::<Result<Vec<_>, String>>()?;
-                Ok((accepted, effects))
-            })();
-            match result {
-                Ok((node, effects)) => (Ok(node), Ok(effects)),
-                Err(error) => (Err(error), Ok(Vec::new())),
-            }
-        } else {
-            let generation = self.next_generation;
-            self.next_generation = self.next_generation.saturating_add(1);
-            {
-                let mut runtime = self.runtime.borrow_mut();
-                if let Err(error) = runtime.select_surface(&self.runtime_surface_id) {
-                    self.runtime_failure = Some(error.clone());
-                    self.last_error = Some(error);
-                    return;
-                }
-                let expression = format!(
-                    "__nickelDispatchBatchPatched({}, {})",
-                    serde_json::Value::Array(events),
-                    self.dispatch_removed_focus
-                );
-                let rendered =
-                    runtime
-                        .dispatch_patched(&expression)
-                        .and_then(|outcome| match outcome {
-                            ScheduledPatch::Unchanged => Ok(None),
-                            ScheduledPatch::Patched {
-                                patch,
-                                dirty_components,
-                                transport_bytes,
-                                ..
-                            } => {
-                                let mut candidate = self.accepted.clone();
-                                let application_started = Instant::now();
-                                let accepted = candidate.apply_patch(
-                                    &patch,
-                                    &self.manifest,
-                                    self.expected_surface_id.as_deref(),
-                                    &self.stylesheet,
-                                    generation,
-                                    transport_bytes,
-                                );
-                                let application_micros = application_started
-                                    .elapsed()
-                                    .as_micros()
-                                    .min(u128::from(u64::MAX))
-                                    as u64;
-                                runtime.report_typed_patch_apply(
-                                    application_micros,
-                                    accepted.is_ok(),
-                                )?;
-                                accepted.inspect_err(|error| {
-                                    validation_rejected = true;
-                                    native_failure = Some((dirty_components, error.clone()));
-                                })?;
-                                Ok(Some(candidate))
-                            }
-                        });
-                let effects = runtime.take_effects();
-                (
-                    rendered,
-                    effects.map(|effects| {
-                        effects
-                            .into_iter()
-                            .map(|effect| (self.manifest.clone(), effect))
-                            .collect::<Vec<_>>()
-                    }),
-                )
-            }
-        };
-        #[cfg(test)]
-        if let Some((operations, transport_bytes, counters)) = composition_patch.get() {
-            self.diagnostic_patch_operations =
-                self.diagnostic_patch_operations.saturating_add(operations);
-            self.diagnostic_patch_transport_bytes = self
-                .diagnostic_patch_transport_bytes
-                .saturating_add(transport_bytes);
-            self.diagnostic_patch_counters.nodes_visited = self
-                .diagnostic_patch_counters
-                .nodes_visited
-                .saturating_add(counters.nodes_visited);
-            self.diagnostic_patch_counters.nodes_mutated = self
-                .diagnostic_patch_counters
-                .nodes_mutated
-                .saturating_add(counters.nodes_mutated);
-            self.diagnostic_patch_counters.local_materializations = self
-                .diagnostic_patch_counters
-                .local_materializations
-                .saturating_add(counters.local_materializations);
-            self.diagnostic_patch_counters.expansion_nodes = self
-                .diagnostic_patch_counters
-                .expansion_nodes
-                .saturating_add(counters.expansion_nodes);
-            self.diagnostic_patch_counters.tree_bytes = self
-                .diagnostic_patch_counters
-                .tree_bytes
-                .saturating_add(counters.tree_bytes);
-        }
-        self.apply_rendered_effects(rendered, effects, validation_rejected);
-        let candidate_accepted = self.accepted.clone();
-        let candidate_effects = self.effects.split_off(previous_effects_len);
-        let candidate_transient = self.pending_transient.clone();
-        self.accepted = previous_accepted;
-        self.pending_transient = previous_transient;
-        if let Some(state) = &mut self.composition {
-            let accepted = self.last_error.is_none();
-            let mut host = state.host.borrow_mut();
-            if host.transaction_pending()
-                && let Err(error) = host.finish_transaction(accepted)
-            {
-                self.runtime_failure = Some(error.clone());
-                self.last_error = Some(error);
-            }
-            if self.last_error.is_some() {
-                if let Some((accepted, effects, transient)) = composition_previous_native {
-                    self.accepted = accepted;
-                    self.effects = effects;
-                    self.pending_transient = transient;
-                }
-                if let Some(events) = composition_previous_events {
-                    state.events = events;
-                }
-                // Supported bootstrap state and queued effects were restored;
-                // package globals and closure mutations are outside this contract.
-            } else {
-                self.accepted = candidate_accepted;
-                self.effects.extend(candidate_effects);
-                self.pending_transient = candidate_transient;
-            }
-            drop(host);
-            if self.last_error.is_none()
-                && let Err(error) = self.reconcile_passive_effects()
-            {
-                self.runtime_failure = Some(error.clone());
-                self.last_error = Some(error);
-            }
-            self.mark_frame_correlation(previous_generation);
-            return;
-        }
-
-        let accepted = self.last_error.is_none();
-        let finalize = {
-            let mut runtime = self.runtime.borrow_mut();
-            runtime
-                .finish_patch_render(accepted)
-                .and_then(|()| runtime.finish_event(accepted))
-        };
-        if let Err(error) = finalize {
-            self.runtime_failure = Some(error.clone());
-            self.last_error = Some(error);
-        } else if let Some((owners, error)) = native_failure {
-            let captured = {
-                let mut runtime = self.runtime.borrow_mut();
-                runtime
-                    .select_surface(&self.runtime_surface_id)
-                    .and_then(|()| runtime.capture_native_failure(&owners, &error))
-            };
-            match captured {
-                Ok(boundaries) if !boundaries.is_empty() => {
-                    self.last_error = None;
-                    if let Err(error) = self.reconcile_passive_effects() {
-                        self.runtime_failure = Some(error.clone());
-                        self.last_error = Some(error);
-                    }
-                }
-                Ok(_) => {}
-                Err(error) => {
-                    self.runtime_failure = Some(error.clone());
-                    self.last_error = Some(error);
-                }
-            }
-        } else if self.last_error.is_none() {
-            self.accepted = candidate_accepted;
-            self.effects.extend(candidate_effects);
-            self.pending_transient = candidate_transient;
-            if let Err(error) = self.reconcile_passive_effects() {
-                self.runtime_failure = Some(error.clone());
-                self.last_error = Some(error);
-            }
-        }
-        self.mark_frame_correlation(previous_generation);
+        self.dispatch_validated_events(events);
     }
 
     fn take_frame_correlation(&mut self) -> Option<nickel_ui::NativeFrameCorrelation> {
@@ -3723,7 +4164,10 @@ impl nickel_ui::Application for PluginPanelApplication {
     }
 
     fn view(&self, context: ViewContext) -> impl nickel_ui::View<Self::Message> {
-        if matches!(&self.accepted.node(), PanelNode::Surface { .. }) {
+        // Geometry may change on a native scroll without changing the accepted
+        // JSX generation. Paint-only hover bypasses view and keeps this cache.
+        self.wallpaper_demand_cache.borrow_mut().take();
+        let mut view = if matches!(&self.accepted.node(), PanelNode::Surface { .. }) {
             AnyView::new(self.accepted.node().view(&self.images, &self.stylesheet))
         } else {
             AnyView::new(
@@ -3739,7 +4183,30 @@ impl nickel_ui::Application for PluginPanelApplication {
                             .child(Spacer::flex()),
                     ),
             )
+        };
+        let generation = self.accepted.generation();
+        let epoch = self.virtual_measurement_epoch;
+        let revision = match self.native_text_revision.get() {
+            Some((old_generation, old_epoch, revision))
+                if old_generation == generation && old_epoch == epoch =>
+            {
+                revision
+            }
+            _ => {
+                let revision = allocate_native_text_revision(&NEXT_NATIVE_TEXT_REVISION);
+                self.native_text_revision
+                    .set(Some((generation, epoch, revision)));
+                revision
+            }
+        };
+        if let Some(revision) = revision {
+            view.set_static_text_content_revision(revision);
         }
+        view
+    }
+
+    fn retain_view_for_native_layout(&self) -> bool {
+        true
     }
 
     fn frame_overlays(&self, _context: ViewContext) -> Vec<FrameOverlay<Self::Message>> {
@@ -3848,6 +4315,1780 @@ mod tests {
             .unwrap()
             .join()
             .unwrap();
+    }
+
+    #[test]
+    fn wallpaper_preview_demand_uses_admitted_rows_and_retires_on_page_change() {
+        with_package_runtime_stack(|| {
+            let application = PluginPanelApplication::new(
+                r#"
+                const items = Array.from({length:1000}, (_, index) => index);
+                function App() { return h(FixedWindow,{width:'100%',height:'100%'},
+                    nickel.data.hide ? h(Text,null,'Keyboard shortcuts') :
+                    h(ScrollView,{id:'scroll',height:100},h(VirtualColumn,{
+                        id:'rows',items,itemKey:String,itemHeight:40,overscan:80,
+                        renderItem:item=>h(Image,{asset:'wallpaper:'+item,width:160,height:40})
+                    }))); }
+            "#,
+            )
+            .unwrap();
+            let mut host = nickel_ui::UiHost::new(application, 320, 100);
+            step_host(&mut host, None, Default::default()).unwrap();
+            let viewport = nickel_ui::Rect::new(0.0, 0.0, 320.0, 100.0);
+            let demand = host
+                .application()
+                .wallpaper_preview_demand(host.resolved_layout(), viewport);
+            assert_eq!(&*demand, &["wallpaper:0", "wallpaper:1", "wallpaper:2"]);
+            assert!(host.resolved_layout().nodes().len() < 100);
+            for _ in 0..100 {
+                let unchanged = host
+                    .application()
+                    .wallpaper_preview_demand(host.resolved_layout(), viewport);
+                assert!(
+                    Arc::ptr_eq(&demand, &unchanged),
+                    "unchanged frames must not walk the image tree again"
+                );
+            }
+            step_host(
+                &mut host,
+                None,
+                nickel_ui::HostBatch {
+                    events: vec![nickel_ui::HostEvent::Ui(nickel_ui::UiEvent::Scroll {
+                        point: nickel_ui::Point { x: 40.0, y: 50.0 },
+                        delta_y: 400.0,
+                    })],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let scrolled = host
+                .application()
+                .wallpaper_preview_demand(host.resolved_layout(), viewport);
+            assert_eq!(
+                &*scrolled,
+                &["wallpaper:10", "wallpaper:11", "wallpaper:12"]
+            );
+            step_host(
+                &mut host,
+                Some(serde_json::json!({"hide":true}).to_string()),
+                Default::default(),
+            )
+            .unwrap();
+            assert!(
+                host.application()
+                    .wallpaper_preview_demand(host.resolved_layout(), viewport)
+                    .is_empty()
+            );
+            assert!(host.application_mut().take_effects().is_empty());
+        });
+    }
+
+    #[test]
+    fn virtual_collection_feedback_is_retryable_before_delivery() {
+        with_package_runtime_stack(|| {
+            let application = PluginPanelApplication::new(
+                r#"
+                const items = Array.from({length:100}, (_, index) => index);
+                function App() { return h(FixedWindow, {width:'100%',height:'100%'},
+                    h(ScrollView, {id:'scroller',height:100},
+                        h(VirtualColumn, {id:'rows',items,itemKey:String,itemHeight:20,overscan:0,
+                            renderItem:item=>h(Text, null, 'Row '+item)}))); }
+                "#,
+            )
+            .unwrap();
+            let mut host = nickel_ui::UiHost::new(application, 320, 100);
+            let viewport = nickel_ui::Rect::new(0.0, 0.0, 320.0, 100.0);
+            // Zero is a valid initial generation, not an initialized-cache marker.
+            let first = host
+                .application()
+                .virtual_collection_feedback(0, host.resolved_layout(), viewport)
+                .unwrap();
+            assert!(!first.is_empty());
+            let retry = host
+                .application()
+                .virtual_collection_feedback(0, host.resolved_layout(), viewport)
+                .unwrap();
+            assert_eq!(
+                retry, first,
+                "querying must not acknowledge undelivered feedback"
+            );
+            crate::live_shell::step_plugin_host(&mut host, None, Default::default()).unwrap();
+            let generation = host.resolved_frame_generation();
+            assert!(
+                host.application()
+                    .virtual_collection_feedback(generation, host.resolved_layout(), viewport,)
+                    .unwrap()
+                    .is_empty()
+            );
+            let source_generation = host.application().accepted.generation();
+            assert_eq!(
+                host.application().virtual_feedback_generation.get(),
+                Some((generation, source_generation, viewport))
+            );
+            let changed_viewport = nickel_ui::Rect::new(0.0, 0.0, 320.0, 80.0);
+            let resized = host
+                .application()
+                .virtual_collection_feedback(generation, host.resolved_layout(), changed_viewport)
+                .unwrap();
+            assert!(
+                !resized.is_empty(),
+                "a changed viewport must reselect rows even with an ancestor clip"
+            );
+            assert_eq!(host.application().virtual_feedback_generation.get(), None);
+            assert_eq!(
+                host.application()
+                    .virtual_collection_feedback(
+                        generation,
+                        host.resolved_layout(),
+                        changed_viewport,
+                    )
+                    .unwrap(),
+                resized
+            );
+        });
+    }
+
+    fn logical_source(
+        node: &PanelNode,
+    ) -> Option<&std::sync::Arc<nickel_plugin_presentation::virtual_source::VirtualSource>> {
+        if let PanelNode::Div {
+            collection: Some(collection),
+            ..
+        } = node
+            && let Some(source) = &collection.source
+        {
+            return Some(source);
+        }
+        node.container_children()
+            .and_then(|children| children.iter().find_map(logical_source))
+    }
+    #[test]
+    fn navigation_batch_can_introduce_its_first_virtual_collection() {
+        with_package_runtime_stack(|| {
+            let source = r#"
+                const items = Array.from({length:100}, (_, i) => i);
+                function App() {
+                    const [open, setOpen] = useState(false);
+                    return h(FixedWindow, {width:'100%',height:'100%'},
+                        h(Button, {id:'open',onClick:()=>setOpen(true)}, 'Open rows'),
+                        open ? h(ScrollView, {id:'scroller',height:100},
+                            h(VirtualColumn, {id:'rows',items,itemKey:String,itemHeight:36,overscan:96,
+                                renderItem:i=>h(Button, {id:'row-'+i,onClick:()=>{}}, 'Row '+i)})) : null);
+                }
+                "#;
+            let make_host = || {
+                let mut host =
+                    nickel_ui::UiHost::new(PluginPanelApplication::new(source).unwrap(), 320, 140);
+                step_host(&mut host, None, Default::default()).unwrap();
+                assert!(!host.application().has_virtual_collections());
+                let open = host
+                    .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                        role: SemanticRole::Button,
+                        name: "Open rows".into(),
+                    })
+                    .unwrap();
+                host.request_focus(open.id);
+                step_host(&mut host, None, Default::default()).unwrap();
+                host
+            };
+            let mut host = make_host();
+            let mut sequential = make_host();
+            let events = || {
+                let mut events = vec![nickel_ui::HostEvent::Ui(
+                    nickel_ui::UiEvent::KeyboardNavigateActivate,
+                )];
+                events.extend(
+                    (0..33).map(|_| nickel_ui::HostEvent::Ui(nickel_ui::UiEvent::FocusNext)),
+                );
+                events
+            };
+            for event in events() {
+                step_host(
+                    &mut sequential,
+                    None,
+                    nickel_ui::HostBatch {
+                        events: vec![event],
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            }
+            let (outcome, _) = step_host(
+                &mut host,
+                None,
+                nickel_ui::HostBatch {
+                    events: events(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(outcome.telemetry.events_processed, 34);
+            assert!(host.application().has_virtual_collections());
+            // The scroll viewport is also a focus stop: 33 advances reach row 31.
+            for host in [&host, &sequential] {
+                let last = host
+                    .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                        role: SemanticRole::Button,
+                        name: "Row 31".into(),
+                    })
+                    .expect("later batch events must see rows introduced by the first event");
+                assert_eq!(host.inspect().keyboard_focus, Some(last.id));
+                assert!(host.resolved_layout().nodes().len() < 100);
+            }
+        });
+    }
+
+    #[test]
+    fn virtual_controller_batches_preserve_admission_and_paired_releases() {
+        with_package_runtime_stack(|| {
+            use nickel_ui::{
+                ControllerAction, ControllerExecutionAuthority, ControllerExecutionBinding,
+                ControllerExecutionDisposition, HostBatch, HostEvent,
+            };
+            let source = r#"
+                const items = Array.from({length:100}, (_, i) => i);
+                const reversed = [...items].reverse();
+                function App() { return h(FixedWindow, {width:'100%',height:'100%'},
+                    h(ScrollView, {id:'scroller',height:100},
+                        h(VirtualColumn, {id:'rows',items:nickel.data.reversed ? reversed : items,itemKey:String,itemHeight:36,overscan:96,
+                            renderItem:i=>h(Button, {id:'row-'+i,onClick:()=>{}}, 'Row '+i)}))); }
+            "#;
+            let make = || {
+                let mut host =
+                    nickel_ui::UiHost::new(PluginPanelApplication::new(source).unwrap(), 320, 100);
+                step_host(&mut host, None, Default::default()).unwrap();
+                host
+            };
+            let mut host = make();
+            let mut sequential = make();
+            let authority = ControllerExecutionAuthority {
+                routing_epoch: 9,
+                lease_epoch: 7,
+                connection_generation: 3,
+                stream_generation: 2,
+                cutoff: None,
+                surface_generation: Some(10),
+            };
+            let events = |action, count: u64, start: u64| {
+                (0..count * 2)
+                    .map(|index| HostEvent::AdmittedController {
+                        action: Some(action),
+                        binding: ControllerExecutionBinding {
+                            device_generation: 5,
+                            edge: if index % 2 == 0 {
+                                nickel_input::KeyEdge::Pressed
+                            } else {
+                                nickel_input::KeyEdge::Released
+                            },
+                            event_id: start + index,
+                            routing_epoch: 9,
+                            lease_epoch: 7,
+                            connection_generation: 3,
+                            stream_generation: 2,
+                            cutoff: None,
+                            surface_generation: Some(10),
+                            repeat: false,
+                        },
+                    })
+                    .collect::<Vec<_>>()
+            };
+            for supplied in [
+                None,
+                Some(ControllerExecutionAuthority {
+                    routing_epoch: 8,
+                    ..authority
+                }),
+            ] {
+                let (outcome, _) = step_host(
+                    &mut host,
+                    None,
+                    HostBatch {
+                        controller_authority: supplied,
+                        events: events(ControllerAction::Down, 32, 1),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                assert_eq!(outcome.controller_executions.len(), 64);
+                assert!(outcome.controller_executions.iter().all(
+                    |event| event.disposition == ControllerExecutionDisposition::RejectedStale
+                ));
+                assert!(host.inspect().controller_target.is_none());
+            }
+            for (action, count, start) in [
+                (ControllerAction::Down, 32, 1),
+                (ControllerAction::Up, 16, 65),
+            ] {
+                let (outcome, _) = step_host(
+                    &mut host,
+                    None,
+                    HostBatch {
+                        controller_authority: Some(authority),
+                        events: events(action, count, start),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                assert_eq!(outcome.controller_executions.len(), (count * 2) as usize);
+                assert!(
+                    outcome
+                        .controller_executions
+                        .iter()
+                        .all(|event| event.disposition == ControllerExecutionDisposition::Executed)
+                );
+                for event in events(action, count, start) {
+                    step_host(
+                        &mut sequential,
+                        None,
+                        HostBatch {
+                            controller_authority: Some(authority),
+                            events: vec![event],
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap();
+                }
+                let selected = |host: &nickel_ui::UiHost<PluginPanelApplication>| {
+                    host.inspect()
+                        .controller_target
+                        .unwrap()
+                        .as_str()
+                        .rsplit('/')
+                        .next()
+                        .unwrap()
+                        .to_owned()
+                };
+                assert_eq!(selected(&host), selected(&sequential));
+                let row: usize = selected(&host)
+                    .strip_prefix("row-")
+                    .expect("controller must reach a row")
+                    .parse()
+                    .unwrap();
+                assert!(if action == ControllerAction::Down {
+                    row >= 20
+                } else {
+                    row < 20
+                });
+                assert!(host.resolved_layout().nodes().len() < 100);
+            }
+            let selected = host.inspect().controller_target.unwrap();
+            let prior_bounds = host.resolved_layout().find(&selected).unwrap().allocated;
+            step_host(
+                &mut host,
+                Some(serde_json::json!({"reversed":true}).to_string()),
+                HostBatch::default(),
+            )
+            .unwrap();
+            assert_eq!(host.inspect().controller_target, Some(selected.clone()));
+            assert_eq!(
+                host.inspect().modality,
+                nickel_ui::InputModality::Controller
+            );
+            let bounds = host.resolved_layout().find(&selected).unwrap().allocated;
+            assert!(
+                bounds.origin.y >= 0.0 && bounds.origin.y + bounds.size.height <= 100.01,
+                "controller bounds before={prior_bounds:?}, after={bounds:?}"
+            );
+            assert!(host.resolved_layout().nodes().len() < 100);
+        });
+    }
+
+    #[test]
+    fn virtual_navigation_batches_preserve_normalized_authority_and_replay_fences() {
+        with_package_runtime_stack(|| {
+            use nickel_input::{
+                DeviceId, EventOrder, InputEvent, KeyCode, KeyEdge, KeyEvent, KeyLocation,
+                LogicalKey, ModifierState, NamedKey, PhysicalKey,
+            };
+            let application = PluginPanelApplication::new(
+                r#"
+                const items = Array.from({length:100}, (_, i) => i);
+                function App() { return h(FixedWindow, {width:'100%',height:'100%'},
+                    h(ScrollView, {id:'scroller',height:100},
+                        h(VirtualColumn, {id:'rows',items,itemKey:String,itemHeight:36,overscan:96,
+                            renderItem:i=>h(Button, {id:'row-'+i,onClick:()=>{}}, 'Row '+i)}))); }
+            "#,
+            )
+            .unwrap();
+            let mut host = nickel_ui::UiHost::new(application, 320, 100);
+            step_host(&mut host, None, Default::default()).unwrap();
+            let first = host
+                .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                    role: SemanticRole::Button,
+                    name: "Row 0".into(),
+                })
+                .unwrap();
+            host.request_focus(first.id.clone());
+            step_host(&mut host, None, Default::default()).unwrap();
+            assert_eq!(host.inspect().keyboard_focus, Some(first.id));
+            let mut envelopes = Vec::new();
+            let mut authorities = Vec::new();
+            for order in 0..64 {
+                let (event, authority) = crate::live_shell::internal_normalized_ingress(
+                    InputEvent::Key(KeyEvent {
+                        device: DeviceId(1),
+                        order: EventOrder(order + 1),
+                        physical: PhysicalKey::Code(KeyCode::Tab),
+                        logical: LogicalKey::Named(NamedKey::Tab),
+                        location: KeyLocation::Standard,
+                        edge: if order % 2 == 0 {
+                            KeyEdge::Pressed
+                        } else {
+                            KeyEdge::Released
+                        },
+                        repeat: false,
+                        modifiers: ModifierState::default(),
+                    }),
+                    None,
+                    "virtual-navigation-regression",
+                    host.input_lease(),
+                    None,
+                );
+                let nickel_ui::HostEvent::NormalizedIngress(envelope) = event else {
+                    unreachable!()
+                };
+                envelopes.push(envelope);
+                authorities.push(authority);
+            }
+            for (mode, expected) in [
+                ("missing", 0),
+                ("mismatched", 0),
+                ("valid", 32),
+                ("replay", 32),
+            ] {
+                let mut supplied = authorities.clone();
+                if mode == "missing" {
+                    supplied.clear();
+                }
+                if mode == "mismatched" {
+                    for authority in &mut supplied {
+                        authority.source.reconnect_generation += 1;
+                    }
+                }
+                let (outcome, _) = step_host(
+                    &mut host,
+                    None,
+                    nickel_ui::HostBatch {
+                        normalized_authorities: supplied,
+                        events: envelopes
+                            .iter()
+                            .cloned()
+                            .map(nickel_ui::HostEvent::NormalizedIngress)
+                            .collect(),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                assert_eq!(outcome.telemetry.events_processed, 64);
+                let expected = host
+                    .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                        role: SemanticRole::Button,
+                        name: format!("Row {expected}"),
+                    })
+                    .unwrap();
+                assert_eq!(host.inspect().keyboard_focus, Some(expected.id), "{mode}");
+                let rows = host
+                    .application()
+                    .accepted
+                    .node()
+                    .virtual_collection_measurements(host.resolved_layout())
+                    .unwrap();
+                // Native button height is 20.8 here, not the 36-pixel estimate.
+                // Bound by the actual viewport plus overscan and edge rows.
+                let minimum_height = rows[0]
+                    .rows
+                    .iter()
+                    .map(|(_, height)| *height)
+                    .fold(f32::INFINITY, f32::min);
+                assert!(minimum_height > 0.0);
+                let row_bound = ((100.0 + 2.0 * 96.0) / minimum_height).ceil() as usize + 2;
+                assert!(
+                    rows[0].rows.len() <= row_bound,
+                    "{mode}: accumulated hidden rows: {:?}",
+                    rows[0]
+                );
+                assert!(rows[0].rows.len() < 100);
+                assert!(host.application_mut().take_effects().is_empty());
+            }
+        });
+    }
+
+    #[test]
+    fn native_virtual_column_constructs_only_the_visible_jsx_rows() {
+        with_package_runtime_stack(|| {
+            for (mode, height) in [
+                ("uniform", "20"),
+                ("mixed", "item => item % 2 === 0 ? 20 : 70"),
+            ] {
+                let mut baseline_work = None;
+                for count in [100, 1_000, 10_000] {
+                    let source = format!(
+                        r#"
+                    let built = 0;
+                    let keyed = 0;
+                    const items = Array.from({{length:{count}}}, (_, index) => index);
+                    function App() {{ return h(FixedWindow, {{width:'100%',height:'100%'}},
+                        h(ScrollView, {{id:'scroller',height:100}},
+                            h(VirtualColumn, {{id:'rows',items,itemKey:item=>{{keyed++; return String(item);}},itemHeight:{height},overscan:0,
+                                renderItem:item=>{{built++; return h(Button, {{id:'row-'+item,onClick:()=>{{}}}}, 'Row '+item);}}
+                            }}))); }}
+                "#
+                    );
+                    let application = PluginPanelApplication::new(&source).unwrap();
+                    assert_eq!(
+                        application
+                            .runtime
+                            .borrow_mut()
+                            .eval_json::<usize>("built")
+                            .unwrap(),
+                        0
+                    );
+                    let mut host = nickel_ui::UiHost::new(application, 320, 100);
+                    crate::live_shell::step_plugin_host(&mut host, None, Default::default())
+                        .unwrap();
+                    let built: usize = host
+                        .application()
+                        .runtime
+                        .borrow_mut()
+                        .eval_json("built")
+                        .unwrap();
+                    assert!(
+                        built > 0 && built <= 24,
+                        "constructed {built} rows from {count}"
+                    );
+                    assert!(host.inspect().resources.accessibility_node_count < 80);
+                    let before = built;
+                    crate::live_shell::step_plugin_host(&mut host, None, Default::default())
+                        .unwrap();
+                    let after: usize = host
+                        .application()
+                        .runtime
+                        .borrow_mut()
+                        .eval_json("built")
+                        .unwrap();
+                    assert_eq!(after, before, "unchanged frame constructed rows");
+                    let transport_before = host.application().diagnostic_patch_transport_bytes;
+                    let source_before = logical_source(host.application().accepted.node()).cloned();
+                    let measured = host
+                        .application()
+                        .accepted
+                        .node()
+                        .virtual_collection_measurements(host.resolved_layout())
+                        .unwrap();
+                    for &(ordinal, height) in &measured[0].rows {
+                        assert_eq!(
+                            source_before.as_ref().unwrap().geometry().height(ordinal),
+                            Some(height)
+                        );
+                    }
+                    assert!(
+                        host.application()
+                            .virtual_measurements(
+                                host.resolved_frame_generation(),
+                                host.resolved_layout(),
+                                nickel_ui::Rect::new(0.0, 0.0, 320.0, 100.0),
+                                1.0
+                            )
+                            .unwrap()
+                            .is_empty(),
+                        "settled frame repeated measurement collection"
+                    );
+                    assert!(
+                        source_before.is_some(),
+                        "logical keys must exist independently of visible rows"
+                    );
+                    assert_eq!(
+                        source_before
+                            .as_ref()
+                            .unwrap()
+                            .ordinal(&(count - 1).to_string()),
+                        Some(count - 1)
+                    );
+                    crate::live_shell::step_plugin_host(
+                        &mut host,
+                        None,
+                        nickel_ui::HostBatch {
+                            events: vec![nickel_ui::HostEvent::Ui(nickel_ui::UiEvent::Scroll {
+                                point: nickel_ui::Point { x: 40.0, y: 50.0 },
+                                delta_y: 400.0,
+                            })],
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap();
+                    let scrolled: usize = host
+                        .application()
+                        .runtime
+                        .borrow_mut()
+                        .eval_json("built")
+                        .unwrap();
+                    assert!(
+                        scrolled > after && scrolled - after <= 24,
+                        "scroll constructed {} rows from {count}",
+                        scrolled - after
+                    );
+                    assert!(host.inspect().resources.accessibility_node_count < 80);
+                    // Count all convergence passes, not only the final range.
+                    let work = (built, scrolled - after);
+                    if let Some(baseline) = baseline_work {
+                        assert_eq!(
+                            work, baseline,
+                            "row-factory work grew with logical source size"
+                        );
+                    } else {
+                        baseline_work = Some(work);
+                    }
+                    let keyed: usize = host
+                        .application()
+                        .runtime
+                        .borrow_mut()
+                        .eval_json("keyed")
+                        .unwrap();
+                    assert_eq!(keyed, count, "scroll revalidated the full source");
+                    if let Some(source) = source_before {
+                        let current = logical_source(host.application().accepted.node()).unwrap();
+                        assert_eq!(source.revision(), current.revision());
+                        assert_eq!(
+                            source.key(0).map(str::as_ptr),
+                            current.key(0).map(str::as_ptr),
+                            "measurement correction must share logical key storage"
+                        );
+                    }
+                    let source_bytes = serde_json::to_vec(host.application().accepted.source())
+                        .unwrap()
+                        .len();
+                    let transport_bytes =
+                        host.application().diagnostic_patch_transport_bytes - transport_before;
+                    assert!(
+                        transport_bytes > 0,
+                        "scroll transport measurement was not recorded"
+                    );
+                    assert!(
+                        source_bytes < 16_384,
+                        "{mode} collection retained {source_bytes} declaration bytes for {count} items"
+                    );
+                    assert!(
+                        transport_bytes < 32_768,
+                        "scroll transported {transport_bytes} bytes for {count} items"
+                    );
+                    eprintln!(
+                        "virtual collection: mode={mode}, count={count}, source_bytes={source_bytes}, scroll_patch_bytes={transport_bytes}, rows={}",
+                        scrolled - after
+                    );
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn virtual_zero_content_rows_have_bounded_positive_native_slots() {
+        with_package_runtime_stack(|| {
+            let mut baseline = None;
+            for count in [100, 1_000, 10_000] {
+                let source = format!(
+                    r#"
+                    let built = 0;
+                    const items = Array.from({{length:{count}}}, (_, index) => index);
+                    const itemKey = item => String(item);
+                    const renderItem = item => {{ built++; return h('div',null); }};
+                    function App() {{ return h(FixedWindow,{{width:'100%',height:'100%'}},
+                        h(ScrollView,{{id:'scroller',height:20}},h(VirtualColumn,{{
+                            id:'rows',items,itemKey,itemHeight:20,renderItem,overscan:0
+                        }}))); }}
+                "#
+                );
+                let mut host =
+                    nickel_ui::UiHost::new(PluginPanelApplication::new(&source).unwrap(), 320, 20);
+                let mut before = 0usize;
+                let mut work = Vec::new();
+                for turn in 0..16 {
+                    let now = host.next_deadline().unwrap_or_else(Instant::now);
+                    crate::live_shell::step_plugin_host(
+                        &mut host,
+                        None,
+                        nickel_ui::HostBatch {
+                            now: Some(now),
+                            events: if turn == 0 {
+                                vec![]
+                            } else {
+                                vec![nickel_ui::HostEvent::Poll]
+                            },
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap();
+                    let built: usize = host
+                        .application()
+                        .runtime
+                        .borrow_mut()
+                        .eval_json("built")
+                        .unwrap();
+                    assert!(
+                        built - before <= 168,
+                        "collapsed rows escaped per-turn work bound"
+                    );
+                    work.push(built - before);
+                    before = built;
+                    let rows = host
+                        .application()
+                        .accepted
+                        .node()
+                        .virtual_collection_measurements(host.resolved_layout())
+                        .unwrap();
+                    assert!(
+                        rows[0].rows.len() <= 21,
+                        "zero-height rows accumulated in the materialized slice"
+                    );
+                    assert!(rows[0].rows.iter().all(|(_, height)| *height == 1.0));
+                    assert!(host.resolved_layout().nodes().len() < 180);
+                    if !host.application().virtual_work_pending {
+                        break;
+                    }
+                }
+                assert!(!host.application().virtual_work_pending);
+                assert!(host.next_deadline().is_none());
+                if let Some(expected) = &baseline {
+                    assert_eq!(&work, expected);
+                } else {
+                    baseline = Some(work);
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn virtual_estimate_convergence_yields_and_retires_native_deadline() {
+        with_package_runtime_stack(|| {
+            let mut baseline = None;
+            for count in [100, 1_000, 10_000] {
+                let source = format!(
+                    r#"
+                    let built = 0;
+                    const items = Array.from({{length:{count}}}, (_, index) => index);
+                    const itemKey = item => String(item);
+                    const renderItem = item => {{ built++; return h('div',{{className:'row'}},
+                        h(Button,{{onClick:()=>{{}}}},'Row '+item)); }};
+                    function App() {{ return h(FixedWindow,{{width:'100%',height:'100%'}},
+                        nickel.data.hidden ? h(Text,null,'Hidden') :
+                        h(ScrollView,{{id:'scroller',height:120}},h(VirtualColumn,{{
+                            id:'rows',items,itemKey,itemHeight:8192,renderItem,overscan:0
+                        }}))); }}
+                "#
+                );
+                let make_host = || {
+                    let mut application = PluginPanelApplication::new(&source).unwrap();
+                    application.stylesheet = StyleSheet::compile(".row { height: 20px; }").unwrap();
+                    nickel_ui::UiHost::new(application, 320, 120)
+                };
+                let mut host = make_host();
+                let mut counts = Vec::new();
+                let mut before = 0usize;
+                let mut now = Instant::now();
+                for turn in 0..8 {
+                    let (outcome, _) = crate::live_shell::step_plugin_host(
+                        &mut host,
+                        None,
+                        nickel_ui::HostBatch {
+                            now: Some(now),
+                            events: if turn == 0 {
+                                vec![]
+                            } else {
+                                vec![nickel_ui::HostEvent::Poll]
+                            },
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap();
+                    let built: usize = host
+                        .application()
+                        .runtime
+                        .borrow_mut()
+                        .eval_json("built")
+                        .unwrap();
+                    let work = built - before;
+                    assert!(work <= 32, "unbounded synchronous convergence: {work}");
+                    counts.push(work);
+                    before = built;
+                    assert_eq!(outcome.next_deadline, host.next_deadline());
+                    if !host.application().virtual_work_pending {
+                        assert!(turn > 0, "fixture must exercise deferred convergence");
+                        assert!(
+                            host.next_deadline().is_none(),
+                            "settled collection kept polling"
+                        );
+                        break;
+                    }
+                    now = host
+                        .next_deadline()
+                        .expect("pending geometry needs a native wakeup");
+                }
+                assert!(
+                    !host.application().virtual_work_pending,
+                    "positive-height estimates failed to converge"
+                );
+                if let Some(expected) = &baseline {
+                    assert_eq!(&counts, expected);
+                } else {
+                    baseline = Some(counts);
+                }
+                let mut hidden = make_host();
+                crate::live_shell::step_plugin_host(&mut hidden, None, Default::default()).unwrap();
+                assert!(hidden.application().virtual_work_pending);
+                crate::live_shell::step_plugin_host(
+                    &mut hidden,
+                    Some(serde_json::json!({"hidden":true}).to_string()),
+                    Default::default(),
+                )
+                .unwrap();
+                assert!(!hidden.application().virtual_work_pending);
+                assert!(hidden.next_deadline().is_none());
+                assert!(logical_source(hidden.application().accepted.node()).is_none());
+            }
+        });
+    }
+
+    #[test]
+    fn virtual_measurements_preserve_anchor_on_preview_height_change() {
+        with_package_runtime_stack(|| {
+            let source = r#"
+                const items = Array.from({length:1000}, (_, index) => index);
+                const inserted = [-1,...items];
+                const itemKey = item => String(item);
+                const renderItem = item => h('div',{className:nickel.data.height === 60 ? 'tall' : 'short'},
+                    h(Button,{id:'row-'+item,onClick:()=>{}},'Row '+item));
+                function App() { return h(FixedWindow,{width:'100%',height:'100%'},
+                    h(ScrollView,{id:'scroller',height:120},h(VirtualColumn,{
+                        id:'rows',items:nickel.data.inserted ? inserted : items,itemKey,itemHeight:20,renderItem,overscan:80
+                    }))); }
+            "#;
+            let mut application = PluginPanelApplication::new(source).unwrap();
+            application.stylesheet =
+                StyleSheet::compile(".short { height: 20px; } .tall { height: 60px; }").unwrap();
+            let mut host = nickel_ui::UiHost::new(application, 320, 120);
+            crate::live_shell::step_plugin_host(&mut host, None, Default::default()).unwrap();
+            crate::live_shell::step_plugin_host(
+                &mut host,
+                None,
+                nickel_ui::HostBatch {
+                    events: vec![nickel_ui::HostEvent::Ui(nickel_ui::UiEvent::Scroll {
+                        point: nickel_ui::Point { x: 40.0, y: 50.0 },
+                        delta_y: 405.0,
+                    })],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let anchor = host
+                .application()
+                .virtual_anchor_candidates(host.resolved_layout())
+                .unwrap()
+                .remove(0);
+            let y = host
+                .resolved_layout()
+                .find(&anchor)
+                .unwrap()
+                .allocated
+                .origin
+                .y;
+            let previous_epoch = logical_source(host.application().accepted.node())
+                .unwrap()
+                .measurement_context()
+                .unwrap();
+            crate::live_shell::step_plugin_host(
+                &mut host,
+                Some(serde_json::json!({"height":60}).to_string()),
+                Default::default(),
+            )
+            .unwrap();
+            assert!(
+                (host
+                    .resolved_layout()
+                    .find(&anchor)
+                    .unwrap()
+                    .allocated
+                    .origin
+                    .y
+                    - y)
+                    .abs()
+                    < 0.02,
+                "preview arrival moved the visible keyed row"
+            );
+            let current = logical_source(host.application().accepted.node()).unwrap();
+            assert_ne!(
+                current.measurement_context().unwrap().layout_revision,
+                previous_epoch.layout_revision
+            );
+            let rows = host
+                .application()
+                .accepted
+                .node()
+                .virtual_collection_measurements(host.resolved_layout())
+                .unwrap();
+            for &(row, height) in &rows[0].rows {
+                assert_eq!(height, 60.0);
+                assert_eq!(current.geometry().height(row), Some(height));
+            }
+            crate::live_shell::step_plugin_host(
+                &mut host,
+                None,
+                nickel_ui::HostBatch {
+                    scale_factor: Some(1.5),
+                    surface_size: Some((400, 120)),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let context = logical_source(host.application().accepted.node())
+                .unwrap()
+                .measurement_context()
+                .unwrap();
+            assert_eq!(context.scale, 1.5);
+            assert_ne!(context.width, previous_epoch.width);
+            let before_insert = logical_source(host.application().accepted.node())
+                .unwrap()
+                .clone();
+            let y_before_insert = host
+                .resolved_layout()
+                .find(&anchor)
+                .unwrap()
+                .allocated
+                .origin
+                .y;
+            crate::live_shell::step_plugin_host(
+                &mut host,
+                Some(serde_json::json!({"height":60,"inserted":true}).to_string()),
+                Default::default(),
+            )
+            .unwrap();
+            let after_insert = logical_source(host.application().accepted.node()).unwrap();
+            assert_ne!(before_insert.revision(), after_insert.revision());
+            assert_eq!(before_insert.identity(), after_insert.identity());
+            assert!(
+                (host
+                    .resolved_layout()
+                    .find(&anchor)
+                    .unwrap()
+                    .allocated
+                    .origin
+                    .y
+                    - y_before_insert)
+                    .abs()
+                    < 0.02,
+                "prefix insertion moved the surviving keyed anchor"
+            );
+        });
+    }
+
+    #[test]
+    fn virtual_accessibility_key_focus_admits_only_the_requested_window() {
+        with_package_runtime_stack(|| {
+            for (count, mixed) in [100, 1_000, 10_000]
+                .into_iter()
+                .flat_map(|count| [(count, false), (count, true)])
+            {
+                let source = format!(
+                    r#"
+                    const items=Array.from({{length:{count}}},(_,index)=>index);
+                    let built=0;let clicks=[];
+                    function App(){{return h(FixedWindow,{{width:'100%',height:'100%'}},
+                        h(ScrollView,{{id:'scroll',height:120}},h(VirtualColumn,{{
+                            id:'rows',items,itemKey:String,itemHeight:24,overscan:48,
+                            renderItem:item=>{{built++;return h(Button,{{id:'row-'+item,className:item%2?'tall':'short',
+                                onClick:()=>clicks.push(item)}},'Row '+item)}}
+                        }})))}}
+                "#
+                );
+                let mut application = PluginPanelApplication::new(&source).unwrap();
+                if mixed {
+                    application.stylesheet =
+                        StyleSheet::compile(".short { height: 36px; } .tall { height: 96px; }")
+                            .unwrap();
+                }
+                let mut host = nickel_ui::UiHost::new(application, 320, 120);
+                step_host(&mut host, None, Default::default()).unwrap();
+                let column = host
+                    .resolved_layout()
+                    .nodes()
+                    .iter()
+                    .find(|node| node.virtual_navigation.is_some())
+                    .unwrap();
+                let collection = column.id.clone();
+                let revision = column.virtual_navigation.as_ref().unwrap().revision;
+                let ordinal = count / 2 + 3;
+                let selector = nickel_ui::SemanticSelector::RoleAndName {
+                    role: SemanticRole::Button,
+                    name: format!("Row {ordinal}"),
+                };
+                assert!(host.query_unique(&selector).is_err());
+                let before: usize = host
+                    .application()
+                    .runtime
+                    .borrow_mut()
+                    .eval_json("built")
+                    .unwrap();
+                assert!(
+                    host.application()
+                        .virtual_key_focus_event(
+                            &collection,
+                            revision + 1,
+                            &ordinal.to_string(),
+                            host.resolved_layout()
+                        )
+                        .is_err()
+                );
+                assert!(
+                    host.application()
+                        .virtual_key_focus_event(
+                            &collection,
+                            revision,
+                            "missing",
+                            host.resolved_layout()
+                        )
+                        .is_err()
+                );
+                let event = host
+                    .application()
+                    .virtual_key_focus_event(
+                        &collection,
+                        revision,
+                        &ordinal.to_string(),
+                        host.resolved_layout(),
+                    )
+                    .unwrap();
+                assert_eq!(
+                    host.application()
+                        .runtime
+                        .borrow_mut()
+                        .eval_json::<usize>("built")
+                        .unwrap(),
+                    before,
+                    "resolving a logical key must not build rows"
+                );
+                step_host(
+                    &mut host,
+                    None,
+                    nickel_ui::HostBatch {
+                        events: vec![nickel_ui::HostEvent::Ui(event)],
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                let target = host.query_unique(&selector).unwrap();
+                assert_eq!(host.inspect().keyboard_focus, Some(target.id));
+                assert!(
+                    target.bounds.origin.y >= 0.0
+                        && target.bounds.origin.y + target.bounds.size.height <= 120.01
+                );
+                assert!(
+                    host.application()
+                        .runtime
+                        .borrow_mut()
+                        .eval_json::<usize>("built")
+                        .unwrap()
+                        - before
+                        < 50
+                );
+                assert!(host.resolved_layout().nodes().len() < 150);
+                assert!(
+                    host.application()
+                        .runtime
+                        .borrow_mut()
+                        .eval_json::<Vec<usize>>("JSON.stringify(clicks)")
+                        .unwrap()
+                        .is_empty()
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn virtual_keyboard_boundaries_reach_never_materialized_rows() {
+        with_package_runtime_stack(|| {
+            for (count, mixed) in [100, 1_000, 10_000]
+                .into_iter()
+                .flat_map(|count| [(count, false), (count, true)])
+            {
+                let source = format!(
+                    r#"
+                    const items = Array.from({{length:{count}}}, (_, index) => index);
+                    let built = 0;
+                    let clicks = [];
+                    function App() {{ return h(FixedWindow,{{width:'100%',height:'100%'}},
+                        h(ScrollView,{{id:'scroll',height:120}},h(VirtualColumn,{{
+                            id:'rows',items,itemKey:String,itemHeight:24,overscan:48,
+                            renderItem:item=>{{ built++; return h(Button,{{id:'row-'+item,
+                                className:item % 2 ? 'tall' : 'short',
+                                onClick:()=>clicks.push(item)}},'Row '+item); }}
+                        }}))); }}
+                "#
+                );
+                let mut application = PluginPanelApplication::new(&source).unwrap();
+                if mixed {
+                    application.stylesheet =
+                        StyleSheet::compile(".short { height: 36px; } .tall { height: 96px; }")
+                            .unwrap();
+                }
+                let mut host = nickel_ui::UiHost::new(application, 320, 120);
+                step_host(&mut host, None, Default::default()).unwrap();
+                let selector = |ordinal| nickel_ui::SemanticSelector::RoleAndName {
+                    role: SemanticRole::Button,
+                    name: format!("Row {ordinal}"),
+                };
+                assert!(host.query_unique(&selector(count - 1)).is_err());
+                let first = host.query_unique(&selector(0)).unwrap().id;
+                host.request_focus(first);
+                let mut expected_clicks = Vec::new();
+                for (event, ordinal) in [
+                    (nickel_ui::UiEvent::KeyboardNavigateEnd, count - 1),
+                    (nickel_ui::UiEvent::KeyboardNavigateStart, 0),
+                ] {
+                    let before: usize = host
+                        .application()
+                        .runtime
+                        .borrow_mut()
+                        .eval_json("built")
+                        .unwrap();
+                    step_host(
+                        &mut host,
+                        None,
+                        nickel_ui::HostBatch {
+                            events: vec![nickel_ui::HostEvent::Ui(event)],
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap();
+                    let target = host.query_unique(&selector(ordinal)).expect(
+                        "boundary navigation must admit the logical boundary, not stop at overscan",
+                    );
+                    assert_eq!(host.inspect().controller_target, Some(target.id));
+                    assert!(
+                        target.bounds.origin.y >= 0.0
+                            && target.bounds.origin.y + target.bounds.size.height <= 120.01
+                    );
+                    let after: usize = host
+                        .application()
+                        .runtime
+                        .borrow_mut()
+                        .eval_json("built")
+                        .unwrap();
+                    assert!(after - before < 50, "boundary jump built intermediate rows");
+                    assert!(host.resolved_layout().nodes().len() < 150);
+                    eprintln!(
+                        "virtual-boundary count={count} mixed={mixed} target={ordinal} built={} nodes={}",
+                        after - before,
+                        host.resolved_layout().nodes().len(),
+                    );
+                    assert_eq!(
+                        host.application()
+                            .runtime
+                            .borrow_mut()
+                            .eval_json::<Vec<usize>>("JSON.stringify(clicks)")
+                            .unwrap(),
+                        expected_clicks
+                    );
+                    step_host(
+                        &mut host,
+                        None,
+                        nickel_ui::HostBatch {
+                            events: vec![nickel_ui::HostEvent::Ui(
+                                nickel_ui::UiEvent::KeyboardNavigateActivate,
+                            )],
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap();
+                    expected_clicks.push(ordinal);
+                    assert_eq!(
+                        host.application()
+                            .runtime
+                            .borrow_mut()
+                            .eval_json::<Vec<usize>>("JSON.stringify(clicks)")
+                            .unwrap(),
+                        expected_clicks
+                    );
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn virtual_accessibility_keys_cross_nested_sources_without_eager_rows() {
+        with_package_runtime_stack(|| {
+            let source = r#"
+                const groups=Array.from({length:8},(_,index)=>index);
+                const items=Array.from({length:128},(_,index)=>index);
+                let built=0;
+                function App(){return h(FixedWindow,{width:'100%',height:'100%'},
+                    h(ScrollView,{id:'scroll',height:120},h(VirtualColumn,{
+                        id:'groups',items:groups,itemKey:String,itemHeight:3072,overscan:0,
+                        renderItem:group=>h(VirtualColumn,{
+                            id:'items-'+group,items,itemKey:String,itemHeight:24,overscan:48,
+                            renderItem:item=>{built++;return h(Button,{onClick:()=>{}},'Row '+group+'/'+item)}
+                        })
+                    })));}
+            "#;
+            let mut host =
+                nickel_ui::UiHost::new(PluginPanelApplication::new(source).unwrap(), 320, 120);
+            step_host(&mut host, None, Default::default()).unwrap();
+            for (count, key, label) in [(8, "7", "Row 7/0"), (128, "77", "Row 7/77")] {
+                let column = host
+                    .resolved_layout()
+                    .nodes()
+                    .iter()
+                    .find(|node| {
+                        node.virtual_navigation
+                            .as_ref()
+                            .is_some_and(|logical| logical.count == count)
+                            && (count == 8 || node.id.as_str().contains("/items-7/"))
+                    })
+                    .unwrap();
+                let revision = column.virtual_navigation.as_ref().unwrap().revision;
+                let event = host
+                    .application()
+                    .virtual_key_focus_event(&column.id, revision, key, host.resolved_layout())
+                    .unwrap();
+                let before: usize = host
+                    .application()
+                    .runtime
+                    .borrow_mut()
+                    .eval_json("built")
+                    .unwrap();
+                step_host(
+                    &mut host,
+                    None,
+                    nickel_ui::HostBatch {
+                        events: vec![nickel_ui::HostEvent::Ui(event)],
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                let target = host
+                    .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                        role: SemanticRole::Button,
+                        name: label.into(),
+                    })
+                    .unwrap_or_else(|error| panic!("nested key {key} in {count} expected {label}: {error:?}; admitted={:?}; collections={:?}",
+                        host.accessibility_nodes().iter().filter_map(|node| node.label.as_deref()).collect::<Vec<_>>(),
+                        host.resolved_layout().nodes().iter().filter(|node| node.virtual_navigation.is_some())
+                            .map(|node| (&node.id, &node.virtual_navigation, node.allocated, node.clip)).collect::<Vec<_>>()));
+                assert_eq!(host.inspect().keyboard_focus, Some(target.id));
+                assert!(
+                    target.bounds.origin.y >= 0.0
+                        && target.bounds.origin.y + target.bounds.size.height <= 120.01
+                );
+                assert!(
+                    host.application()
+                        .runtime
+                        .borrow_mut()
+                        .eval_json::<usize>("built")
+                        .unwrap()
+                        - before
+                        < 100
+                );
+                assert!(host.resolved_layout().nodes().len() < 200);
+            }
+        });
+    }
+
+    #[test]
+    fn virtual_keyboard_boundaries_cross_nested_sources() {
+        with_package_runtime_stack(|| {
+            for nested in [false, true] {
+                let source = r#"
+                const groups = Array.from({length:8}, (_, index) => index);
+                const middles = [0,1];
+                const items = Array.from({length:128}, (_, index) => index);
+                let built = 0;
+                function rows(prefix) { return h(VirtualColumn,{
+                    id:'items-'+prefix,items,itemKey:String,itemHeight:24,overscan:48,
+                    renderItem:item=>{built++; return h(Button,{
+                        id:'row-'+prefix+'-'+item,onClick:()=>{}
+                    },'Row '+prefix+'/'+item);}
+                }); }
+                function App() { return h(FixedWindow,{width:'100%',height:'100%'},
+                    h(ScrollView,{id:'scroll',height:120},h(VirtualColumn,{
+                        id:'groups',items:groups,itemKey:String,itemHeight:nested?6144:3072,overscan:0,
+                        renderItem:group=>nested ? h(VirtualColumn,{
+                            id:'middle-'+group,items:middles,itemKey:String,itemHeight:3072,overscan:0,
+                            renderItem:middle=>rows(group+'/'+middle)
+                        }) : rows(group)
+                    }))); }
+            "#;
+                let source = format!("const nested = {nested};\n{source}");
+                let mut host =
+                    nickel_ui::UiHost::new(PluginPanelApplication::new(&source).unwrap(), 320, 120);
+                step_host(&mut host, None, Default::default()).unwrap();
+                for (event, label) in [
+                    (
+                        nickel_ui::UiEvent::KeyboardNavigateEnd,
+                        if nested { "Row 7/1/127" } else { "Row 7/127" },
+                    ),
+                    (
+                        nickel_ui::UiEvent::KeyboardNavigateStart,
+                        if nested { "Row 0/0/0" } else { "Row 0/0" },
+                    ),
+                ] {
+                    let before: usize = host
+                        .application()
+                        .runtime
+                        .borrow_mut()
+                        .eval_json("built")
+                        .unwrap();
+                    step_host(
+                        &mut host,
+                        None,
+                        nickel_ui::HostBatch {
+                            events: vec![nickel_ui::HostEvent::Ui(event)],
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap();
+                    let target = host
+                        .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                            role: SemanticRole::Button,
+                            name: label.into(),
+                        })
+                        .expect("nested boundary must cross omitted outer and inner sources");
+                    let semantic = host
+                        .accessibility_nodes()
+                        .iter()
+                        .find(|node| node.id == target.id)
+                        .unwrap();
+                    assert_eq!(
+                        semantic.collection_position,
+                        Some((if label.ends_with("/127") { 128 } else { 1 }, 128))
+                    );
+                    assert_eq!(host.inspect().controller_target, Some(target.id));
+                    assert!(
+                        target.bounds.origin.y >= 0.0
+                            && target.bounds.origin.y + target.bounds.size.height <= 120.01
+                    );
+                    let after: usize = host
+                        .application()
+                        .runtime
+                        .borrow_mut()
+                        .eval_json("built")
+                        .unwrap();
+                    assert!(after - before < 100);
+                    assert!(host.resolved_layout().nodes().len() < 200);
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn virtual_source_far_reorder_preserves_focused_key_and_reveals_it() {
+        with_package_runtime_stack(|| {
+            let source = r#"
+                const items = Array.from({length:1000}, (_, index) => index);
+                const reversed = [...items].reverse();
+                const removed = reversed.filter(item=>item!==2);
+                const itemKey = String;
+                let clicks = [];
+                function App() { return h(FixedWindow,{width:'100%',height:'100%'},
+                    h(ScrollView,{id:'scroll',height:120},h(VirtualColumn,{
+                        id:'rows',items:nickel.data.removed ? removed : nickel.data.reversed ? reversed : items,
+                        itemKey,itemHeight:24,overscan:48,
+                        renderItem:item=>h(Button,{id:'row-'+item,onClick:()=>clicks.push(item)},'Row '+item)
+                    }))); }
+            "#;
+            let mut host =
+                nickel_ui::UiHost::new(PluginPanelApplication::new(source).unwrap(), 320, 120);
+            step_host(&mut host, None, Default::default()).unwrap();
+            let selector = nickel_ui::SemanticSelector::RoleAndName {
+                role: SemanticRole::Button,
+                name: "Row 2".into(),
+            };
+            let target = host.query_unique(&selector).unwrap().id;
+            assert_eq!(
+                host.accessibility_nodes()
+                    .iter()
+                    .find(|node| node.id == target)
+                    .unwrap()
+                    .collection_position,
+                Some((3, 1000))
+            );
+            host.request_focus(target.clone());
+            step_host(
+                &mut host,
+                Some(serde_json::json!({"reversed":true}).to_string()),
+                Default::default(),
+            )
+            .unwrap();
+            assert_eq!(host.inspect().keyboard_focus, Some(target.clone()));
+            let item = host
+                .query_unique(&selector)
+                .expect("focused logical key must materialize");
+            assert_eq!(item.id, target);
+            assert_eq!(
+                host.accessibility_nodes()
+                    .iter()
+                    .find(|node| node.id == target)
+                    .unwrap()
+                    .collection_position,
+                Some((998, 1000))
+            );
+            assert!(
+                item.bounds.origin.y >= 0.0
+                    && item.bounds.origin.y + item.bounds.size.height <= 120.01
+            );
+            assert!(host.resolved_layout().nodes().len() < 100);
+            assert!(host.application().last_error().is_none());
+            host.perform_semantic_action(
+                target.clone(),
+                nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
+            );
+            assert_eq!(
+                host.application()
+                    .runtime
+                    .borrow_mut()
+                    .eval_json::<Vec<usize>>("JSON.stringify(clicks)")
+                    .unwrap(),
+                vec![2]
+            );
+            step_host(
+                &mut host,
+                Some(serde_json::json!({"removed":true}).to_string()),
+                Default::default(),
+            )
+            .unwrap();
+            assert_ne!(host.inspect().keyboard_focus, Some(target.clone()));
+            assert!(host.query_unique(&selector).is_err());
+            host.perform_semantic_action(
+                target.clone(),
+                nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
+            );
+            assert_eq!(
+                host.application()
+                    .runtime
+                    .borrow_mut()
+                    .eval_json::<Vec<usize>>("JSON.stringify(clicks)")
+                    .unwrap(),
+                vec![2]
+            );
+            step_host(
+                &mut host,
+                Some(serde_json::json!({"reversed":true}).to_string()),
+                Default::default(),
+            )
+            .unwrap();
+            assert_ne!(host.inspect().keyboard_focus, Some(target));
+            // Snapshot anchor repair precedes, rather than undoing, the wheel
+            // event that arrived in the same native batch.
+            assert!(
+                host.resolved_layout()
+                    .nodes()
+                    .iter()
+                    .find_map(|node| node.scroll)
+                    .unwrap()
+                    .offset
+                    > 1000.0
+            );
+            step_host(
+                &mut host,
+                Some(serde_json::json!({"reversed":true,"label":"updated"}).to_string()),
+                nickel_ui::HostBatch {
+                    events: vec![nickel_ui::HostEvent::Ui(nickel_ui::UiEvent::Scroll {
+                        point: Point { x: 40.0, y: 50.0 },
+                        delta_y: -100_000.0,
+                    })],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let scroll = host
+                .resolved_layout()
+                .nodes()
+                .iter()
+                .find_map(|node| node.scroll)
+                .unwrap();
+            assert_eq!(
+                scroll.offset, 0.0,
+                "snapshot repair undid the current wheel event"
+            );
+        });
+    }
+
+    #[test]
+    fn virtual_nested_reorder_preserves_focused_descendant() {
+        with_package_runtime_stack(|| {
+            let source = r#"
+                const groups = Array.from({length:8}, (_, index) => index);
+                const reversedGroups = [...groups].reverse();
+                const removedGroups = reversedGroups.filter(group=>group!==0);
+                const rows = Array.from({length:128}, (_, index) => index);
+                const reversedRows = [...rows].reverse();
+                let clicks = [];
+                function App() { return h(FixedWindow,{width:'100%',height:'100%'},
+                    h(ScrollView,{id:'scroll',height:120},h(VirtualColumn,{
+                        id:'groups',items:nickel.data.removed ? removedGroups : nickel.data.reversed ? reversedGroups : groups,
+                        itemKey:String,itemHeight:3072,overscan:0,
+                        renderItem:group=>h(VirtualColumn,{
+                            id:'rows-'+group,items:nickel.data.reversed ? reversedRows : rows,
+                            itemKey:String,itemHeight:24,overscan:48,
+                            renderItem:row=>h(Button,{id:'row-'+group+'-'+row,
+                                onClick:()=>clicks.push([group,row])},'Row '+group+'/'+row)
+                        })
+                    }))); }
+            "#;
+            let mut host =
+                nickel_ui::UiHost::new(PluginPanelApplication::new(source).unwrap(), 320, 120);
+            for _ in 0..32 {
+                let now = host.next_deadline().unwrap_or_else(Instant::now);
+                step_host(
+                    &mut host,
+                    None,
+                    nickel_ui::HostBatch {
+                        now: Some(now),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                if !host.application().virtual_work_pending() {
+                    break;
+                }
+            }
+            assert!(!host.application().virtual_work_pending());
+            let selector = nickel_ui::SemanticSelector::RoleAndName {
+                role: SemanticRole::Button,
+                name: "Row 0/2".into(),
+            };
+            let target = host.query_unique(&selector).unwrap().id;
+            host.request_focus(target.clone());
+            step_host(
+                &mut host,
+                Some(serde_json::json!({"reversed":true}).to_string()),
+                Default::default(),
+            )
+            .unwrap();
+            for _ in 0..32 {
+                assert!(
+                    host.application().last_error().is_none(),
+                    "{:?}",
+                    host.application().last_error()
+                );
+                assert_eq!(host.inspect().keyboard_focus, Some(target.clone()));
+                assert!(host.resolved_layout().nodes().len() < 200);
+                if !host.application().virtual_work_pending() {
+                    break;
+                }
+                let now = host
+                    .next_deadline()
+                    .expect("pending virtual work needs a deadline");
+                step_host(
+                    &mut host,
+                    None,
+                    nickel_ui::HostBatch {
+                        now: Some(now),
+                        events: vec![nickel_ui::HostEvent::Poll],
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            }
+            assert!(!host.application().virtual_work_pending());
+            let item = host.query_unique(&selector).unwrap();
+            assert_eq!(item.id, target);
+            assert!(
+                item.bounds.origin.y >= 0.0
+                    && item.bounds.origin.y + item.bounds.size.height <= 120.01
+            );
+            host.perform_semantic_action(
+                target.clone(),
+                nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
+            );
+            assert_eq!(
+                host.application()
+                    .runtime
+                    .borrow_mut()
+                    .eval_json::<Vec<(usize, usize)>>("JSON.stringify(clicks)")
+                    .unwrap(),
+                vec![(0, 2)]
+            );
+            step_host(
+                &mut host,
+                Some(serde_json::json!({"removed":true}).to_string()),
+                Default::default(),
+            )
+            .unwrap();
+            assert_ne!(host.inspect().keyboard_focus, Some(target.clone()));
+            assert!(host.query_unique(&selector).is_err());
+            host.perform_semantic_action(
+                target.clone(),
+                nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
+            );
+            assert_eq!(
+                host.application()
+                    .runtime
+                    .borrow_mut()
+                    .eval_json::<Vec<(usize, usize)>>("JSON.stringify(clicks)")
+                    .unwrap(),
+                vec![(0, 2)]
+            );
+            step_host(
+                &mut host,
+                Some(serde_json::json!({"reversed":true}).to_string()),
+                Default::default(),
+            )
+            .unwrap();
+            assert_ne!(host.inspect().keyboard_focus, Some(target));
+            assert!(host.application().last_error().is_none());
+        });
+    }
+
+    #[test]
+    fn virtual_source_lifecycle_preserves_readmission_and_retires_removed_keys() {
+        with_package_runtime_stack(|| {
+            let source = r#"
+                let clicks = [];
+                const original = [{id:'a',height:20},{id:'b',height:70},{id:'c',height:40}];
+                const reordered = [{id:'c',height:40},{id:'a',height:20},{id:'d',height:70}];
+                const empty = [];
+                const itemKey = item => item.id;
+                const itemHeight = item => item.height;
+                const renderItem = item => h(Button,{id:'row-'+item.id,onClick:()=>clicks.push(item.id)},'Row '+item.id);
+                function App() { return h(FixedWindow,{width:'100%',height:'100%'},
+                    h(Column,null,h(Text,null,nickel.data.label || 'initial'),
+                        nickel.data.show === false ? h(Text,null,'Hidden') :
+                            h(ScrollView,{id:'scroll',height:180},h(VirtualColumn,{
+                                id:'rows',items:nickel.data.empty ? empty : nickel.data.reordered ? reordered : original,
+                                itemKey,itemHeight,renderItem,overscan:0
+                            })))); }
+            "#;
+            let application = PluginPanelApplication::new(source).unwrap();
+            let mut host = nickel_ui::UiHost::new(application, 320, 240);
+            crate::live_shell::step_plugin_host(&mut host, None, Default::default()).unwrap();
+            let initial = logical_source(host.application().accepted.node())
+                .unwrap()
+                .clone();
+            let weak_initial = std::sync::Arc::downgrade(&initial);
+            crate::live_shell::step_plugin_host(
+                &mut host,
+                Some(serde_json::json!({"label":"unrelated update"}).to_string()),
+                Default::default(),
+            )
+            .unwrap();
+            let current = logical_source(host.application().accepted.node()).unwrap();
+            assert_eq!(initial.revision(), current.revision());
+            assert_eq!(
+                initial.key(0).map(str::as_ptr),
+                current.key(0).map(str::as_ptr),
+                "layout invalidation must share unchanged logical key storage"
+            );
+            let selector = |name: &str| nickel_ui::SemanticSelector::RoleAndName {
+                role: nickel_ui::SemanticRole::Button,
+                name: name.into(),
+            };
+            let removed = host.query_unique(&selector("Row b")).unwrap().id;
+            let surviving = host.query_unique(&selector("Row c")).unwrap().id;
+            host.request_focus(surviving.clone());
+            assert_eq!(host.inspect().keyboard_focus, Some(surviving.clone()));
+            crate::live_shell::step_plugin_host(
+                &mut host,
+                Some(serde_json::json!({"reordered":true}).to_string()),
+                Default::default(),
+            )
+            .unwrap();
+            let replacement = logical_source(host.application().accepted.node())
+                .unwrap()
+                .clone();
+            assert_ne!(replacement.revision(), initial.revision());
+            assert_eq!(replacement.identity(), initial.identity());
+            assert_eq!(host.query_unique(&selector("Row c")).unwrap().id, surviving);
+            assert_eq!(
+                host.inspect().keyboard_focus,
+                Some(surviving.clone()),
+                "a surviving keyed row lost focus during source replacement"
+            );
+            assert_eq!(replacement.ordinal("c"), Some(0));
+            assert_eq!(replacement.ordinal("a"), Some(1));
+            assert_eq!(replacement.ordinal("b"), None);
+            assert_eq!(replacement.ordinal("d"), Some(2));
+            assert!(host.query_unique(&selector("Row b")).is_err());
+            host.perform_semantic_action(
+                removed,
+                nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
+            );
+            assert_eq!(
+                host.application()
+                    .runtime
+                    .borrow_mut()
+                    .eval_json::<Vec<String>>("JSON.stringify(clicks)")
+                    .unwrap(),
+                Vec::<String>::new()
+            );
+            let first = host.query_unique(&selector("Row c")).unwrap();
+            host.perform_semantic_action(
+                first.id,
+                nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
+            );
+            assert_eq!(
+                host.application()
+                    .runtime
+                    .borrow_mut()
+                    .eval_json::<Vec<String>>("JSON.stringify(clicks)")
+                    .unwrap(),
+                vec!["c"]
+            );
+            let weak_replacement = std::sync::Arc::downgrade(&replacement);
+            drop(initial);
+            drop(replacement);
+            assert!(
+                weak_initial.upgrade().is_none(),
+                "replacement retained the previous source"
+            );
+            crate::live_shell::step_plugin_host(
+                &mut host,
+                Some(serde_json::json!({"empty":true}).to_string()),
+                Default::default(),
+            )
+            .unwrap();
+            let empty = logical_source(host.application().accepted.node()).unwrap();
+            assert!(empty.is_empty());
+            assert!(
+                weak_replacement.upgrade().is_none(),
+                "empty-list transition retained previous rows"
+            );
+            let weak_empty = std::sync::Arc::downgrade(empty);
+            assert!(host.query_unique(&selector("Row c")).is_err());
+            crate::live_shell::step_plugin_host(
+                &mut host,
+                Some(serde_json::json!({"show":false}).to_string()),
+                Default::default(),
+            )
+            .unwrap();
+            assert!(logical_source(host.application().accepted.node()).is_none());
+            assert!(
+                weak_empty.upgrade().is_none(),
+                "hidden empty collection retained its registration"
+            );
+            assert!(
+                weak_initial.upgrade().is_none(),
+                "old source survived replacement"
+            );
+            assert!(
+                weak_replacement.upgrade().is_none(),
+                "hidden collection retained native source"
+            );
+            crate::live_shell::step_plugin_host(
+                &mut host,
+                Some(serde_json::json!({"show":true}).to_string()),
+                Default::default(),
+            )
+            .unwrap();
+            assert!(host.query_unique(&selector("Row b")).is_ok());
+            assert_ne!(
+                host.query_unique(&selector("Row c")).unwrap().id,
+                surviving,
+                "a retired collection must not revive its old native row identity"
+            );
+            assert_eq!(
+                logical_source(host.application().accepted.node())
+                    .unwrap()
+                    .ordinal("b"),
+                Some(1)
+            );
+        });
     }
 
     #[test]
@@ -4115,7 +6356,7 @@ mod tests {
             );
             let mut child = package(
                 "derived-shell",
-                "globalThis.origin = 'derived';\nexport function Taskbar(props) { const [count,setCount] = useState(0); return h(Column,null,h(Button,{id:'callback-control',onClick:()=>props.onChange('changed')},'Callback'),h(Button, {id:'replacement',icon:'shared',onClick:()=>{setCount(count+1); nickel.request('show-launcher');}}, origin + count),...props.children); }\nexport function Widget() { return h(Button, {id:'contribution',onClick:()=>nickel.request('show-launcher')}, 'Owned contribution'); }\nexport default Taskbar;",
+                "globalThis.origin = 'derived';\nexport function Taskbar(props) { const [count,setCount] = useState(0); const [hidden,setHidden] = useState(0); globalThis.setIdleHidden = setHidden; globalThis.setIdleCount = setCount; return h(Column,null,h(Button,{id:'callback-control',onClick:()=>props.onChange('changed')},'Callback'),h(Button, {id:'replacement',icon:'shared',onClick:()=>{setCount(count+1); nickel.request('show-launcher');}}, origin + count),...props.children); }\nexport function Widget() { return h(Button, {id:'contribution',onClick:()=>nickel.request('show-launcher')}, 'Owned contribution'); }\nexport default Taskbar;",
                 Some("base-shell"),
                 if granted {
                     vec![PluginCapability::LauncherShow]
@@ -4257,6 +6498,28 @@ mod tests {
                 );
                 application.update(application.button_message("replacement").unwrap());
                 assert_eq!(application.take_effects(), vec![PluginEffect::ShowLauncher]);
+                // Idle state from the replacement owner must use composed
+                // patch admission, preserving the base owner's callbacks.
+                let runtime = host.borrow().shared_owner_runtime(&owner).unwrap();
+                let generation = application.accepted.generation();
+                runtime.borrow_mut().eval("setIdleHidden(1)").unwrap();
+                assert!(!application.reconcile_idle_work().unwrap());
+                assert_eq!(application.accepted.generation(), generation);
+                runtime.borrow_mut().eval("setIdleCount(99)").unwrap();
+                application.dispatch_validated_events(Vec::new());
+                assert!(
+                    format!("{:?}", application.accepted.node()).contains("derived99"),
+                    "idle composed update failed: {:?}; runtime failure: {:?}",
+                    application.last_error(),
+                    application.runtime_failure
+                );
+                assert!(application.last_error().is_none());
+                assert!(application.take_effects().is_empty());
+                let generation = application.accepted.generation();
+                application.dispatch_validated_events(Vec::new());
+                assert_eq!(application.accepted.generation(), generation);
+                application.update(application.button_message("callback-control").unwrap());
+                assert_eq!(application.take_effects(), vec![PluginEffect::ShowLauncher]);
             } else {
                 assert!(application.take_effects().is_empty());
                 assert!(application.last_error().is_some());
@@ -4342,6 +6605,117 @@ mod tests {
                 .unwrap(),
             1,
             "the production composed path must not call the root component"
+        );
+    }
+
+    #[test]
+    fn idle_reconciliation_updates_only_the_dirty_shared_runtime_surface() {
+        let mut package = PluginPackage::load(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/plugins/example-two-windows"
+        ))
+        .unwrap();
+        package.source = "export default function App(){const [value,setValue]=useState(0);globalThis.latestSetter=setValue;return [h(Window,{id:'home',width:400,height:240},h(Text,null,'Home:'+value)),h(Window,{id:'details',width:450,height:260},h(Text,null,'Details:'+value))]}".into();
+        let runtime = PluginPanelApplication::shared_package_runtime(
+            &package,
+            &Default::default(),
+            &package.manifest.surfaces[0],
+        )
+        .unwrap();
+        let mut panels = Vec::new();
+        for (index, surface) in package.manifest.surfaces.iter().enumerate() {
+            panels.push(
+                PluginPanelApplication::from_package_surface_with_runtime(
+                    &package,
+                    &Default::default(),
+                    surface,
+                    PluginImages::new(),
+                    Some(runtime.clone()),
+                )
+                .unwrap(),
+            );
+            if index == 0 {
+                runtime
+                    .borrow_mut()
+                    .eval("globalThis.firstSurfaceSetter=latestSetter")
+                    .unwrap();
+            }
+        }
+        assert_eq!(panels.len(), 2);
+        let generations = panels
+            .iter()
+            .map(|panel| panel.accepted.generation())
+            .collect::<Vec<_>>();
+        let clean_node = format!("{:?}", panels[1].accepted.node());
+        runtime
+            .borrow_mut()
+            .eval("globalThis.secondSurfaceSetter=latestSetter;firstSurfaceSetter(7)")
+            .unwrap();
+        assert!(!panels[1].reconcile_idle_work().unwrap());
+        assert_eq!(panels[1].accepted.generation(), generations[1]);
+        assert!(panels[0].reconcile_idle_work().unwrap());
+        assert!(panels[0].accepted.generation() > generations[0]);
+        assert!(format!("{:?}", panels[0].accepted.node()).contains(":7"));
+        assert_eq!(format!("{:?}", panels[1].accepted.node()), clean_node);
+        let first_node = format!("{:?}", panels[0].accepted.node());
+        runtime
+            .borrow_mut()
+            .eval("secondSurfaceSetter(11)")
+            .unwrap();
+        assert!(!panels[0].reconcile_idle_work().unwrap());
+        assert!(panels[1].reconcile_idle_work().unwrap());
+        assert!(format!("{:?}", panels[1].accepted.node()).contains(":11"));
+        assert_eq!(format!("{:?}", panels[0].accepted.node()), first_node);
+        for panel in &mut panels {
+            assert!(!panel.reconcile_idle_work().unwrap());
+            assert!(panel.take_effects().is_empty());
+        }
+    }
+
+    #[test]
+    fn idle_reconciliation_of_non_host_child_preserves_visible_window() {
+        let mut package = PluginPackage::load(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/plugins/example-two-windows"
+        ))
+        .unwrap();
+        package.source = "function Hidden(){const [value,setValue]=useState(0);globalThis.hiddenSetter=setValue;return h(Text,null,'Hidden:'+value)}\nexport default function App(){return [h(Window,{id:'home',width:400,height:240},h(Text,null,'Home')),h(Window,{id:'details',width:450,height:260},h(Hidden))]}".into();
+        let mut panel = PluginPanelApplication::from_package_surface_with_runtime(
+            &package,
+            &Default::default(),
+            &package.manifest.surfaces[0],
+            PluginImages::new(),
+            None,
+        )
+        .unwrap();
+        let generation = panel.accepted.generation();
+        let node = format!("{:?}", panel.accepted.node());
+        panel.runtime.borrow_mut().eval("hiddenSetter(7)").unwrap();
+        assert!(!panel.reconcile_idle_work().unwrap());
+        assert_eq!(panel.accepted.generation(), generation);
+        assert_eq!(format!("{:?}", panel.accepted.node()), node);
+        assert!(!panel.reconcile_idle_work().unwrap());
+        let materialized = panel
+            .runtime
+            .borrow_mut()
+            .eval_json::<u64>("__runtimeCounters.nativeNodesMaterialized")
+            .unwrap();
+        for value in 8..16 {
+            panel
+                .runtime
+                .borrow_mut()
+                .eval(&format!("hiddenSetter({value})"))
+                .unwrap();
+            assert!(!panel.reconcile_idle_work().unwrap());
+            assert_eq!(panel.accepted.generation(), generation);
+        }
+        assert_eq!(
+            panel
+                .runtime
+                .borrow_mut()
+                .eval_json::<u64>("__runtimeCounters.nativeNodesMaterialized")
+                .unwrap(),
+            materialized
         );
     }
 
@@ -5708,6 +8082,70 @@ mod tests {
     }
 
     #[test]
+    fn native_text_revisions_follow_accepted_content_and_presentation_lifetimes() {
+        with_package_runtime_stack(native_text_revision_lifecycle_inner);
+    }
+
+    fn native_text_revision_lifecycle_inner() {
+        let source = "function App() { return h(Panel, {}, h(Text, {}, nickel.data.label)); }";
+        let make = |label: &str| {
+            PluginPanelApplication::new_with_manifest(
+                source,
+                manifest(),
+                Some(serde_json::json!({"label":label}).to_string()),
+            )
+            .unwrap()
+        };
+        let mut host = nickel_ui::UiHost::new(make("Before"), 320, 100);
+        let initial = host.application().native_text_revision.get().unwrap();
+        assert!(initial.2.is_some());
+        for _ in 0..4 {
+            let outcome = host.step(nickel_ui::HostBatch {
+                application_changed: true,
+                ..Default::default()
+            });
+            assert_eq!(host.application().native_text_revision.get(), Some(initial));
+            assert_eq!(outcome.telemetry.nodes_measured, 0);
+        }
+        let other = nickel_ui::UiHost::new(make("Before"), 320, 100);
+        assert_ne!(
+            other.application().native_text_revision.get().unwrap().2,
+            initial.2
+        );
+        host.application_mut()
+            .sync_data(&serde_json::json!({"label":"A longer changed label"}))
+            .unwrap();
+        host.step(nickel_ui::HostBatch {
+            application_changed: true,
+            ..Default::default()
+        });
+        let changed = host.application().native_text_revision.get().unwrap();
+        assert_ne!(changed.2, initial.2);
+        let cold = nickel_ui::UiHost::new(make("A longer changed label"), 320, 100);
+        assert_eq!(host.commands(), cold.commands());
+        assert_eq!(host.layout_snapshot(), cold.layout_snapshot());
+        host.application_mut()
+            .sync_reading_direction(nickel_ui::ReadingDirection::RightToLeft);
+        host.step(nickel_ui::HostBatch {
+            application_changed: true,
+            ..Default::default()
+        });
+        assert_ne!(
+            host.application().native_text_revision.get().unwrap().2,
+            changed.2
+        );
+
+        let exhausted = AtomicU64::new(u64::MAX - 1);
+        assert_eq!(
+            allocate_native_text_revision(&exhausted),
+            Some(u64::MAX - 1)
+        );
+        assert_eq!(allocate_native_text_revision(&exhausted), None);
+        assert_eq!(allocate_native_text_revision(&exhausted), None);
+        assert_eq!(exhausted.load(Ordering::Relaxed), u64::MAX);
+    }
+
+    #[test]
     fn unstyled_plugin_button_has_no_mandatory_paint() {
         let source = "function App() { return h(Panel, {background: 0}, h(Button, {id: 'go', onClick: () => {}}, 'Go')); }";
         let host = nickel_ui::UiHost::new(PluginPanelApplication::new(source).unwrap(), 320, 80);
@@ -6313,6 +8751,82 @@ mod tests {
         granted.sync_host_data_field("plugins", &stale).unwrap();
         granted.update(granted.button_message("change").unwrap());
         assert!(granted.take_effects().is_empty());
+    }
+
+    #[test]
+    fn plugin_metadata_and_preview_effects_dispatch_with_native_grants() {
+        let mut manifest = PluginPackage::load(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/plugins/example-window"
+        ))
+        .unwrap()
+        .manifest;
+        for (operation, preview) in [
+            ("nickel.plugins.setSetting('example','count',3,'7')", false),
+            ("nickel.plugins.selectShell('example','7')", false),
+            ("nickel.plugins.confirmShell('11','7')", true),
+            ("nickel.plugins.revertShell('11','7')", true),
+        ] {
+            let snapshot = serde_json::json!({"available":true,"writable":true,"revision":"7",
+                "shellPreview":if preview { serde_json::json!({"token":"11","canConfirm":true,"canRevert":true}) } else {Value::Null},
+                "plugins":[{"id":"example","shell":true,"enabled":true,
+                    "settings":[{"id":"count","kind":{"kind":"integer","min":1,"max":4},"value":2}]}]
+            });
+            let source = format!(
+                "function App() {{ return h(Window,{{id:'main',width:520,height:340}},h(Button,{{id:'change',onClick:()=>{operation}}},'Change')); }}"
+            );
+            for capabilities in [
+                vec![],
+                vec![PluginCapability::PluginsRead],
+                vec![PluginCapability::PluginsControl],
+                vec![
+                    PluginCapability::PluginsRead,
+                    PluginCapability::PluginsControl,
+                ],
+            ] {
+                let admitted = capabilities.len() == 2;
+                manifest.capabilities = capabilities;
+                let mut application = PluginPanelApplication::new_with_manifest(
+                    &source,
+                    &manifest,
+                    Some(serde_json::json!({"plugins":snapshot}).to_string()),
+                )
+                .unwrap();
+                application.update(application.button_message("change").unwrap());
+                let effects = application.take_effects();
+                if admitted {
+                    assert!(
+                        application.last_error().is_none(),
+                        "{operation}: {:?}",
+                        application.last_error()
+                    );
+                    assert!(
+                        matches!(
+                            (operation, effects.as_slice()),
+                            (
+                                "nickel.plugins.setSetting('example','count',3,'7')",
+                                [PluginEffect::PluginsSetting { .. }]
+                            ) | (
+                                "nickel.plugins.selectShell('example','7')",
+                                [PluginEffect::ShellSelection { .. }]
+                            ) | (
+                                "nickel.plugins.confirmShell('11','7')"
+                                    | "nickel.plugins.revertShell('11','7')",
+                                [PluginEffect::ShellPreviewDecision { .. }]
+                            )
+                        ),
+                        "{operation}: {effects:?}"
+                    );
+                    let mut stale = snapshot.clone();
+                    stale["revision"] = "8".into();
+                    application.sync_host_data_field("plugins", &stale).unwrap();
+                    application.update(application.button_message("change").unwrap());
+                    assert!(application.take_effects().is_empty(), "stale {operation}");
+                } else {
+                    assert!(effects.is_empty(), "ungranted {operation}: {effects:?}");
+                }
+            }
+        }
     }
 
     #[test]
@@ -7924,6 +10438,139 @@ mod tests {
     }
 
     #[test]
+    fn gc_only_idle_maintenance_preserves_the_accepted_panel_generation() {
+        let mut panel =
+            PluginPanelApplication::new("function App(){return h(Panel,null,h(Text,null,'idle'))}")
+                .unwrap();
+        let generation = panel.accepted.generation();
+        for _ in 0..16 {
+            panel.runtime.borrow_mut().eval(
+                "globalThis.temporaryAllocations=Array.from({length:16384},(_,i)=>({i}));temporaryAllocations=null"
+            ).unwrap();
+            assert!(!panel.service_idle_platform_tasks().unwrap());
+            assert_eq!(panel.accepted.generation(), generation);
+            assert!(panel.take_effects().is_empty());
+        }
+        panel.runtime.borrow_mut().begin_transaction().unwrap();
+        assert!(panel.service_idle_platform_tasks().is_err());
+        panel
+            .runtime
+            .borrow_mut()
+            .finish_transaction(false)
+            .unwrap();
+        assert!(!panel.service_idle_platform_tasks().unwrap());
+    }
+
+    #[test]
+    fn empty_validated_dispatch_preserves_native_tree_on_rejection() {
+        let mut panel = PluginPanelApplication::new(
+            "function App(){const [invalid,setInvalid]=useState(false);globalThis.invalidateIdle=setInvalid;return h(Panel,null,invalid?h('not-a-component'):h(Text,null,'accepted'));}",
+        )
+        .unwrap();
+        let original = format!("{:?}", panel.accepted.node());
+        let generation = panel.accepted.generation();
+        panel
+            .runtime
+            .borrow_mut()
+            .eval("invalidateIdle(true)")
+            .unwrap();
+        panel.dispatch_validated_events(Vec::new());
+        assert_eq!(format!("{:?}", panel.accepted.node()), original);
+        assert_eq!(panel.accepted.generation(), generation);
+        assert!(panel.last_error().is_some());
+        assert!(panel.take_effects().is_empty());
+    }
+
+    #[test]
+    fn empty_validated_dispatch_keeps_effect_capability_checks() {
+        for granted in [false, true] {
+            let mut manifest = PluginPackage::load(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../assets/plugins/example-window"
+            ))
+            .unwrap()
+            .manifest;
+            manifest.capabilities = if granted {
+                vec![PluginCapability::LauncherShow]
+            } else {
+                Vec::new()
+            };
+            let mut panel = PluginPanelApplication::new_with_manifest(
+                "function App(){return h(Window,{width:320,height:180},h(Text,null,'accepted'))}",
+                &manifest,
+                None,
+            )
+            .unwrap();
+            let generation = panel.accepted.generation();
+            panel
+                .runtime
+                .borrow_mut()
+                .eval("nickel.request('show-launcher')")
+                .unwrap();
+            panel.dispatch_validated_events(Vec::new());
+            assert_eq!(panel.accepted.generation(), generation);
+            if granted {
+                assert_eq!(panel.take_effects(), vec![PluginEffect::ShowLauncher]);
+                assert!(panel.last_error().is_none());
+            } else {
+                assert!(panel.take_effects().is_empty());
+                assert!(panel.last_error().is_some());
+            }
+        }
+    }
+
+    #[test]
+    fn idle_reconciliation_admits_dirty_state_without_fabricated_input() {
+        let mut panel = PluginPanelApplication::new(
+            "function App(){const [count,setCount]=useState(0);globalThis.setIdleCount=setCount;return h(Panel,null,h(Text,null,'count:'+count));}",
+        )
+        .unwrap();
+        let original_generation = panel.accepted.generation();
+        assert!(!panel.reconcile_idle_work().unwrap());
+        assert_eq!(panel.accepted.generation(), original_generation);
+        panel.runtime.borrow_mut().eval("setIdleCount(1)").unwrap();
+        assert!(panel.reconcile_idle_work().unwrap());
+        assert!(format!("{:?}", panel.accepted.node()).contains("count:1"));
+        assert!(panel.accepted.generation() > original_generation);
+        assert!(panel.last_error().is_none());
+        assert!(panel.take_effects().is_empty());
+        let accepted_generation = panel.accepted.generation();
+        assert!(!panel.reconcile_idle_work().unwrap());
+        assert_eq!(panel.accepted.generation(), accepted_generation);
+    }
+
+    #[test]
+    fn host_poll_reconciles_pending_state_without_idle_timer_or_clean_redraw() {
+        let panel = PluginPanelApplication::new(
+            "function App(){const [count,setCount]=useState(0);globalThis.pollSetter=setCount;return h(Panel,null,h(Text,null,'count:'+count));}"
+        ).unwrap();
+        let runtime = panel.runtime.clone();
+        let mut host = nickel_ui::UiHost::new(panel, 320, 80);
+        let generation = host.resolved_frame_generation();
+        assert!(host.next_deadline().is_none());
+        assert!(!host.poll());
+        assert_eq!(host.resolved_frame_generation(), generation);
+        runtime.borrow_mut().eval("pollSetter(1)").unwrap();
+        assert!(host.poll());
+        assert!(format!("{:?}", host.application().accepted.node()).contains("count:1"));
+        let generation = host.resolved_frame_generation();
+        assert!(!host.poll());
+        assert_eq!(host.resolved_frame_generation(), generation);
+        assert!(host.next_deadline().is_none());
+        assert!(host.application().last_error().is_none());
+        runtime
+            .borrow_mut()
+            .eval("nickel.request('show-launcher')")
+            .unwrap();
+        assert!(!host.poll());
+        assert_eq!(host.resolved_frame_generation(), generation);
+        assert_eq!(
+            host.application_mut().take_effects(),
+            vec![PluginEffect::ShowLauncher]
+        );
+    }
+
+    #[test]
     fn passive_effect_state_is_reconciled_after_mount() {
         let panel = PluginPanelApplication::new(
             r#"
@@ -7937,6 +10584,30 @@ mod tests {
         .unwrap();
         assert!(format!("{:?}", panel.accepted.node()).contains("count:1"));
         assert!(panel.last_error().is_none());
+    }
+
+    #[test]
+    fn passive_effect_without_native_changes_preserves_generation() {
+        let panel = PluginPanelApplication::new(
+            r#"
+                function App() {
+                    const [ready, setReady] = useState(false);
+                    useEffect(() => { setReady(true); }, []);
+                    return h(Panel, null, h(Text, null, 'unchanged'));
+                }
+            "#,
+        )
+        .unwrap();
+        assert!(panel.last_error().is_none());
+        assert_eq!(panel.accepted.generation(), 1);
+        assert_eq!(
+            panel
+                .runtime
+                .borrow_mut()
+                .eval_json::<u64>("__runtimeCounters.renders")
+                .unwrap(),
+            2
+        );
     }
 
     #[test]
@@ -8110,6 +10781,12 @@ mod tests {
 
     fn settings_admission_runtime() -> Result<AdmissionRuntime, String> {
         let package = crate::bundled_plugin_assets::load_package("nickel-default")?;
+        settings_admission_runtime_with_package(package)
+    }
+
+    fn settings_admission_runtime_with_package(
+        package: PluginPackage,
+    ) -> Result<AdmissionRuntime, String> {
         let surface = package
             .manifest
             .surfaces
@@ -8416,6 +11093,43 @@ mod tests {
                     .unwrap()
             );
         }
+        // Native owned-value publication and the legacy serialized entry point
+        // must share the same committed snapshot and unchanged-update behavior.
+        let snapshot = host.application().projection_value.clone().unwrap();
+        let serialized = snapshot.to_string();
+        assert_eq!(
+            host.application().projection_data.as_deref(),
+            Some(serialized.as_str())
+        );
+        assert!(
+            !host
+                .application_mut()
+                .sync_serialized_data(serialized)
+                .unwrap()
+        );
+        assert!(!host.application_mut().sync_data(&snapshot).unwrap());
+        assert!(
+            !host
+                .application_mut()
+                .sync_host_data_fields(&[
+                    ("navigation", &navigation),
+                    ("clock", &snapshot["clock"])
+                ])
+                .unwrap()
+        );
+        assert!(
+            host.application_mut()
+                .sync_host_data_fields(&[("not-a-host-field", &serde_json::Value::Null)])
+                .is_err()
+        );
+        assert_eq!(
+            host.application().projection_value.as_ref(),
+            Some(&snapshot)
+        );
+        assert!(
+            host.application_mut().refresh_settings_render().unwrap(),
+            "forced sibling refresh must not take the unchanged fast path"
+        );
         let appearance = host
             .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
                 role: SemanticRole::Button,
@@ -8520,6 +11234,2058 @@ mod tests {
             .unwrap()
             .join()
             .unwrap();
+    }
+
+    #[test]
+    #[ignore = "release-profile real Settings same-target pointer workload"]
+    fn production_settings_pointer_motion_emits_release_distribution() {
+        std::thread::Builder::new()
+            .stack_size(32 * 1024 * 1024)
+            .spawn(|| {
+                for (page, wallpaper_count, target) in [
+                    ("keyboard-shortcuts", 0, "Keyboard shortcuts"),
+                    ("appearance", 0, "Light"),
+                    ("appearance", 128, "Light"),
+                ] {
+                    let (mut application, _composition) =
+                        settings_admission_application(&format!("nickel-default/{page}")).unwrap();
+                    let wallpaper = serde_json::json!({
+                        "available":true,"writable":true,"generation":2,
+                        "configured":{"custom_image_configured":false,"position":"fill"},
+                        "images":(0..wallpaper_count).map(|index| serde_json::json!({
+                            "id":format!("fixture-{index}"),"label":format!("Wallpaper {index}"),
+                            "configured":false,
+                        })).collect::<Vec<_>>(),
+                        "chooser":{"available":true,"pending":false,"result":null},
+                    });
+                    application.sync_host_data_fields(&[
+                        ("wallpaper", &wallpaper),
+                        ("shortcuts", &crate::shortcut_capabilities::snapshot(false, None)),
+                    ]).unwrap();
+                    let mut host = nickel_ui::UiHost::new(application, 1100, 800);
+                    let target = host.query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                        role: SemanticRole::Button, name: target.into(),
+                    }).unwrap();
+                    let center = Point {
+                        x: target.bounds.origin.x + target.bounds.size.width / 2.0,
+                        y: target.bounds.origin.y + target.bounds.size.height / 2.0,
+                    };
+                    let motion = |host: &mut nickel_ui::UiHost<PluginPanelApplication>, x| {
+                        crate::live_shell::step_plugin_host(host, None, nickel_ui::HostBatch {
+                            events: vec![nickel_ui::HostEvent::Ui(nickel_ui::UiEvent::PointerMoved(Point { x, ..center }))],
+                            ..Default::default()
+                        }).unwrap()
+                    };
+                    for _ in 0..16 { motion(&mut host, center.x); }
+                    assert_eq!(host.inspect().pointer_hover.as_ref(), Some(&target.id));
+                    let generation = host.resolved_frame_generation();
+                    let runtime = host.application_mut().shared_runtime();
+                    let before = settings_profile_totals(&runtime.borrow_mut().runtime_diagnostics().unwrap());
+                    let mut samples = Vec::with_capacity(512);
+                    let mut allocation_operations = 0;
+                    let mut requested_bytes = 0;
+                    let mut bytes = None;
+                    let started = Instant::now();
+                    for index in 0..512 {
+                        let allocations_before = crate::allocation_counter::thread_allocation_operations();
+                        let bytes_before = crate::allocation_counter::thread_requested_bytes();
+                        let started = Instant::now();
+                        let (outcome, retained) = motion(&mut host, center.x + (index % 2) as f32);
+                        samples.push(started.elapsed());
+                        allocation_operations += crate::allocation_counter::thread_allocation_operations() - allocations_before;
+                        requested_bytes += crate::allocation_counter::thread_requested_bytes() - bytes_before;
+                        assert!(!outcome.changed);
+                        assert_eq!(outcome.telemetry.view_calls, 0);
+                        assert_eq!(outcome.telemetry.nodes_measured, 0);
+                        assert_eq!(outcome.telemetry.nodes_placed, 0);
+                        assert_eq!(outcome.telemetry.semantic_nodes_rebuilt, 0);
+                        assert_eq!(outcome.telemetry.paint_commands_emitted, 0);
+                        assert_eq!(outcome.telemetry.retained_paint_refreshes, 0);
+                        assert_eq!(host.resolved_frame_generation(), generation);
+                        if let Some(bytes) = bytes { assert_eq!(retained, bytes); }
+                        bytes = Some(retained);
+                    }
+                    let duration = started.elapsed();
+                    let after = settings_profile_totals(&runtime.borrow_mut().runtime_diagnostics().unwrap());
+                    assert_eq!(after, before, "mouse movement executed JSX or patch transport");
+                    assert!(host.application().last_error().is_none());
+                    let report = serde_json::json!({
+                        "schema":1,"suite":"settings_interaction","workload":"same_target_motion",
+                        "metadata":{"page":page,"wallpapers":wallpaper_count,"previewAssets":0,
+                            "viewport":[1100,800],"scale":1,"samples":samples.len(),"warmup":16,
+                            "backend":"native-host-headless","release":!cfg!(debug_assertions),
+                            "sampleDurationNs":duration.as_nanos() as u64},
+                        "work":{"viewCalls":0,"nodesMeasured":0,"nodesPlaced":0,
+                            "semanticNodesRebuilt":0,"paintCommandsEmitted":0,
+                            "jsxProfileDelta":after.iter().zip(before).map(|(a,b)|a-b).collect::<Vec<_>>()},
+                        "retainedFrameAndImageBytes":bytes,
+                        "allocationVolume":{"scope":"thread Rust System requests; includes event transport, excludes V8 allocator and live memory",
+                            "operations":allocation_operations,"requestedBytes":requested_bytes},
+                        "timings":settings_admission_distribution(&samples),
+                    });
+                    eprintln!("nickel_release_admission={report}");
+                    let mut samples = Vec::with_capacity(128);
+                    let mut allocation_operations = 0;
+                    let mut requested_bytes = 0;
+                    let mut max_fragments = 0;
+                    let mut max_commands = 0;
+                    for index in 0..128 {
+                        let allocations_before = crate::allocation_counter::thread_allocation_operations();
+                        let bytes_before = crate::allocation_counter::thread_requested_bytes();
+                        let started = Instant::now();
+                        let (outcome, _) = motion(&mut host, if index % 2 == 0 { -1.0 } else { center.x });
+                        samples.push(started.elapsed());
+                        allocation_operations += crate::allocation_counter::thread_allocation_operations() - allocations_before;
+                        requested_bytes += crate::allocation_counter::thread_requested_bytes() - bytes_before;
+                        assert!(outcome.changed);
+                        assert_eq!(outcome.telemetry.view_calls, 0, "{page}: hover rebuilt application");
+                        assert_eq!(outcome.telemetry.nodes_measured, 0);
+                        assert_eq!(outcome.telemetry.nodes_placed, 0);
+                        assert_eq!(outcome.telemetry.semantic_nodes_rebuilt, 0);
+                        assert_eq!(outcome.telemetry.retained_paint_refreshes, 1);
+                        assert_eq!(outcome.telemetry.paint_interaction_records_saved, 2);
+                        max_fragments = max_fragments.max(outcome.telemetry.paint_fragments_rebuilt);
+                        max_commands = max_commands.max(outcome.telemetry.paint_commands_emitted);
+                    }
+                    assert_eq!(settings_profile_totals(&runtime.borrow_mut().runtime_diagnostics().unwrap()), before);
+                    let report = serde_json::json!({
+                        "schema":1,"suite":"settings_interaction","workload":"hover_entry_exit",
+                        "metadata":{"page":page,"wallpapers":wallpaper_count,"previewAssets":0,
+                            "viewport":[1100,800],"scale":1,"samples":samples.len(),
+                            "backend":"native-host-headless","release":!cfg!(debug_assertions)},
+                        "work":{"viewCalls":0,"nodesMeasured":0,"nodesPlaced":0,"semanticNodesRebuilt":0,
+                            "maxPaintFragmentsRebuilt":max_fragments,"maxPaintCommandsEmitted":max_commands,
+                            "interactionRecordsSavedPerTransition":2},
+                        "allocationVolume":{"scope":"thread Rust System requests; includes event transport, excludes V8 allocator and live memory",
+                            "operations":allocation_operations,"requestedBytes":requested_bytes},
+                        "timings":settings_admission_distribution(&samples),
+                    });
+                    eprintln!("nickel_release_admission={report}");
+                }
+            }).unwrap().join().unwrap();
+    }
+
+    #[test]
+    #[ignore = "release-profile long-lived Settings virtual traversal workload"]
+    fn production_settings_traversal_reports_retained_lifetimes() {
+        with_package_runtime_stack(|| {
+            fn settle_previews(
+                host: &mut nickel_ui::UiHost<PluginPanelApplication>,
+                previews: &mut crate::wallpaper_previews::WallpaperPreviews,
+                key: &nickel_core::plugins::PluginSurfaceKey,
+                outcome: &mut nickel_ui::HostEventOutcome,
+                retained: &mut u64,
+            ) {
+                let timeout = Instant::now() + std::time::Duration::from_secs(30);
+                loop {
+                    assert!(
+                        Instant::now() < timeout,
+                        "preview/geometry convergence timed out"
+                    );
+                    let size = host.render_frame().logical_size;
+                    let viewport = nickel_ui::Rect::new(0.0, 0.0, size.0 as f32, size.1 as f32);
+                    let demand = host
+                        .application()
+                        .wallpaper_preview_demand(host.resolved_layout(), viewport);
+                    previews.sync_surfaces(std::iter::once((key, demand)), Instant::now());
+                    while previews.next_deadline().is_some() {
+                        assert!(Instant::now() < timeout, "preview decoding timed out");
+                        previews.poll(Instant::now());
+                        if previews.next_deadline().is_some() {
+                            std::thread::sleep(std::time::Duration::from_millis(1));
+                        }
+                    }
+                    if !host
+                        .application_mut()
+                        .sync_application_images(previews.images().clone())
+                    {
+                        break;
+                    }
+                    let (next, bytes) = step_host(
+                        host,
+                        None,
+                        nickel_ui::HostBatch {
+                            application_changed: true,
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap();
+                    outcome.merge(next);
+                    *retained = bytes;
+                }
+                // This fixture's 800-pixel viewport can intersect at most ten
+                // 90-pixel image rectangles. This is an assertion, not admission.
+                assert!(previews.images().len() <= 10);
+            }
+            fn native_actions(value: &Value, actions: &mut std::collections::BTreeSet<u64>) {
+                match value {
+                    Value::Object(object) => {
+                        if let Some(slots) = object.get("__handlerSlots").and_then(Value::as_object)
+                        {
+                            for name in slots.keys() {
+                                actions.insert(object[name].as_u64().unwrap());
+                            }
+                        }
+                        for value in object.values() {
+                            native_actions(value, actions);
+                        }
+                    }
+                    Value::Array(values) => {
+                        for value in values {
+                            native_actions(value, actions);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let (mut application, composition) =
+                settings_admission_application("nickel-default/appearance").unwrap();
+            let previews_enabled =
+                std::env::var("NICKEL_SETTINGS_TRAVERSAL_PREVIEWS").is_ok_and(|value| value == "1");
+            let fixture_directory = previews_enabled.then(|| tempfile::tempdir().unwrap());
+            let preview_catalog = fixture_directory.as_ref().map(|directory| {
+                for index in 0..128u8 {
+                    image::RgbaImage::from_pixel(800, 450, image::Rgba([index, 80, 160, 255]))
+                        .save(directory.path().join(format!("wallpaper-{index:03}.png")))
+                        .unwrap();
+                }
+                crate::wallpaper_selection::Catalog::discover_fixture(directory.path())
+            });
+            let wallpaper_ids: Vec<String> = preview_catalog.as_ref().map_or_else(
+                || (0..128).map(|index| format!("fixture-{index}")).collect(),
+                |catalog| {
+                    catalog
+                        .choices(None)
+                        .into_iter()
+                        .map(|choice| choice.id)
+                        .collect()
+                },
+            );
+            let mut previews = crate::wallpaper_previews::WallpaperPreviews::default();
+            if let Some(catalog) = preview_catalog {
+                previews.set_catalog(catalog);
+            }
+            let preview_key = nickel_core::plugins::PluginSurfaceKey {
+                plugin_id: "nickel-default".into(),
+                surface_id: "settings".into(),
+            };
+            let wallpaper = serde_json::json!({
+                "available":true,"writable":true,"generation":2,
+                "configured":{"custom_image_configured":false,"position":"fill"},
+                "images":wallpaper_ids.iter().enumerate().map(|(index, id)| {
+                    let mut image = serde_json::json!({"id":id,"label":format!("Wallpaper {index}"),"configured":false});
+                    if previews_enabled { image["previewAsset"] = format!("wallpaper:{id}").into(); }
+                    image
+                }).collect::<Vec<_>>(),
+                "chooser":{"available":true,"pending":false,"result":null}
+            });
+            application
+                .sync_host_data_fields(&[
+                    ("wallpaper", &wallpaper),
+                    (
+                        "shortcuts",
+                        &crate::shortcut_capabilities::snapshot(false, None),
+                    ),
+                ])
+                .unwrap();
+            let mut host = nickel_ui::UiHost::new(application, 1100, 800);
+            let mut reports = Vec::new();
+            let cycles = std::env::var("NICKEL_SETTINGS_TRAVERSAL_CYCLES")
+                .map(|value| {
+                    value
+                        .parse::<usize>()
+                        .expect("integer traversal cycle count")
+                })
+                .unwrap_or(24);
+            assert!(
+                (24..=8192).contains(&cycles),
+                "traversal fixture cycles must be 24..=8192"
+            );
+            let snapshot_directory = std::env::var_os("NICKEL_SETTINGS_TRAVERSAL_HEAP_SNAPSHOTS")
+                .map(std::path::PathBuf::from);
+            let pump_platform_tasks = std::env::var_os("NICKEL_SETTINGS_TRAVERSAL_PUMP_TASKS")
+                .is_some_and(|value| value == "1");
+            let host_maintenance = std::env::var_os("NICKEL_SETTINGS_TRAVERSAL_HOST_MAINTENANCE")
+                .is_some_and(|value| value == "1");
+            assert!(!(pump_platform_tasks && host_maintenance));
+            let exit_before_teardown =
+                std::env::var_os("NICKEL_SETTINGS_TRAVERSAL_EXIT_BEFORE_TEARDOWN")
+                    .is_some_and(|value| value == "1");
+            if exit_before_teardown {
+                assert!(
+                    std::env::args().any(|argument| argument == "--exact"),
+                    "pre-teardown attribution requires an isolated exact test invocation"
+                );
+            }
+            if let Some(directory) = &snapshot_directory {
+                assert!(
+                    directory.is_dir(),
+                    "heap snapshot directory must already exist"
+                );
+                assert!(
+                    cycles >= 256,
+                    "heap attribution needs a warm baseline and later snapshot"
+                );
+            }
+            let mut steady_compilations = None;
+            for cycle in 0..cycles {
+                let mut phases = Vec::with_capacity(6);
+                let started = Instant::now();
+                let allocations_before = crate::allocation_counter::thread_allocation_operations();
+                let bytes_before = crate::allocation_counter::thread_requested_bytes();
+                let mut peak_frame = 0;
+                let mut peak_preview_pixels = 0usize;
+                for delta in [100_000.0, -100_000.0, 100_000.0, -100_000.0] {
+                    let phase_started = Instant::now();
+                    let phase_operations =
+                        crate::allocation_counter::thread_allocation_operations();
+                    let phase_bytes = crate::allocation_counter::thread_requested_bytes();
+                    let (mut outcome, mut retained) = step_host(
+                        &mut host,
+                        None,
+                        nickel_ui::HostBatch {
+                            events: vec![nickel_ui::HostEvent::Ui(nickel_ui::UiEvent::Scroll {
+                                point: Point { x: 700.0, y: 600.0 },
+                                delta_y: delta,
+                            })],
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap();
+                    if previews_enabled {
+                        settle_previews(
+                            &mut host,
+                            &mut previews,
+                            &preview_key,
+                            &mut outcome,
+                            &mut retained,
+                        );
+                        peak_preview_pixels = peak_preview_pixels.max(
+                            previews
+                                .images()
+                                .values()
+                                .map(|(_, image)| image.len())
+                                .sum(),
+                        );
+                    }
+                    let elapsed = phase_started.elapsed();
+                    let operations = crate::allocation_counter::thread_allocation_operations()
+                        - phase_operations;
+                    let requested =
+                        crate::allocation_counter::thread_requested_bytes() - phase_bytes;
+                    phases.push(serde_json::json!({"action":if delta>0.0 {"scroll-end"} else {"scroll-start"},
+                        "elapsedNs":elapsed.as_nanos() as u64,"allocationOperations":operations,"requestedBytes":requested,
+                        "viewCalls":outcome.telemetry.view_calls,"nodesMeasured":outcome.telemetry.nodes_measured,
+                        "nodesPlaced":outcome.telemetry.nodes_placed,"paintCommands":outcome.telemetry.paint_commands_emitted}));
+                    assert!(!host.application().virtual_work_pending);
+                    peak_frame = peak_frame.max(retained);
+                    let (sources, rows, _) = host.application().accepted.virtual_source_usage();
+                    assert_eq!((sources, rows), (1, 128));
+                    assert!(host.resolved_layout().nodes().len() < 500);
+                    if delta > 0.0 {
+                        assert!(
+                            host.application()
+                                .button_message(&format!(
+                                    "appearance-wallpaper-{}",
+                                    wallpaper_ids[127]
+                                ))
+                                .is_some()
+                        );
+                        assert!(
+                            host.application()
+                                .button_message(&format!(
+                                    "appearance-wallpaper-{}",
+                                    wallpaper_ids[0]
+                                ))
+                                .is_none()
+                        );
+                    }
+                }
+                let mut checkpoints = Vec::new();
+                for page in ["Keyboard shortcuts", "Appearance"] {
+                    let destination = if page == "Appearance" {
+                        "appearance"
+                    } else {
+                        "keyboard-shortcuts"
+                    };
+                    let token = host
+                        .application()
+                        .accepted
+                        .node()
+                        .button_action(&format!(
+                            "settings-navigation/destination/nickel-default/{destination}"
+                        ))
+                        .unwrap();
+                    let binding = host
+                        .application()
+                        .composition
+                        .as_ref()
+                        .unwrap()
+                        .events
+                        .get(&(token as u64));
+                    assert!(
+                        binding.is_some(),
+                        "cycle {cycle} {page}: live navigation token {token} has no callback authority"
+                    );
+                    let navigation = host
+                        .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                            role: SemanticRole::Button,
+                            name: page.into(),
+                        })
+                        .unwrap();
+                    let phase_started = Instant::now();
+                    let phase_operations =
+                        crate::allocation_counter::thread_allocation_operations();
+                    let phase_bytes = crate::allocation_counter::thread_requested_bytes();
+                    let mut action = host.perform_semantic_action(
+                        navigation.id,
+                        nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
+                    );
+                    assert!(
+                        action.semantic_failures.is_empty(),
+                        "cycle {cycle} {page}: {:?}",
+                        action.semantic_failures
+                    );
+                    assert!(
+                        action.changed,
+                        "cycle {cycle} {page}: navigation did not change the host"
+                    );
+                    let (followup, mut retained) =
+                        step_host(&mut host, None, Default::default()).unwrap();
+                    action.merge(followup);
+                    if previews_enabled {
+                        settle_previews(
+                            &mut host,
+                            &mut previews,
+                            &preview_key,
+                            &mut action,
+                            &mut retained,
+                        );
+                    }
+                    let elapsed = phase_started.elapsed();
+                    let operations = crate::allocation_counter::thread_allocation_operations()
+                        - phase_operations;
+                    let requested =
+                        crate::allocation_counter::thread_requested_bytes() - phase_bytes;
+                    phases.push(serde_json::json!({"action":page,"elapsedNs":elapsed.as_nanos() as u64,
+                        "allocationOperations":operations,"requestedBytes":requested,"viewCalls":action.telemetry.view_calls,
+                        "nodesMeasured":action.telemetry.nodes_measured,"nodesPlaced":action.telemetry.nodes_placed,
+                        "paintCommands":action.telemetry.paint_commands_emitted}));
+                    assert!(
+                        host.application().last_error().is_none(),
+                        "cycle {cycle} page {page}: {:?}",
+                        host.application().last_error()
+                    );
+                    assert!(!host.application().virtual_work_pending);
+                    let catalog = host.application().accepted.virtual_source_usage();
+                    let mut live_actions = std::collections::BTreeSet::new();
+                    native_actions(host.application().accepted.source(), &mut live_actions);
+                    let admitted_actions = host
+                        .application()
+                        .composition
+                        .as_ref()
+                        .unwrap()
+                        .events
+                        .keys()
+                        .copied()
+                        .collect();
+                    assert_eq!(
+                        live_actions, admitted_actions,
+                        "cycle {cycle} {page}: callback table differs from live native actions"
+                    );
+                    if page == "Keyboard shortcuts" {
+                        assert_eq!(catalog, (0, 0, 0));
+                        assert!(previews.images().is_empty());
+                        assert!(previews.next_deadline().is_none());
+                        assert!(!host.application().has_wallpaper_images());
+                    } else {
+                        assert_eq!(
+                            (catalog.0, catalog.1),
+                            (1, 128),
+                            "cycle {cycle}: Appearance navigation did not restore its source"
+                        );
+                    }
+                    checkpoints.push(serde_json::json!({"page":page,"frameAndImageBytes":retained,
+                        "previewImages":previews.images().len(),
+                        "previewPixelBytes":previews.images().values().map(|(_, image)| image.len()).sum::<usize>(),
+                        "catalogSources":catalog.0,"catalogRows":catalog.1,"catalogPayloadBytes":catalog.2,
+                        "mounts":composition.borrow().mount_count(),
+                        "eventBindings":host.application().composition.as_ref().unwrap().events.len()}));
+                }
+                let elapsed = started.elapsed();
+                let operations =
+                    crate::allocation_counter::thread_allocation_operations() - allocations_before;
+                let requested = crate::allocation_counter::thread_requested_bytes() - bytes_before;
+                let runtime = host.application_mut().shared_runtime();
+                let (pumped_tasks, platform_task_ns) = if host_maintenance {
+                    let before = runtime.borrow_mut().runtime_diagnostics().unwrap()["engine"]
+                        ["platformTasksServiced"].as_u64().unwrap();
+                    let task_started = Instant::now();
+                    assert!(
+                        !host
+                            .application_mut()
+                            .service_idle_platform_tasks()
+                            .unwrap(),
+                        "GC-only maintenance must not change the accepted UI"
+                    );
+                    let elapsed = task_started.elapsed().as_nanos() as u64;
+                    let after = runtime.borrow_mut().runtime_diagnostics().unwrap()["engine"]
+                        ["platformTasksServiced"].as_u64().unwrap();
+                    ((after - before) as usize, elapsed)
+                } else if pump_platform_tasks {
+                    let task_started = Instant::now();
+                    let count = runtime
+                        .borrow_mut()
+                        .diagnostic_pump_platform_tasks()
+                        .unwrap();
+                    (count, task_started.elapsed().as_nanos() as u64)
+                } else {
+                    (0, 0)
+                };
+                let diagnostics = runtime.borrow_mut().runtime_diagnostics().unwrap();
+                if cycle >= 4 {
+                    let compilations = diagnostics["engine"]["scriptCompilations"]
+                        .as_u64()
+                        .unwrap();
+                    assert_eq!(
+                        *steady_compilations.get_or_insert(compilations),
+                        compilations,
+                        "unchanged loaded packages must not compile call wrappers during traversal"
+                    );
+                }
+                // Sample outside the measured cycle. This includes the entire
+                // test process (V8, allocator retention and report storage),
+                // unlike the native frame resource accounting above.
+                #[cfg(target_os = "linux")]
+                let process_memory = {
+                    // Observation only: do not trim or force collection to
+                    // manufacture a plateau. Include allocator live/free space
+                    // so RSS growth alone is not mislabeled as object leakage.
+                    let memory = crate::process_memory::trim_snapshot();
+                    serde_json::json!({"rssBytes":memory.process_rss_bytes,
+                        "anonymousRssBytes":memory.process_anonymous_bytes,
+                        "privateBytes":memory.process_private_bytes,
+                        "allocatorArenaBytes":memory.allocator_arena_bytes,
+                        "allocatorMmapBytes":memory.allocator_mmap_bytes,
+                        "allocatorLiveBytes":memory.allocator_live_bytes,
+                        "allocatorFreeBytes":memory.allocator_free_bytes,
+                        "allocatorReleasableBytes":memory.allocator_releasable_bytes})
+                };
+                #[cfg(not(target_os = "linux"))]
+                let process_memory = Value::Null;
+                let rust_live_requested = crate::allocation_counter::live_requested_bytes();
+                let report = serde_json::json!({"cycle":cycle,"warmup":cycle<4,"elapsedNs":elapsed.as_nanos() as u64,
+                    "rustLiveRequestedBytes":rust_live_requested,
+                    "rustLiveAccounting":true,
+                    "diagnosticHeapSnapshots":snapshot_directory.is_some(),
+                    "diagnosticPlatformTasks":pump_platform_tasks,"pumpedPlatformTasks":pumped_tasks,
+                    "diagnosticHostMaintenance":host_maintenance,
+                    "platformTaskNs":platform_task_ns,
+                    "peakPreviewPixelBytes":peak_preview_pixels,
+                    "allocationOperations":operations,"requestedBytes":requested,"peakFrameAndImageBytes":peak_frame,
+                    "checkpoints":checkpoints,"phases":phases,"engine":diagnostics["engine"],
+                    "runtimeRetention":diagnostics["retained"],"runtimeCounters":diagnostics["counters"],"processMemory":process_memory});
+                if cycles > 24 {
+                    // Long memory runs stream outside the measured interval so
+                    // retaining benchmark reports cannot create a false leak.
+                    eprintln!("nickel_settings_traversal_cycle={report}");
+                } else {
+                    reports.push(report);
+                }
+                if let Some(directory) = &snapshot_directory
+                    && (cycle == 128 || cycle + 1 == cycles)
+                {
+                    use std::io::Write;
+                    // Synthetic fixture only. V8 may collect during snapshots;
+                    // keep this explicitly separate from normal plateau runs.
+                    let snapshot = runtime.borrow_mut().diagnostic_heap_snapshot().unwrap();
+                    let path = directory.join(format!("cycle-{cycle:05}.heapsnapshot"));
+                    let mut file = std::fs::OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .open(&path)
+                        .unwrap();
+                    file.write_all(&snapshot).unwrap();
+                    eprintln!("diagnostic_heap_snapshot={}", path.display());
+                }
+            }
+            eprintln!(
+                "nickel_settings_traversal={}",
+                serde_json::json!({
+                    "backend":"native-host-headless","viewport":[1100,800],"scale":1,
+                    "wallpapers":128,"previewAssets":if previews_enabled {128} else {0},"release":!cfg!(debug_assertions),
+                    "previewSourcePixels":if previews_enabled {serde_json::json!([800,450])} else {Value::Null},
+                    "previewTimingScope":"headless phases await native worker completion; includes deadline waits, not compositor latency; thread allocations exclude the worker",
+                    "cycleCount":cycles,"streamedCycles":cycles>24,"cycles":reports,
+                    "diagnosticHeapSnapshots":snapshot_directory.is_some(),
+                    "diagnosticPlatformTasks":pump_platform_tasks,
+                    "diagnosticHostMaintenance":host_maintenance,
+                    "diagnosticExitBeforeTeardown":exit_before_teardown,
+                    "rustLiveAccounting":true
+                })
+            );
+            if exit_before_teardown {
+                // Profiler attribution only: retain the live host/isolate so
+                // process-exit allocation stacks describe this boundary rather
+                // than V8 teardown caches. This intentionally bypasses the test
+                // harness result and is never a test-pass or plateau claim.
+                // Remove only the fixture's own temporary image directory.
+                drop(fixture_directory);
+                eprintln!(
+                    "diagnostic_exit_before_teardown=true; test completion intentionally bypassed"
+                );
+                std::process::exit(0);
+            }
+            host.application_mut().retire_surface().unwrap();
+            assert_eq!(composition.borrow().mount_count(), 0);
+        });
+    }
+
+    #[test]
+    fn production_settings_initial_size_matches_manifest_before_output_observation() {
+        with_package_runtime_stack(|| {
+            let (mut application, _composition) =
+                settings_admission_application("nickel-default/appearance").unwrap();
+            let manifest = crate::bundled_plugin_assets::load_package("nickel-default")
+                .unwrap()
+                .manifest;
+            let surface = manifest
+                .surfaces
+                .iter()
+                .find(|surface| surface.id == "settings")
+                .unwrap();
+            application
+                .sync_host_data_fields(&[(
+                    "displays",
+                    &serde_json::json!({"available":false,"outputs":[]}),
+                )])
+                .unwrap();
+            let window = find_settings_source(application.accepted.source(), "settings").unwrap();
+            assert_eq!(window["width"], surface.width);
+            assert_eq!(window["height"], surface.height);
+            application
+                .sync_host_data_fields(&[(
+                    "displays",
+                    &serde_json::json!({"available":true,"outputs":[{
+                        "primary":true,"geometry":{"x":0,"y":0,"width":1200,"height":768},
+                        "work_area":{"x":0,"y":0,"width":1200,"height":712}
+                    }]}),
+                )])
+                .unwrap();
+            let window = find_settings_source(application.accepted.source(), "settings").unwrap();
+            assert_eq!(window["width"], 1100);
+            assert_eq!(window["height"], 656);
+        });
+    }
+
+    #[test]
+    fn production_settings_associations_bound_cards_and_handler_rows() {
+        with_package_runtime_stack(|| {
+            let settle = |host: &mut nickel_ui::UiHost<PluginPanelApplication>| {
+                for _ in 0..16 {
+                    if !host.application().virtual_work_pending {
+                        return;
+                    }
+                    let now = host
+                        .next_deadline()
+                        .expect("virtual continuation must schedule its native deadline");
+                    crate::live_shell::step_plugin_host(
+                        host,
+                        None,
+                        nickel_ui::HostBatch {
+                            now: Some(now),
+                            events: vec![nickel_ui::HostEvent::Poll],
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap();
+                    assert!(host.resolved_layout().nodes().len() < 600);
+                }
+                assert!(
+                    !host.application().virtual_work_pending,
+                    "nested sources failed to converge"
+                );
+            };
+            let (mut application, _composition) =
+                settings_admission_application("nickel-default/default-apps").unwrap();
+            let catalog = serde_json::json!({"available":true,"writable":true,"revision":"7",
+                "operations":{"setDefault":true,"openSystemSettings":true},
+                "targets":(0..128).map(|target| serde_json::json!({
+                    "id":format!("mime:text/x-{target}"),"family":if target % 2 == 0 {"Documents"} else {"Links"},"canSetDefault":true,
+                    "effectiveHandlerId":"handler-0","protected":false,
+                    "handlers":(0..128).map(|handler| serde_json::json!({
+                        "id":format!("handler-{handler}"),"name":format!("Handler {target}/{handler}"),"protected":false,
+                    })).collect::<Vec<_>>()
+                })).collect::<Vec<_>>()
+            });
+            application
+                .sync_host_data_fields(&[("associations", &catalog)])
+                .unwrap();
+            let mut host = nickel_ui::UiHost::new(application, 1100, 800);
+            crate::live_shell::step_plugin_host(&mut host, None, Default::default()).unwrap();
+            settle(&mut host);
+            assert!(!host.application().virtual_work_pending);
+            assert_eq!(
+                logical_source(host.application().accepted.node())
+                    .unwrap()
+                    .len(),
+                128
+            );
+            let bounded = |host: &nickel_ui::UiHost<PluginPanelApplication>| {
+                let rows = host
+                    .application()
+                    .accepted
+                    .node()
+                    .virtual_collection_measurements(host.resolved_layout())
+                    .unwrap();
+                assert!(rows.len() <= 4, "too many association cards materialized");
+                assert!(
+                    rows.iter().map(|source| source.rows.len()).sum::<usize>() < 50,
+                    "offscreen handler rows materialized"
+                );
+                assert!(host.resolved_layout().nodes().len() < 600);
+            };
+            bounded(&host);
+            let last = nickel_ui::SemanticSelector::RoleAndName {
+                role: SemanticRole::Button,
+                name: "Handler 127/127".into(),
+            };
+            assert!(host.query_unique(&last).is_err());
+            crate::live_shell::step_plugin_host(
+                &mut host,
+                None,
+                nickel_ui::HostBatch {
+                    events: vec![nickel_ui::HostEvent::Ui(nickel_ui::UiEvent::Scroll {
+                        point: Point { x: 700.0, y: 600.0 },
+                        delta_y: 1_000_000.0,
+                    })],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            settle(&mut host);
+            assert!(!host.application().virtual_work_pending);
+            bounded(&host);
+            let last = host
+                .query_unique(&last)
+                .expect("last handler in last association reachable");
+            host.perform_semantic_action(
+                last.id,
+                nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
+            );
+            assert!(
+                host.application().last_error().is_none(),
+                "{:?}",
+                host.application().last_error()
+            );
+            let effects = host.application_mut().take_effects();
+            let expected = crate::associations_capabilities::AssociationsEffect::parse(&serde_json::json!({
+                "type":"associations.setDefault","targetId":"mime:text/x-127","handlerId":"handler-127",
+                "revision":"7","expectedHandlerId":"handler-0",
+            })).unwrap();
+            assert!(
+                matches!(effects.as_slice(),[PluginEffect::Associations{effect,..}] if effect == &expected),
+                "{effects:?}"
+            );
+            let search = host
+                .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                    role: SemanticRole::TextField,
+                    name: "Search default applications".into(),
+                })
+                .unwrap();
+            host.request_focus(search.id.clone());
+            for (query, count) in [("Handler 37/", 1), ("no matching handler", 0), ("", 128)] {
+                host.perform_semantic_action(
+                    search.id.clone(),
+                    nickel_ui::SemanticAction::SetValue(nickel_ui::SemanticValueInput::Text(
+                        query.into(),
+                    )),
+                );
+                crate::live_shell::step_plugin_host(&mut host, None, Default::default()).unwrap();
+                settle(&mut host);
+                assert_eq!(
+                    logical_source(host.application().accepted.node())
+                        .unwrap()
+                        .len(),
+                    count
+                );
+                bounded(&host);
+                assert!(host.application().last_error().is_none());
+            }
+            let family = host
+                .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                    role: SemanticRole::Button,
+                    name: "Documents".into(),
+                })
+                .unwrap();
+            host.perform_semantic_action(
+                family.id,
+                nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
+            );
+            crate::live_shell::step_plugin_host(&mut host, None, Default::default()).unwrap();
+            settle(&mut host);
+            assert_eq!(
+                logical_source(host.application().accepted.node())
+                    .unwrap()
+                    .len(),
+                64
+            );
+            bounded(&host);
+        });
+    }
+
+    #[test]
+    fn production_settings_plugins_virtualize_and_preserve_editor_drafts() {
+        with_package_runtime_stack(|| {
+            let settle = |host: &mut nickel_ui::UiHost<PluginPanelApplication>, phase: &str| {
+                for _ in 0..32 {
+                    if !host.application().virtual_work_pending {
+                        return;
+                    }
+                    let now = host.next_deadline().expect("native virtual continuation");
+                    step_host(
+                        host,
+                        None,
+                        nickel_ui::HostBatch {
+                            now: Some(now),
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap();
+                }
+                panic!(
+                    "plugin collections did not converge during {phase}: {:?}; {:?}",
+                    host.application().last_error(),
+                    host.application()
+                        .accepted
+                        .node()
+                        .virtual_collection_measurements(host.resolved_layout())
+                        .unwrap()
+                );
+            };
+            let snapshot = serde_json::json!({
+                "available":true,"writable":true,"revision":"7",
+                "plugins":(0..256).map(|index| serde_json::json!({
+                    "id":format!("fixture-{index}"),"name":format!("Plugin {index}"),
+                    "enabled":true,"health":{"state":"running"},"grants":[],"surfaces":[],
+                    "composition":[],"memory":{"jsHeapBytes":null,"nativeUiBytes":null,
+                        "textureBytes":null,"trackedPeakBytes":null,"timers":0,"subscriptions":0},
+                    "settings":[{"id":"value","label":format!("Value {index}"),
+                        "kind":{"kind":"text","max_length":1024},"value":format!("Stored {index}")}]
+                })).collect::<Vec<_>>()
+            });
+            let (mut application, _) =
+                settings_admission_application("nickel-default/plugins").unwrap();
+            application
+                .sync_host_data_fields(&[("plugins", &snapshot)])
+                .unwrap();
+            let mut host = nickel_ui::UiHost::new(application, 1100, 800);
+            step_host(&mut host, None, Default::default()).unwrap();
+            settle(&mut host, "initial mount");
+            let editor = |index| nickel_ui::SemanticSelector::RoleAndName {
+                role: SemanticRole::TextField,
+                name: format!("Value {index}"),
+            };
+            let first = host.query_unique(&editor(0)).unwrap();
+            assert!(host.query_unique(&editor(255)).is_err());
+            host.perform_semantic_action(
+                first.id,
+                nickel_ui::SemanticAction::SetValue(nickel_ui::SemanticValueInput::Text(
+                    "Unapplied draft".into(),
+                )),
+            );
+            step_host(&mut host, None, Default::default()).unwrap();
+            settle(&mut host, "draft edit");
+            assert!(host.application_mut().take_effects().is_empty());
+            for (delta_y, visible, absent) in [(1_000_000.0, 255, 0), (-1_000_000.0, 0, 255)] {
+                step_host(
+                    &mut host,
+                    None,
+                    nickel_ui::HostBatch {
+                        events: vec![nickel_ui::HostEvent::Ui(nickel_ui::UiEvent::Scroll {
+                            point: Point { x: 700.0, y: 600.0 },
+                            delta_y,
+                        })],
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                settle(&mut host, "scroll");
+                assert!(host.query_unique(&editor(visible)).is_ok());
+                assert!(host.query_unique(&editor(absent)).is_err());
+                assert!(host.application().last_error().is_none());
+                let rows = host
+                    .application()
+                    .accepted
+                    .node()
+                    .virtual_collection_measurements(host.resolved_layout())
+                    .unwrap();
+                assert!(rows.iter().map(|batch| batch.rows.len()).sum::<usize>() < 16);
+                assert!(host.application().accepted.virtual_source_usage().1 >= 256);
+                assert!(host.application_mut().take_effects().is_empty());
+            }
+            assert_eq!(
+                find_settings_source(
+                    host.application().accepted.source(),
+                    "plugin-setting/fixture-0/value"
+                )
+                .unwrap()["value"],
+                "Unapplied draft"
+            );
+            let apply = host
+                .query(&nickel_ui::SemanticSelector::RoleAndName {
+                    role: SemanticRole::Button,
+                    name: "Apply".into(),
+                })
+                .into_iter()
+                .find(|node| {
+                    node.id
+                        .as_str()
+                        .ends_with("plugin-setting/fixture-0/value/apply")
+                })
+                .unwrap();
+            host.perform_semantic_action(
+                apply.id,
+                nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
+            );
+            let expected =
+                crate::plugins_capabilities::PluginsSettingEffect::parse(&serde_json::json!({
+                    "type":"plugins.setSetting","id":"fixture-0","key":"value","revision":"7",
+                    "priorValue":"Stored 0","value":"Unapplied draft"
+                }))
+                .unwrap();
+            let effects = host.application_mut().take_effects();
+            assert!(
+                matches!(effects.as_slice(),
+                [PluginEffect::PluginsSetting{effect,..}] if effect == &expected),
+                "{effects:?}; {:?}",
+                host.application().last_error()
+            );
+            // A single card can itself contain a long settings list. Keeping
+            // cards bounded alone must not eagerly construct those editors.
+            let mut nested = snapshot.clone();
+            nested["plugins"].as_array_mut().unwrap().truncate(1);
+            nested["plugins"][0]["settings"] =
+                serde_json::json!((0..128).map(|index| serde_json::json!({
+                "id":if index == 0 { "value".to_owned() } else { format!("value-{index}") },
+                "label":format!("Value {index}"),"kind":{"kind":"text","max_length":1024},
+                "value":format!("Stored {index}")
+            })).collect::<Vec<_>>());
+            host.application_mut()
+                .sync_host_data_fields(&[("plugins", &nested)])
+                .unwrap();
+            step_host(&mut host, None, Default::default()).unwrap();
+            settle(&mut host, "nested settings mount");
+            assert!(host.query_unique(&editor(0)).is_ok());
+            assert!(host.query_unique(&editor(127)).is_err());
+            for (delta_y, visible, absent) in [(1_000_000.0, 127, 0), (-1_000_000.0, 0, 127)] {
+                step_host(
+                    &mut host,
+                    None,
+                    nickel_ui::HostBatch {
+                        events: vec![nickel_ui::HostEvent::Ui(nickel_ui::UiEvent::Scroll {
+                            point: Point { x: 700.0, y: 600.0 },
+                            delta_y,
+                        })],
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                settle(&mut host, "nested settings scroll");
+                assert!(host.query_unique(&editor(visible)).is_ok());
+                assert!(host.query_unique(&editor(absent)).is_err());
+                let rows = host
+                    .application()
+                    .accepted
+                    .node()
+                    .virtual_collection_measurements(host.resolved_layout())
+                    .unwrap();
+                assert!(rows.iter().map(|batch| batch.rows.len()).sum::<usize>() < 24);
+                assert_eq!(host.application().accepted.virtual_source_usage().1, 129);
+                assert!(host.application_mut().take_effects().is_empty());
+            }
+            assert_eq!(
+                find_settings_source(
+                    host.application().accepted.source(),
+                    "plugin-setting/fixture-0/value"
+                )
+                .unwrap()["value"],
+                "Unapplied draft"
+            );
+            step_host(
+                &mut host,
+                None,
+                nickel_ui::HostBatch {
+                    events: vec![nickel_ui::HostEvent::Ui(nickel_ui::UiEvent::Scroll {
+                        point: Point { x: 700.0, y: 600.0 },
+                        delta_y: 1_000_000.0,
+                    })],
+                    // Native callers include viewport metadata on ordinary
+                    // input. Equal dimensions must not undo the scroll anchor.
+                    surface_size: Some((1100, 800)),
+                    scale_factor: Some(1.0),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            settle(&mut host, "before offscreen schema replacement");
+            assert!(host.query_unique(&editor(0)).is_err());
+            for (revision, kind, value) in [
+                (
+                    "8",
+                    serde_json::json!({"kind":"integer","min":0,"max":99}),
+                    serde_json::json!(2),
+                ),
+                (
+                    "9",
+                    serde_json::json!({"kind":"text","max_length":1024}),
+                    serde_json::json!("Stored 0"),
+                ),
+            ] {
+                nested["revision"] = revision.into();
+                nested["plugins"][0]["settings"][0]["kind"] = kind;
+                nested["plugins"][0]["settings"][0]["value"] = value;
+                host.application_mut()
+                    .sync_host_data_fields(&[("plugins", &nested)])
+                    .unwrap();
+                step_host(&mut host, None, Default::default()).unwrap();
+                settle(&mut host, "offscreen schema replacement");
+                assert!(host.query_unique(&editor(0)).is_err());
+            }
+            step_host(
+                &mut host,
+                None,
+                nickel_ui::HostBatch {
+                    events: vec![nickel_ui::HostEvent::Ui(nickel_ui::UiEvent::Scroll {
+                        point: Point { x: 700.0, y: 600.0 },
+                        delta_y: -1_000_000.0,
+                    })],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            settle(&mut host, "after offscreen schema replacement");
+            assert_eq!(
+                find_settings_source(
+                    host.application().accepted.source(),
+                    "plugin-setting/fixture-0/value"
+                )
+                .unwrap()["value"],
+                "Stored 0",
+                "restoring an editor type must not resurrect a retired draft"
+            );
+            assert!(host.application_mut().take_effects().is_empty());
+        });
+    }
+
+    #[test]
+    fn production_settings_display_modes_virtualize_without_losing_draft() {
+        with_package_runtime_stack(|| {
+            let settle = |host: &mut nickel_ui::UiHost<PluginPanelApplication>| {
+                for _ in 0..16 {
+                    if !host.application().virtual_work_pending {
+                        return;
+                    }
+                    let now = host.next_deadline().expect("native virtual continuation");
+                    step_host(
+                        host,
+                        None,
+                        nickel_ui::HostBatch {
+                            now: Some(now),
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap();
+                }
+                panic!("display mode range did not converge");
+            };
+            let modes = (0..128)
+                .map(|index| {
+                    serde_json::json!({
+                        "width":1920,"height":1080,"refresh_millihz":60_000 + index * 1000
+                    })
+                })
+                .collect::<Vec<_>>();
+            let snapshot = serde_json::json!({
+                "available":true,"revision":"0123456789abcdef","operations":{},
+                "outputs":[{"name":"DP-1","model":"Fixture display","enabled":true,
+                    "primary":true,"scale_120":120,"transform":"normal",
+                    "physical_width_mm":500,"physical_height_mm":300,
+                    "geometry":{"x":0,"y":0,"width":1920,"height":1080},
+                    "work_area":{"x":0,"y":0,"width":1920,"height":1080},
+                    "current_mode":modes[0],"modes":modes}]
+            });
+            let (mut application, _) =
+                settings_admission_application("nickel-default/displays").unwrap();
+            application
+                .sync_host_data_fields(&[("displays", &snapshot)])
+                .unwrap();
+            let mut host = nickel_ui::UiHost::new(application, 1100, 800);
+            step_host(&mut host, None, Default::default()).unwrap();
+            settle(&mut host);
+            let mode = |index: usize| nickel_ui::SemanticSelector::RoleAndName {
+                role: SemanticRole::Button,
+                name: format!("1920 × 1080 · {}.00 Hz", 60 + index),
+            };
+            let assert_top_text = |host: &nickel_ui::UiHost<PluginPanelApplication>| {
+                for label in [
+                    "Arrange displays",
+                    "Drag displays to match their physical positions. Apply to preview your changes.",
+                    "Fixture display · Primary",
+                ] {
+                    assert!(
+                        host.commands().iter().any(|command| matches!(
+                            command,
+                            nickel_ui::backend::PaintCommand::Text { text, .. } if text == label
+                        )),
+                        "missing display text {label:?}"
+                    );
+                }
+            };
+            assert_top_text(&host);
+            assert!(host.query_unique(&mode(0)).is_ok());
+            assert!(host.query_unique(&mode(127)).is_err());
+            for (visit, (delta_y, visible, absent)) in [
+                (100_000.0, 127, 0),
+                (-100_000.0, 0, 127),
+                (100_000.0, 127, 0),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                step_host(
+                    &mut host,
+                    None,
+                    nickel_ui::HostBatch {
+                        events: vec![nickel_ui::HostEvent::Ui(nickel_ui::UiEvent::Scroll {
+                            point: Point { x: 700.0, y: 600.0 },
+                            delta_y,
+                        })],
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                settle(&mut host);
+                assert!(!host.application().virtual_work_pending);
+                let button = host.query_unique(&mode(visible)).unwrap();
+                assert!(host.query_unique(&mode(absent)).is_err());
+                if visit == 0 {
+                    host.perform_semantic_action(
+                        button.id,
+                        nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
+                    );
+                    step_host(&mut host, None, Default::default()).unwrap();
+                    settle(&mut host);
+                }
+                if visible == 127 {
+                    assert_eq!(
+                        find_settings_source(
+                            host.application().accepted.source(),
+                            "display-mode-127"
+                        )
+                        .unwrap()["state"],
+                        "selected"
+                    );
+                } else {
+                    assert_top_text(&host);
+                    assert_eq!(
+                        find_settings_source(
+                            host.application().accepted.source(),
+                            "display-mode-0"
+                        )
+                        .unwrap()["state"],
+                        "unselected"
+                    );
+                }
+                assert!(host.application().last_error().is_none());
+                let rows = host
+                    .application()
+                    .accepted
+                    .node()
+                    .virtual_collection_measurements(host.resolved_layout())
+                    .unwrap();
+                assert!(rows.iter().map(|batch| batch.rows.len()).sum::<usize>() < 24);
+                assert_eq!(host.application().accepted.virtual_source_usage().1, 128);
+                assert!(
+                    host.application_mut().take_effects().is_empty(),
+                    "choosing a mode edits the draft; only Apply may change displays"
+                );
+            }
+            let discard = host
+                .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                    role: SemanticRole::Button,
+                    name: "Discard draft".into(),
+                })
+                .unwrap();
+            host.perform_semantic_action(
+                discard.id,
+                nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
+            );
+            step_host(&mut host, None, Default::default()).unwrap();
+            settle(&mut host);
+            assert_eq!(
+                find_settings_source(host.application().accepted.source(), "display-mode-127")
+                    .unwrap()["state"],
+                "unselected"
+            );
+            assert!(host.application_mut().take_effects().is_empty());
+        });
+    }
+
+    #[test]
+    fn production_settings_adapter_inventory_uses_native_virtual_rows() {
+        with_package_runtime_stack(|| {
+            let snapshot =
+                crate::connectivity_capabilities::wifi_snapshot(&crate::platform::NetworkStatus {
+                    adapters_available: true,
+                    adapters: (0..256)
+                        .map(|index| crate::platform::NetworkAdapterStatus {
+                            id: format!("adapter-{index}"),
+                            name: format!("Adapter {index}"),
+                            description: "A variable-height adapter description "
+                                .repeat(index % 4 + 1),
+                            ..Default::default()
+                        })
+                        .collect(),
+                    ..Default::default()
+                });
+            let (mut application, _) =
+                settings_admission_application("nickel-default/wifi").unwrap();
+            application
+                .sync_host_data_fields(&[("wifi", &snapshot)])
+                .unwrap();
+            let mut host = nickel_ui::UiHost::new(application, 1100, 800);
+            step_host(&mut host, None, Default::default()).unwrap();
+            let text = |name: String| nickel_ui::SemanticSelector::RoleAndName {
+                role: SemanticRole::Text,
+                name,
+            };
+            assert!(host.query_unique(&text("Adapter 0".into())).is_ok());
+            assert!(host.query_unique(&text("Adapter 255".into())).is_err());
+            for (delta_y, visible, absent) in [(100_000.0, 255, 0), (-100_000.0, 0, 255)] {
+                step_host(
+                    &mut host,
+                    None,
+                    nickel_ui::HostBatch {
+                        events: vec![nickel_ui::HostEvent::Ui(nickel_ui::UiEvent::Scroll {
+                            point: Point { x: 700.0, y: 600.0 },
+                            delta_y,
+                        })],
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                assert!(!host.application().virtual_work_pending);
+                assert!(
+                    host.query_unique(&text(format!("Adapter {visible}")))
+                        .is_ok()
+                );
+                assert!(
+                    host.query_unique(&text(format!("Adapter {absent}")))
+                        .is_err()
+                );
+                let rows = host
+                    .application()
+                    .accepted
+                    .node()
+                    .virtual_collection_measurements(host.resolved_layout())
+                    .unwrap();
+                assert!(rows.iter().map(|batch| batch.rows.len()).sum::<usize>() < 20);
+                assert_eq!(host.application().accepted.virtual_source_usage().1, 256);
+            }
+            assert!(host.application_mut().take_effects().is_empty());
+        });
+    }
+
+    #[test]
+    fn production_settings_connectivity_lists_use_native_virtual_windows() {
+        with_package_runtime_stack(|| {
+            let long_network = "é".repeat(256);
+            let long_device = "d".repeat(512);
+            let last_wifi = format!("settings-wifi-connect/{long_network}");
+            let last_bluetooth = format!("settings-bluetooth-pair/{long_device}");
+            let wifi =
+                crate::connectivity_capabilities::wifi_snapshot(&crate::platform::NetworkStatus {
+                    available: true,
+                    enabled: true,
+                    networks: (0..256)
+                        .map(|index| crate::platform::WifiNetworkStatus {
+                            id: if index == 255 {
+                                long_network.clone()
+                            } else {
+                                format!("network-{index}")
+                            },
+                            name: format!("Network {index}"),
+                            saved: true,
+                            ..Default::default()
+                        })
+                        .collect(),
+                    ..Default::default()
+                });
+            let bluetooth = crate::connectivity_capabilities::bluetooth_snapshot(
+                &crate::platform::BluetoothStatus {
+                    available: true,
+                    powered: true,
+                    devices: (0..256)
+                        .map(|index| crate::platform::BluetoothDeviceStatus {
+                            id: if index == 255 {
+                                long_device.clone()
+                            } else {
+                                format!("device-{index}")
+                            },
+                            name: format!("Device {index}"),
+                            battery_percent: (index % 2 == 0).then_some(80),
+                            kind: (index % 3 == 0).then(|| "Headphones".into()),
+                            ..Default::default()
+                        })
+                        .collect(),
+                    ..Default::default()
+                },
+            );
+            for (page, snapshot, first, last) in [
+                (
+                    "wifi",
+                    &wifi,
+                    "settings-wifi-connect/network-0",
+                    last_wifi.as_str(),
+                ),
+                (
+                    "bluetooth",
+                    &bluetooth,
+                    "settings-bluetooth-pair/device-0",
+                    last_bluetooth.as_str(),
+                ),
+            ] {
+                let (mut application, _composition) =
+                    settings_admission_application(&format!("nickel-default/{page}")).unwrap();
+                application
+                    .sync_host_data_fields(&[(page, snapshot)])
+                    .unwrap();
+                let mut host = nickel_ui::UiHost::new(application, 1100, 800);
+                crate::live_shell::step_plugin_host(&mut host, None, Default::default()).unwrap();
+                assert!(!host.application().virtual_work_pending);
+                let source = logical_source(host.application().accepted.node())
+                    .unwrap()
+                    .clone();
+                assert_eq!(source.len(), 256);
+                assert!(host.application().button_message(first).is_some());
+                assert!(host.application().button_message(last).is_none());
+                for delta_y in [100_000.0, -100_000.0, 100_000.0] {
+                    crate::live_shell::step_plugin_host(
+                        &mut host,
+                        None,
+                        nickel_ui::HostBatch {
+                            events: vec![nickel_ui::HostEvent::Ui(nickel_ui::UiEvent::Scroll {
+                                point: Point { x: 700.0, y: 600.0 },
+                                delta_y,
+                            })],
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap();
+                    assert!(!host.application().virtual_work_pending);
+                    let rows = host
+                        .application()
+                        .accepted
+                        .node()
+                        .virtual_collection_measurements(host.resolved_layout())
+                        .unwrap();
+                    assert_eq!(rows.len(), 1);
+                    assert!(
+                        rows[0].rows.len() < 20,
+                        "{page} materialized offscreen inventory"
+                    );
+                    assert_eq!(
+                        logical_source(host.application().accepted.node())
+                            .unwrap()
+                            .revision(),
+                        source.revision()
+                    );
+                }
+                assert!(host.application().button_message(first).is_none());
+                let action = host
+                    .application()
+                    .button_message(last)
+                    .expect("last device reachable");
+                host.application_mut().update(action);
+                assert!(
+                    host.application().last_error().is_none(),
+                    "{page}: {:?}",
+                    host.application().last_error()
+                );
+                let effects = host.application_mut().take_effects();
+                let expected = crate::connectivity_capabilities::ConnectivityEffect::parse(
+                    &serde_json::json!({
+                        "type":if page == "wifi" {"wifi.connect"} else {"bluetooth.pair"},
+                        "revision":snapshot["revision"],
+                    "id":if page == "wifi" {&long_network} else {&long_device},
+                    }),
+                )
+                .unwrap();
+                assert!(
+                    matches!(effects.as_slice(),[PluginEffect::Connectivity {effect,..}] if effect == &expected),
+                    "{effects:?}"
+                );
+                let mut empty = snapshot.clone();
+                empty[if page == "wifi" {
+                    "networks"
+                } else {
+                    "devices"
+                }] = serde_json::json!([]);
+                host.application_mut()
+                    .sync_host_data_fields(&[(page, &empty)])
+                    .unwrap();
+                crate::live_shell::step_plugin_host(
+                    &mut host,
+                    None,
+                    nickel_ui::HostBatch {
+                        application_changed: true,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                assert_eq!(
+                    logical_source(host.application().accepted.node())
+                        .unwrap()
+                        .len(),
+                    0
+                );
+                assert!(host.application().button_message(last).is_none());
+                assert!(!host.application().virtual_work_pending);
+            }
+        });
+    }
+
+    #[test]
+    fn production_repeated_settings_preserve_drafts_across_virtual_unmount() {
+        with_package_runtime_stack(|| {
+            fn settle(host: &mut nickel_ui::UiHost<PluginPanelApplication>) {
+                for _ in 0..16 {
+                    if !host.application().virtual_work_pending {
+                        return;
+                    }
+                    for message in host
+                        .application()
+                        .accepted
+                        .node()
+                        .virtual_collection_feedback(
+                            host.resolved_layout(),
+                            nickel_ui::Rect::new(0.0, 0.0, 1100.0, 800.0),
+                        )
+                        .unwrap()
+                    {
+                        if let PluginMessage::Text(action, _) = message {
+                            assert!(
+                                host.application()
+                                    .composition
+                                    .as_ref()
+                                    .unwrap()
+                                    .events
+                                    .contains_key(&(action as u64)),
+                                "native virtual feedback lost its callback authority"
+                            );
+                        }
+                    }
+                    step_host(
+                        host,
+                        None,
+                        nickel_ui::HostBatch {
+                            now: host.next_deadline(),
+                            events: vec![nickel_ui::HostEvent::Poll],
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap();
+                }
+                assert!(
+                    !host.application().virtual_work_pending,
+                    "editable rows did not settle"
+                );
+            }
+            for nesting in ["plain", "group", "repeated"] {
+                eprintln!("editable fixture: {nesting}");
+                let field_path = match nesting {
+                    "group" => "fixture/row-0/details/name",
+                    "repeated" => "fixture/row-0/children/row-0/name",
+                    _ => "fixture/row-0/name",
+                };
+                let last_field_path = field_path.replacen("row-0", "row-127", 1);
+                let mut package =
+                    crate::bundled_plugin_assets::load_package("nickel-default").unwrap();
+                let fixture = r#"
+                function RepeatedFixture() {
+                    const nesting='__NESTING__';
+                    const [rows,setRows]=useState(()=>Array.from({length:128},(_,i)=>({name:'Stored '+i,details:{name:'Stored '+i},children:[{name:'Stored '+i}]})));
+                    const leaf={id:'name',type:'text',label:'Name',maxLength:1024};
+                    const fields=nesting==='group'?[{id:'details',type:'group',label:'Details',fields:[leaf]}]
+                        :nesting==='repeated'?[{id:'children',type:'repeated',label:'Children',maxItems:4,fields:[leaf]}]:[leaf];
+                    const saved=nesting==='group'?rows[0].details.name:nesting==='repeated'?rows[0].children[0].name:rows[0].name;
+                    return h(Column,{},h(Text,{id:'saved-first'},saved),
+                        h(SettingControl,{controlId:'fixture',setting:{id:'fixture',providerPackage:'nickel-default',
+                            type:'repeated',maxItems:256,fields,
+                            value:rows,onChange:setRows}}));
+                }
+                registerSettingsPage({id:'repeated-fixture',group:'Tests',label:'Repeated fixture',component:RepeatedFixture});
+            "#.replace("__NESTING__", nesting);
+                package.source.push_str(&fixture);
+                package
+                    .modules
+                    .iter_mut()
+                    .find(|module| module.path == "src/Shell.tsx")
+                    .unwrap()
+                    .source
+                    .push_str(&fixture);
+                let (catalog, surface, composition) =
+                    settings_admission_runtime_with_package(package).unwrap();
+                let application = settings_admission_application_with_runtime(
+                    "nickel-default/repeated-fixture",
+                    &catalog,
+                    &surface,
+                    composition,
+                )
+                .unwrap();
+                let mut host = nickel_ui::UiHost::new(application, 1100, 800);
+                step_host(&mut host, None, Default::default())
+                    .unwrap_or_else(|error| panic!("{nesting}: {error}"));
+                settle(&mut host);
+                let field = host
+                    .query(&nickel_ui::SemanticSelector::RoleAndName {
+                        role: SemanticRole::TextField,
+                        name: "Name".into(),
+                    })
+                    .into_iter()
+                    .find(|node| node.id.as_str().ends_with(field_path))
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "repeated inputs missing: {:?}; {:?}",
+                            host.query(&nickel_ui::SemanticSelector::RoleAndName {
+                                role: SemanticRole::TextField,
+                                name: "Name".into()
+                            }),
+                            host.application().last_error()
+                        )
+                    });
+                host.perform_semantic_action(
+                    field.id.clone(),
+                    nickel_ui::SemanticAction::SetValue(nickel_ui::SemanticValueInput::Text(
+                        "Unapplied draft".into(),
+                    )),
+                );
+                step_host(&mut host, None, Default::default()).unwrap();
+                settle(&mut host);
+                assert!(
+                    find_settings_source(host.application().accepted.source(), "saved-first")
+                        .unwrap()
+                        .to_string()
+                        .contains("Stored 0"),
+                    "editing a draft applied the setting"
+                );
+                host.request_focus(field.id.clone());
+                step_host(
+                    &mut host,
+                    None,
+                    nickel_ui::HostBatch {
+                        events: vec![nickel_ui::HostEvent::Ui(nickel_ui::UiEvent::ImePreedit(
+                            "未確定".into(),
+                        ))],
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                assert!(host.input_context().text_focused);
+                assert!(
+                    host.commands().iter().any(|command| matches!(
+                        command,
+                        nickel_ui::backend::PaintCommand::Text { text, .. }
+                            if text.contains("未確定")
+                    )),
+                    "focused editor did not display its IME preedit"
+                );
+                assert_eq!(
+                    find_settings_source(host.application().accepted.source(), field_path).unwrap()
+                        ["value"],
+                    "Unapplied draft",
+                    "IME preedit must not commit the draft"
+                );
+                for delta in [100_000.0, -100_000.0] {
+                    step_host(
+                        &mut host,
+                        None,
+                        nickel_ui::HostBatch {
+                            events: vec![nickel_ui::HostEvent::Ui(nickel_ui::UiEvent::Scroll {
+                                point: Point { x: 700.0, y: 600.0 },
+                                delta_y: delta,
+                            })],
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap();
+                    settle(&mut host);
+                    assert!(!host.application().virtual_work_pending);
+                    let source = logical_source(host.application().accepted.node()).unwrap();
+                    assert_eq!(source.len(), 128);
+                    let rows = host
+                        .application()
+                        .accepted
+                        .node()
+                        .virtual_collection_measurements(host.resolved_layout())
+                        .unwrap();
+                    assert!(rows[0].rows.len() < 20);
+                    if delta > 0.0 {
+                        assert!(!host.input_context().text_focused);
+                        assert_ne!(host.inspect().keyboard_focus.as_ref(), Some(&field.id));
+                        step_host(
+                            &mut host,
+                            None,
+                            nickel_ui::HostBatch {
+                                events: vec![nickel_ui::HostEvent::Ui(
+                                    nickel_ui::UiEvent::TextInput("late IME commit".into()),
+                                )],
+                                ..Default::default()
+                            },
+                        )
+                        .unwrap();
+                        assert!(
+                            find_settings_source(host.application().accepted.source(), field_path)
+                                .is_none()
+                        );
+                        assert!(
+                            find_settings_source(
+                                host.application().accepted.source(),
+                                &last_field_path
+                            )
+                            .is_some()
+                        );
+                        assert_eq!(
+                            find_settings_source(
+                                host.application().accepted.source(),
+                                &last_field_path
+                            )
+                            .unwrap()["value"],
+                            "Stored 127",
+                            "retired editor's text must not reach a recycled row"
+                        );
+                    }
+                }
+                assert_eq!(
+                    find_settings_source(host.application().accepted.source(), field_path).unwrap()
+                        ["value"],
+                    "Unapplied draft"
+                );
+                assert!(
+                    !host.commands().iter().any(|command| matches!(
+                        command,
+                        nickel_ui::backend::PaintCommand::Text { text, .. }
+                            if text.contains("未確定") || text.contains("late IME commit")
+                    )),
+                    "retired composition reappeared after rematerialization"
+                );
+                let apply = host
+                    .query(&nickel_ui::SemanticSelector::RoleAndName {
+                        role: SemanticRole::Button,
+                        name: "Apply".into(),
+                    })
+                    .into_iter()
+                    .find(|node| node.id.as_str().ends_with(&format!("{field_path}/apply")))
+                    .unwrap();
+                host.perform_semantic_action(
+                    apply.id,
+                    nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
+                );
+                step_host(&mut host, None, Default::default()).unwrap();
+                let saved =
+                    find_settings_source(host.application().accepted.source(), "saved-first")
+                        .unwrap();
+                assert!(saved.to_string().contains("Unapplied draft"));
+                assert!(host.application_mut().take_effects().is_empty());
+            }
+        });
+    }
+
+    #[test]
+    fn production_settings_wallpaper_previews_follow_visible_rows_and_arrive_without_effects() {
+        with_package_runtime_stack(|| {
+            let (mut application, _composition) =
+                settings_admission_application("nickel-default/appearance").unwrap();
+            let wallpaper = serde_json::json!({
+                "available":true,"writable":true,"generation":2,
+                "configured":{"custom_image_configured":false,"position":"fill"},
+                "images":(0..128).map(|index| serde_json::json!({
+                    "id":format!("fixture-{index}"),"label":format!("Wallpaper {index}"),
+                    "configured":false,"previewAsset":format!("wallpaper:fixture-{index}"),
+                })).collect::<Vec<_>>(),
+                "chooser":{"available":true,"pending":false,"result":null},
+            });
+            application
+                .sync_host_data_fields(&[("wallpaper", &wallpaper)])
+                .unwrap();
+            let mut host = nickel_ui::UiHost::new(application, 1100, 800);
+            step_host(&mut host, None, Default::default()).unwrap();
+            let viewport = nickel_ui::Rect::new(0.0, 0.0, 1100.0, 800.0);
+            let first = host
+                .application()
+                .wallpaper_preview_demand(host.resolved_layout(), viewport);
+            assert!(first.len() <= 8);
+            assert!(!first.iter().any(|asset| asset == "wallpaper:fixture-127"));
+            step_host(
+                &mut host,
+                None,
+                nickel_ui::HostBatch {
+                    events: vec![nickel_ui::HostEvent::Ui(nickel_ui::UiEvent::Scroll {
+                        point: Point { x: 700.0, y: 600.0 },
+                        delta_y: 100_000.0,
+                    })],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert!(!host.application().virtual_work_pending);
+            let demand = host
+                .application()
+                .wallpaper_preview_demand(host.resolved_layout(), viewport);
+            assert!(!demand.is_empty() && demand.len() <= 8);
+            assert!(demand.iter().any(|asset| asset == "wallpaper:fixture-127"));
+            assert!(!demand.iter().any(|asset| asset == "wallpaper:fixture-0"));
+            let last = host
+                .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                    role: SemanticRole::Button,
+                    name: "Wallpaper 127".into(),
+                })
+                .unwrap();
+            let unfocused_paint = host.commands().to_vec();
+            step_host(
+                &mut host,
+                None,
+                nickel_ui::HostBatch {
+                    events: vec![nickel_ui::HostEvent::Ui(
+                        nickel_ui::UiEvent::AccessibilityFocus(last.id.clone()),
+                    )],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert!(
+                host.commands() != unfocused_paint.as_slice(),
+                "keyboard focus on a wallpaper must have a visible paint affordance"
+            );
+            let images = demand
+                .iter()
+                .enumerate()
+                .map(|(index, asset)| {
+                    (
+                        asset.clone(),
+                        (
+                            64000 + index as u16,
+                            Arc::new(image::RgbaImage::from_pixel(
+                                160,
+                                90,
+                                image::Rgba([20, 40, 60, 255]),
+                            )),
+                        ),
+                    )
+                })
+                .collect();
+            assert!(host.application_mut().sync_application_images(images));
+            step_host(
+                &mut host,
+                None,
+                nickel_ui::HostBatch {
+                    application_changed: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(host.inspect().keyboard_focus, Some(last.id.clone()));
+            let bounds = host.resolved_layout().find(&last.id).unwrap().allocated;
+            assert!(bounds.origin.y >= 0.0 && bounds.origin.y + bounds.size.height <= 800.0);
+            assert!(host.commands().iter().any(|command| matches!(command, nickel_ui::backend::PaintCommand::Image {id,..} if *id >= 64000 && *id < 64008)));
+            assert!(host.resolved_layout().nodes().len() < 500);
+            assert!(host.application_mut().take_effects().is_empty());
+        });
+    }
+
+    #[test]
+    fn production_settings_wallpapers_materialize_only_the_native_window() {
+        with_package_runtime_stack(|| {
+            let (mut application, _composition) =
+                settings_admission_application("nickel-default/appearance").unwrap();
+            let wallpaper = serde_json::json!({
+                "available":true,"writable":true,"generation":2,
+                "configured":{"custom_image_configured":false,"position":"fill"},
+                "images":(0..128).map(|index| serde_json::json!({
+                    "id":format!("fixture-{index}"),"label":format!("Wallpaper {index}"),
+                    "configured":false,
+                })).collect::<Vec<_>>(),
+                "chooser":{"available":true,"pending":false,"result":null},
+            });
+            application
+                .sync_host_data_fields(&[("wallpaper", &wallpaper)])
+                .unwrap();
+            let mut host = nickel_ui::UiHost::new(application, 1100, 800);
+            crate::live_shell::step_plugin_host(&mut host, None, Default::default()).unwrap();
+            assert!(!host.application().virtual_work_pending);
+            let source = logical_source(host.application().accepted.node())
+                .unwrap()
+                .clone();
+            assert_eq!(source.len(), 128);
+            let rows = host
+                .application()
+                .accepted
+                .node()
+                .virtual_collection_measurements(host.resolved_layout())
+                .unwrap();
+            assert_eq!(rows.len(), 1);
+            assert!(
+                rows[0].rows.len() < 30,
+                "offscreen wallpapers were materialized"
+            );
+            assert!(
+                host.application()
+                    .button_message("appearance-wallpaper-fixture-127")
+                    .is_none()
+            );
+            crate::live_shell::step_plugin_host(
+                &mut host,
+                None,
+                nickel_ui::HostBatch {
+                    events: vec![nickel_ui::HostEvent::Ui(nickel_ui::UiEvent::Scroll {
+                        point: Point { x: 700.0, y: 600.0 },
+                        delta_y: 100_000.0,
+                    })],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert!(!host.application().virtual_work_pending);
+            assert_eq!(
+                logical_source(host.application().accepted.node())
+                    .unwrap()
+                    .revision(),
+                source.revision(),
+                "scrolling replaced the logical source"
+            );
+            let rows = host
+                .application()
+                .accepted
+                .node()
+                .virtual_collection_measurements(host.resolved_layout())
+                .unwrap();
+            assert!(rows[0].rows.len() < 30);
+            assert!(
+                host.application()
+                    .button_message("appearance-wallpaper-fixture-127")
+                    .is_some(),
+                "last wallpaper is unreachable through the outer Settings scroller"
+            );
+            assert!(
+                host.application()
+                    .button_message("appearance-wallpaper-fixture-0")
+                    .is_none(),
+                "retired offscreen wallpaper kept its callback"
+            );
+            let last = host
+                .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                    role: SemanticRole::Button,
+                    name: "Wallpaper 127".into(),
+                })
+                .unwrap();
+            assert!(last.bounds.origin.y < 800.0);
+            host.perform_semantic_action(
+                last.id,
+                nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
+            );
+            assert!(host.application().last_error().is_none());
+            let effects = host.application_mut().take_effects();
+            assert!(
+                matches!(effects.as_slice(), [PluginEffect::Appearance { .. }]),
+                "{effects:?}"
+            );
+            let chooser = host
+                .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                    role: SemanticRole::Button,
+                    name: "Choose image…".into(),
+                })
+                .unwrap();
+            host.request_focus(chooser.id);
+            crate::live_shell::step_plugin_host(&mut host, None, Default::default()).unwrap();
+            let mut peak_javascript_handlers = 0;
+            for (index, event) in (0..128)
+                .map(|index| (index, nickel_ui::UiEvent::FocusNext))
+                .chain(
+                    (0..127)
+                        .rev()
+                        .map(|index| (index, nickel_ui::UiEvent::FocusPrevious)),
+                )
+            {
+                crate::live_shell::step_plugin_host(
+                    &mut host,
+                    None,
+                    nickel_ui::HostBatch {
+                        events: vec![nickel_ui::HostEvent::Ui(event)],
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                let expected = host
+                    .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                        role: SemanticRole::Button,
+                        name: format!("Wallpaper {index}"),
+                    })
+                    .unwrap_or_else(|error| {
+                        panic!("keyboard did not materialize wallpaper {index}: {error:?}")
+                    });
+                assert_eq!(
+                    host.inspect().keyboard_focus.as_ref(),
+                    Some(&expected.id),
+                    "wallpaper {index}"
+                );
+                assert!(
+                    expected.bounds.origin.y >= 0.0
+                        && expected.bounds.origin.y + expected.bounds.size.height <= 800.0
+                );
+                let rows = host
+                    .application()
+                    .accepted
+                    .node()
+                    .virtual_collection_measurements(host.resolved_layout())
+                    .unwrap();
+                assert!(
+                    rows[0].rows.len() < 30,
+                    "keyboard traversal accumulated offscreen rows"
+                );
+                let runtime = host.application_mut().shared_runtime();
+                let diagnostics = runtime.borrow_mut().runtime_diagnostics().unwrap();
+                let retained = &diagnostics["retained"];
+                let handlers = retained["handlerEntries"].as_u64().unwrap();
+                peak_javascript_handlers = peak_javascript_handlers.max(handlers);
+                // This fixture has fewer than 30 admitted wallpaper rows plus
+                // the fixed Settings controls. Walking all 128 logical rows
+                // must not retain a JavaScript callback for each visited row.
+                assert!(handlers < 100, "wallpaper {index}: {retained}");
+                assert!(retained["handlerSlots"].as_u64().unwrap() < 100);
+                assert!(retained["previousHandlerEntries"].as_u64().unwrap() < 100);
+                assert_eq!(
+                    logical_source(host.application().accepted.node())
+                        .unwrap()
+                        .revision(),
+                    source.revision()
+                );
+            }
+            eprintln!(
+                "production wallpaper traversal peak JavaScript handlers: {peak_javascript_handlers}"
+            );
+            // OS input may arrive in one batch. Each focus step must reveal
+            // the next logical row before the following event is interpreted.
+            for (steps, expected_index, forward) in [
+                (32, 32, true),
+                (32, 64, true),
+                (32, 96, true),
+                (31, 127, true),
+                (64, 63, false),
+                (63, 0, false),
+            ] {
+                crate::live_shell::step_plugin_host(
+                    &mut host,
+                    None,
+                    nickel_ui::HostBatch {
+                        events: (0..steps)
+                            .map(|_| {
+                                nickel_ui::HostEvent::Ui(if forward {
+                                    nickel_ui::UiEvent::FocusNext
+                                } else {
+                                    nickel_ui::UiEvent::FocusPrevious
+                                })
+                            })
+                            .collect(),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                let expected = host
+                    .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                        role: SemanticRole::Button,
+                        name: format!("Wallpaper {expected_index}"),
+                    })
+                    .unwrap();
+                assert_eq!(
+                    host.inspect().keyboard_focus.as_ref(),
+                    Some(&expected.id),
+                    "batched traversal to {expected_index}"
+                );
+            }
+            let focused = host.inspect().keyboard_focus.unwrap();
+            let mut updated_wallpaper = wallpaper.clone();
+            updated_wallpaper["generation"] = serde_json::json!(3);
+            updated_wallpaper["images"]
+                .as_array_mut()
+                .unwrap()
+                .reverse();
+            let mut updated_snapshot = host.application().projection_value.clone().unwrap();
+            updated_snapshot["wallpaper"] = updated_wallpaper;
+            step_host(
+                &mut host,
+                Some(updated_snapshot.to_string()),
+                Default::default(),
+            )
+            .unwrap();
+            assert_eq!(host.inspect().keyboard_focus, Some(focused.clone()));
+            let reordered = host
+                .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                    role: SemanticRole::Button,
+                    name: "Wallpaper 0".into(),
+                })
+                .unwrap();
+            assert_eq!(reordered.id, focused);
+            assert!(
+                reordered.bounds.origin.y >= 0.0
+                    && reordered.bounds.origin.y + reordered.bounds.size.height <= 800.01
+            );
+            assert!(host.resolved_layout().nodes().len() < 500);
+            assert!(host.application().last_error().is_none());
+            assert!(host.application_mut().take_effects().is_empty());
+            for height in [400, 800] {
+                step_host(
+                    &mut host,
+                    None,
+                    nickel_ui::HostBatch {
+                        surface_size: Some((1100, height)),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                assert_eq!(host.render_frame().logical_size, (1100, height));
+                assert_eq!(host.inspect().keyboard_focus, Some(focused.clone()));
+                let bounds = host.resolved_layout().find(&focused).unwrap().allocated;
+                assert!(
+                    bounds.origin.y >= 0.0
+                        && bounds.origin.y + bounds.size.height <= height as f32 + 0.01,
+                    "focused wallpaper escaped resized viewport: {bounds:?}, height={height}"
+                );
+                assert!(!host.application().virtual_work_pending);
+                assert!(host.application_mut().take_effects().is_empty());
+            }
+            let navigation = host
+                .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                    role: SemanticRole::Button,
+                    name: "Keyboard shortcuts".into(),
+                })
+                .unwrap();
+            host.perform_semantic_action(
+                navigation.id,
+                nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
+            );
+            crate::live_shell::step_plugin_host(&mut host, None, Default::default()).unwrap();
+            assert!(
+                logical_source(host.application().accepted.node()).is_none(),
+                "inactive Appearance retained its logical wallpaper source"
+            );
+            assert!(
+                host.application()
+                    .button_message("appearance-wallpaper-fixture-127")
+                    .is_none()
+            );
+            assert!(!host.application().virtual_work_pending);
+        });
     }
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -1799,7 +1799,7 @@ mod tests {
             "../../../assets/plugins/nickel-default/plugin.json"
         ))
         .unwrap();
-        assert_eq!(manifest.entry, "src/Shell.js");
+        assert_eq!(manifest.entry, "src/Shell.tsx");
         assert_eq!(manifest.surfaces.len(), 10);
         assert!(
             manifest

@@ -17,9 +17,10 @@ pub(crate) fn internal_normalized_ingress(
     input: nickel_input::InputEvent,
     clipboard_text: Option<String>,
     owner: &'static str,
-    recipient: nickel_ui::HostInspection,
+    recipient: impl Into<nickel_ui::HostInputLease>,
     transform_generation: Option<u64>,
 ) -> (HostEvent, nickel_ui::NormalizedIngressAuthority) {
+    let recipient = recipient.into();
     let device = input.device();
     let device_generation = device.map_or(0, |device| device.0);
     let order = INTERNAL_INGRESS_ORDER.fetch_add(1, Ordering::Relaxed);
@@ -637,6 +638,7 @@ pub struct LiveShell {
     >,
     active_shell_package_id: String,
     package_runtimes: std::collections::BTreeMap<String, RetainedPackageRuntime>,
+    platform_maintenance_cursor: usize,
     package_settings_generation: u64,
     package_settings_values: nickel_plugin_runtime::settings::SettingsValueSnapshot,
     package_settings_value_revisions: std::collections::BTreeMap<String, u64>,
@@ -662,6 +664,8 @@ pub struct LiveShell {
             nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>,
         ),
     >,
+    plugin_image_deadlines:
+        std::collections::BTreeMap<nickel_core::plugins::PluginSurfaceKey, Instant>,
     /// Bounded, quiescent cache for selected-shell overlays. These hosts own no
     /// native surface while parked and are excluded from visibility queries.
     warm_shell_surface_hosts: std::collections::BTreeMap<
@@ -749,7 +753,7 @@ pub struct LiveShell {
 struct ApplicationCatalogCache {
     launcher_revision: Arc<()>,
     windows: Vec<OpenWindow>,
-    value: serde_json::Value,
+    value: Arc<serde_json::Value>,
 }
 
 #[cfg(target_os = "linux")]
@@ -935,15 +939,222 @@ pub(crate) fn passive_pointer_batch(batch: &HostBatch) -> bool {
     }
 }
 
-fn step_plugin_host(
+pub(crate) fn step_plugin_host(
     host: &mut nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>,
     data: Option<String>,
     mut batch: HostBatch,
 ) -> Result<(nickel_ui::HostEventOutcome, u64), String> {
-    if let Some(data) = data {
-        batch.application_changed |= host.application_mut().sync_serialized_data(data)?;
+    let geometry_or_data_changed = batch.application_changed
+        || batch
+            .surface_size
+            .is_some_and(|size| size != host.render_frame().logical_size)
+        || batch.scale_factor.is_some_and(|scale| {
+            scale.is_finite() && scale > 0.0 && scale != host.render_frame().scale_factor
+        })
+        || data
+            .as_ref()
+            .is_some_and(|data| host.application().snapshot_will_change(data));
+    if batch.events.len() > 1 || (!batch.events.is_empty() && geometry_or_data_changed) {
+        // Virtual rows are admitted from native geometry. Resolve that feedback
+        // between input events, so repeated navigation cannot wrap around the
+        // old materialized window. An earlier callback (or batch-wide update)
+        // can introduce the first collection, so the pre-batch tree cannot
+        // determine whether subsequent events need this boundary. Apply
+        // batch-wide changes/completions once, retaining their original order.
+        let events = std::mem::take(&mut batch.events);
+        let authorities = std::mem::take(&mut batch.normalized_authorities);
+        let controller_authority = batch.controller_authority;
+        let clipboard_text_limit = batch.clipboard_text_limit;
+        let now = Some(batch.now.unwrap_or_else(Instant::now));
+        batch.now = now;
+        let (mut outcome, mut retained_bytes) = step_plugin_host(host, data, batch)?;
+        for event in events {
+            // Carry only an authority actually supplied by the native caller;
+            // never manufacture one from the event's claimed identity.
+            let normalized_authorities = match &event {
+                HostEvent::NormalizedIngress(envelope) => authorities
+                    .iter()
+                    .find(|authority| authority.admits(envelope))
+                    .cloned()
+                    .into_iter()
+                    .collect(),
+                _ => Vec::new(),
+            };
+            let (next, bytes) = step_plugin_host(
+                host,
+                None,
+                HostBatch {
+                    now,
+                    clipboard_text_limit,
+                    controller_authority,
+                    normalized_authorities,
+                    events: vec![event],
+                    ..Default::default()
+                },
+            )?;
+            outcome.merge(next);
+            retained_bytes = bytes;
+        }
+        outcome.next_deadline = host.next_deadline();
+        return Ok((outcome, retained_bytes));
     }
-    let outcome = host.step(batch);
+    let now = batch.now;
+    let mut before_update: Vec<nickel_ui::ScrollAnchor> = Vec::new();
+    let mut virtual_targets = Vec::new();
+    if geometry_or_data_changed {
+        if host.application().has_virtual_collections() {
+            let inspection = host.inspect();
+            let targets = if inspection.modality == nickel_ui::InputModality::Controller {
+                [inspection.controller_target, inspection.keyboard_focus]
+            } else {
+                [inspection.keyboard_focus, inspection.controller_target]
+            };
+            for target in targets.iter().flatten() {
+                if let Some(anchor) = host.capture_scroll_anchor(target)
+                    && !before_update
+                        .iter()
+                        .any(|previous| previous.shares_scroll_owner(&anchor))
+                {
+                    virtual_targets.extend(
+                        host.application()
+                            .capture_virtual_targets(target, host.resolved_layout())?,
+                    );
+                    before_update.push(anchor);
+                }
+            }
+        }
+        for id in host
+            .application()
+            .virtual_anchor_candidates(host.resolved_layout())?
+        {
+            if let Some(anchor) = host.capture_scroll_anchor(&id)
+                && !before_update
+                    .iter()
+                    .any(|previous| previous.shares_scroll_owner(&anchor))
+            {
+                before_update.push(anchor);
+            }
+        }
+    }
+    if !virtual_targets.is_empty() {
+        host.application_mut()
+            .begin_virtual_target_repair(&virtual_targets);
+    }
+    let synchronized = if let Some(data) = data {
+        host.application_mut().sync_serialized_data(data)
+    } else {
+        Ok(false)
+    };
+    if synchronized.is_ok() {
+        host.application_mut()
+            .preserve_virtual_targets(&virtual_targets);
+    }
+    // Retire unreferenced ancestry on both success and rejection; the temporary
+    // catalog protection must never survive into ordinary input or later turns.
+    if !virtual_targets.is_empty() {
+        host.application_mut().end_virtual_target_repair();
+    }
+    batch.application_changed |= synchronized?;
+    let mut outcome = host.step(batch);
+    for anchor in &before_update {
+        if let Some(correction) = host.restore_scroll_anchor(anchor) {
+            outcome.merge(correction);
+        }
+    }
+    let mut virtual_work_pending = false;
+    for pass in 0..8 {
+        let (width, height) = host.render_frame().logical_size;
+        let viewport = nickel_ui::Rect::new(0.0, 0.0, width as f32, height as f32);
+        let scale = host.render_frame().scale_factor;
+        let generation = host.resolved_frame_generation();
+        let measurements = host.application().virtual_measurements(
+            generation,
+            host.resolved_layout(),
+            viewport,
+            scale,
+        )?;
+        // Keep a surviving transaction anchor through estimate refinement.
+        // Anchoring a different first-visible row here can move the focused
+        // row back offscreen as preceding estimates become measured heights.
+        let mut anchors: Vec<nickel_ui::ScrollAnchor> = before_update
+            .iter()
+            .filter(|anchor| {
+                host.capture_scroll_anchor(anchor.target())
+                    .is_some_and(|current| current.shares_scroll_owner(anchor))
+            })
+            .cloned()
+            .collect();
+        for anchor in measurements.iter().filter_map(|batch| {
+            batch
+                .anchor
+                .as_ref()
+                .and_then(|id| host.capture_scroll_anchor(id))
+        }) {
+            if !anchors
+                .iter()
+                .any(|previous| previous.shares_scroll_owner(&anchor))
+            {
+                anchors.push(anchor);
+            }
+        }
+        if host.application_mut().apply_virtual_measurements(
+            generation,
+            viewport,
+            scale,
+            &measurements,
+        )? {
+            outcome.merge(host.step(HostBatch {
+                now,
+                application_changed: true,
+                ..Default::default()
+            }));
+            for anchor in &anchors {
+                if let Some(correction) = host.restore_scroll_anchor(anchor) {
+                    outcome.merge(correction);
+                }
+            }
+            if pass == 7 {
+                virtual_work_pending = true;
+                break;
+            }
+            continue;
+        }
+        let feedback = host.application().virtual_collection_feedback(
+            host.resolved_frame_generation(),
+            host.resolved_layout(),
+            nickel_ui::Rect::new(0.0, 0.0, width as f32, height as f32),
+        )?;
+        if feedback.is_empty() {
+            break;
+        }
+        if pass == 7 {
+            virtual_work_pending = true;
+            break;
+        }
+        host.application_mut().deliver_virtual_feedback(feedback);
+        outcome.merge(host.step(HostBatch {
+            now,
+            application_changed: true,
+            ..Default::default()
+        }));
+        for anchor in &before_update {
+            if let Some(correction) = host.restore_scroll_anchor(anchor) {
+                outcome.merge(correction);
+            }
+        }
+    }
+    if host
+        .application_mut()
+        .set_virtual_work_pending(virtual_work_pending)
+    {
+        // Refresh the native host's existing polling cadence without inventing
+        // an independent timer or rebuilding an unchanged application view.
+        outcome.merge(host.step(HostBatch {
+            now,
+            ..Default::default()
+        }));
+    }
+    outcome.next_deadline = host.next_deadline();
     if let Some(error) = host.application_mut().take_runtime_failure() {
         return Err(error);
     }
@@ -1400,6 +1611,7 @@ impl LiveShell {
             package_settings_runtimes: Default::default(),
             active_shell_package_id: "nickel-default".into(),
             package_runtimes: Default::default(),
+            platform_maintenance_cursor: 0,
             package_settings_generation: 0,
             package_settings_values: Default::default(),
             package_settings_value_revisions: Default::default(),
@@ -1426,6 +1638,7 @@ impl LiveShell {
                 }
                 hosts
             },
+            plugin_image_deadlines: Default::default(),
             warm_shell_surface_hosts: std::collections::BTreeMap::new(),
             warm_shell_surface_clock: 0,
             plugin_pointer_paint: None,
@@ -2089,6 +2302,10 @@ impl LiveShell {
         }
     }
 
+    pub(crate) fn desktop_presentation_dirty(&self) -> bool {
+        self.desktop_application_dirty
+    }
+
     fn refresh_configured_wallpaper(
         &mut self,
         configured_path: Option<std::path::PathBuf>,
@@ -2369,8 +2586,13 @@ impl LiveShell {
     }
 
     pub fn desktop_input(&mut self, event: nickel_input::InputEvent) -> bool {
-        let (ingress, authority) =
-            internal_normalized_ingress(event, None, "desktop", self.desktop_host.inspect(), None);
+        let (ingress, authority) = internal_normalized_ingress(
+            event,
+            None,
+            "desktop",
+            self.desktop_host.input_lease(),
+            None,
+        );
         self.desktop_host_event_authorized(ingress, Some(authority))
     }
 
@@ -3199,6 +3421,16 @@ impl LiveShell {
     }
 
     fn external_plugin_applications(&mut self, plugin_id: &str) -> Option<serde_json::Value> {
+        self.external_plugin_applications_shared(plugin_id)
+            .map(|value| (*value).clone())
+    }
+
+    // Scene projection only borrows snapshots. Preserve native revision and
+    // per-call grant checks without cloning the entire catalog on cache hits.
+    fn external_plugin_applications_shared(
+        &mut self,
+        plugin_id: &str,
+    ) -> Option<Arc<serde_json::Value>> {
         let package = self.external_plugin_packages.get(plugin_id)?;
         if !package
             .manifest
@@ -3226,7 +3458,10 @@ impl LiveShell {
         {
             return Some(cached.value.clone());
         }
-        let value = crate::application_capabilities::include_running(&self.launcher, windows);
+        let value = Arc::new(crate::application_capabilities::include_running(
+            &self.launcher,
+            windows,
+        ));
         #[cfg(test)]
         {
             self.application_catalog_builds = self.application_catalog_builds.saturating_add(1);
@@ -3266,8 +3501,12 @@ impl LiveShell {
         &mut self,
         catalog: Option<&serde_json::Value>,
         search: Option<&serde_json::Value>,
+        demand: &std::collections::BTreeSet<String>,
     ) -> crate::plugin_panel::PluginImages {
         let mut images = crate::plugin_panel::PluginImages::new();
+        if demand.is_empty() {
+            return images;
+        }
         let items = catalog
             .and_then(serde_json::Value::as_array)
             .into_iter()
@@ -3279,6 +3518,15 @@ impl LiveShell {
                     .flatten(),
             );
         for item in items {
+            let Some(asset) = item["icon"]
+                .as_str()
+                .filter(|asset| demand.contains(*asset))
+            else {
+                continue;
+            };
+            if images.contains_key(asset) {
+                continue;
+            }
             let Some(id) = item["id"].as_str() else {
                 continue;
             };
@@ -3306,7 +3554,7 @@ impl LiveShell {
             } else {
                 continue;
             };
-            images.insert(crate::application_capabilities::icon_asset(id), icon);
+            images.insert(asset.to_owned(), icon);
         }
         images
     }
@@ -3965,13 +4213,10 @@ impl LiveShell {
         let windows = self.external_plugin_windows(&key.plugin_id);
         let window_menu = self.plugin_window_menu(&key.plugin_id);
         let window_destinations = self.plugin_window_destinations(&key.plugin_id);
-        let applications = self.external_plugin_applications(&key.plugin_id);
+        let applications = self.external_plugin_applications_shared(&key.plugin_id);
         let application_search = self.plugin_application_search(&key.plugin_id);
         let features = self.plugin_features(&key.plugin_id, false);
         let shortcuts = self.plugin_features(&key.plugin_id, true);
-        let mut application_images =
-            self.plugin_application_images(applications.as_ref(), application_search.as_ref());
-        application_images.insert("codex".into(), (u16::MAX, self.codex_icon.clone()));
         let clock = crate::clock_capabilities::snapshot();
         let notifications = self.external_plugin_notifications(&key.plugin_id);
         let tray = self.plugin_registry.get(&key.plugin_id)
@@ -3984,9 +4229,6 @@ impl LiveShell {
         let appearance = self.plugin_appearance(&key.plugin_id, false);
         let wallpaper = self.plugin_appearance(&key.plugin_id, true);
         let session = self.plugin_session(&key.plugin_id);
-        if wallpaper.is_some() {
-            application_images.extend(self.appearance_capabilities.wallpaper_images.clone());
-        }
         let system = Self::plugin_system_metadata();
         let navigation = self.plugin_navigation(&key.plugin_id);
         let wifi = self.plugin_connectivity(&key.plugin_id, true);
@@ -3995,7 +4237,7 @@ impl LiveShell {
         let workspaces = self.plugin_workspace_snapshot(&key.plugin_id);
         let desktop = self.plugin_desktop_snapshot(&key.plugin_id);
         let keyboard_data = self.plugin_keyboard_snapshot(&key.plugin_id);
-        let result = (|| {
+        let preparation = (|| {
             let host = self.plugin_panel_host_for(key)?;
             let projected = (|| -> Result<bool, String> {
                 // Geometry is published first. Focus is a distinct UiHost fact,
@@ -4019,7 +4261,6 @@ impl LiveShell {
                 } else {
                     false
                 };
-                application_images.extend(preview_images);
                 let fields = [
                     ("viewport", Some(&viewport)),
                     ("clock", Some(&clock)),
@@ -4028,7 +4269,7 @@ impl LiveShell {
                     ("windowMenu", window_menu.as_ref()),
                     ("windowDestinations", window_destinations.as_ref()),
                     ("windowPreviews", window_previews.as_ref()),
-                    ("applications", applications.as_ref()),
+                    ("applications", applications.as_deref()),
                     ("applicationSearch", application_search.as_ref()),
                     ("features", features.as_ref()),
                     ("shortcuts", shortcuts.as_ref()),
@@ -4056,19 +4297,11 @@ impl LiveShell {
                 let dependency_changed = host
                     .application_mut()
                     .sync_composition_dependency_fields(&dependency_fields)?;
-                let application_images_changed =
-                    if applications.is_some() || window_previews.is_some() {
-                        host.application_mut()
-                            .sync_application_images(application_images)
-                    } else {
-                        false
-                    };
-                if resource_changed || dependency_changed || application_images_changed {
+                if resource_changed || dependency_changed {
                     tracing::warn!(
                         surface = %key.surface_id,
                         resource_changed,
                         dependency_changed,
-                        application_images_changed,
                         "plugin projection change source"
                     );
                 }
@@ -4076,19 +4309,72 @@ impl LiveShell {
                     || focus_changed
                     || surface_changed
                     || resource_changed
-                    || dependency_changed
-                    || application_images_changed)
+                    || dependency_changed)
             })();
             let projected = match projected {
                 Ok(changed) => changed,
                 Err(error) => return Some(Err(error)),
+            };
+            // Admit data/geometry and its native virtual row window before
+            // resolving artwork. An unchanged scene avoids this extra step.
+            Some(
+                if projected
+                    || host.render_frame().logical_size != (width, height)
+                    || host.application().virtual_work_pending()
+                {
+                    step_plugin_host(
+                        host,
+                        None,
+                        HostBatch {
+                            application_changed: projected,
+                            surface_size: Some((width, height)),
+                            ..HostBatch::default()
+                        },
+                    )
+                    .map(|_| ())
+                } else {
+                    Ok(())
+                },
+            )
+        })()?;
+        if let Err(error) = preparation {
+            self.fail_plugin_panel_runtime(&key.plugin_id, error);
+            return None;
+        }
+        let image_demand = self
+            .plugin_panel_host_for(key)?
+            .application()
+            .application_image_demand();
+        let mut application_images = self.plugin_application_images(
+            applications.as_deref(),
+            application_search.as_ref(),
+            &image_demand,
+        );
+        application_images.insert("codex".into(), (u16::MAX, self.codex_icon.clone()));
+        application_images.extend(preview_images);
+        if wallpaper.is_some() {
+            application_images.extend(self.appearance_capabilities.previews.images().clone());
+        }
+        let result = (|| {
+            let host = self.plugin_panel_host_for(key)?;
+            let images_changed = if applications.is_some()
+                || application_search.is_some()
+                || window_previews.is_some()
+                || wallpaper.is_some()
+                || host.application().has_wallpaper_images()
+                || host.application().has_application_images()
+            {
+                host.application_mut()
+                    .sync_application_images(application_images)
+            } else {
+                false
             };
             Some(
                 render_plugin_host(
                     host,
                     None,
                     HostBatch {
-                        application_changed: projected,
+                        application_changed: images_changed,
                         surface_size: Some((width, height)),
                         ..HostBatch::default()
                     },
@@ -4098,6 +4384,22 @@ impl LiveShell {
         })()?;
         match result {
             Ok((commands, bytes, effects)) => {
+                let next_demand = self
+                    .plugin_panel_host_for(key)?
+                    .application()
+                    .application_image_demand();
+                if (applications.is_some() || application_search.is_some())
+                    && !Arc::ptr_eq(&image_demand, &next_demand)
+                    && image_demand != next_demand
+                {
+                    // Artwork can change row geometry. If native admission now
+                    // requests another set, yield rather than recursively redraw.
+                    self.plugin_image_deadlines
+                        .insert(key.clone(), Instant::now() + Duration::from_millis(16));
+                } else {
+                    self.plugin_image_deadlines.remove(key);
+                }
+                self.sync_wallpaper_preview_demand(Instant::now());
                 self.record_plugin_panel_memory(key, bytes);
                 if let Err(error) = self.reconcile_plugin_surface_root(key) {
                     self.fail_plugin_panel_runtime(&key.plugin_id, error);
@@ -4306,6 +4608,7 @@ impl LiveShell {
             self.plugin_surface_hosts.remove(key);
             self.plugin_panel_memory.remove(key);
         }
+        self.sync_wallpaper_preview_demand(Instant::now());
         if self.primary_panel_key == *key {
             self.primary_panel_key = crate::plugin_panel::surface_key();
         }
@@ -5106,6 +5409,7 @@ impl LiveShell {
         self.application_search.retire(id);
         self.plugin_surface_hosts
             .retain(|key, _| key.plugin_id != id);
+        self.sync_wallpaper_preview_demand(Instant::now());
         self.retire_warm_shell_surfaces_for(id);
         self.plugin_panel_memory
             .retain(|key, _| key.plugin_id != id);
@@ -5151,6 +5455,7 @@ impl LiveShell {
         let id = crate::plugin_panel::manifest().id.clone();
         self.plugin_surface_hosts
             .retain(|key, _| key.plugin_id != id);
+        self.sync_wallpaper_preview_demand(Instant::now());
         self.plugin_panel_memory
             .retain(|key, _| key.plugin_id != id);
         self.retire_warm_shell_surfaces_for(&id);
@@ -5622,6 +5927,45 @@ impl LiveShell {
             .min()
     }
 
+    fn sync_wallpaper_preview_demand(&mut self, now: Instant) {
+        self.plugin_image_deadlines
+            .retain(|key, _| self.plugin_surface_hosts.contains_key(key));
+        let registry = &self.plugin_registry;
+        let packages = &self.external_plugin_packages;
+        let demands = self
+            .plugin_surface_hosts
+            .iter()
+            .filter_map(|(key, (_, host))| {
+                if !packages
+                    .get(&key.plugin_id)
+                    .map(|package| &package.manifest)
+                    .or_else(|| registry.get(&key.plugin_id).map(|entry| &entry.manifest))
+                    .is_some_and(|manifest| {
+                        manifest
+                            .capabilities
+                            .contains(&nickel_core::plugins::PluginCapability::WallpaperRead)
+                    })
+                {
+                    return None;
+                }
+                let frame = host.render_frame();
+                let viewport = nickel_ui::Rect::new(
+                    0.0,
+                    0.0,
+                    frame.logical_size.0 as f32,
+                    frame.logical_size.1 as f32,
+                );
+                Some((
+                    key,
+                    host.application()
+                        .wallpaper_preview_demand(host.resolved_layout(), viewport),
+                ))
+            });
+        self.appearance_capabilities
+            .previews
+            .sync_surfaces(demands, now);
+    }
+
     pub fn host_deadline_sources(&self) -> Vec<(&'static str, Instant)> {
         let mut sources = Vec::new();
         let mut push = |name, deadline| {
@@ -5639,6 +5983,14 @@ impl LiveShell {
         );
         push("on-screen-keyboard", Some(self.keyboard_deadline));
         push("clock", Some(self.clock_deadline));
+        push(
+            "plugin-image-admission",
+            self.plugin_image_deadlines.values().copied().min(),
+        );
+        push(
+            "wallpaper-previews",
+            self.appearance_capabilities.previews.next_deadline(),
+        );
         push(
             "shell-selection-preview",
             self.shell_selection_preview
@@ -5798,7 +6150,8 @@ impl LiveShell {
             .plugin_surface_hosts
             .iter()
             .filter(|(_, (_, host))| host.next_deadline().is_some_and(|deadline| now >= deadline))
-            .map(|(key, (surface, _))| (key.clone(), (surface.width, surface.height)))
+            // A timer must not restore the package's initial window size.
+            .map(|(key, (_, host))| (key.clone(), host.render_frame().logical_size))
             .collect::<Vec<_>>();
         for (key, size) in due_plugin_surfaces {
             let outcome = self.plugin_surface_host_event(&key, HostEvent::Poll, size, None, None);
@@ -5828,6 +6181,131 @@ impl LiveShell {
         }
     }
 
+    fn service_cooperative_platform_tasks(&mut self, outcome: &mut ShellDeadlineOutcome) {
+        let mut roots = self
+            .package_runtimes
+            .iter()
+            .map(|(id, runtime)| (id.clone(), runtime.clone()))
+            .collect::<Vec<_>>();
+        roots.extend(self.plugin_surface_hosts.iter().map(|(key, (_, host))| {
+            let application = host.application();
+            let retained = application
+                .shared_composition_runtime()
+                .map(RetainedPackageRuntime::Composed)
+                .unwrap_or_else(|| RetainedPackageRuntime::Ordinary(application.shared_runtime()));
+            (key.plugin_id.clone(), retained)
+        }));
+        // A context can be retained independently and also participate in a
+        // composition. Block all aliases of a provisional composition owner,
+        // regardless of which root appears first in the registry.
+        let mut blocked = std::collections::HashSet::new();
+        for (_, retained) in &roots {
+            if let RetainedPackageRuntime::Composed(host) = retained {
+                let host = host.borrow();
+                if host.transaction_pending() {
+                    for owner in host.participating_owners() {
+                        if let Ok(runtime) = host.shared_owner_runtime(owner) {
+                            blocked.insert(std::rc::Rc::as_ptr(&runtime) as usize);
+                        }
+                    }
+                }
+            }
+        }
+        let mut seen = std::collections::HashSet::new();
+        let mut candidates = Vec::new();
+        for (id, retained) in roots {
+            match &retained {
+                RetainedPackageRuntime::Ordinary(runtime) => {
+                    if !runtime.borrow().transaction_pending()
+                        && !blocked.contains(&(std::rc::Rc::as_ptr(runtime) as usize))
+                        && seen.insert(std::rc::Rc::as_ptr(runtime) as usize)
+                    {
+                        candidates.push((id, retained.clone(), None, runtime.clone()));
+                    }
+                }
+                RetainedPackageRuntime::Composed(host) => {
+                    let host = host.borrow();
+                    if host.transaction_pending() {
+                        continue;
+                    }
+                    for owner in host.participating_owners() {
+                        if let Ok(runtime) = host.shared_owner_runtime(owner)
+                            && !runtime.borrow().transaction_pending()
+                            && !blocked.contains(&(std::rc::Rc::as_ptr(&runtime) as usize))
+                            && seen.insert(std::rc::Rc::as_ptr(&runtime) as usize)
+                        {
+                            candidates.push((
+                                id.clone(),
+                                retained.clone(),
+                                Some(owner.clone()),
+                                runtime,
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        if candidates.is_empty() {
+            return;
+        }
+        let index = self.platform_maintenance_cursor % candidates.len();
+        self.platform_maintenance_cursor = (index + 1) % candidates.len();
+        let (id, retained, owner, runtime) = candidates.swap_remove(index);
+        // Deliberately probe even an inactive owner: V8 may post delayed work
+        // after its activity hint was cleared. This uses an existing wakeup.
+        let serviced = match retained {
+            RetainedPackageRuntime::Ordinary(runtime) => {
+                runtime.borrow_mut().service_platform_tasks()
+            }
+            RetainedPackageRuntime::Composed(host) => host
+                .borrow_mut()
+                .service_owner_platform_tasks(owner.as_ref().expect("composed maintenance owner")),
+        };
+        if let Err(error) = serviced {
+            outcome.visibility_changed |= self.fail_plugin_panel_runtime(&id, error);
+            return;
+        }
+        let hosts = self
+            .plugin_surface_hosts
+            .iter()
+            .filter(|(_, (_, host))| host.application().uses_runtime(&runtime))
+            .map(|(key, (_, host))| (key.clone(), host.render_frame().logical_size))
+            .collect::<Vec<_>>();
+        for (key, size) in hosts {
+            let Some((_, host)) = self.plugin_surface_hosts.get_mut(&key) else {
+                continue;
+            };
+            match host.application_mut().idle_work_pending() {
+                Ok(false) => continue,
+                Err(error) => {
+                    outcome.visibility_changed |=
+                        self.fail_plugin_panel_runtime(&key.plugin_id, error);
+                    continue;
+                }
+                Ok(true) => {}
+            }
+            let changed = self.step_generic_plugin_surface(
+                &key,
+                HostBatch {
+                    surface_size: Some(size),
+                    events: vec![HostEvent::Poll],
+                    ..HostBatch::default()
+                },
+                None,
+            );
+            let failure = self
+                .plugin_surface_hosts
+                .get_mut(&key)
+                .and_then(|(_, host)| host.application_mut().take_runtime_failure());
+            if let Some(error) = failure {
+                outcome.visibility_changed |= self.fail_plugin_panel_runtime(&key.plugin_id, error);
+            }
+            if changed {
+                outcome.redraw.push(self.plugin_surface_redraw_role(&key));
+            }
+        }
+    }
+
     pub fn poll_deadlines(&mut self, now: Instant) -> ShellDeadlineOutcome {
         let shell_recovered = self
             .shell_selection_preview
@@ -5840,7 +6318,39 @@ impl LiveShell {
             redraw: self.poll_host_deadlines(now),
             ..ShellDeadlineOutcome::default()
         };
+        self.sync_wallpaper_preview_demand(now);
+        let due_images = self
+            .plugin_image_deadlines
+            .iter()
+            .filter(|(_, deadline)| now >= **deadline)
+            .map(|(key, _)| key.clone())
+            .collect::<Vec<_>>();
+        for key in due_images {
+            self.plugin_image_deadlines.remove(&key);
+            outcome.redraw.push(self.plugin_surface_redraw_role(&key));
+        }
+        if self.appearance_capabilities.previews.poll(now) {
+            // Image arrivals change native paint resources, not package state or
+            // wallpaper selection. Redraw the live admitted consumers only.
+            for (key, (_, host)) in &self.plugin_surface_hosts {
+                let frame = host.render_frame();
+                let viewport = nickel_ui::Rect::new(
+                    0.0,
+                    0.0,
+                    frame.logical_size.0 as f32,
+                    frame.logical_size.1 as f32,
+                );
+                if !host
+                    .application()
+                    .wallpaper_preview_demand(host.resolved_layout(), viewport)
+                    .is_empty()
+                {
+                    outcome.redraw.push(self.plugin_surface_redraw_role(key));
+                }
+            }
+        }
         if now >= self.keyboard_deadline {
+            self.service_cooperative_platform_tasks(&mut outcome);
             let visible = self.keyboard_visible;
             if self.refresh_keyboard() {
                 outcome.redraw.push(SurfaceRole::OnScreenKeyboard);
@@ -5946,7 +6456,7 @@ impl LiveShell {
             input,
             None,
             "notification",
-            self.notification_host.inspect(),
+            self.notification_host.input_lease(),
             None,
         );
         self.notification_host_event_authorized(ingress, width, height, Some(authority))
@@ -6144,13 +6654,15 @@ impl LiveShell {
                     outcome.changed,
                     paint_only,
                     host.application_mut().take_effects(),
+                    outcome.telemetry,
                 ))
             })
         };
-        let (changed, paint_only, effects) = match result {
+        let (changed, paint_only, effects, telemetry) = match result {
             Ok(result) => result,
             Err(error) => return self.fail_plugin_panel_runtime(&key.plugin_id, error),
         };
+        self.host_runtime_samples.record(telemetry);
         if paint_only && effects.is_empty() {
             self.plugin_pointer_paint = Some(key.clone());
             return changed;
@@ -6168,9 +6680,13 @@ impl LiveShell {
     pub(crate) fn take_plugin_pointer_paint(
         &mut self,
         key: &nickel_core::plugins::PluginSurfaceKey,
+        changed: bool,
     ) -> Option<Vec<PaintCommand>> {
         (self.plugin_pointer_paint.take().as_ref() == Some(key))
             .then(|| {
+                if !changed {
+                    return Some(Vec::new());
+                }
                 self.plugin_panel_host_ref(key)
                     .map(|host| host.commands().to_vec())
             })
@@ -6197,7 +6713,7 @@ impl LiveShell {
             let Some(host) = self.plugin_panel_host_for(key) else {
                 return false;
             };
-            internal_normalized_ingress(input, None, "plugin-panel", host.inspect(), None)
+            internal_normalized_ingress(input, None, "plugin-panel", host.input_lease(), None)
         };
         self.step_generic_plugin_surface(
             key,
@@ -7711,8 +8227,13 @@ impl LiveShell {
             let Some(host) = self.preview_plugin_host_ref() else {
                 return Default::default();
             };
-            let (ingress, authority) =
-                internal_normalized_ingress(input, None, "window-preview", host.inspect(), None);
+            let (ingress, authority) = internal_normalized_ingress(
+                input,
+                None,
+                "window-preview",
+                host.input_lease(),
+                None,
+            );
             return self.preview_host_event_authorized(ingress, Some(authority));
         }
         Default::default()
@@ -8866,6 +9387,7 @@ impl LiveShell {
     /// whichever application was active before this surface opened.
     pub(crate) fn dismiss_ephemeral_on_focus_loss(&mut self, role: SurfaceRole) -> bool {
         match role {
+            SurfaceRole::Launcher => self.set_default_shell_surface_visible("launcher", false),
             SurfaceRole::ControlCenter if self.shell_selection_preview.is_some() => false,
             SurfaceRole::ControlCenter => {
                 if self.quick_settings_surface_active() {
@@ -9263,7 +9785,7 @@ impl LiveShell {
             });
         }
         let (ingress, authority) =
-            internal_normalized_ingress(input, None, "lock", self.lock_host.inspect(), None);
+            internal_normalized_ingress(input, None, "lock", self.lock_host.input_lease(), None);
         let outcome = self.lock_host.step(HostBatch {
             events: vec![ingress],
             normalized_authorities: vec![authority],
@@ -9310,6 +9832,9 @@ impl LiveShell {
                     let application = self.lock_host.application_mut();
                     match authenticated {
                         Ok(true) => {
+                            tracing::info!(
+                                "lock authentication succeeded; enqueueing session unlock"
+                            );
                             #[cfg(target_os = "linux")]
                             if let Err(error) = self.session_host.dispatch(ShellCommand::Unlock) {
                                 tracing::warn!(%error, "session unlock command failed");

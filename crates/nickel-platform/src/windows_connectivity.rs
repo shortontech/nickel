@@ -446,6 +446,7 @@ pub fn pair_bluetooth_device(id: &str, connected: bool) -> Result<(), String> {
 /// Bounded native interface inventory, independent of any Settings page.
 #[derive(Clone, Debug)]
 pub struct NetworkAdapter {
+    pub id: String,
     pub name: String,
     pub description: String,
     pub connected: bool,
@@ -500,9 +501,13 @@ pub fn network_adapters() -> Result<Vec<NetworkAdapter>, String> {
         // SAFETY: Names returned by GetAdaptersAddresses are terminated wide strings in the same buffer.
         let name = unsafe { adapter.FriendlyName.to_string() }.unwrap_or_default();
         let description = unsafe { adapter.Description.to_string() }.unwrap_or_default();
+        // SAFETY: AdapterName is a terminated adapter identifier in the same
+        // GetAdaptersAddresses buffer; it is not the mutable friendly name.
+        let id = unsafe { adapter.AdapterName.to_string() }.unwrap_or_default();
         if !name.is_empty() && adapter.IfType != 24 {
             let speed = adapter.ReceiveLinkSpeed.max(adapter.TransmitLinkSpeed);
             adapters.push(NetworkAdapter {
+                id,
                 name: name.chars().take(512).collect(),
                 description: description.chars().take(512).collect(),
                 connected: adapter.OperStatus == IfOperStatusUp,

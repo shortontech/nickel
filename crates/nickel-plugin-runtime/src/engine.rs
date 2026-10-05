@@ -10,18 +10,31 @@ use serde_json::Value;
 #[serde(rename_all = "camelCase")]
 pub(crate) struct EngineDiagnostics {
     pub invocations: u64,
+    /// Source compilation attempts, distinct from direct calls to loaded code.
+    pub script_compilations: u64,
     pub failed_invocations: u64,
     pub deadline_terminations: u64,
     pub javascript_micros: u64,
     pub bridge_micros: u64,
+    /// JSON value nodes actually converted into V8 arguments (not byte size).
+    pub bridge_values: u64,
     pub microtask_checkpoints: u64,
     pub microtask_micros: u64,
     pub gc_collections: u64,
     pub gc_micros: u64,
+    /// Foreground tasks actually executed, including batches later rejected.
+    pub platform_tasks_serviced: u64,
     pub used_heap_bytes: usize,
     pub peak_used_heap_bytes: usize,
     pub total_heap_bytes: usize,
     pub heap_limit_bytes: usize,
+    // V8-owned accounting, not additive to RSS or glibc live bytes. These help
+    // distinguish retained contexts/handles from external or engine allocations.
+    pub external_memory_bytes: usize,
+    pub malloced_memory_bytes: usize,
+    pub used_global_handles_bytes: usize,
+    pub native_contexts: usize,
+    pub detached_contexts: usize,
 }
 
 mod implementation {
@@ -30,9 +43,55 @@ mod implementation {
     use std::sync::{Arc, Once, OnceLock, mpsc};
     use std::time::{Duration, Instant};
 
+    enum NativeCallResult {
+        Boolean(bool),
+        JsonText(String),
+    }
+
     const INITIAL_HEAP_BYTES: usize = 4 * 1024 * 1024;
     const MAX_HEAP_BYTES: usize = 64 * 1024 * 1024;
     const EXECUTION_DEADLINE: Duration = Duration::from_millis(100);
+    fn pump_ready_task_batch(
+        mut run_ready_task: impl FnMut() -> bool,
+        mut stop: impl FnMut() -> bool,
+    ) -> usize {
+        let mut count = 0;
+        while count < 8 && !stop() {
+            if !run_ready_task() {
+                break;
+            }
+            count += 1;
+        }
+        count
+    }
+
+    #[test]
+    fn foreground_task_admission_preserves_remaining_work_and_stop_boundary() {
+        use std::cell::Cell;
+        let queued = Cell::new(20);
+        let run = || {
+            queued.set(queued.get() - 1);
+            true
+        };
+        assert_eq!(pump_ready_task_batch(run, || false), 8);
+        assert_eq!(queued.get(), 12);
+        assert_eq!(pump_ready_task_batch(run, || true), 0);
+        assert_eq!(queued.get(), 12);
+        assert_eq!(pump_ready_task_batch(run, || queued.get() == 9), 3);
+        assert_eq!(queued.get(), 9);
+        let probes = Cell::new(0);
+        assert_eq!(
+            pump_ready_task_batch(
+                || {
+                    probes.set(probes.get() + 1);
+                    false
+                },
+                || false
+            ),
+            0
+        );
+        assert_eq!(probes.get(), 1, "empty queue must not spin or wait");
+    }
     static INITIALIZE_V8: Once = Once::new();
     static NEXT_DEADLINE_ID: AtomicU64 = AtomicU64::new(1);
     static WATCHDOG: OnceLock<mpsc::Sender<Deadline>> = OnceLock::new();
@@ -147,6 +206,13 @@ mod implementation {
     impl JavascriptEngine {
         pub(crate) fn new() -> Self {
             INITIALIZE_V8.call_once(|| {
+                // Nickel runs bounded synchronous calls, not a V8 foreground
+                // event loop. Speculative minor-GC tasks otherwise accumulate
+                // as canceled task objects in DefaultForegroundTaskRunner.
+                // Keep ordinary allocation-triggered GC; do not schedule work
+                // that this embedding cannot service. Revisit with any future
+                // transaction-aware foreground-task integration.
+                v8::V8::set_flags_from_string("--no-minor-gc-task");
                 let platform = v8::new_default_platform(0, false).make_shared();
                 v8::V8::initialize_platform(platform);
                 v8::V8::initialize();
@@ -192,6 +258,153 @@ mod implementation {
             diagnostics
         }
 
+        pub(crate) fn microtask_checkpoint_count(&self) -> u64 {
+            self.diagnostics.microtask_checkpoints
+        }
+
+        pub(crate) fn platform_tasks_serviced(&self) -> u64 {
+            self.diagnostics.platform_tasks_serviced
+        }
+
+        pub(crate) fn diagnostic_pump_platform_tasks(&mut self) -> Result<usize, String> {
+            let deadline = self.arm_deadline();
+            let platform = v8::V8::get_current_platform();
+            let context = self.context.clone();
+            let started = Instant::now();
+            // SAFETY: the exclusive engine borrow owns this isolate and all
+            // foreground tasks execute synchronously on its owner thread.
+            unsafe { self.isolate.enter() };
+            let (count, ready, terminated, caught, microtask_micros) = {
+                v8::scope!(let scope, &mut self.isolate);
+                let context = v8::Local::new(scope, context);
+                let scope = &mut v8::ContextScope::new(scope, context);
+                let scope = std::pin::pin!(v8::TryCatch::new(scope));
+                let mut scope = scope.init();
+                // Read bootstrap transaction state without the ordinary bridge's
+                // microtask checkpoint: a rejected diagnostic must not advance
+                // provisional render/event work before returning to its owner.
+                let readiness = v8::String::new(&scope, "__nickelPlatformMaintenanceReady")
+                    .and_then(|key| context.global(&scope).get(&scope, key.into()))
+                    .and_then(|value| v8::Local::<v8::Function>::try_from(value).ok());
+                let probe_ready = || {
+                    readiness
+                        .and_then(|function| {
+                            function.call(&scope, v8::undefined(&scope).into(), &[])
+                        })
+                        .is_some_and(|value| value.is_true())
+                };
+                let mut ready = probe_ready();
+                let count = pump_ready_task_batch(
+                    || v8::Platform::pump_message_loop(&platform, &scope, false),
+                    || {
+                        if !ready
+                            || started.elapsed() >= Duration::from_millis(2)
+                            || scope.has_caught()
+                            || scope.has_terminated()
+                        {
+                            return true;
+                        }
+                        // A foreground task can run JavaScript and leave a new
+                        // provisional render/event. Never admit another task
+                        // based only on the batch's initial idle state.
+                        ready = probe_ready();
+                        !ready
+                    },
+                );
+                // The count/time bound may end the batch immediately after a
+                // task, without another admission check. Do not report success
+                // with the readiness value from before that final task.
+                if ready && !scope.has_caught() && !scope.has_terminated() {
+                    ready = probe_ready();
+                }
+                let microtask_micros =
+                    if count > 0 && ready && !scope.has_caught() && !scope.has_terminated() {
+                        let checkpoint_started = Instant::now();
+                        scope.perform_microtask_checkpoint();
+                        let elapsed = checkpoint_started
+                            .elapsed()
+                            .as_micros()
+                            .min(u128::from(u64::MAX)) as u64;
+                        if !scope.has_caught() && !scope.has_terminated() {
+                            ready = readiness
+                                .and_then(|function| {
+                                    function.call(&scope, v8::undefined(&scope).into(), &[])
+                                })
+                                .is_some_and(|value| value.is_true());
+                        }
+                        Some(elapsed)
+                    } else {
+                        None
+                    };
+                (
+                    count,
+                    ready,
+                    scope.has_terminated(),
+                    scope.has_caught(),
+                    microtask_micros,
+                )
+            };
+            // SAFETY: every foreground task and Rust handle scope has ended.
+            unsafe { self.isolate.exit() };
+            drop(deadline);
+            self.diagnostics.platform_tasks_serviced = self
+                .diagnostics
+                .platform_tasks_serviced
+                .saturating_add(count as u64);
+            if let Some(micros) = microtask_micros {
+                self.diagnostics.microtask_checkpoints =
+                    self.diagnostics.microtask_checkpoints.saturating_add(1);
+                self.diagnostics.microtask_micros =
+                    self.diagnostics.microtask_micros.saturating_add(micros);
+            }
+            if terminated || self.isolate.is_execution_terminating() {
+                self.isolate.cancel_terminate_execution();
+                self.diagnostics.deadline_terminations =
+                    self.diagnostics.deadline_terminations.saturating_add(1);
+                return Err("JavaScript execution deadline exceeded".into());
+            }
+            if caught {
+                return Err("V8 foreground task raised an exception".into());
+            }
+            if !ready {
+                return Err("platform task diagnostic requires an idle valid runtime".into());
+            }
+            Ok(count)
+        }
+
+        pub(crate) fn diagnostic_heap_snapshot(&mut self) -> Result<Vec<u8>, String> {
+            const MAX_SNAPSHOT_BYTES: usize = 128 * 1024 * 1024;
+            let mut bytes = Vec::new();
+            let mut overflow = false;
+            let mut completed = false;
+            // SAFETY: the exclusive engine borrow owns the isolate; there are
+            // no outstanding handle scopes. Snapshot callbacks only copy bytes.
+            unsafe { self.isolate.enter() };
+            self.isolate.take_heap_snapshot(|chunk| {
+                if chunk.is_empty() {
+                    completed = true;
+                    return true;
+                }
+                if chunk.len() > MAX_SNAPSHOT_BYTES - bytes.len() {
+                    overflow = true;
+                    return false;
+                }
+                bytes.extend_from_slice(chunk);
+                true
+            });
+            // SAFETY: snapshot serialization has finished and created no Rust
+            // handle scopes. Restore the engine's ordinary unentered state.
+            unsafe { self.isolate.exit() };
+            self.refresh_heap_diagnostics();
+            if overflow {
+                Err("diagnostic heap snapshot exceeds 128 MiB".into())
+            } else if !completed || bytes.is_empty() {
+                Err("diagnostic heap snapshot did not complete".into())
+            } else {
+                Ok(bytes)
+            }
+        }
+
         pub(crate) fn eval(&mut self, source: &str) -> Result<(), String> {
             self.eval_value(source).map(|_| ())
         }
@@ -229,7 +442,21 @@ mod implementation {
             name: &str,
             arguments: &[Value],
         ) -> Result<(), String> {
-            self.call_global(name, arguments).map(|_| ())
+            self.call_global(name, arguments, false).map(|_| ())
+        }
+
+        pub(crate) fn call_global_object_fields(
+            &mut self,
+            name: &str,
+            fields: &[(&str, &Value)],
+        ) -> Result<(), String> {
+            self.call_global_arguments(
+                name,
+                std::iter::once(NativeArgument::Object(fields)),
+                false,
+                true,
+            )
+            .map(|_| ())
         }
 
         pub(crate) fn call_global_bool(
@@ -237,13 +464,53 @@ mod implementation {
             name: &str,
             arguments: &[Value],
         ) -> Result<bool, String> {
-            self.call_global(name, arguments)
+            let NativeCallResult::Boolean(value) = self.call_global(name, arguments, false)? else {
+                unreachable!("boolean call requested a JSON result")
+            };
+            Ok(value)
+        }
+
+        pub(crate) fn call_global_bool_without_microtasks(
+            &mut self,
+            name: &str,
+            arguments: &[Value],
+        ) -> Result<bool, String> {
+            let NativeCallResult::Boolean(value) = self.call_global_arguments(
+                name,
+                arguments.iter().map(NativeArgument::Value),
+                false,
+                false,
+            )?
+            else {
+                unreachable!("boolean call requested a JSON result")
+            };
+            Ok(value)
+        }
+
+        pub(crate) fn call_global_json<T: DeserializeOwned>(
+            &mut self,
+            name: &str,
+            arguments: &[Value],
+        ) -> Result<T, String> {
+            let NativeCallResult::JsonText(text) = self.call_global(name, arguments, true)? else {
+                unreachable!("JSON call requested a boolean result")
+            };
+            let started = Instant::now();
+            let result = serde_json::from_str(&text).map_err(|error| error.to_string());
+            self.diagnostics.bridge_micros = self
+                .diagnostics
+                .bridge_micros
+                .saturating_add(elapsed_micros(started));
+            result
         }
 
         fn eval_value(&mut self, source: &str) -> Result<v8::Global<v8::Value>, String> {
+            self.diagnostics.script_compilations =
+                self.diagnostics.script_compilations.saturating_add(1);
             let deadline = self.arm_deadline();
             let context = self.context.clone();
             let invocation_started = Instant::now();
+            let mut terminated = false;
             // SAFETY: calls are synchronous and exclusively borrow the owner.
             unsafe { self.isolate.enter() };
             let result = (|| {
@@ -258,6 +525,7 @@ mod implementation {
                 let script = match v8::Script::compile(&scope, source, None) {
                     Some(script) => script,
                     None => {
+                        terminated = scope.has_terminated();
                         let error = scope
                             .message()
                             .map(|message| message.get(&scope).to_rust_string_lossy(&scope))
@@ -268,6 +536,7 @@ mod implementation {
                 let value = match script.run(&scope) {
                     Some(value) => value,
                     None => {
+                        terminated = scope.has_terminated();
                         let error = scope
                             .message()
                             .map(|message| message.get(&scope).to_rust_string_lossy(&scope))
@@ -278,6 +547,7 @@ mod implementation {
                 let javascript_micros = elapsed_micros(javascript_started);
                 let microtask_started = Instant::now();
                 scope.perform_microtask_checkpoint();
+                terminated = scope.has_terminated();
                 let microtask_micros = elapsed_micros(microtask_started);
                 Ok((
                     v8::Global::new(&scope, value),
@@ -310,7 +580,7 @@ mod implementation {
                     self.diagnostics.failed_invocations.saturating_add(1);
             }
             self.refresh_heap_diagnostics();
-            if self.isolate.is_execution_terminating() {
+            if terminated || self.isolate.is_execution_terminating() {
                 self.isolate.cancel_terminate_execution();
                 self.diagnostics.deadline_terminations =
                     self.diagnostics.deadline_terminations.saturating_add(1);
@@ -319,10 +589,32 @@ mod implementation {
             result.map(|(value, _, _)| value)
         }
 
-        fn call_global(&mut self, name: &str, arguments: &[Value]) -> Result<bool, String> {
+        fn call_global(
+            &mut self,
+            name: &str,
+            arguments: &[Value],
+            json_result: bool,
+        ) -> Result<NativeCallResult, String> {
+            self.call_global_arguments(
+                name,
+                arguments.iter().map(NativeArgument::Value),
+                json_result,
+                true,
+            )
+        }
+
+        fn call_global_arguments<'a>(
+            &mut self,
+            name: &str,
+            arguments: impl IntoIterator<Item = NativeArgument<'a>>,
+            json_result: bool,
+            checkpoint_microtasks: bool,
+        ) -> Result<NativeCallResult, String> {
             let deadline = self.arm_deadline();
             let context = self.context.clone();
             let invocation_started = Instant::now();
+            let mut terminated = false;
+            let mut bridge_values = 0u64;
             // SAFETY: calls are synchronous and exclusively borrow the owner.
             unsafe { self.isolate.enter() };
             let result = (|| {
@@ -336,17 +628,32 @@ mod implementation {
                     v8::String::new(&scope, name).ok_or("global function name is too large")?;
                 let function = global
                     .get(&scope, key.into())
-                    .and_then(|value| v8::Local::<v8::Function>::try_from(value).ok())
-                    .ok_or_else(|| format!("global function {name:?} is not callable"))?;
+                    .and_then(|value| v8::Local::<v8::Function>::try_from(value).ok());
+                terminated = scope.has_terminated();
+                let function =
+                    function.ok_or_else(|| format!("global function {name:?} is not callable"))?;
                 let arguments = arguments
-                    .iter()
-                    .map(|value| json_to_v8(&mut scope, value))
+                    .into_iter()
+                    .map(|argument| match argument {
+                        NativeArgument::Value(value) => {
+                            json_to_v8(&mut scope, value, &mut bridge_values)
+                        }
+                        NativeArgument::Object(fields) => {
+                            bridge_values = bridge_values.saturating_add(1);
+                            object_fields_to_v8(
+                                &mut scope,
+                                fields.iter().copied(),
+                                &mut bridge_values,
+                            )
+                        }
+                    })
                     .collect::<Result<Vec<_>, _>>()?;
                 let receiver = v8::undefined(&scope).into();
                 let javascript_started = Instant::now();
                 let result = match function.call(&scope, receiver, &arguments) {
                     Some(result) => result,
                     None => {
+                        terminated = scope.has_terminated();
                         let error = scope
                             .message()
                             .map(|message| message.get(&scope).to_rust_string_lossy(&scope))
@@ -355,10 +662,29 @@ mod implementation {
                     }
                 };
                 let javascript_micros = elapsed_micros(javascript_started);
-                let result = result.boolean_value(&scope);
                 let microtask_started = Instant::now();
-                scope.perform_microtask_checkpoint();
-                let microtask_micros = elapsed_micros(microtask_started);
+                if checkpoint_microtasks {
+                    scope.perform_microtask_checkpoint();
+                }
+                terminated = scope.has_terminated();
+                let microtask_micros = if checkpoint_microtasks {
+                    elapsed_micros(microtask_started)
+                } else {
+                    0
+                };
+                // Ordinary calls match eval_json: execute queued microtasks before
+                // converting the result. Do not retain engine values outside
+                // this entered isolate or compile a wrapper expression.
+                let result = if json_result {
+                    let text = result.to_string(&scope);
+                    terminated |= scope.has_terminated();
+                    NativeCallResult::JsonText(
+                        text.ok_or("JavaScript result could not be converted to a string")?
+                            .to_rust_string_lossy(&scope),
+                    )
+                } else {
+                    NativeCallResult::Boolean(result.boolean_value(&scope))
+                };
                 Ok((result, javascript_micros, microtask_micros))
             })();
             // SAFETY: every handle/context scope created above has dropped.
@@ -370,8 +696,10 @@ mod implementation {
                     .diagnostics
                     .javascript_micros
                     .saturating_add(*javascript_micros);
-                self.diagnostics.microtask_checkpoints =
-                    self.diagnostics.microtask_checkpoints.saturating_add(1);
+                if checkpoint_microtasks {
+                    self.diagnostics.microtask_checkpoints =
+                        self.diagnostics.microtask_checkpoints.saturating_add(1);
+                }
                 self.diagnostics.microtask_micros = self
                     .diagnostics
                     .microtask_micros
@@ -385,8 +713,10 @@ mod implementation {
                 self.diagnostics.failed_invocations =
                     self.diagnostics.failed_invocations.saturating_add(1);
             }
+            self.diagnostics.bridge_values =
+                self.diagnostics.bridge_values.saturating_add(bridge_values);
             self.refresh_heap_diagnostics();
-            if self.isolate.is_execution_terminating() {
+            if terminated || self.isolate.is_execution_terminating() {
                 self.isolate.cancel_terminate_execution();
                 self.diagnostics.deadline_terminations =
                     self.diagnostics.deadline_terminations.saturating_add(1);
@@ -404,6 +734,11 @@ mod implementation {
                 .max(heap.used_heap_size());
             self.diagnostics.total_heap_bytes = heap.total_heap_size();
             self.diagnostics.heap_limit_bytes = heap.heap_size_limit();
+            self.diagnostics.external_memory_bytes = heap.external_memory();
+            self.diagnostics.malloced_memory_bytes = heap.malloced_memory();
+            self.diagnostics.used_global_handles_bytes = heap.used_global_handles_size();
+            self.diagnostics.native_contexts = heap.number_of_native_contexts();
+            self.diagnostics.detached_contexts = heap.number_of_detached_contexts();
         }
 
         fn arm_deadline(&self) -> DeadlineGuard {
@@ -430,10 +765,34 @@ mod implementation {
         }
     }
 
+    enum NativeArgument<'a> {
+        Value(&'a Value),
+        Object(&'a [(&'a str, &'a Value)]),
+    }
+
+    fn object_fields_to_v8<'scope, 'value>(
+        scope: &mut v8::PinScope<'scope, '_, v8::Context>,
+        fields: impl IntoIterator<Item = (&'value str, &'value Value)>,
+        bridge_values: &mut u64,
+    ) -> Result<v8::Local<'scope, v8::Value>, String> {
+        let object = v8::Object::new(scope);
+        for (key, value) in fields {
+            let key = v8::String::new(scope, key).ok_or("JSON object key is too large for V8")?;
+            let value = json_to_v8(scope, value, bridge_values)?;
+            // Own data properties must not invoke guest prototype setters.
+            if object.create_data_property(scope, key.into(), value) != Some(true) {
+                return Err("V8 rejected a JSON object property".into());
+            }
+        }
+        Ok(object.into())
+    }
+
     fn json_to_v8<'scope>(
         scope: &mut v8::PinScope<'scope, '_, v8::Context>,
         value: &Value,
+        bridge_values: &mut u64,
     ) -> Result<v8::Local<'scope, v8::Value>, String> {
+        *bridge_values = bridge_values.saturating_add(1);
         Ok(match value {
             Value::Null => v8::null(scope).into(),
             Value::Bool(value) => v8::Boolean::new(scope, *value).into(),
@@ -450,22 +809,15 @@ mod implementation {
             Value::Array(values) => {
                 let values = values
                     .iter()
-                    .map(|value| json_to_v8(scope, value))
+                    .map(|value| json_to_v8(scope, value, bridge_values))
                     .collect::<Result<Vec<_>, _>>()?;
                 v8::Array::new_with_elements(scope, &values).into()
             }
-            Value::Object(values) => {
-                let object = v8::Object::new(scope);
-                for (key, value) in values {
-                    let key =
-                        v8::String::new(scope, key).ok_or("JSON object key is too large for V8")?;
-                    let value = json_to_v8(scope, value)?;
-                    if object.set(scope, key.into(), value).is_none() {
-                        return Err("V8 rejected a JSON object property".into());
-                    }
-                }
-                object.into()
-            }
+            Value::Object(values) => object_fields_to_v8(
+                scope,
+                values.iter().map(|(key, value)| (key.as_str(), value)),
+                bridge_values,
+            )?,
         })
     }
 }

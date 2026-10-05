@@ -2,6 +2,7 @@ column.display-page, column.display-modes {
     width: 100%;
     gap: 12px;
 }
+.display-page button { color: var(--nickel-text); }
 layer.display-arrangement {
     width: 100%;
     height: 240px;

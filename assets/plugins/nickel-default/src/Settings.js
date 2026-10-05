@@ -2,6 +2,7 @@
 import "./styles/settings.css";
 import { SettingsCollection } from "./SettingsCollection.js";
 import { SettingShortcut } from "./SettingShortcut.js";
+import { useSettingDraft } from "./SettingsDrafts.js";
 function settingValue(setting) {
     const value = typeof setting.value === "function" ? setting.value() : setting.value;
     return value === undefined ? setting.defaultValue : value;
@@ -17,13 +18,13 @@ export function SettingControl(props) {
         return h(Column, { className: "settings-group" }, setting.fields.map(field => h(Column, { key: field.id, className: "settings-group-field" },
             h(Text, null, field.label),
             field.description ? h(Text, { wrap: true }, field.description) : null,
-            h(Control, { controlId: controlId + "/" + field.id, setting: { ...field,
+            h(Control, { controlId: controlId + "/" + field.id, draftState: props.draftState?.[field.id]?.type === field.type ? props.draftState[field.id].state : undefined, onDraftChange: props.onDraftChange ? next => props.onDraftChange({ ...props.draftState, [field.id]: { type: field.type, state: next } }) : undefined, setting: { ...field,
                     providerPackage: setting.providerPackage,
                     value: values[field.id] === undefined ? field.defaultValue : values[field.id],
                     onChange: next => change({ ...values, [field.id]: next }) } }))));
     }
     if (setting.type === "repeated") {
-        return h(SettingsCollection, { setting: setting, value: value, controlId: controlId, onChange: change });
+        return h(SettingsCollection, { setting: setting, value: value, controlId: controlId, onChange: change, draftState: props.draftState, onDraftChange: props.onDraftChange });
     }
     if (setting.type === "switch") {
         return h(Switch, { id: controlId, state: value ? "on" : "off", accessibilityLabel: setting.label, onClick: () => change(!value) });
@@ -39,7 +40,7 @@ export function SettingControl(props) {
         return h(Picker, { id: controlId, label: setting.label, value: value, allowAlpha: setting.allowAlpha, onChange: change });
     }
     if (setting.type === "text" || setting.type === "number") {
-        return h(SettingInput, { setting: setting, value: value, controlId: controlId, onChange: change });
+        return h(SettingInput, { setting: setting, value: value, controlId: controlId, onChange: change, draftState: props.draftState, onDraftChange: props.onDraftChange });
     }
     if (setting.type === "shortcut") {
         return h(SettingShortcut, { setting: setting, value: value, controlId: controlId, onChange: change });
@@ -49,17 +50,21 @@ export function SettingControl(props) {
     }
     return h(Text, null, value === undefined || value === null ? "" : String(value));
 }
-function SettingInput({ setting, value, controlId, onChange }) {
+function SettingInput({ setting, value, controlId, onChange, draftState, onDraftChange }) {
     const source = String(value === undefined || value === null ? "" : value);
-    const [draft, setDraft] = useState({ source, text: source });
-    const text = draft.source === source ? draft.text : source;
+    const [localText, setText] = useSettingDraft(source, controlId, setting.type);
+    const text = draftState?.source === source ? draftState.text : localText;
     const number = Number(text);
     const valid = setting.type === "number"
         ? text.trim() !== "" && Number.isFinite(number) && number >= setting.min && number <= setting.max
         : [...text].length <= (setting.maxLength || 1024);
     return h(Column, { className: "settings-input" },
         h(Row, { className: "settings-input-actions" },
-            h(TextField, { id: controlId, value: text, accessibilityLabel: setting.label, onChange: next => setDraft({ source, text: next }) }),
+            h(TextField, { id: controlId, value: text, accessibilityLabel: setting.label, onChange: next => {
+                    setText(next);
+                    if (onDraftChange)
+                        onDraftChange({ source, text: next });
+                } }),
             h(Button, { id: controlId + "/apply", disabled: !valid, onClick: () => {
                     if (valid)
                         onChange(setting.type === "number" ? number : text);
@@ -99,8 +104,9 @@ function centeredWorkAreaSize(outputs) {
     const output = outputs.find(item => item.primary) || outputs[0];
     const geometry = output?.geometry;
     const workArea = output?.work_area;
+    // Match the declared Settings surface until native output data is available.
     if (!geometry || !workArea)
-        return { width: 900, height: 600 };
+        return { width: 1100, height: 800 };
     const centeredLimit = (screenSize, workStart, workSize) => Math.max(320, Math.min(screenSize, screenSize - 2 * workStart, 2 * (workStart + workSize) - screenSize));
     const width = centeredLimit(geometry.width, workArea.x - geometry.x, workArea.width);
     const height = centeredLimit(geometry.height, workArea.y - geometry.y, workArea.height);

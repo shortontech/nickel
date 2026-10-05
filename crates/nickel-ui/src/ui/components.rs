@@ -91,6 +91,428 @@ pub struct VirtualWindow {
     pub total: f32,
 }
 
+/// Reusable variable-height geometry for a logical collection. Build when the
+/// source/estimates change; viewport queries neither rebuild nor scan the source.
+#[derive(Debug, PartialEq)]
+pub struct VirtualHeightIndex {
+    starts: Vec<f32>,
+    ends: Vec<f32>,
+    total: f32,
+    uniform: Option<(usize, f32, f32)>,
+    base: Option<Arc<VirtualHeightIndex>>,
+    corrections: Option<Arc<HeightCorrection>>,
+}
+
+/// Sparse persistent prefix-sum tree. Intervals are implicit in the logical
+/// row count; snapshots share every branch outside the changed row's path.
+#[derive(Debug, PartialEq)]
+struct HeightCorrection {
+    delta: f64,
+    nodes: usize,
+    left: Option<Arc<Self>>,
+    right: Option<Arc<Self>>,
+}
+
+impl HeightCorrection {
+    fn row_delta(root: &Option<Arc<Self>>, range: Range<usize>, row: usize) -> f64 {
+        let Some(node) = root else {
+            return 0.0;
+        };
+        if range.end - range.start == 1 {
+            return node.delta;
+        }
+        let middle = range.start + (range.end - range.start) / 2;
+        if row < middle {
+            Self::row_delta(&node.left, range.start..middle, row)
+        } else {
+            Self::row_delta(&node.right, middle..range.end, row)
+        }
+    }
+
+    fn update(
+        previous: &Option<Arc<Self>>,
+        range: Range<usize>,
+        row: usize,
+        delta: f64,
+        allocations: &mut usize,
+    ) -> Option<Arc<Self>> {
+        if range.end - range.start == 1 {
+            if delta == 0.0 {
+                return None;
+            }
+            *allocations += 1;
+            return Some(Arc::new(Self {
+                delta,
+                nodes: 1,
+                left: None,
+                right: None,
+            }));
+        }
+        let middle = range.start + (range.end - range.start) / 2;
+        let mut left = previous.as_ref().and_then(|node| node.left.clone());
+        let mut right = previous.as_ref().and_then(|node| node.right.clone());
+        if row < middle {
+            left = Self::update(&left, range.start..middle, row, delta, allocations);
+        } else {
+            right = Self::update(&right, middle..range.end, row, delta, allocations);
+        }
+        if left.is_none() && right.is_none() {
+            return None;
+        }
+        *allocations += 1;
+        Some(Arc::new(Self {
+            delta: left.as_ref().map_or(0.0, |node| node.delta)
+                + right.as_ref().map_or(0.0, |node| node.delta),
+            nodes: 1
+                + left.as_ref().map_or(0, |node| node.nodes)
+                + right.as_ref().map_or(0, |node| node.nodes),
+            left,
+            right,
+        }))
+    }
+
+    fn prefix(root: &Option<Arc<Self>>, range: Range<usize>, end: usize, work: &mut usize) -> f64 {
+        let Some(node) = root else {
+            return 0.0;
+        };
+        *work += 1;
+        if end <= range.start {
+            return 0.0;
+        }
+        if end >= range.end {
+            return node.delta;
+        }
+        let middle = range.start + (range.end - range.start) / 2;
+        if end <= middle {
+            Self::prefix(&node.left, range.start..middle, end, work)
+        } else {
+            node.left.as_ref().map_or(0.0, |node| node.delta)
+                + Self::prefix(&node.right, middle..range.end, end, work)
+        }
+    }
+}
+
+impl VirtualHeightIndex {
+    pub fn new(heights: &[f32], gap: f32) -> Self {
+        let gap = gap.max(0.0);
+        let mut starts = Vec::with_capacity(heights.len());
+        let mut ends = Vec::with_capacity(heights.len());
+        let mut cursor = 0.0;
+        for (index, height) in heights.iter().enumerate() {
+            if index > 0 {
+                cursor += gap;
+            }
+            starts.push(cursor);
+            cursor += height.max(0.0);
+            ends.push(cursor);
+        }
+        Self {
+            starts,
+            ends,
+            total: cursor,
+            uniform: None,
+            base: None,
+            corrections: None,
+        }
+    }
+
+    /// Retain fixed row geometry without allocating one extent per item.
+    pub fn uniform(count: usize, height: f32, gap: f32) -> Self {
+        let height = height.max(0.0);
+        let gap = gap.max(0.0);
+        let total = if count == 0 {
+            0.0
+        } else {
+            height + (height + gap) * count.saturating_sub(1) as f32
+        };
+        Self {
+            starts: Vec::new(),
+            ends: Vec::new(),
+            total,
+            uniform: Some((count, height, gap)),
+            base: None,
+            corrections: None,
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        if let Some(base) = &self.base {
+            return base.len();
+        }
+        self.uniform
+            .map_or(self.starts.len(), |(count, _, _)| count)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    fn row_start(&self, row: usize, work: &mut usize) -> f32 {
+        if row >= self.len() {
+            return self.total;
+        }
+        if let Some(base) = &self.base {
+            return (f64::from(base.row_start(row, work))
+                + HeightCorrection::prefix(&self.corrections, 0..self.len(), row, work))
+                as f32;
+        }
+        self.uniform.map_or_else(
+            || self.starts[row],
+            |(_, height, gap)| row as f32 * (height + gap),
+        )
+    }
+
+    fn row_end(&self, row: usize, work: &mut usize) -> f32 {
+        if let Some(base) = &self.base {
+            return (f64::from(base.row_end(row, work))
+                + HeightCorrection::prefix(&self.corrections, 0..self.len(), row + 1, work))
+                as f32;
+        }
+        self.uniform.map_or_else(
+            || self.ends[row],
+            |(_, height, gap)| row as f32 * (height + gap) + height,
+        )
+    }
+
+    pub fn height(&self, row: usize) -> Option<f32> {
+        if row >= self.len() {
+            return None;
+        }
+        if let Some(base) = &self.base {
+            return Some(
+                (f64::from(base.height(row)?)
+                    + HeightCorrection::row_delta(&self.corrections, 0..self.len(), row))
+                    as f32,
+            );
+        }
+        if let Some((_, height, _)) = self.uniform {
+            return Some(height);
+        }
+        Some(self.row_end(row, &mut 0) - self.row_start(row, &mut 0))
+    }
+
+    /// Refine a measured row without copying base extents or previous correction
+    /// branches. Returns actual new correction-node allocations for admission.
+    /// Callers own viewport/scale invalidation and scroll-anchor adjustment.
+    pub fn with_measured_height(
+        self: &Arc<Self>,
+        row: usize,
+        height: f32,
+    ) -> Option<(Arc<Self>, usize)> {
+        if !height.is_finite() || !self.total.is_finite() || height < 0.0 || row >= self.len() {
+            return None;
+        }
+        if self.height(row) == Some(height) {
+            return Some((Arc::clone(self), 0));
+        }
+        let base = self.base.as_ref().unwrap_or(self);
+        let delta = f64::from(height) - f64::from(base.height(row)?);
+        let mut allocations = 0;
+        let corrections = HeightCorrection::update(
+            &self.corrections,
+            0..self.len(),
+            row,
+            delta,
+            &mut allocations,
+        );
+        if corrections.is_none() {
+            return Some((Arc::clone(base), allocations));
+        }
+        let total = (f64::from(base.total) + corrections.as_ref().map_or(0.0, |node| node.delta))
+            .max(0.0) as f32;
+        if !total.is_finite() {
+            return None;
+        }
+        Some((
+            Arc::new(Self {
+                starts: Vec::new(),
+                ends: Vec::new(),
+                total,
+                uniform: None,
+                base: Some(Arc::clone(base)),
+                corrections,
+            }),
+            allocations,
+        ))
+    }
+
+    /// Geometry for an already selected logical range, without re-reading rows.
+    pub fn window_for_range(&self, range: Range<usize>) -> Option<VirtualWindow> {
+        if range.start > range.end || range.end > self.len() {
+            return None;
+        }
+        if self.base.is_some() {
+            let leading = self.row_start(range.start, &mut 0);
+            let visible_end = if range.is_empty() {
+                leading
+            } else {
+                self.row_end(range.end - 1, &mut 0)
+            };
+            return Some(VirtualWindow {
+                range,
+                leading,
+                trailing: (self.total - visible_end).max(0.0),
+                total: self.total,
+            });
+        }
+        if let Some((count, height, gap)) = self.uniform {
+            let leading = if range.start < count {
+                range.start as f32 * (height + gap)
+            } else {
+                self.total
+            };
+            let visible_end = if range.is_empty() {
+                leading
+            } else {
+                (range.end - 1) as f32 * (height + gap) + height
+            };
+            return Some(VirtualWindow {
+                range,
+                leading,
+                trailing: (self.total - visible_end).max(0.0),
+                total: self.total,
+            });
+        }
+        let leading = self.starts.get(range.start).copied().unwrap_or(self.total);
+        let visible_end = if range.is_empty() {
+            leading
+        } else {
+            self.ends[range.end - 1]
+        };
+        Some(VirtualWindow {
+            range,
+            leading,
+            trailing: (self.total - visible_end).max(0.0),
+            total: self.total,
+        })
+    }
+
+    /// Retained extent payload, excluding allocator overhead.
+    pub fn retained_bytes(&self) -> usize {
+        if let Some(base) = &self.base {
+            return base.retained_bytes()
+                + self.corrections.as_ref().map_or(0, |node| {
+                    node.nodes * std::mem::size_of::<HeightCorrection>()
+                });
+        }
+        (self.starts.capacity() + self.ends.capacity()) * std::mem::size_of::<f32>()
+    }
+
+    pub fn window(&self, offset: f32, viewport: f32, overscan: f32) -> VirtualWindow {
+        self.window_with_work(offset, viewport, overscan).0
+    }
+
+    /// Resolve an embedded collection against its actual ancestor clip. `bounds`
+    /// is in the same coordinate space as `clip`, including scroll translation.
+    /// Unlike a standalone scroller, a wholly offscreen collection builds no rows.
+    pub fn window_in_clip(&self, bounds: Rect, clip: Rect, overscan: f32) -> VirtualWindow {
+        let overscan = overscan.max(0.0);
+        let left = bounds.origin.x.max(clip.origin.x);
+        let right = (bounds.origin.x + bounds.size.width).min(clip.origin.x + clip.size.width);
+        let top = bounds.origin.y.max(clip.origin.y - overscan);
+        let bottom =
+            (bounds.origin.y + self.total).min(clip.origin.y + clip.size.height + overscan);
+        if right <= left || bottom <= top || clip.size.height <= 0.0 {
+            return VirtualWindow {
+                range: 0..0,
+                leading: 0.0,
+                trailing: self.total,
+                total: self.total,
+            };
+        }
+        self.window(top - bounds.origin.y, bottom - top, 0.0)
+    }
+
+    /// Returns actual boundary comparisons plus correction-tree nodes visited.
+    pub fn window_with_work(
+        &self,
+        offset: f32,
+        viewport: f32,
+        overscan: f32,
+    ) -> (VirtualWindow, usize) {
+        if self.base.is_some() {
+            let viewport = viewport.max(0.0);
+            let overscan = overscan.max(0.0);
+            let offset = offset.clamp(0.0, (self.total - viewport).max(0.0));
+            let minimum = (offset - overscan).max(0.0);
+            let maximum = (offset + viewport + overscan).min(self.total);
+            let mut work = 0;
+            let (mut first, mut high) = (0, self.len());
+            while first < high {
+                work += 1;
+                let middle = first + (high - first) / 2;
+                if self.row_end(middle, &mut work) < minimum {
+                    first = middle + 1;
+                } else {
+                    high = middle;
+                }
+            }
+            let (mut end, mut high) = (first, self.len());
+            while end < high {
+                work += 1;
+                let middle = end + (high - end) / 2;
+                if self.row_start(middle, &mut work) <= maximum {
+                    end = middle + 1;
+                } else {
+                    high = middle;
+                }
+            }
+            let leading = self.row_start(first, &mut work);
+            let visible_end = if end > first {
+                self.row_end(end - 1, &mut work)
+            } else {
+                leading
+            };
+            return (
+                VirtualWindow {
+                    range: first..end,
+                    leading,
+                    trailing: (self.total - visible_end).max(0.0),
+                    total: self.total,
+                },
+                work,
+            );
+        }
+        if let Some((count, height, gap)) = self.uniform {
+            return VirtualWindow::from_uniform_with_work(
+                count, height, gap, offset, viewport, overscan,
+            );
+        }
+        let viewport = viewport.max(0.0);
+        let overscan = overscan.max(0.0);
+        let offset = offset.clamp(0.0, (self.total - viewport).max(0.0));
+        let minimum = (offset - overscan).max(0.0);
+        let maximum = (offset + viewport + overscan).min(self.total);
+        let mut comparisons = 0;
+        let first = self.ends.partition_point(|end| {
+            comparisons += 1;
+            *end < minimum
+        });
+        let end = self
+            .starts
+            .partition_point(|start| {
+                comparisons += 1;
+                *start <= maximum
+            })
+            .max(first);
+        let leading = self.starts.get(first).copied().unwrap_or(self.total);
+        let visible_end = end
+            .checked_sub(1)
+            .and_then(|index| self.ends.get(index))
+            .copied()
+            .unwrap_or(leading);
+        (
+            VirtualWindow {
+                range: first..end,
+                leading,
+                trailing: (self.total - visible_end).max(0.0),
+                total: self.total,
+            },
+            comparisons,
+        )
+    }
+}
+
 impl VirtualWindow {
     /// Resolves a fixed-extent window without allocating or walking one entry
     /// per logical item.
@@ -102,6 +524,17 @@ impl VirtualWindow {
         viewport: f32,
         overscan: f32,
     ) -> Self {
+        Self::from_uniform_with_work(count, height, gap, offset, viewport, overscan).0
+    }
+
+    fn from_uniform_with_work(
+        count: usize,
+        height: f32,
+        gap: f32,
+        offset: f32,
+        viewport: f32,
+        overscan: f32,
+    ) -> (Self, usize) {
         let height = height.max(0.0);
         let gap = gap.max(0.0);
         let viewport = viewport.max(0.0);
@@ -118,7 +551,9 @@ impl VirtualWindow {
 
         let mut low = 0usize;
         let mut high = count;
+        let mut comparisons = 0;
         while low < high {
+            comparisons += 1;
             let middle = low + (high - low) / 2;
             let end = middle as f32 * stride + height;
             if end < minimum {
@@ -132,6 +567,7 @@ impl VirtualWindow {
         let mut end_low = first;
         high = count;
         while end_low < high {
+            comparisons += 1;
             let middle = end_low + (high - end_low) / 2;
             let start = middle as f32 * stride;
             if start <= maximum {
@@ -151,12 +587,15 @@ impl VirtualWindow {
         } else {
             leading
         };
-        Self {
-            range: first..end,
-            leading,
-            trailing: (total - visible_end).max(0.0),
-            total,
-        }
+        (
+            Self {
+                range: first..end,
+                leading,
+                trailing: (total - visible_end).max(0.0),
+                total,
+            },
+            comparisons,
+        )
     }
 
     pub fn from_heights(
@@ -166,51 +605,23 @@ impl VirtualWindow {
         viewport: f32,
         overscan: f32,
     ) -> Self {
-        let gap = gap.max(0.0);
-        let viewport = viewport.max(0.0);
-        let overscan = overscan.max(0.0);
-        let mut starts = Vec::with_capacity(heights.len());
-        let mut ends = Vec::with_capacity(heights.len());
-        let mut cursor = 0.0;
-        for (index, height) in heights.iter().enumerate() {
-            if index > 0 {
-                cursor += gap;
-            }
-            starts.push(cursor);
-            cursor += height.max(0.0);
-            ends.push(cursor);
-        }
-        let total = cursor;
-        let offset = offset.clamp(0.0, (total - viewport).max(0.0));
-        let minimum = (offset - overscan).max(0.0);
-        let maximum = (offset + viewport + overscan).min(total);
-        let first = ends
-            .iter()
-            .position(|end| *end >= minimum)
-            .unwrap_or(heights.len());
-        let end = starts
-            .iter()
-            .rposition(|start| *start <= maximum)
-            .map_or(first, |index| index + 1)
-            .max(first);
-        let leading = starts.get(first).copied().unwrap_or(total);
-        let visible_end = end
-            .checked_sub(1)
-            .and_then(|index| ends.get(index))
-            .copied()
-            .unwrap_or(leading);
-        Self {
-            range: first..end,
-            leading,
-            trailing: (total - visible_end).max(0.0),
-            total,
-        }
+        VirtualHeightIndex::new(heights, gap).window(offset, viewport, overscan)
     }
+}
+
+/// Native logical extent and admitted rows. Change revision when the source
+/// changes so deferred navigation cannot cross source generations.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct VirtualNavigation {
+    pub revision: u64,
+    pub count: usize,
+    pub range: Range<usize>,
 }
 
 pub struct VirtualColumn<Message = String> {
     window: VirtualWindow,
     visible: Column<Message>,
+    navigation: Option<(usize, u64)>,
 }
 
 impl<Message> VirtualColumn<Message> {
@@ -218,11 +629,18 @@ impl<Message> VirtualColumn<Message> {
         Self {
             window: VirtualWindow::from_heights(&[], 0.0, 0.0, 0.0, 0.0),
             visible: Column::new().fill_width(),
+            navigation: None,
         }
     }
 
     pub fn window(mut self, window: VirtualWindow) -> Self {
         self.window = window;
+        self
+    }
+
+    /// Enable logical Home/End navigation without building omitted rows.
+    pub fn logical_navigation(mut self, count: usize, revision: u64) -> Self {
+        self.navigation = Some((count, revision));
         self
     }
 
@@ -255,12 +673,19 @@ impl<Message> Default for VirtualColumn<Message> {
 
 impl<Message> Component<Message> for VirtualColumn<Message> {
     fn into_element(self) -> Element<Message> {
-        Column::new()
+        let navigation = self.navigation.map(|(count, revision)| VirtualNavigation {
+            revision,
+            count,
+            range: self.window.range.clone(),
+        });
+        let mut element = Column::new()
             .fill_width()
             .child(Spacer::vertical(self.window.leading))
             .child(self.visible)
             .child(Spacer::vertical(self.window.trailing))
-            .into_element()
+            .into_element();
+        element.virtual_navigation = navigation;
+        element
     }
 }
 
@@ -278,6 +703,7 @@ impl<Message> VerticalScroll<Message> {
             id: None,
             source: None,
             content_revision: None,
+            virtual_navigation: None,
             kind: Kind::VerticalScroll {
                 offset: offset.max(0.0),
                 controlled: false,
@@ -381,6 +807,7 @@ impl<Message> Grid<Message> {
             id: None,
             source: None,
             content_revision: None,
+            virtual_navigation: None,
             kind: Kind::Grid {
                 columns: GridColumnSpec::Count(2),
             },
@@ -425,6 +852,7 @@ impl<Message> Grid<Message> {
             id: None,
             source: None,
             content_revision: None,
+            virtual_navigation: None,
             kind: Kind::Grid {
                 columns: GridColumnSpec::Tracks(tracks),
             },
@@ -454,6 +882,7 @@ impl<Message> Grid<Message> {
             id: None,
             source: None,
             content_revision: None,
+            virtual_navigation: None,
             kind: Kind::Grid {
                 columns: GridColumnSpec::AutoFit(track),
             },
@@ -983,6 +1412,7 @@ impl<Message> StyledText<Message> {
             id: None,
             source: None,
             content_revision: None,
+            virtual_navigation: None,
             style: Style {
                 accessibility_label: Some(value),
                 ..Style::default()
@@ -1275,6 +1705,7 @@ impl<Message> CustomPaint<Message> {
             id: None,
             source: None,
             content_revision: None,
+            virtual_navigation: None,
             kind: Kind::CustomPaint { paint },
             style: Style::default(),
             message: None,
@@ -1303,6 +1734,7 @@ impl<Message> CustomPaint<Message> {
             id: None,
             source: None,
             content_revision: None,
+            virtual_navigation: None,
             kind: Kind::CustomPaintCommands { commands },
             style: Style::default(),
             message: None,
@@ -1411,6 +1843,7 @@ impl<Message> Image<Message> {
             id: None,
             source: None,
             content_revision: None,
+            virtual_navigation: None,
             kind: Kind::Image {
                 id,
                 generation,
@@ -3268,6 +3701,7 @@ impl<Message> Slider<Message> {
             id: None,
             source: None,
             content_revision: None,
+            virtual_navigation: None,
             kind: Kind::Slider {
                 value: value.clamp(0.0, 1.0),
                 track: 0x354158,
@@ -3530,6 +3964,7 @@ impl<Message> Dropdown<Message> {
             id: None,
             source: None,
             content_revision: None,
+            virtual_navigation: None,
             kind: Kind::Dropdown {
                 selected: selected.into(),
                 options,
@@ -3729,6 +4164,7 @@ impl<Message: Clone> Menu<Message> {
             id: None,
             source: None,
             content_revision: None,
+            virtual_navigation: None,
             kind: Kind::Dropdown {
                 selected: label.into(),
                 options: items.iter().map(|item| item.label.clone()).collect(),

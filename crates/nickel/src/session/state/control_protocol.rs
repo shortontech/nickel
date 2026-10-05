@@ -1008,6 +1008,17 @@ impl NickelSession {
             ),
             Query::Outputs => ServerMessage::Outputs(self.protocol_outputs()),
             Query::ShellSurfaces => ServerMessage::ShellSurfaces(self.protocol_shell_surfaces()),
+            Query::ShellRuntimeDiagnostics if self.test_control_enabled => self
+                .internal_shell
+                .as_ref()
+                .map(|shell| {
+                    ServerMessage::ShellRuntimeDiagnostics(Box::new(
+                        shell.host_runtime_diagnostics(),
+                    ))
+                })
+                .unwrap_or_else(|| {
+                    protocol_error(ErrorCode::InvalidRequest, "internal shell is unavailable")
+                }),
             Query::UiLayouts if self.test_control_enabled => {
                 ServerMessage::UiLayouts(self.protocol_ui_layouts())
             }

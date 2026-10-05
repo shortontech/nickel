@@ -1,5 +1,1033 @@
 use super::*;
 
+#[test]
+fn virtual_row_accessibility_focus_is_revision_scoped_and_cancellable() {
+    let build = |revision, range: std::ops::Range<usize>| {
+        let heights = VirtualHeightIndex::new(&[24.0; 100], 0.0);
+        VerticalScroll::new((), 0.0).id("scroll").child(
+            VirtualColumn::new()
+                .logical_navigation(100, revision)
+                .window(heights.window_for_range(range.clone()).unwrap())
+                .children(range.map(|ordinal| {
+                    Button::new((), format!("Row {ordinal}"))
+                        .id(format!("row-{ordinal}"))
+                        .height(24.0)
+                }))
+                .into_element()
+                .id("rows"),
+        )
+    };
+    let bounds = Rect::new(0.0, 0.0, 320.0, 96.0);
+    let mut state = UiStateStore::default();
+    let first = UiFrame::resolve(build(1, 0..6), FrameRequest::new(bounds, &mut state));
+    let collection = first
+        .resolved_layout()
+        .nodes()
+        .iter()
+        .find(|node| node.virtual_navigation.is_some())
+        .unwrap()
+        .id
+        .clone();
+    let request = |revision| UiEvent::AccessibilityRevealVirtualRow {
+        collection: collection.clone(),
+        revision,
+        ordinal: 50,
+        leading: 1200.0,
+        height: 24.0,
+    };
+    first.handle_event(&mut state, request(2));
+    assert!(state.virtual_focus.is_none());
+    let outcome = first.handle_event(&mut state, request(1));
+    assert_eq!(outcome.invalidation, Invalidation::Layout);
+    assert!(outcome.messages.is_empty());
+    assert!(state.virtual_focus.is_some());
+    assert_eq!(
+        first.reconcile_virtual_boundary(&mut state),
+        Invalidation::None
+    );
+    assert!(state.focused().is_none());
+    let pending = state.clone();
+    let admitted = UiFrame::resolve_against(
+        build(1, 48..54),
+        FrameRequest::new(bounds, &mut state),
+        &first,
+    );
+    assert_ne!(
+        admitted.reconcile_virtual_boundary(&mut state),
+        Invalidation::None
+    );
+    assert!(state.focused().unwrap().as_str().ends_with("/row-50"));
+    assert!(state.virtual_focus.is_none());
+
+    let mut disabled_state = pending.clone();
+    let heights = VirtualHeightIndex::new(&[24.0; 100], 0.0);
+    let disabled = UiFrame::resolve_against(
+        VerticalScroll::new((), 0.0).id("scroll").child(
+            VirtualColumn::new()
+                .logical_navigation(100, 1)
+                .window(heights.window_for_range(48..54).unwrap())
+                .children((48..54).map(|ordinal| {
+                    Button::new((), format!("Row {ordinal}"))
+                        .enabled(false)
+                        .id(format!("row-{ordinal}"))
+                        .height(24.0)
+                }))
+                .into_element()
+                .id("rows"),
+        ),
+        FrameRequest::new(bounds, &mut disabled_state),
+        &first,
+    );
+    assert_eq!(
+        disabled.reconcile_virtual_boundary(&mut disabled_state),
+        Invalidation::None
+    );
+    assert!(disabled_state.focused().is_none());
+    assert!(disabled_state.virtual_focus.is_none());
+
+    let mut replaced = pending.clone();
+    let replacement = UiFrame::resolve_against(
+        build(2, 48..54),
+        FrameRequest::new(bounds, &mut replaced),
+        &first,
+    );
+    assert_eq!(
+        replacement.reconcile_virtual_boundary(&mut replaced),
+        Invalidation::None
+    );
+    assert!(replaced.virtual_focus.is_none());
+    assert!(replaced.focused().is_none());
+    for event in [
+        UiEvent::FocusLost,
+        UiEvent::KeyboardNavigateStart,
+        UiEvent::PointerCancelled,
+    ] {
+        let mut cancelled = pending.clone();
+        first.handle_event(&mut cancelled, event);
+        assert!(cancelled.virtual_focus.is_none());
+    }
+    let mut destroyed = pending.clone();
+    destroyed.destroy();
+    assert!(destroyed.virtual_focus.is_none());
+    let mut scoped = pending.clone();
+    scoped
+        .navigation_mut()
+        .set_controller_scope(Some(UiId::from("other-scope")));
+    assert_eq!(
+        admitted.reconcile_virtual_boundary(&mut scoped),
+        Invalidation::None
+    );
+    assert!(scoped.virtual_focus.is_none());
+    let mut removed = pending;
+    let empty = UiFrame::resolve(Column::<()>::new(), FrameRequest::new(bounds, &mut removed));
+    assert_eq!(
+        empty.reconcile_virtual_boundary(&mut removed),
+        Invalidation::None
+    );
+    assert!(removed.virtual_focus.is_none());
+}
+
+#[test]
+fn virtual_boundary_navigation_is_revision_scoped_and_cancellable() {
+    let build = |revision, range: std::ops::Range<usize>| {
+        let heights = VirtualHeightIndex::new(&[24.0; 100], 0.0);
+        VerticalScroll::new((), 0.0).id("scroll").child(
+            VirtualColumn::new()
+                .logical_navigation(100, revision)
+                .window(heights.window_for_range(range.clone()).unwrap())
+                .children(range.map(|ordinal| {
+                    Button::new((), format!("Row {ordinal}"))
+                        .id(format!("row-{ordinal}"))
+                        .height(24.0)
+                }))
+                .into_element()
+                .id("rows"),
+        )
+    };
+    let bounds = Rect::new(0.0, 0.0, 320.0, 96.0);
+    let mut state = UiStateStore::default();
+    let first = UiFrame::resolve(build(1, 0..6), FrameRequest::new(bounds, &mut state));
+    let outcome = first.handle_event(&mut state, UiEvent::KeyboardNavigateEnd);
+    assert_eq!(outcome.invalidation, Invalidation::Layout);
+    assert!(outcome.messages.is_empty());
+    assert!(state.virtual_boundary.is_some());
+    assert!(
+        state
+            .state(&UiId::from("root/scroll"))
+            .unwrap()
+            .scroll_offset
+            > 2_000.0
+    );
+
+    // A layout with the old window cannot select an overscan row as the end.
+    assert_eq!(
+        first.reconcile_virtual_boundary(&mut state),
+        Invalidation::None
+    );
+    assert!(state.virtual_boundary.is_some());
+    let pending = state.clone();
+    let last = UiFrame::resolve_against(
+        build(1, 94..100),
+        FrameRequest::new(bounds, &mut state),
+        &first,
+    );
+    assert_ne!(
+        last.reconcile_virtual_boundary(&mut state),
+        Invalidation::None
+    );
+    assert!(state.virtual_boundary.is_none());
+    assert!(
+        state
+            .navigation()
+            .controller_selected()
+            .unwrap()
+            .as_str()
+            .ends_with("/row-99")
+    );
+    assert_eq!(
+        last.reconcile_virtual_boundary(&mut state),
+        Invalidation::None
+    );
+
+    let mut replaced = pending.clone();
+    let replacement = UiFrame::resolve_against(
+        build(2, 94..100),
+        FrameRequest::new(bounds, &mut replaced),
+        &first,
+    );
+    assert_eq!(
+        replacement.reconcile_virtual_boundary(&mut replaced),
+        Invalidation::None
+    );
+    assert!(replaced.virtual_boundary.is_none());
+    assert!(replaced.navigation().controller_selected().is_none());
+
+    for event in [
+        UiEvent::FocusLost,
+        UiEvent::KeyboardNavigateStart,
+        UiEvent::PointerCancelled,
+    ] {
+        let mut cancelled = pending.clone();
+        first.handle_event(&mut cancelled, event);
+        assert!(cancelled.virtual_boundary.is_none());
+    }
+    let mut destroyed = pending.clone();
+    destroyed.destroy();
+    assert!(destroyed.virtual_boundary.is_none());
+    let mut scoped = pending.clone();
+    scoped
+        .navigation_mut()
+        .set_controller_scope(Some(UiId::from("other-scope")));
+    assert_eq!(
+        last.reconcile_virtual_boundary(&mut scoped),
+        Invalidation::None
+    );
+    assert!(scoped.virtual_boundary.is_none());
+    let mut removed = pending;
+    let empty = UiFrame::resolve(Column::<()>::new(), FrameRequest::new(bounds, &mut removed));
+    assert_eq!(
+        empty.reconcile_virtual_boundary(&mut removed),
+        Invalidation::None
+    );
+    assert!(removed.virtual_boundary.is_none());
+}
+
+#[test]
+fn declaration_child_filter_matches_allocating_scope_oracle() {
+    for explicit in [
+        None,
+        Some(""),
+        Some("row-1"),
+        Some("row-10"),
+        Some("nested/leaf"),
+        Some("名前"),
+        Some("#01"),
+    ] {
+        let id = explicit.map(UiId::from);
+        for index in [0, 1, 10, usize::MAX] {
+            let scope = explicit
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("#{index}"));
+            for target in [
+                "",
+                "#0",
+                "#00",
+                "#1",
+                "#01",
+                "#+1",
+                "#1/leaf",
+                "#184467440737095516160",
+                "row-1",
+                "row-10/leaf",
+                "nested/leaf",
+                "nested/leaf/child",
+                "名前",
+                "名前/child",
+            ] {
+                let expected = target == scope || target.starts_with(&format!("{scope}/"));
+                assert_eq!(
+                    declared_child_matches(target, id.as_ref(), index),
+                    expected,
+                    "target={target:?}, scope={scope:?}"
+                );
+            }
+            assert!(declared_child_matches(&scope, id.as_ref(), index));
+            assert!(declared_child_matches(
+                &format!("{scope}/child"),
+                id.as_ref(),
+                index
+            ));
+        }
+    }
+    for count in [100, 1_000, 10_000] {
+        let target = format!("#{}/leaf", count - 1);
+        assert_eq!(
+            (0..count)
+                .filter(|index| declared_child_matches(&target, None, *index))
+                .count(),
+            1
+        );
+    }
+}
+
+#[test]
+fn declared_hover_lookup_preserves_scoped_identity_and_ancestor_foreground() {
+    let color: Color = 0xff0c2238;
+    let tree = Column::<()>::new()
+        .child(
+            Column::new()
+                .id("row-1")
+                .child(Text::new("Wrong").id("leaf")),
+        )
+        .child(
+            Column::new()
+                .id("row-10")
+                .child(Text::new("Right").id("nested/leaf")),
+        )
+        .child(Text::new("Anonymous"))
+        .into_element()
+        .foreground(color);
+    let root = UiId::from("root");
+    let mut state = UiStateStore::default();
+    for (target, expected_id) in [
+        ("root/row-1/leaf", Some("leaf")),
+        ("root/row-10/nested/leaf", Some("nested/leaf")),
+        ("root/#2", None),
+    ] {
+        let (found, foreground) =
+            find_declared_element(&tree, &root, &UiId::from(target), None, &state).unwrap();
+        assert_eq!(found.id.as_ref().map(UiId::as_str), expected_id);
+        assert_eq!(foreground, Some(color));
+    }
+    assert!(
+        find_declared_element(
+            &tree,
+            &root,
+            &UiId::from("root-other/row-1/leaf"),
+            None,
+            &state,
+        )
+        .is_none()
+    );
+    state.set_hovered(Some(UiId::from("root/row-1")));
+    assert!(
+        find_declared_element(&tree, &root, &UiId::from("root/row-1/leaf"), None, &state,)
+            .is_none(),
+        "active ancestor must retain the conservative inheritance guard"
+    );
+    assert!(
+        find_declared_element(
+            &tree,
+            &root,
+            &UiId::from("root/row-10/nested/leaf"),
+            None,
+            &state,
+        )
+        .is_some(),
+        "unrelated active sibling must not block the target"
+    );
+}
+
+#[test]
+fn static_text_revision_excludes_editors_and_action_authority() {
+    let element = Column::new()
+        .child(Text::new("Label"))
+        .child(Text::new("Action").into_element().message(()))
+        .child(TextField::on_change("Editable", |_| ()))
+        .child(Text::new("Explicit").content_revision(77))
+        .into_element()
+        .static_text_content_revision(12);
+    assert_eq!(element.content_revision, None);
+    assert_eq!(element.children[0].content_revision, Some(12));
+    assert_eq!(element.children[1].content_revision, None);
+    assert_eq!(element.children[2].content_revision, None);
+    assert_eq!(element.children[3].content_revision, Some(77));
+    let mut selected = Column::<()>::new()
+        .child(Text::new("Selectable"))
+        .into_element();
+    selected.style.selection_region = true;
+    let selected = selected.static_text_content_revision(12);
+    assert_eq!(selected.children[0].content_revision, None);
+
+    let bounds = Rect::new(0.0, 0.0, 200.0, 80.0);
+    let mut state = UiStateStore::default();
+    let view = |label, revision| {
+        Text::<()>::new(label)
+            .into_element()
+            .static_text_content_revision(revision)
+    };
+    let first = UiFrame::resolve(view("Before", 1), FrameRequest::new(bounds, &mut state));
+    let unchanged = UiFrame::resolve_against(
+        view("Before", 1),
+        FrameRequest::new(bounds, &mut state),
+        &first,
+    );
+    assert_eq!(unchanged.resource_diagnostics().nodes_measured, 0);
+    let changed = UiFrame::resolve_against(
+        view("Different content", 2),
+        FrameRequest::new(bounds, &mut state),
+        &unchanged,
+    );
+    assert_eq!(changed.resource_diagnostics().nodes_measured, 1);
+    let cold = UiFrame::resolve(
+        view("Different content", 2),
+        FrameRequest::new(bounds, &mut state.clone()),
+    );
+    assert_eq!(changed.commands(), cold.commands());
+    assert_eq!(
+        changed.resolved.deterministic_snapshot(),
+        cold.resolved.deterministic_snapshot()
+    );
+}
+
+#[test]
+fn vertical_scroll_skips_duplicate_content_measurement_only_for_equal_widths() {
+    for count in [100, 1_000, 10_000] {
+        let content = || {
+            Column::<()>::new().children((0..count).map(|row| {
+                Container::new()
+                    .id(format!("row-{row}"))
+                    .width(100.0)
+                    .height(20.0)
+            }))
+        };
+        for height in [100.0, count as f32 * 20.0 + 20.0] {
+            let frame = UiFrame::layout_with_state(
+                VerticalScroll::new((), 0.0).child(content()),
+                Rect::new(0.0, 0.0, 200.0, height),
+                &mut UiStateStore::default(),
+            );
+            let work = frame.resource_diagnostics();
+            let scrolls = height < count as f32 * 20.0;
+            assert_eq!(
+                work.scroll_content_measurements,
+                if scrolls { 2 } else { 1 }
+            );
+            assert_eq!(
+                work.scroll_content_measurements_reused,
+                if scrolls { 0 } else { 1 }
+            );
+            let extent = frame.scroll_extent(&()).unwrap();
+            let width = 200.0
+                - if scrolls {
+                    scrollbar::SCROLLBAR_GUTTER
+                } else {
+                    0.0
+                };
+            let cold = measure_element(
+                &content().into_element(),
+                Constraints::loose(Size::new(width, f32::INFINITY)),
+            );
+            assert_eq!(
+                extent.content,
+                Size::new(cold.width.max(width), cold.height.max(height))
+            );
+        }
+    }
+}
+
+#[test]
+fn zero_width_scrollbar_gutter_reuses_content_measurement() {
+    let mut root = VerticalScroll::new((), 0.0)
+        .child(Spacer::vertical(240.0))
+        .into_element();
+    root.style.scrollbar_parts = Some(Box::new([DropdownPartStyle::default(); 2]));
+    let frame = UiFrame::layout_with_state(
+        root,
+        Rect::new(0.0, 0.0, 200.0, 100.0),
+        &mut UiStateStore::default(),
+    );
+    assert!(frame.scroll_extent(&()).unwrap().can_scroll());
+    let work = frame.resource_diagnostics();
+    assert_eq!(work.scroll_content_measurements, 1);
+    assert_eq!(work.scroll_content_measurements_reused, 1);
+    assert_eq!(frame.resolved.nodes[1].allocated.size.width, 200.0);
+}
+
+#[test]
+fn scroll_intrinsic_measurement_reuses_widths_and_invalidates_changed_content() {
+    let build = |height: f32| {
+        VerticalScroll::new((), 0.0).id("scroll").child(
+            Column::new()
+                .id("content")
+                .child(Container::new().height(height).width(50.0)),
+        )
+    };
+    let bounds = Rect::new(0.0, 0.0, 200.0, 100.0);
+    let mut state = UiStateStore::default();
+    let first = UiFrame::resolve(build(600.0), FrameRequest::new(bounds, &mut state));
+    assert_eq!(first.resource_diagnostics().scroll_content_measurements, 2);
+    state.scroll_by(UiId::from("root/scroll"), 40.0, 500.0);
+    let scrolled =
+        UiFrame::resolve_against(build(600.0), FrameRequest::new(bounds, &mut state), &first);
+    assert_eq!(scrolled.scroll_extent(&()).unwrap().offset, 40.0);
+    assert_eq!(
+        scrolled.resource_diagnostics().scroll_content_measurements,
+        0
+    );
+    assert_eq!(
+        scrolled
+            .resource_diagnostics()
+            .scroll_content_measurements_reused,
+        2
+    );
+    let cold = UiFrame::resolve(build(600.0), FrameRequest::new(bounds, &mut state.clone()));
+    assert_eq!(scrolled.scroll_extent(&()), cold.scroll_extent(&()));
+    assert_eq!(scrolled.commands(), cold.commands());
+    for (height, width) in [(900.0, 200.0), (600.0, 160.0), (50.0, 160.0)] {
+        let bounds = Rect::new(0.0, 0.0, width, 100.0);
+        let next = UiFrame::resolve_against(
+            build(height),
+            FrameRequest::new(bounds, &mut state),
+            &scrolled,
+        );
+        assert!(next.resource_diagnostics().scroll_content_measurements > 0);
+        let cold = UiFrame::resolve(build(height), FrameRequest::new(bounds, &mut state.clone()));
+        assert_eq!(next.scroll_extent(&()), cold.scroll_extent(&()));
+        assert_eq!(next.commands(), cold.commands());
+        let repeat =
+            UiFrame::resolve_against(build(height), FrameRequest::new(bounds, &mut state), &next);
+        assert_eq!(
+            repeat.resource_diagnostics().scroll_content_measurements,
+            0,
+            "both widths must remain cached after resizing"
+        );
+    }
+}
+
+#[test]
+fn scrollbar_width_change_still_remeasures_wrapped_content() {
+    let content = || {
+        Text::<()>::new(
+            "Wrapped content must use the width remaining beside the scrollbar. ".repeat(8),
+        )
+        .wrap(true)
+    };
+    for width in [40.0, 120.0, 200.0] {
+        let height = 30.0;
+        let frame = UiFrame::layout_with_state(
+            VerticalScroll::new((), 0.0).child(content()),
+            Rect::new(0.0, 0.0, width, height),
+            &mut UiStateStore::default(),
+        );
+        let work = frame.resource_diagnostics();
+        assert_eq!(work.scroll_content_measurements, 2);
+        assert_eq!(work.scroll_content_measurements_reused, 0);
+        let reduced = width - scrollbar::SCROLLBAR_GUTTER;
+        let oracle = measure_element(
+            &content().into_element(),
+            Constraints::loose(Size::new(reduced, f32::INFINITY)),
+        );
+        assert_eq!(
+            frame.scroll_extent(&()).unwrap().content.height,
+            oracle.height.max(height)
+        );
+        assert_eq!(frame.resolved.nodes[1].allocated.size.width, reduced);
+    }
+}
+
+#[test]
+fn retained_paint_resource_delta_matches_full_accounting_when_vectors_grow() {
+    let view = || {
+        Container::new()
+            .width(100.0)
+            .height(40.0)
+            .message(())
+            .into_element()
+            .interaction_backgrounds(0xff334455, 0xff556677)
+    };
+    let mut state = UiStateStore::default();
+    let mut frame =
+        UiFrame::layout_with_state(view(), Rect::new(0.0, 0.0, 100.0, 40.0), &mut state);
+    let mut accounted = frame.resource_diagnostics().estimated_retained_bytes;
+    let initial_vectors = frame.resource_vector_bytes();
+    for point in [
+        Point { x: 10.0, y: 10.0 },
+        Point { x: -1.0, y: -1.0 },
+        Point { x: 20.0, y: 10.0 },
+    ] {
+        frame.handle_event(&mut state, UiEvent::PointerMoved(point));
+        let work = frame.refresh_retained_paint(&mut state).unwrap();
+        accounted = accounted - work.vector_bytes_before + work.vector_bytes_after;
+        assert_eq!(
+            accounted,
+            frame.resource_diagnostics().estimated_retained_bytes
+        );
+    }
+    assert!(frame.resource_vector_bytes() > initial_vectors);
+}
+
+#[test]
+fn local_paint_saves_only_affected_subtree_hit_records() {
+    for count in [100, 1_000, 10_000] {
+        let view = || {
+            Column::new()
+                .child(
+                    Container::new()
+                        .id("target")
+                        .child(Button::new((), "Target").id("button")),
+                )
+                .children(
+                    (1..count).map(|row| Container::new().id(format!("row-{row}")).height(20.0)),
+                )
+        };
+        let bounds = Rect::new(0.0, 0.0, 200.0, 100.0);
+        let mut state = UiStateStore::default();
+        let mut frame = UiFrame::layout_with_state(view(), bounds, &mut state);
+        let target = frame
+            .resolved
+            .find(&UiId::from("root/target/button"))
+            .unwrap()
+            .allocated;
+        let point = Point {
+            x: target.origin.x + target.size.width / 2.0,
+            y: target.origin.y + target.size.height / 2.0,
+        };
+        let original_hits = frame
+            .hits
+            .iter()
+            .map(|hit| (hit.id.clone(), hit.rect))
+            .collect::<Vec<_>>();
+        let original_stacks = frame
+            .resolved
+            .nodes
+            .iter()
+            .map(|node| node.hit_stack)
+            .collect::<Vec<_>>();
+        for point in [point, Point { x: -1.0, y: -1.0 }, point] {
+            frame.handle_event(&mut state, UiEvent::PointerMoved(point));
+            let work = frame.refresh_retained_paint(&mut state).unwrap();
+            assert_eq!(work.interaction_records_saved, 2, "source count {count}");
+            assert_eq!(
+                frame
+                    .hits
+                    .iter()
+                    .map(|hit| (hit.id.clone(), hit.rect))
+                    .collect::<Vec<_>>(),
+                original_hits
+            );
+            assert_eq!(
+                frame
+                    .resolved
+                    .nodes
+                    .iter()
+                    .map(|node| node.hit_stack)
+                    .collect::<Vec<_>>(),
+                original_stacks
+            );
+            let cold = UiFrame::layout_with_state(view(), bounds, &mut state.clone());
+            assert_eq!(frame.commands(), cold.commands());
+            assert_eq!(
+                frame.resolved.deterministic_snapshot(),
+                cold.resolved.deterministic_snapshot()
+            );
+            assert_eq!(frame.semantic_nodes(), cold.semantic_nodes());
+        }
+    }
+}
+
+#[test]
+fn pointer_motion_does_not_rescan_unchanged_declarations() {
+    for count in [100, 1_000, 10_000] {
+        let root = Column::<()>::new().children((0..count).map(|row| {
+            Container::new()
+                .id(format!("row-{row}"))
+                .width(100.0)
+                .height(20.0)
+        }));
+        let mut state = UiStateStore::default();
+        POINTER_GEOMETRY_VISITS.with(|visits| visits.set(0));
+        let frame = UiFrame::layout_with_state(root, Rect::new(0.0, 0.0, 200.0, 100.0), &mut state);
+        assert_eq!(
+            POINTER_GEOMETRY_VISITS.with(|visits| visits.get()),
+            count + 1
+        );
+        assert!(!frame.pointer_position_affects_geometry);
+        // First input can adopt pointer modality and request paint independently
+        // of position-dependent geometry.
+        frame.handle_event(&mut state, UiEvent::PointerMoved(Point { x: 0.0, y: 10.0 }));
+        POINTER_GEOMETRY_VISITS.with(|visits| visits.set(0));
+        for x in 0..256 {
+            let outcome = frame.handle_event(
+                &mut state,
+                UiEvent::PointerMoved(Point {
+                    x: x as f32,
+                    y: 10.0,
+                }),
+            );
+            assert_eq!(outcome.invalidation, Invalidation::None);
+        }
+        assert_eq!(POINTER_GEOMETRY_VISITS.with(|visits| visits.get()), 0);
+    }
+}
+
+#[test]
+fn pointer_geometry_summary_changes_with_declaration_replacement() {
+    let view = |proximity: bool| {
+        let child = Row::new()
+            .child(Button::new((), "Item").width(40.0).height(40.0))
+            .into_element();
+        let child = if proximity {
+            child.proximity_magnification(ProximityMagnification {
+                maximum_scale: 1.5,
+                radius: 1,
+            })
+        } else {
+            child
+        };
+        Container::new().child(child)
+    };
+    let bounds = Rect::new(0.0, 0.0, 200.0, 100.0);
+    let mut state = UiStateStore::default();
+    let mut frame = UiFrame::resolve(view(false), FrameRequest::new(bounds, &mut state));
+    for proximity in [true, false, true, false] {
+        frame = UiFrame::resolve_against(
+            view(proximity),
+            FrameRequest::new(bounds, &mut state),
+            &frame,
+        );
+        let oracle = pointer_position_affects_geometry(frame.declaration_root.as_ref().unwrap());
+        assert_eq!(frame.pointer_position_affects_geometry, oracle);
+        assert_eq!(oracle, proximity);
+        let mut cold_state = state.clone();
+        let cold = UiFrame::resolve(view(proximity), FrameRequest::new(bounds, &mut cold_state));
+        for x in [10.0, 20.0, 30.0, 190.0] {
+            let event = UiEvent::PointerMoved(Point { x, y: 10.0 });
+            let retained = frame.handle_event(&mut state, event.clone());
+            let fresh = cold.handle_event(&mut cold_state, event);
+            assert_eq!(retained.invalidation, fresh.invalidation);
+            assert_eq!(state.hovered(), cold_state.hovered());
+        }
+    }
+}
+
+#[test]
+fn measured_virtual_heights_share_base_and_copy_only_changed_paths() {
+    for count in [100usize, 1_000, 10_000] {
+        for uniform in [false, true] {
+            let original: Vec<f32> = (0..count)
+                .map(|row| if uniform || row % 2 == 0 { 20.0 } else { 70.0 })
+                .collect();
+            let base = Arc::new(if uniform {
+                VirtualHeightIndex::uniform(count, 20.0, 5.0)
+            } else {
+                VirtualHeightIndex::new(&original, 5.0)
+            });
+            let base_window = base.window(400.0, 100.0, 64.0);
+            let mut measured = original.clone();
+            let mut corrected = Arc::clone(&base);
+            let mut previous = Vec::new();
+            for (row, height) in [(0, 80.0), (count / 2, 12.5), (count - 1, 100.0), (0, 40.0)] {
+                previous.push((Arc::clone(&corrected), corrected.window(400.0, 100.0, 64.0)));
+                let (next, allocations) = corrected.with_measured_height(row, height).unwrap();
+                assert!(
+                    allocations <= count.ilog2() as usize + 2,
+                    "{allocations} nodes allocated for {count} rows"
+                );
+                assert_eq!(next.height(row), Some(height));
+                assert_eq!(next.len(), count);
+                let (same, noop_work) = next.with_measured_height(row, height).unwrap();
+                assert!(Arc::ptr_eq(&next, &same));
+                assert_eq!(noop_work, 0);
+                measured[row] = height;
+                let oracle = VirtualHeightIndex::new(&measured, 5.0);
+                for offset in [0.0, 400.0, count as f32 * 20.0, 1_000_000.0] {
+                    let (window, work) = next.window_with_work(offset, 100.0, 64.0);
+                    assert_eq!(window, oracle.window(offset, 100.0, 64.0));
+                    assert_eq!(next.window_for_range(window.range.clone()), Some(window));
+                    let depth = count.ilog2() as usize + 2;
+                    assert!(
+                        work <= 4 * depth * depth,
+                        "{work} query operations for {count} rows"
+                    );
+                }
+                corrected = next;
+            }
+            assert_eq!(base.window(400.0, 100.0, 64.0), base_window);
+            for (snapshot, window) in previous {
+                assert_eq!(snapshot.window(400.0, 100.0, 64.0), window);
+            }
+            for row in [0, count / 2, count - 1] {
+                corrected = corrected
+                    .with_measured_height(row, original[row])
+                    .unwrap()
+                    .0;
+            }
+            assert!(
+                Arc::ptr_eq(&corrected, &base),
+                "reverting corrections must release the sparse tree"
+            );
+            for invalid in [f32::NAN, f32::INFINITY, -1.0] {
+                assert!(base.with_measured_height(0, invalid).is_none());
+            }
+            assert!(base.with_measured_height(count, 20.0).is_none());
+        }
+    }
+    let base = Arc::new(VirtualHeightIndex::uniform(10_000, 20.2, 1.3));
+    let (corrected, _) = base.with_measured_height(9_999, 30.7).unwrap();
+    assert_eq!(corrected.height(9_999), Some(30.7));
+    assert!(
+        Arc::ptr_eq(
+            &corrected,
+            &corrected.with_measured_height(9_999, 30.7).unwrap().0
+        ),
+        "fractional geometry must not keep allocating unchanged corrections"
+    );
+    let invalid = Arc::new(VirtualHeightIndex::new(&[f32::INFINITY], 0.0));
+    assert!(invalid.with_measured_height(0, 20.0).is_none());
+}
+
+#[test]
+fn measured_height_storage_plateaus_across_full_traversals() {
+    for count in [100usize, 1_000, 10_000] {
+        let base = Arc::new(VirtualHeightIndex::uniform(count, 20.0, 5.0));
+        let mut corrected = Arc::clone(&base);
+        let mut measured = vec![20.0; count];
+        let mut plateau = None;
+        for round in 0..3 {
+            for (row, measured_height) in measured.iter_mut().enumerate() {
+                *measured_height = if row % 2 == 0 {
+                    22.5 + round as f32
+                } else {
+                    40.75 + round as f32
+                };
+                let previous = Arc::downgrade(&corrected);
+                let previous_was_base = Arc::ptr_eq(&corrected, &base);
+                let (next, allocations) = corrected
+                    .with_measured_height(row, *measured_height)
+                    .unwrap();
+                assert!(allocations <= count.ilog2() as usize + 2);
+                corrected = next;
+                if !previous_was_base {
+                    assert!(
+                        previous.upgrade().is_none(),
+                        "correction retained a previous index wrapper"
+                    );
+                }
+            }
+            let bytes = corrected.retained_bytes();
+            assert!(
+                bytes <= count * 128,
+                "correction payload grew beyond a bounded binary tree"
+            );
+            if let Some(previous) = plateau {
+                assert_eq!(bytes, previous, "retained payload grew after warm-up");
+            }
+            plateau = Some(bytes);
+            let oracle = VirtualHeightIndex::new(&measured, 5.0);
+            for offset in [0.0, 400.0, count as f32 * 20.0, 1_000_000.0] {
+                assert_eq!(
+                    corrected.window(offset, 100.0, 64.0),
+                    oracle.window(offset, 100.0, 64.0)
+                );
+            }
+        }
+        for (row, height) in measured.into_iter().enumerate() {
+            let (next, allocations) = corrected.with_measured_height(row, height).unwrap();
+            assert_eq!(allocations, 0);
+            assert!(Arc::ptr_eq(&corrected, &next));
+        }
+    }
+}
+
+#[test]
+fn retained_uniform_height_index_keeps_constant_payload_and_matches_expanded_geometry() {
+    for count in [0usize, 1, 100, 1_000, 10_000] {
+        for height in [1.0, 20.5, 126.0] {
+            for gap in [0.0, 1.25, 5.0] {
+                let compact = VirtualHeightIndex::uniform(count, height, gap);
+                let expanded = VirtualHeightIndex::new(&vec![height; count], gap);
+                assert_eq!(compact.len(), count);
+                assert_eq!(compact.is_empty(), count == 0);
+                assert_eq!(
+                    compact.retained_bytes(),
+                    0,
+                    "uniform index allocated per-item extents"
+                );
+                for viewport in [100.0, 800.0] {
+                    for offset in [0.0, 1.0, 36.0, count as f32 * 20.0, 1_000_000.0] {
+                        for overscan in [0.0, 64.0] {
+                            let (window, comparisons) =
+                                compact.window_with_work(offset, viewport, overscan);
+                            assert_eq!(window, expanded.window(offset, viewport, overscan));
+                            assert_eq!(
+                                compact.window_for_range(window.range.clone()),
+                                Some(window)
+                            );
+                            let bound = if count == 0 {
+                                0
+                            } else {
+                                2 * (count.ilog2() as usize + 2)
+                            };
+                            assert!(comparisons <= bound);
+                        }
+                    }
+                }
+                for range in [0..0, count..count, 0..count] {
+                    assert_eq!(
+                        compact.window_for_range(range.clone()),
+                        expanded.window_for_range(range)
+                    );
+                }
+                assert!(compact.window_for_range(count + 1..count + 1).is_none());
+            }
+        }
+    }
+}
+
+#[test]
+fn embedded_virtual_collection_uses_translated_ancestor_clip() {
+    let index = VirtualHeightIndex::new(&[20.0; 100], 0.0);
+    let clip = Rect::new(0.0, 0.0, 320.0, 100.0);
+    let below = index.window_in_clip(Rect::new(0.0, 500.0, 320.0, 2000.0), clip, 40.0);
+    assert!(below.range.is_empty());
+    assert_eq!(below.trailing, 2000.0);
+    let partial = index.window_in_clip(Rect::new(0.0, 60.0, 320.0, 2000.0), clip, 0.0);
+    assert_eq!(partial, index.window(0.0, 40.0, 0.0));
+    let scrolled = index.window_in_clip(Rect::new(0.0, -500.0, 320.0, 2000.0), clip, 40.0);
+    assert_eq!(scrolled, index.window(460.0, 180.0, 0.0));
+    assert!(
+        index
+            .window_in_clip(Rect::new(400.0, 0.0, 320.0, 2000.0), clip, 40.0)
+            .range
+            .is_empty()
+    );
+    assert!(
+        index
+            .window_in_clip(
+                Rect::new(0.0, 0.0, 320.0, 2000.0),
+                Rect::new(0.0, 0.0, 320.0, 0.0),
+                40.0
+            )
+            .range
+            .is_empty()
+    );
+}
+
+#[test]
+fn retained_variable_height_windows_match_linear_boundaries_with_logarithmic_work() {
+    fn linear(
+        heights: &[f32],
+        gap: f32,
+        offset: f32,
+        viewport: f32,
+        overscan: f32,
+    ) -> VirtualWindow {
+        let mut starts = Vec::new();
+        let mut ends = Vec::new();
+        let mut total = 0.0;
+        for (index, height) in heights.iter().enumerate() {
+            if index != 0 {
+                total += gap;
+            }
+            starts.push(total);
+            total += height.max(0.0);
+            ends.push(total);
+        }
+        let offset = offset.clamp(0.0, (total - viewport).max(0.0));
+        let first = ends
+            .iter()
+            .position(|end| *end >= (offset - overscan).max(0.0))
+            .unwrap_or(heights.len());
+        let end = starts
+            .iter()
+            .rposition(|start| *start <= (offset + viewport + overscan).min(total))
+            .map_or(first, |index| index + 1)
+            .max(first);
+        let leading = starts.get(first).copied().unwrap_or(total);
+        let visible_end = end
+            .checked_sub(1)
+            .and_then(|index| ends.get(index))
+            .copied()
+            .unwrap_or(leading);
+        VirtualWindow {
+            range: first..end,
+            leading,
+            trailing: (total - visible_end).max(0.0),
+            total,
+        }
+    }
+    for count in [0usize, 1, 100, 1_000, 10_000] {
+        let heights = (0..count)
+            .map(|index| match index % 4 {
+                0 => 0.0,
+                1 => 36.0,
+                2 => 126.0,
+                _ => 52.0,
+            })
+            .collect::<Vec<_>>();
+        for gap in [0.0, 5.0] {
+            let index = VirtualHeightIndex::new(&heights, gap);
+            assert_eq!(index.len(), count);
+            assert_eq!(index.is_empty(), count == 0);
+            assert_eq!(
+                index.retained_bytes(),
+                count * 2 * std::mem::size_of::<f32>()
+            );
+            for viewport in [0.0, 100.0, 800.0] {
+                for offset in [0.0, 1.0, 36.0, count as f32 * 20.0, 1_000_000.0] {
+                    for overscan in [0.0, 64.0] {
+                        let (window, comparisons) =
+                            index.window_with_work(offset, viewport, overscan);
+                        assert_eq!(window, linear(&heights, gap, offset, viewport, overscan));
+                        let bound = if count == 0 {
+                            0
+                        } else {
+                            2 * (count.ilog2() as usize + 2)
+                        };
+                        assert!(
+                            comparisons <= bound,
+                            "{comparisons} comparisons for {count} items"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn unchanged_paint_refresh_does_not_clone_declaration_messages() {
+    struct CountedMessage(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+    impl Clone for CountedMessage {
+        fn clone(&self) -> Self {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Self(self.0.clone())
+        }
+    }
+    let clones = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut state = UiStateStore::default();
+    let mut frame = UiFrame::resolve(
+        Text::new("unchanged")
+            .into_element()
+            .message(CountedMessage(clones.clone())),
+        FrameRequest::new(Rect::new(0.0, 0.0, 200.0, 100.0), &mut state),
+    );
+    clones.store(0, std::sync::atomic::Ordering::Relaxed);
+    assert!(frame.refresh_retained_paint(&mut state).is_none());
+    assert_eq!(clones.load(std::sync::atomic::Ordering::Relaxed), 0);
+}
+
 fn legacy_is_descendant_or_self<Message: Clone>(
     frame: &UiFrame<Message>,
     ancestor: &UiId,
@@ -3918,6 +4946,75 @@ fn declared_scroll_owner_is_the_only_surface_revealed_for_scope_focus() {
 }
 
 #[test]
+fn accessibility_focus_reveals_a_declared_offscreen_control_without_activation() {
+    let view = || {
+        VerticalScroll::new(TestMessage::Named("scroll"), 0.0)
+            .id("owner")
+            .height(60.0)
+            .child(Column::new().children((0..10).map(|index| {
+                Button::new(TestMessage::Option(index), format!("Item {index}"))
+                    .id(format!("item-{index}"))
+                    .height(30.0)
+            })))
+    };
+    let mut state = UiStateStore::default();
+    let bounds = Rect::new(0.0, 0.0, 200.0, 60.0);
+    let tree = UiFrame::layout_with_state(view(), bounds, &mut state);
+    let target = tree.semantic_targets_for_message(&TestMessage::Option(9))[0]
+        .id
+        .clone();
+    let outcome = tree.handle_event(&mut state, UiEvent::AccessibilityFocus(target.clone()));
+    assert!(outcome.messages.is_empty());
+    assert_eq!(state.focused(), Some(&target));
+    assert_eq!(outcome.invalidation, Invalidation::Layout);
+    let tree = UiFrame::layout_with_state(view(), bounds, &mut state);
+    let rect = tree.resolved_layout().find(&target).unwrap().allocated;
+    assert!(rect.origin.y >= 0.0 && rect.origin.y + rect.size.height <= 60.0);
+    let offset = state
+        .state(&UiId::from("root/owner"))
+        .unwrap()
+        .scroll_offset;
+    let outcome = tree.handle_event(&mut state, UiEvent::AccessibilityFocus(target));
+    assert!(outcome.messages.is_empty());
+    assert_eq!(
+        state
+            .state(&UiId::from("root/owner"))
+            .unwrap()
+            .scroll_offset,
+        offset
+    );
+}
+
+#[test]
+fn focus_reveal_does_not_scroll_a_non_ancestor_viewport() {
+    let view = Column::new().children([
+        VerticalScroll::new(TestMessage::Named("scroll"), 0.0)
+            .id("owner")
+            .height(60.0)
+            .child(Column::new().children(
+                (0..10).map(|index| Button::new(TestMessage::Option(index), "Row").height(30.0)),
+            ))
+            .into_element(),
+        Button::new(TestMessage::Named("footer"), "Footer")
+            .id("footer")
+            .into_element(),
+    ]);
+    let mut state = UiStateStore::default();
+    let tree = UiFrame::layout_with_state(view, Rect::new(0.0, 0.0, 200.0, 100.0), &mut state);
+    assert_eq!(tree.scrolls.len(), 1);
+    let owner = tree.scrolls[0].id.clone();
+    let target = tree.semantic_targets_for_message(&TestMessage::Named("footer"))[0]
+        .id
+        .clone();
+    tree.handle_event(&mut state, UiEvent::AccessibilityFocus(target.clone()));
+    assert_eq!(state.focused(), Some(&target));
+    assert_eq!(
+        state.state(&owner).map_or(0.0, |entry| entry.scroll_offset),
+        0.0
+    );
+}
+
+#[test]
 fn pointer_drag_selects_visible_text_and_caret_blink_only_changes_paint() {
     fn query(value: String) -> TestMessage {
         TestMessage::Query(value)
@@ -5450,6 +6547,45 @@ fn multiline_text_field_hit_testing_and_caret_follow_explicit_lines() {
         PaintCommand::Fill { rect, .. }
             if (rect.size.width - 1.5).abs() < f32::EPSILON && rect.origin.y > 10.0
     )));
+}
+
+#[test]
+fn scrolling_clipped_content_back_into_view_matches_fresh_paint_and_hits() {
+    let view = || {
+        Column::new()
+            .id("scroll")
+            .height(80.0)
+            .overflow_y(Overflow::Auto)
+            .children((0..8).map(|index| {
+                Row::new()
+                    .id(format!("row-{index}"))
+                    .height(40.0)
+                    .shrink(0.0)
+                    .child(Text::new(format!("Label {index}")).content_revision(index as u64))
+                    .child(
+                        Button::new(index, format!("Action {index}"))
+                            .content_revision(index as u64),
+                    )
+            }))
+    };
+    let bounds = Rect::new(0.0, 0.0, 320.0, 80.0);
+    let mut state = UiStateStore::default();
+    let mut frame = UiFrame::resolve(view(), FrameRequest::new(bounds, &mut state));
+    for offset in [40.0, 240.0, 20.0, 0.0, 240.0, 0.0] {
+        state.touch(UiId::from("root/scroll")).scroll_offset = offset;
+        frame = UiFrame::resolve_against(view(), FrameRequest::new(bounds, &mut state), &frame);
+        let cold = UiFrame::resolve(view(), FrameRequest::new(bounds, &mut state.clone()));
+        assert_eq!(frame.commands(), cold.commands(), "scroll offset {offset}");
+        assert_eq!(frame.semantic_nodes(), cold.semantic_nodes());
+        for y in [1.0, 20.0, 39.0, 60.0, 79.0] {
+            for x in [20.0, 100.0, 200.0, 310.0] {
+                assert_eq!(
+                    frame.message_at(Point { x, y }),
+                    cold.message_at(Point { x, y })
+                );
+            }
+        }
+    }
 }
 
 #[test]

@@ -1069,6 +1069,27 @@ impl CodexClient {
             .unwrap()
             .remove(&key);
         let result = received.map_err(|_| CodexError::Timeout(format!("{method} timed out")))?;
+        if let Err(CodexError::Protocol(error)) = &result {
+            // Record the diagnostic, never request parameters or arbitrary RPC
+            // error data (which may contain conversation or credential material).
+            let diagnostic = serde_json::from_str::<Value>(error).ok();
+            let code = diagnostic
+                .as_ref()
+                .and_then(|value| value.get("code"))
+                .and_then(Value::as_i64);
+            let message = diagnostic
+                .as_ref()
+                .and_then(|value| value.get("message"))
+                .and_then(Value::as_str)
+                .unwrap_or("protocol error without a structured message");
+            tracing::warn!(
+                method,
+                code,
+                message = ?message.chars().take(4096).collect::<String>(),
+                message_truncated = message.chars().count() > 4096,
+                "Codex app-server request failed"
+            );
+        }
         if std::env::var_os("NICKEL_CODEX_TIMING").is_some() || resume_timing {
             eprintln!(
                 "nickel-codex timing: method={method} elapsed_ms={:.3} success={}",

@@ -18,6 +18,39 @@ use crate::css::{ControlStyle, Display, FlexDirection, InteractionState, StyleSh
 
 pub type PluginImages = BTreeMap<String, (u16, Arc<image::RgbaImage>)>;
 
+/// Geometry observed from materialized native rows, never supplied by JSX.
+#[derive(Clone, Debug, PartialEq)]
+pub struct VirtualCollectionMeasurements {
+    pub source_revision: u64,
+    pub width: f32,
+    pub rows: Vec<(usize, f32)>,
+    /// First materialized row intersecting its native ancestor clip. The host
+    /// revalidates visibility and scroll ownership before capturing an anchor.
+    pub anchor: Option<nickel_ui::UiId>,
+}
+
+/// A native focused row retained across one synchronous source update. The
+/// source lifetime and key must still exist before it can select a new window.
+#[derive(Clone, Debug)]
+pub struct VirtualCollectionTarget {
+    source_identity: u64,
+    key: String,
+    viewport: f32,
+}
+
+fn virtual_row_id(source: &crate::virtual_source::VirtualSource, ordinal: usize) -> String {
+    use std::fmt::Write;
+    let mut id = format!("__nickel_virtual_row_{}_", source.identity());
+    for byte in source
+        .key(ordinal)
+        .expect("validated virtual row ordinal")
+        .bytes()
+    {
+        write!(id, "{byte:02x}").expect("writing to String");
+    }
+    id
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum PluginMessage {
     Click(usize),
@@ -206,6 +239,173 @@ impl WindowRequest {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct VirtualCollectionDeclaration {
+    pub heights: Arc<nickel_ui::VirtualHeightIndex>,
+    pub range: std::ops::Range<usize>,
+    pub gap: f32,
+    pub overscan: f32,
+    pub source: Option<Arc<crate::virtual_source::VirtualSource>>,
+    needs_source_ack: bool,
+}
+
+impl PartialEq for VirtualCollectionDeclaration {
+    fn eq(&self, other: &Self) -> bool {
+        self.range == other.range
+            && self.gap == other.gap
+            && self.overscan == other.overscan
+            && self.needs_source_ack == other.needs_source_ack
+            && match (&self.source, &other.source) {
+                (Some(left), Some(right)) => {
+                    left.revision() == right.revision()
+                        && Arc::ptr_eq(&self.heights, &other.heights)
+                }
+                (None, None) => {
+                    Arc::ptr_eq(&self.heights, &other.heights) || self.heights == other.heights
+                }
+                _ => false,
+            }
+    }
+}
+
+impl VirtualCollectionDeclaration {
+    fn parse(
+        value: &Value,
+        owner: Option<&str>,
+        sources: &mut crate::virtual_source::VirtualSourceCatalog,
+    ) -> Result<Self, String> {
+        let bounded = |name: &str, limit: f64| -> Result<f32, String> {
+            value
+                .get(name)
+                .map_or(Some(0.0), Value::as_f64)
+                .filter(|value| value.is_finite() && (0.0..=limit).contains(value))
+                .map(|value| value as f32)
+                .ok_or_else(|| format!("invalid virtual collection {name}"))
+        };
+        let ordinal = |name| -> Result<usize, String> {
+            value
+                .get(name)
+                .map_or(Some(0), Value::as_u64)
+                .and_then(|value| usize::try_from(value).ok())
+                .ok_or_else(|| format!("invalid virtual collection {name}"))
+        };
+        let start = ordinal("start")?;
+        let end = ordinal("end")?;
+        let gap = bounded("gap", 1024.0)?;
+        let height = |value: &Value| {
+            value
+                .as_f64()
+                .filter(|height| height.is_finite() && (1.0..=8192.0).contains(height))
+                .map(|height| height as f32)
+                .ok_or("invalid virtual row height")
+        };
+        let source = if let Some(reference) = value.get("source") {
+            if ["keys", "heights", "count", "height"]
+                .iter()
+                .any(|name| value.get(name).is_some())
+            {
+                return Err("virtual source reference cannot redefine source data".into());
+            }
+            let owner = owner.ok_or("registered virtual collection needs native identity")?;
+            let revision = reference
+                .as_u64()
+                .ok_or("invalid virtual source reference")?;
+            let source = sources.resolve(owner, revision)?;
+            if source.gap() != gap {
+                return Err("virtual source gap differs from admission".into());
+            }
+            Some(source)
+        } else if let Some(keys) = value.get("keys") {
+            let owner = owner.ok_or("registered virtual collection needs native identity")?;
+            let keys = keys
+                .as_array()
+                .ok_or("virtual source keys must be an array")?;
+            if keys.len() > 10_000 {
+                return Err("virtual source exceeds 10000 keys".into());
+            }
+            let keys = keys
+                .iter()
+                .map(|key| {
+                    key.as_str()
+                        .filter(|key| {
+                            !key.is_empty() && key.len() <= crate::virtual_source::MAX_KEY_BYTES
+                        })
+                        .map(str::to_owned)
+                        .ok_or("invalid virtual source key")
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let estimates = if value.get("count").is_some() || value.get("height").is_some() {
+                if value.get("heights").is_some() {
+                    return Err("ambiguous registered virtual source geometry".into());
+                }
+                if value.get("count").and_then(Value::as_u64) != Some(keys.len() as u64) {
+                    return Err("virtual source count differs from keys".into());
+                }
+                let height = height(value.get("height").ok_or("virtual source needs height")?)?;
+                vec![height; keys.len()]
+            } else {
+                let estimates = value
+                    .get("heights")
+                    .and_then(Value::as_array)
+                    .ok_or("virtual source needs heights")?;
+                if estimates.len() != keys.len() {
+                    return Err("virtual source estimates differ from keys".into());
+                }
+                estimates
+                    .iter()
+                    .map(height)
+                    .collect::<Result<Vec<_>, _>>()?
+            };
+            Some(sources.admit(owner, &keys, &estimates, gap)?)
+        } else {
+            None
+        };
+        let heights = if let Some(source) = &source {
+            source.geometry_handle()
+        } else if value.get("count").is_some() || value.get("height").is_some() {
+            if value.get("heights").is_some() {
+                return Err("ambiguous virtual collection geometry".into());
+            }
+            let count = value
+                .get("count")
+                .and_then(Value::as_u64)
+                .filter(|count| *count <= 10_000)
+                .ok_or("invalid virtual collection count")?;
+            let height = height(
+                value
+                    .get("height")
+                    .ok_or("virtual collection needs height")?,
+            )?;
+            Arc::new(nickel_ui::VirtualHeightIndex::uniform(
+                count as usize,
+                height,
+                gap,
+            ))
+        } else {
+            let source = value
+                .get("heights")
+                .and_then(Value::as_array)
+                .ok_or("virtual collection needs heights")?;
+            if source.len() > 10_000 {
+                return Err("virtual collection exceeds 10000 items".into());
+            }
+            let heights = source.iter().map(height).collect::<Result<Vec<_>, _>>()?;
+            Arc::new(nickel_ui::VirtualHeightIndex::new(&heights, gap))
+        };
+        if start > end || end > heights.len() {
+            return Err("invalid virtual collection range".into());
+        }
+        Ok(Self {
+            heights,
+            range: start..end,
+            gap,
+            overscan: bounded("overscan", 8192.0)?,
+            needs_source_ack: source.is_some() && value.get("source").is_none(),
+            source,
+        })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum PanelNode {
     Badge {
@@ -231,6 +431,7 @@ pub enum PanelNode {
         class_name: Option<String>,
     },
     Div {
+        collection: Option<VirtualCollectionDeclaration>,
         id: Option<String>,
         class_name: Option<String>,
         children: Vec<Self>,
@@ -596,7 +797,7 @@ struct InheritedTextStyle {
     font_size: Option<f32>,
     line_height: Option<f32>,
     text_align: Option<nickel_ui::TextAlign>,
-    custom_properties: std::collections::HashMap<String, String>,
+    custom_properties: Arc<std::collections::HashMap<String, String>>,
     ancestors: Vec<(String, Option<String>, Option<String>)>,
 }
 
@@ -643,7 +844,10 @@ impl InheritedTextStyle {
 }
 
 impl PanelNode {
-    fn parse_flow_children(children: &[Value]) -> Result<Vec<Self>, String> {
+    fn parse_flow_children(
+        children: &[Value],
+        sources: &mut crate::virtual_source::VirtualSourceCatalog,
+    ) -> Result<Vec<Self>, String> {
         let mut nodes = Vec::new();
         let mut text = String::new();
         let flush_text = |nodes: &mut Vec<Self>, text: &mut String| {
@@ -665,7 +869,7 @@ impl PanelNode {
                 Value::Number(value) => text.push_str(&value.to_string()),
                 Value::Object(_) => {
                     flush_text(&mut nodes, &mut text);
-                    nodes.push(Self::parse(child)?);
+                    nodes.push(Self::parse_with_sources(child, sources)?);
                 }
                 _ => return Err("component children must be elements, text, or numbers".into()),
             }
@@ -685,6 +889,448 @@ impl PanelNode {
             | Self::ScrollView { children, .. } => Some(children),
             _ => None,
         }
+    }
+
+    /// Only declarations admitted into this tree may request application artwork.
+    /// Unmaterialized virtual rows and closed overlays contribute no demand.
+    pub fn application_image_assets(&self) -> std::collections::BTreeSet<String> {
+        fn visit(node: &PanelNode, assets: &mut std::collections::BTreeSet<String>) {
+            let asset = match node {
+                PanelNode::Image { asset, .. } => Some(asset),
+                PanelNode::Button { icon, .. } => icon.as_ref(),
+                _ => None,
+            };
+            if let Some(asset) = asset.filter(|asset| asset.starts_with("application:")) {
+                assets.insert(asset.clone());
+            }
+            let children = match node {
+                PanelNode::Dialog {
+                    open: true,
+                    children,
+                    ..
+                }
+                | PanelNode::Menu {
+                    open: true,
+                    items: children,
+                    ..
+                }
+                | PanelNode::MenuItem { children, .. } => Some(children),
+                _ => node.container_children(),
+            };
+            if let Some(children) = children {
+                for child in children {
+                    visit(child, assets);
+                }
+            }
+        }
+        let mut assets = Default::default();
+        visit(self, &mut assets);
+        assets
+    }
+
+    /// Resource demand follows resolved native visibility, never package-supplied
+    /// viewport claims. The admitted tree already excludes unmaterialized rows.
+    pub fn visible_wallpaper_assets(
+        &self,
+        layout: &nickel_ui::ResolvedLayout,
+        viewport: nickel_ui::Rect,
+    ) -> Vec<String> {
+        fn intersects(left: nickel_ui::Rect, right: nickel_ui::Rect) -> bool {
+            left.size.width > 0.0
+                && left.size.height > 0.0
+                && right.size.width > 0.0
+                && right.size.height > 0.0
+                && left.origin.x < right.origin.x + right.size.width
+                && right.origin.x < left.origin.x + left.size.width
+                && left.origin.y < right.origin.y + right.size.height
+                && right.origin.y < left.origin.y + left.size.height
+        }
+        fn visit(
+            node: &PanelNode,
+            layout: &nickel_ui::ResolvedLayout,
+            viewport: nickel_ui::Rect,
+            assets: &mut Vec<String>,
+        ) {
+            if let PanelNode::Image {
+                id: Some(id),
+                asset,
+                ..
+            } = node
+                && asset.starts_with("wallpaper:")
+            {
+                let suffix = format!("/{id}");
+                if layout.nodes().iter().any(|resolved| {
+                    resolved.id.as_str().ends_with(&suffix)
+                        && intersects(resolved.allocated, viewport)
+                        && resolved.clip.is_none_or(|clip| {
+                            intersects(resolved.allocated, clip) && intersects(clip, viewport)
+                        })
+                }) && !assets.contains(asset)
+                {
+                    assets.push(asset.clone());
+                }
+            }
+            let children = match node {
+                PanelNode::Dialog {
+                    open: true,
+                    children,
+                    ..
+                }
+                | PanelNode::Menu {
+                    open: true,
+                    items: children,
+                    ..
+                }
+                | PanelNode::MenuItem { children, .. } => Some(children),
+                _ => node.container_children(),
+            };
+            if let Some(children) = children {
+                for child in children {
+                    visit(child, layout, viewport, assets);
+                }
+            }
+        }
+        let mut assets = Vec::new();
+        visit(self, layout, viewport, &mut assets);
+        assets
+    }
+
+    /// Native-only feedback for collection row construction; ordinary pointer
+    /// callbacks never supply the viewport or select the materialized range.
+    pub fn virtual_collection_feedback(
+        &self,
+        layout: &nickel_ui::ResolvedLayout,
+        viewport: nickel_ui::Rect,
+    ) -> Result<Vec<PluginMessage>, String> {
+        fn visit(
+            node: &PanelNode,
+            layout: &nickel_ui::ResolvedLayout,
+            viewport: nickel_ui::Rect,
+            result: &mut Vec<PluginMessage>,
+        ) -> Result<(), String> {
+            if let PanelNode::Div {
+                id: Some(id),
+                action: Some(action),
+                collection: Some(collection),
+                ..
+            } = node
+            {
+                let suffix = format!("/{id}");
+                let mut matches = layout
+                    .nodes()
+                    .iter()
+                    .filter(|node| node.id.as_str().ends_with(&suffix));
+                if let Some(resolved) = matches.next() {
+                    if matches.next().is_some() {
+                        return Err("ambiguous virtual collection ID".into());
+                    }
+                    // Ancestor clips can outlive an output's viewport. The
+                    // materialized range must satisfy both authorities.
+                    let clip = resolved.clip.map_or(viewport, |clip| {
+                        let left = clip.origin.x.max(viewport.origin.x);
+                        let top = clip.origin.y.max(viewport.origin.y);
+                        let right = (clip.origin.x + clip.size.width)
+                            .min(viewport.origin.x + viewport.size.width);
+                        let bottom = (clip.origin.y + clip.size.height)
+                            .min(viewport.origin.y + viewport.size.height);
+                        nickel_ui::Rect::new(
+                            left,
+                            top,
+                            (right - left).max(0.0),
+                            (bottom - top).max(0.0),
+                        )
+                    });
+                    let window = collection.heights.window_in_clip(
+                        resolved.content,
+                        clip,
+                        collection.overscan,
+                    );
+                    if window.range != collection.range || collection.needs_source_ack {
+                        if result.len() >= 64 {
+                            return Err("too many virtual collection updates".into());
+                        }
+                        result.push(PluginMessage::Text(
+                            *action,
+                            serde_json::json!({"start":window.range.start,"end":window.range.end,
+                                "source":collection.source.as_ref().map(|source| source.revision())})
+                                .to_string(),
+                        ));
+                    }
+                }
+            }
+            if let Some(children) = node.container_children() {
+                for child in children {
+                    visit(child, layout, viewport, result)?;
+                }
+            }
+            Ok(())
+        }
+        let mut result = Vec::new();
+        visit(self, layout, viewport, &mut result)?;
+        Ok(result)
+    }
+
+    pub fn contains_virtual_collection(&self) -> bool {
+        matches!(
+            self,
+            Self::Div {
+                collection: Some(_),
+                ..
+            }
+        ) || self
+            .container_children()
+            .is_some_and(|children| children.iter().any(Self::contains_virtual_collection))
+    }
+
+    /// Prepare native accessibility focus from a current logical key. The
+    /// requested collection must itself be admitted; omitted rows are not built
+    /// or searched, and a retired/revised source cannot authorize the request.
+    pub fn virtual_key_focus_event(
+        &self,
+        collection: &nickel_ui::UiId,
+        revision: u64,
+        key: &str,
+        layout: &nickel_ui::ResolvedLayout,
+    ) -> Result<nickel_ui::UiEvent, String> {
+        let logical = layout
+            .find(collection)
+            .and_then(|node| node.virtual_navigation.as_ref())
+            .filter(|logical| logical.revision == revision)
+            .ok_or("virtual collection is unavailable or stale")?;
+        fn source_for(
+            node: &PanelNode,
+            revision: u64,
+        ) -> Option<&crate::virtual_source::VirtualSource> {
+            if let PanelNode::Div {
+                collection: Some(collection),
+                ..
+            } = node
+                && let Some(source) = &collection.source
+                && source.revision() == revision
+            {
+                return Some(source);
+            }
+            node.container_children()?
+                .iter()
+                .find_map(|child| source_for(child, revision))
+        }
+        let source = source_for(self, revision).ok_or("virtual source is unavailable or stale")?;
+        let ordinal = source.ordinal(key).ok_or("virtual key is unavailable")?;
+        if logical.count != source.len() {
+            return Err("virtual source admission disagrees with layout".into());
+        }
+        let geometry = source
+            .geometry()
+            .window_for_range(ordinal..ordinal + 1)
+            .ok_or("virtual row geometry is unavailable")?;
+        Ok(nickel_ui::UiEvent::AccessibilityRevealVirtualRow {
+            collection: collection.clone(),
+            revision,
+            ordinal,
+            leading: geometry.leading,
+            height: geometry.total - geometry.leading - geometry.trailing,
+        })
+    }
+
+    pub fn capture_virtual_targets(
+        &self,
+        target: &nickel_ui::UiId,
+        layout: &nickel_ui::ResolvedLayout,
+    ) -> Result<Vec<VirtualCollectionTarget>, String> {
+        if layout.find(target).is_none() {
+            return Ok(Vec::new());
+        }
+        // Index admitted row identities once. Scanning the complete resolved
+        // layout for every admitted row made nested focus repair quadratic in
+        // visible content even though omitted rows were never constructed.
+        let mut resolved = BTreeMap::<&str, Vec<&nickel_ui::ResolvedNode>>::new();
+        for row in layout.nodes() {
+            if let Some((_, local)) = row.id.as_str().rsplit_once('/') {
+                resolved.entry(local).or_default().push(row);
+            }
+        }
+        fn visit(
+            node: &PanelNode,
+            target: &nickel_ui::UiId,
+            resolved: &BTreeMap<&str, Vec<&nickel_ui::ResolvedNode>>,
+            result: &mut Vec<VirtualCollectionTarget>,
+        ) -> Result<(), String> {
+            if let PanelNode::Div {
+                collection: Some(collection),
+                ..
+            } = node
+                && let Some(source) = &collection.source
+            {
+                for ordinal in collection.range.clone() {
+                    let local = virtual_row_id(source, ordinal);
+                    let mut rows = resolved.get(local.as_str()).into_iter().flatten();
+                    if let Some(row) = rows.next() {
+                        if rows.next().is_some() {
+                            return Err("ambiguous virtual focus row".into());
+                        }
+                        if target == &row.id
+                            || target
+                                .as_str()
+                                .strip_prefix(row.id.as_str())
+                                .is_some_and(|tail| tail.starts_with('/'))
+                        {
+                            let viewport = row
+                                .clip
+                                .map_or(row.allocated.size.height, |clip| clip.size.height);
+                            if viewport.is_finite() && viewport > 0.0 {
+                                result.push(VirtualCollectionTarget {
+                                    source_identity: source.identity(),
+                                    key: source.key(ordinal).expect("admitted row").to_owned(),
+                                    viewport,
+                                });
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+            if let Some(children) = node.container_children() {
+                for child in children {
+                    visit(child, target, resolved, result)?;
+                }
+            }
+            Ok(())
+        }
+        let mut result = Vec::new();
+        visit(self, target, &resolved, &mut result)?;
+        Ok(result)
+    }
+
+    /// Resolve captured keys using the current native catalog. This runs before
+    /// host focus reconciliation, so a far reorder cannot retire a surviving
+    /// target merely because the provisional range contains its former ordinal.
+    pub fn virtual_target_feedback(
+        &self,
+        targets: &[VirtualCollectionTarget],
+    ) -> Vec<PluginMessage> {
+        fn visit(
+            node: &PanelNode,
+            targets: &[VirtualCollectionTarget],
+            result: &mut Vec<PluginMessage>,
+        ) {
+            if let PanelNode::Div {
+                action: Some(action),
+                collection: Some(collection),
+                ..
+            } = node
+                && let Some(source) = &collection.source
+                && let Some(target) = targets
+                    .iter()
+                    .find(|target| target.source_identity == source.identity())
+                && let Some(ordinal) = source.ordinal(&target.key)
+                && !collection.range.contains(&ordinal)
+                && let Some(window) =
+                    source.reveal_window(&target.key, target.viewport, collection.overscan)
+            {
+                result.push(PluginMessage::Text(
+                    *action,
+                    serde_json::json!({
+                        "start":window.range.start,"end":window.range.end,"source":source.revision()
+                    })
+                    .to_string(),
+                ));
+            }
+            if let Some(children) = node.container_children() {
+                for child in children {
+                    visit(child, targets, result);
+                }
+            }
+        }
+        let mut result = Vec::new();
+        visit(self, targets, &mut result);
+        result
+    }
+
+    /// Collect only admitted, materialized row wrappers. Logical keys are read
+    /// for the visible range, not scanned; nested collections have independent
+    /// native source revisions. Duplicate resolved identities fail closed.
+    pub fn virtual_collection_measurements(
+        &self,
+        layout: &nickel_ui::ResolvedLayout,
+    ) -> Result<Vec<VirtualCollectionMeasurements>, String> {
+        let mut resolved = BTreeMap::new();
+        for node in layout.nodes() {
+            let local = node.id.as_str().rsplit('/').next().unwrap_or_default();
+            resolved.entry(local).or_insert_with(Vec::new).push(node);
+        }
+        fn unique<'a>(
+            index: &BTreeMap<&str, Vec<&'a nickel_ui::ResolvedNode>>,
+            id: &str,
+        ) -> Result<Option<&'a nickel_ui::ResolvedNode>, String> {
+            if id.contains('/') {
+                let suffix = format!("/{id}");
+                let mut matches = index
+                    .values()
+                    .flatten()
+                    .filter(|node| node.id.as_str().ends_with(&suffix));
+                let first = matches.next().copied();
+                return if matches.next().is_some() {
+                    Err("ambiguous virtual measurement identity".into())
+                } else {
+                    Ok(first)
+                };
+            }
+            match index.get(id).map(Vec::as_slice) {
+                None | Some([]) => Ok(None),
+                Some([node]) => Ok(Some(*node)),
+                Some(_) => Err("ambiguous virtual measurement identity".into()),
+            }
+        }
+        fn visit(
+            node: &PanelNode,
+            index: &BTreeMap<&str, Vec<&nickel_ui::ResolvedNode>>,
+            result: &mut Vec<VirtualCollectionMeasurements>,
+        ) -> Result<(), String> {
+            if let PanelNode::Div {
+                id: Some(id),
+                collection: Some(collection),
+                ..
+            } = node
+                && let Some(source) = &collection.source
+                && let Some(container) = unique(index, id)?
+            {
+                let mut rows = Vec::with_capacity(collection.range.len());
+                let mut anchor = None;
+                for ordinal in collection.range.clone() {
+                    let row = unique(index, &virtual_row_id(source, ordinal))?
+                        .ok_or("missing materialized virtual row geometry")?;
+                    rows.push((ordinal, row.allocated.size.height));
+                    let clip = row.clip.unwrap_or(container.content);
+                    if anchor.is_none()
+                        && row.allocated.size.width > 0.0
+                        && row.allocated.size.height > 0.0
+                        && clip.size.width > 0.0
+                        && clip.size.height > 0.0
+                        && row.allocated.origin.y < clip.origin.y + clip.size.height
+                        && row.allocated.origin.y + row.allocated.size.height > clip.origin.y
+                        && row.allocated.origin.x < clip.origin.x + clip.size.width
+                        && row.allocated.origin.x + row.allocated.size.width > clip.origin.x
+                    {
+                        anchor = Some(row.id.clone());
+                    }
+                }
+                result.push(VirtualCollectionMeasurements {
+                    source_revision: source.revision(),
+                    width: container.content.size.width,
+                    rows,
+                    anchor,
+                });
+            }
+            if let Some(children) = node.container_children() {
+                for child in children {
+                    visit(child, index, result)?;
+                }
+            }
+            Ok(())
+        }
+        let mut result = Vec::new();
+        visit(self, &resolved, &mut result)?;
+        Ok(result)
     }
 
     pub fn direct_child_with_class(&self, class: &str) -> Option<&Self> {
@@ -950,12 +1596,19 @@ impl PanelNode {
                     class_name,
                     accessibility_label,
                     accessibility_state,
+                    collection,
                     ..
                 } => {
                     id.as_ref().map_or(0, capacity)
                         + class_name.as_ref().map_or(0, capacity)
                         + accessibility_label.as_ref().map_or(0, capacity)
                         + accessibility_state.as_ref().map_or(0, capacity)
+                        + collection.as_ref().map_or(0, |collection| {
+                            collection.source.as_ref().map_or_else(
+                                || collection.heights.retained_bytes() as u64,
+                                |source| source.payload_bytes() as u64,
+                            )
+                        })
                 }
                 Self::Box { class_name, .. }
                 | Self::Row { class_name, .. }
@@ -1002,6 +1655,13 @@ impl PanelNode {
     }
 
     fn parse(value: &Value) -> Result<Self, String> {
+        Self::parse_with_sources(value, &mut Default::default())
+    }
+
+    fn parse_with_sources(
+        value: &Value,
+        sources: &mut crate::virtual_source::VirtualSourceCatalog,
+    ) -> Result<Self, String> {
         let kind = value
             .get("kind")
             .and_then(Value::as_str)
@@ -1109,7 +1769,28 @@ impl PanelNode {
             }
             "div" => {
                 let role = value.get("role").and_then(Value::as_str);
-                let interactive = value.get("action").and_then(Value::as_u64).is_some();
+                let collection = value
+                    .get("collection")
+                    .map(|collection| {
+                        VirtualCollectionDeclaration::parse(
+                            collection,
+                            value.get("__nativeId").and_then(Value::as_str),
+                            sources,
+                        )
+                    })
+                    .transpose()?;
+                if let Some(collection) = &collection {
+                    if value.get("id").and_then(Value::as_str).is_none()
+                        || value.get("action").and_then(Value::as_u64).is_none()
+                    {
+                        return Err("virtual collection needs an ID and window callback".into());
+                    }
+                    if children.len() != collection.range.len() {
+                        return Err("virtual collection children do not match its range".into());
+                    }
+                }
+                let interactive =
+                    collection.is_none() && value.get("action").and_then(Value::as_u64).is_some();
                 let label = value
                     .get("aria-label")
                     .or_else(|| value.get("accessibilityLabel"));
@@ -1135,6 +1816,7 @@ impl PanelNode {
                     return Err("div disabled must be boolean".into());
                 }
                 Ok(Self::Div {
+                    collection,
                     id: match value.get("id") {
                         None | Some(Value::Null) => None,
                         Some(Value::String(id)) if !id.is_empty() && id.len() <= 128 => {
@@ -1143,7 +1825,7 @@ impl PanelNode {
                         _ => return Err("div id must contain 1 to 128 bytes".into()),
                     },
                     class_name,
-                    children: Self::parse_flow_children(children)?,
+                    children: Self::parse_flow_children(children, sources)?,
                     action: match value.get("action") {
                         None | Some(Value::Null) => None,
                         Some(action) => Some(
@@ -1215,7 +1897,7 @@ impl PanelNode {
                 };
                 Ok(Self::Box {
                     class_name,
-                    children: Self::parse_flow_children(children)?,
+                    children: Self::parse_flow_children(children, sources)?,
                     x: coordinate("x")?,
                     y: coordinate("y")?,
                     width: dimension("width")?,
@@ -1239,7 +1921,7 @@ impl PanelNode {
                     }
                     _ => return Err("layer id must contain 1 to 128 bytes".into()),
                 },
-                children: Self::parse_flow_children(children)?,
+                children: Self::parse_flow_children(children, sources)?,
                 class_name,
             }),
             "window" => {
@@ -1361,7 +2043,7 @@ impl PanelNode {
                         .get("blurAction")
                         .and_then(Value::as_u64)
                         .map(|action| action as usize),
-                    children: Self::parse_flow_children(children)?,
+                    children: Self::parse_flow_children(children, sources)?,
                     id,
                     background: value
                         .get("background")
@@ -1372,7 +2054,7 @@ impl PanelNode {
                 })
             }
             "row" | "column" | "scroll-view" => {
-                let children = Self::parse_flow_children(children)?;
+                let children = Self::parse_flow_children(children, sources)?;
                 if kind == "row" {
                     Ok(Self::Row {
                         children,
@@ -1470,7 +2152,29 @@ impl PanelNode {
                         .and_then(|action| usize::try_from(action).ok());
                     (Some(id.to_owned()), Some(action), context)
                 } else {
-                    (None, None, None)
+                    let generated = value
+                        .get("__nativeId")
+                        .and_then(Value::as_str)
+                        .map(|native| {
+                            let hash = native.bytes().fold(0xcbf29ce484222325_u64, |hash, byte| {
+                                (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
+                            });
+                            format!("native-image-{hash:016x}")
+                        });
+                    (
+                        value
+                            .get("id")
+                            .map(|id| {
+                                id.as_str()
+                                    .filter(|id| !id.is_empty() && id.len() <= 128)
+                                    .map(str::to_owned)
+                                    .ok_or("image ID must contain 1 to 128 characters")
+                            })
+                            .transpose()?
+                            .or(generated),
+                        None,
+                        None,
+                    )
                 };
                 Ok(Self::Image {
                     id,
@@ -1889,7 +2593,7 @@ impl PanelNode {
                     .and_then(|action| usize::try_from(action).ok()),
                 width: value.get("width").and_then(Value::as_u64).unwrap_or(320) as u32,
                 height: value.get("height").and_then(Value::as_u64).unwrap_or(120) as u32,
-                children: Self::parse_flow_children(children)?,
+                children: Self::parse_flow_children(children, sources)?,
             }),
             "menu" => {
                 let id = value
@@ -1908,7 +2612,7 @@ impl PanelNode {
                 }
                 let items = children
                     .iter()
-                    .map(Self::parse)
+                    .map(|value| Self::parse_with_sources(value, sources))
                     .collect::<Result<Vec<_>, _>>()?;
                 let mut seen = HashSet::new();
                 for item in &items {
@@ -1974,7 +2678,7 @@ impl PanelNode {
                     }
                     children
                         .iter()
-                        .map(Self::parse)
+                        .map(|value| Self::parse_with_sources(value, sources))
                         .collect::<Result<Vec<_>, _>>()?
                 } else {
                     Vec::new()
@@ -2611,7 +3315,10 @@ impl PanelNode {
         with_margin(AnyView::new(apply_container_style(control, &style)), &style)
     }
 
-    fn view_as_scoped_with_slots<Message: PluginUiMessage>(
+    // Keep the large collection/flex/grid branch off the stack of every
+    // recursively rendered non-div node, especially nested overlay controls.
+    #[inline(never)]
+    fn view_div<Message: PluginUiMessage>(
         &self,
         images: &PluginImages,
         stylesheet: &StyleSheet,
@@ -2620,35 +3327,6 @@ impl PanelNode {
         slots: &mut dyn FnMut(&str) -> Option<AnyView<Message>>,
     ) -> AnyView<Message> {
         match self {
-            Self::Badge {
-                label,
-                count,
-                color,
-                class_name,
-                ..
-            } => {
-                let style = inherited.resolve(stylesheet, "badge", None, class_name.as_deref());
-                let text = styled_text(
-                    Text::new(count.to_string()).color(0xffffffff).scale(0.72),
-                    &inherited.apply(style.clone()),
-                );
-                let container = Container::new()
-                    .width(30.0)
-                    .height(24.0)
-                    .radius(12.0)
-                    .align_items(nickel_ui::Align::Center)
-                    .justify_content(nickel_ui::Justify::Center)
-                    .semantic_role(SemanticRole::Status)
-                    .accessibility_label(format!("{label}: {count}"))
-                    .child(text);
-                let container = apply_container_style(container, &style);
-                let container = if style.background.is_none() {
-                    container.background(*color)
-                } else {
-                    container
-                };
-                with_margin(AnyView::new(container), &style)
-            }
             Self::Div {
                 id,
                 class_name,
@@ -2659,101 +3337,162 @@ impl PanelNode {
                 accessibility_label,
                 accessibility_state,
                 disabled,
+                collection,
             } => {
                 let style =
                     inherited.resolve(stylesheet, "div", id.as_deref(), class_name.as_deref());
-                let content: AnyView<Message> = match style.display.unwrap_or_default() {
-                    Display::Grid => {
-                        let mut grid = style
-                            .grid_columns
-                            .as_ref()
-                            .map_or_else(Grid::new, |tracks| Grid::tracks(tracks.iter().cloned()));
-                        if let Some(gap) = style.gap {
-                            grid = grid.gap(gap);
+                let content: AnyView<Message> = if let Some(collection) = collection {
+                    let column = nickel_ui::VirtualColumn::new();
+                    let column = if let Some(source) = &collection.source {
+                        column.logical_navigation(source.len(), source.revision())
+                    } else {
+                        column
+                    };
+                    AnyView::new(
+                        column
+                            .window(
+                                collection
+                                    .heights
+                                    .window_for_range(collection.range.clone())
+                                    .expect("validated collection range"),
+                            )
+                            .gap(collection.gap)
+                            .children(children.iter().enumerate().map(|(offset, child)| {
+                                let view = child.view_as_scoped_with_slots::<Message>(
+                                    images,
+                                    stylesheet,
+                                    scope,
+                                    inherited.extend(&style),
+                                    slots,
+                                );
+                                if let Some(source) = &collection.source {
+                                    AnyView::new(
+                                        Container::new()
+                                            .id(virtual_row_id(
+                                                source,
+                                                collection.range.start + offset,
+                                            ))
+                                            .fill_width()
+                                            .semantic_role(SemanticRole::ListItem)
+                                            .accessibility_label(
+                                                source
+                                                    .key(collection.range.start + offset)
+                                                    .expect("validated virtual row ordinal"),
+                                            )
+                                            .accessibility_description(format!(
+                                                "item {} of {}",
+                                                collection.range.start + offset + 1,
+                                                source.len()
+                                            ))
+                                            // Match native Collection's minimum
+                                            // positive virtual item extent.
+                                            .min_height(1.0)
+                                            .child(view),
+                                    )
+                                } else {
+                                    view
+                                }
+                            })),
+                    )
+                } else {
+                    match style.display.unwrap_or_default() {
+                        Display::Grid => {
+                            let mut grid = style
+                                .grid_columns
+                                .as_ref()
+                                .map_or_else(Grid::new, |tracks| {
+                                    Grid::tracks(tracks.iter().cloned())
+                                });
+                            if let Some(gap) = style.gap {
+                                grid = grid.gap(gap);
+                            }
+                            if let Some(align) = style.align_items {
+                                grid = grid.align_items(align);
+                            }
+                            if let Some(justify) = style.justify_content {
+                                grid = grid.justify_content(justify);
+                            }
+                            for child in children {
+                                grid = grid.child(child.view_as_scoped_with_slots::<Message>(
+                                    images,
+                                    stylesheet,
+                                    scope,
+                                    inherited.extend(&style),
+                                    slots,
+                                ));
+                            }
+                            grid = grid.direction(stylesheet.reading_direction());
+                            AnyView::new(grid.grow(1.0))
                         }
-                        if let Some(align) = style.align_items {
-                            grid = grid.align_items(align);
-                        }
-                        if let Some(justify) = style.justify_content {
-                            grid = grid.justify_content(justify);
-                        }
-                        for child in children {
-                            grid = grid.child(child.view_as_scoped_with_slots::<Message>(
-                                images,
-                                stylesheet,
-                                scope,
-                                inherited.extend(&style),
-                                slots,
-                            ));
-                        }
-                        grid = grid.direction(stylesheet.reading_direction());
-                        AnyView::new(grid.grow(1.0))
-                    }
-                    Display::Flex
-                        if style.flex_direction.unwrap_or_default() == FlexDirection::Row =>
-                    {
-                        let mut row = Row::new();
-                        if let Some(width) = style.width {
-                            row = row.width_length(width);
-                        }
-                        if let Some(height) = style.height {
-                            row = row.height_length(height);
-                        }
-                        if let Some(gap) = style.gap {
-                            row = row.gap(gap);
-                        }
-                        if let Some(align) = style.align_items {
-                            row = row.align_items(align);
-                        }
-                        if let Some(justify) = style.justify_content {
-                            row = row.justify_content(justify);
-                        }
-                        for child in children {
-                            row = row.child(child.view_as_scoped_with_slots::<Message>(
-                                images,
-                                stylesheet,
-                                scope,
-                                inherited.extend(&style),
-                                slots,
-                            ));
-                        }
-                        if stylesheet.reading_direction()
-                            == nickel_ui::ReadingDirection::RightToLeft
+                        Display::Flex
+                            if style.flex_direction.unwrap_or_default() == FlexDirection::Row =>
                         {
-                            row = row.reverse();
+                            let mut row = Row::new();
+                            if let Some(width) = style.width {
+                                row = row.width_length(width);
+                            }
+                            if let Some(height) = style.height {
+                                row = row.height_length(height);
+                            }
+                            if let Some(gap) = style.gap {
+                                row = row.gap(gap);
+                            }
+                            if let Some(align) = style.align_items {
+                                row = row.align_items(align);
+                            }
+                            if let Some(justify) = style.justify_content {
+                                row = row.justify_content(justify);
+                            }
+                            for child in children {
+                                row = row.child(child.view_as_scoped_with_slots::<Message>(
+                                    images,
+                                    stylesheet,
+                                    scope,
+                                    inherited.extend(&style),
+                                    slots,
+                                ));
+                            }
+                            if stylesheet.reading_direction()
+                                == nickel_ui::ReadingDirection::RightToLeft
+                            {
+                                row = row.reverse();
+                            }
+                            AnyView::new(row.grow(1.0))
                         }
-                        AnyView::new(row.grow(1.0))
-                    }
-                    Display::Block | Display::Flex => {
-                        let mut column = Column::new();
-                        if let Some(width) = style.width {
-                            column = column.width_length(width);
+                        Display::Block | Display::Flex => {
+                            let mut column = Column::new();
+                            if let Some(width) = style.width {
+                                column = column.width_length(width);
+                            }
+                            if let Some(height) = style.height {
+                                column = column.height_length(height);
+                            }
+                            if let Some(gap) = style.gap {
+                                column = column.gap(gap);
+                            }
+                            if let Some(align) = style.align_items {
+                                column = column.align_items(align);
+                            }
+                            if let Some(justify) = style.justify_content {
+                                column = column.justify_content(justify);
+                            }
+                            for child in children {
+                                column = column.child(child.view_as_scoped_with_slots::<Message>(
+                                    images,
+                                    stylesheet,
+                                    scope,
+                                    inherited.extend(&style),
+                                    slots,
+                                ));
+                            }
+                            AnyView::new(column.grow(1.0))
                         }
-                        if let Some(height) = style.height {
-                            column = column.height_length(height);
-                        }
-                        if let Some(gap) = style.gap {
-                            column = column.gap(gap);
-                        }
-                        if let Some(align) = style.align_items {
-                            column = column.align_items(align);
-                        }
-                        if let Some(justify) = style.justify_content {
-                            column = column.justify_content(justify);
-                        }
-                        for child in children {
-                            column = column.child(child.view_as_scoped_with_slots::<Message>(
-                                images,
-                                stylesheet,
-                                scope,
-                                inherited.extend(&style),
-                                slots,
-                            ));
-                        }
-                        AnyView::new(column.grow(1.0))
                     }
                 };
                 let mut container = Container::new().child(content);
+                if collection.is_some() {
+                    container = container.semantic_role(SemanticRole::List);
+                }
                 if let Some(id) = id {
                     container = container.id(id.clone());
                 }
@@ -2768,9 +3507,9 @@ impl PanelNode {
                 }
                 if *disabled {
                     container = container.enabled(false).accessibility_state("disabled");
-                } else if let Some(action) = action {
+                } else if let Some(action) = action.filter(|_| collection.is_none()) {
                     container = container.message(Message::from_plugin_scoped(
-                        PluginMessage::Click(*action),
+                        PluginMessage::Click(action),
                         scope,
                     ));
                 }
@@ -2785,6 +3524,53 @@ impl PanelNode {
                     &style,
                 )
             }
+            _ => unreachable!("view_div requires a Div node"),
+        }
+    }
+
+    fn view_as_scoped_with_slots<Message: PluginUiMessage>(
+        &self,
+        images: &PluginImages,
+        stylesheet: &StyleSheet,
+        scope: Option<&str>,
+        inherited: InheritedTextStyle,
+        slots: &mut dyn FnMut(&str) -> Option<AnyView<Message>>,
+    ) -> AnyView<Message> {
+        // Compound widget builders have large debug stack frames. Dispatch
+        // recursive containers before entering the non-recursive control builder.
+        match self {
+            Self::Div { .. } => self.view_div(images, stylesheet, scope, inherited, slots),
+            Self::Box { .. } => {
+                self.view_box_with_slots(images, stylesheet, scope, inherited, slots)
+            }
+            Self::Layer { .. } => {
+                self.view_layer_with_slots(images, stylesheet, scope, inherited, slots)
+            }
+            Self::Surface { .. } => {
+                self.view_surface_with_slots(images, stylesheet, scope, inherited, slots)
+            }
+            Self::Row { .. } => {
+                self.view_row_with_slots(images, stylesheet, scope, inherited, slots)
+            }
+            Self::Column { .. } => {
+                self.view_column_with_slots(images, stylesheet, scope, inherited, slots)
+            }
+            Self::ScrollView { .. } => {
+                self.view_scroll_view_with_slots(images, stylesheet, scope, inherited, slots)
+            }
+            _ => self.view_control_with_slots(images, stylesheet, scope, inherited, slots),
+        }
+    }
+
+    fn view_box_with_slots<Message: PluginUiMessage>(
+        &self,
+        images: &PluginImages,
+        stylesheet: &StyleSheet,
+        scope: Option<&str>,
+        inherited: InheritedTextStyle,
+        slots: &mut dyn FnMut(&str) -> Option<AnyView<Message>>,
+    ) -> AnyView<Message> {
+        match self {
             Self::Box {
                 children,
                 class_name,
@@ -2825,6 +3611,19 @@ impl PanelNode {
                     &style,
                 )
             }
+            _ => unreachable!("container variant dispatched by view_as_scoped_with_slots"),
+        }
+    }
+
+    fn view_layer_with_slots<Message: PluginUiMessage>(
+        &self,
+        images: &PluginImages,
+        stylesheet: &StyleSheet,
+        scope: Option<&str>,
+        inherited: InheritedTextStyle,
+        slots: &mut dyn FnMut(&str) -> Option<AnyView<Message>>,
+    ) -> AnyView<Message> {
+        match self {
             Self::Layer {
                 id,
                 children,
@@ -2853,6 +3652,19 @@ impl PanelNode {
                 }
                 AnyView::new(layer)
             }
+            _ => unreachable!("container variant dispatched by view_as_scoped_with_slots"),
+        }
+    }
+
+    fn view_surface_with_slots<Message: PluginUiMessage>(
+        &self,
+        images: &PluginImages,
+        stylesheet: &StyleSheet,
+        scope: Option<&str>,
+        inherited: InheritedTextStyle,
+        slots: &mut dyn FnMut(&str) -> Option<AnyView<Message>>,
+    ) -> AnyView<Message> {
+        match self {
             Self::Surface {
                 children,
                 id,
@@ -2874,12 +3686,16 @@ impl PanelNode {
                 let managed = window_request
                     .as_ref()
                     .is_some_and(|request| request.placement == "managed");
-                let width = managed
-                    .then_some(Length::Percent(1.0))
-                    .unwrap_or_else(|| style.width.unwrap_or(*width));
-                let height = managed
-                    .then_some(Length::Percent(1.0))
-                    .unwrap_or_else(|| style.height.unwrap_or(*height));
+                let width = if managed {
+                    Length::Percent(1.0)
+                } else {
+                    style.width.unwrap_or(*width)
+                };
+                let height = if managed {
+                    Length::Percent(1.0)
+                } else {
+                    style.height.unwrap_or(*height)
+                };
                 let mut layer = Layer::new().width_length(width).height_length(height);
                 for child in children {
                     if !matches!(child, Self::Dialog { .. }) {
@@ -2914,6 +3730,19 @@ impl PanelNode {
                     &style,
                 )
             }
+            _ => unreachable!("container variant dispatched by view_as_scoped_with_slots"),
+        }
+    }
+
+    fn view_row_with_slots<Message: PluginUiMessage>(
+        &self,
+        images: &PluginImages,
+        stylesheet: &StyleSheet,
+        scope: Option<&str>,
+        inherited: InheritedTextStyle,
+        slots: &mut dyn FnMut(&str) -> Option<AnyView<Message>>,
+    ) -> AnyView<Message> {
+        match self {
             Self::Row {
                 children,
                 class_name,
@@ -2959,6 +3788,19 @@ impl PanelNode {
                     )
                 }
             }
+            _ => unreachable!("container variant dispatched by view_as_scoped_with_slots"),
+        }
+    }
+
+    fn view_column_with_slots<Message: PluginUiMessage>(
+        &self,
+        images: &PluginImages,
+        stylesheet: &StyleSheet,
+        scope: Option<&str>,
+        inherited: InheritedTextStyle,
+        slots: &mut dyn FnMut(&str) -> Option<AnyView<Message>>,
+    ) -> AnyView<Message> {
+        match self {
             Self::Column {
                 children,
                 class_name,
@@ -3001,6 +3843,19 @@ impl PanelNode {
                     )
                 }
             }
+            _ => unreachable!("container variant dispatched by view_as_scoped_with_slots"),
+        }
+    }
+
+    fn view_scroll_view_with_slots<Message: PluginUiMessage>(
+        &self,
+        images: &PluginImages,
+        stylesheet: &StyleSheet,
+        scope: Option<&str>,
+        inherited: InheritedTextStyle,
+        slots: &mut dyn FnMut(&str) -> Option<AnyView<Message>>,
+    ) -> AnyView<Message> {
+        match self {
             Self::ScrollView {
                 id,
                 class_name,
@@ -3056,6 +3911,55 @@ impl PanelNode {
                     )
                 }
             }
+            _ => unreachable!("container variant dispatched by view_as_scoped_with_slots"),
+        }
+    }
+
+    fn view_control_with_slots<Message: PluginUiMessage>(
+        &self,
+        images: &PluginImages,
+        stylesheet: &StyleSheet,
+        scope: Option<&str>,
+        inherited: InheritedTextStyle,
+        slots: &mut dyn FnMut(&str) -> Option<AnyView<Message>>,
+    ) -> AnyView<Message> {
+        match self {
+            Self::Badge {
+                label,
+                count,
+                color,
+                class_name,
+                ..
+            } => {
+                let style = inherited.resolve(stylesheet, "badge", None, class_name.as_deref());
+                let text = styled_text(
+                    Text::new(count.to_string()).color(0xffffffff).scale(0.72),
+                    &inherited.apply(style.clone()),
+                );
+                let container = Container::new()
+                    .width(30.0)
+                    .height(24.0)
+                    .radius(12.0)
+                    .align_items(nickel_ui::Align::Center)
+                    .justify_content(nickel_ui::Justify::Center)
+                    .semantic_role(SemanticRole::Status)
+                    .accessibility_label(format!("{label}: {count}"))
+                    .child(text);
+                let container = apply_container_style(container, &style);
+                let container = if style.background.is_none() {
+                    container.background(*color)
+                } else {
+                    container
+                };
+                with_margin(AnyView::new(container), &style)
+            }
+            Self::Div { .. }
+            | Self::Box { .. }
+            | Self::Layer { .. }
+            | Self::Surface { .. }
+            | Self::Row { .. }
+            | Self::Column { .. }
+            | Self::ScrollView { .. } => unreachable!("containers bypass the control renderer"),
             Self::Text {
                 value,
                 color,
@@ -3127,6 +4031,9 @@ impl PanelNode {
                     .width(*width as f32)
                     .height(*height as f32)
                     .child(visual);
+                if let Some(id) = id {
+                    container = container.id(id.clone());
+                }
                 if let Some(action) = action {
                     container = container
                         .id(id.as_ref().expect("image button has an ID").clone())
@@ -3817,6 +4724,7 @@ impl PanelNode {
                 id: Some(id),
                 action: Some(action),
                 disabled: false,
+                collection: None,
                 ..
             } if id == requested_id => Some(*action),
             Self::Button {
@@ -3930,6 +4838,7 @@ pub struct RetainedPanelTree {
     generation: u64,
     nodes: BTreeMap<NativeNodeId, String>,
     handler_slots: BTreeMap<HandlerSlotId, usize>,
+    sources: crate::virtual_source::VirtualSourceCatalog,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -3940,13 +4849,86 @@ pub struct NativePatchApplyCounters {
 }
 
 impl RetainedPanelTree {
+    /// Preserve only native-captured focus ancestry during a synchronous data
+    /// transaction. Nested owners may temporarily disappear while their outer
+    /// keyed row is readmitted. This retains catalogs, never offscreen row trees.
+    pub fn begin_virtual_target_repair(&mut self, targets: &[VirtualCollectionTarget]) {
+        self.sources
+            .set_repair_identities(targets.iter().map(|target| target.source_identity));
+    }
+
+    pub fn end_virtual_target_repair(&mut self) {
+        self.sources.set_repair_identities(std::iter::empty());
+        retain_collection_sources(&self.source, &mut self.sources);
+    }
+
     pub fn admit(
         source: &Value,
         manifest: &PluginManifest,
         expected_surface_id: Option<&str>,
         generation: u64,
     ) -> Result<Self, String> {
-        let node = parse_panel_for_manifest(source, manifest, expected_surface_id)?;
+        Self::admit_with_sources(
+            source,
+            manifest,
+            expected_surface_id,
+            generation,
+            Default::default(),
+        )
+    }
+
+    /// Re-admit a candidate using only this generation's source namespace. The
+    /// accepted catalog remains unchanged if any source/tree invariant fails.
+    pub fn readmit(
+        &self,
+        source: &Value,
+        manifest: &PluginManifest,
+        expected_surface_id: Option<&str>,
+        generation: u64,
+    ) -> Result<Self, String> {
+        Self::admit_with_sources(
+            source,
+            manifest,
+            expected_surface_id,
+            generation,
+            self.sources.clone(),
+        )
+    }
+
+    pub fn readmit_validated(
+        &self,
+        source: &Value,
+        manifest: &PluginManifest,
+        expected_surface_id: Option<&str>,
+        stylesheet: &StyleSheet,
+        generation: u64,
+    ) -> Result<Self, String> {
+        let admitted = self.readmit(source, manifest, expected_surface_id, generation)?;
+        if let Some(id) = expected_surface_id {
+            let grant = manifest
+                .surfaces
+                .iter()
+                .find(|surface| surface.id == id)
+                .ok_or("rendered surface is no longer declared")?;
+            admitted.node.requested_surface(grant, stylesheet)?;
+        }
+        Ok(admitted)
+    }
+
+    fn admit_with_sources(
+        source: &Value,
+        manifest: &PluginManifest,
+        expected_surface_id: Option<&str>,
+        generation: u64,
+        mut sources: crate::virtual_source::VirtualSourceCatalog,
+    ) -> Result<Self, String> {
+        retain_collection_sources(source, &mut sources);
+        let node = parse_panel_for_manifest_with_sources(
+            source,
+            manifest,
+            expected_surface_id,
+            &mut sources,
+        )?;
         let mut nodes = BTreeMap::new();
         let mut handler_slots = BTreeMap::new();
         fn index(
@@ -4005,12 +4987,122 @@ impl RetainedPanelTree {
             generation,
             nodes,
             handler_slots,
+            sources,
         })
     }
 
     pub fn node(&self) -> &PanelNode {
         &self.node
     }
+
+    /// Constant-time catalog accounting: (sources, logical rows, payload bytes).
+    /// Payload bytes are the admission budget, not allocator capacity or RSS.
+    pub fn virtual_source_usage(&self) -> (usize, usize, usize) {
+        (
+            self.sources.source_count(),
+            self.sources.logical_rows(),
+            self.sources.payload_bytes(),
+        )
+    }
+
+    /// Commit a native measurement batch without advancing the JSX patch
+    /// generation or changing callback/key authority. Callers must rebuild the
+    /// native frame when this returns true and reconcile its scroll anchor.
+    /// All catalogs and typed collection handles remain unchanged on failure.
+    pub fn apply_virtual_measurements(
+        &mut self,
+        measurements: &[VirtualCollectionMeasurements],
+        scale: f32,
+        layout_revision: u64,
+    ) -> Result<bool, String> {
+        if measurements.is_empty() {
+            return Ok(false);
+        }
+        fn collect_ranges(node: &PanelNode, ranges: &mut BTreeMap<u64, std::ops::Range<usize>>) {
+            if let PanelNode::Div {
+                collection: Some(collection),
+                ..
+            } = node
+                && let Some(source) = &collection.source
+            {
+                ranges.insert(source.revision(), collection.range.clone());
+            }
+            if let Some(children) = node.container_children() {
+                for child in children {
+                    collect_ranges(child, ranges);
+                }
+            }
+        }
+        let mut ranges = BTreeMap::new();
+        collect_ranges(&self.node, &mut ranges);
+        let mut sources = self.sources.clone();
+        let mut replacements = BTreeMap::new();
+        for batch in measurements {
+            if replacements.contains_key(&batch.source_revision) {
+                return Err("duplicate virtual measurement source".into());
+            }
+            let range = ranges
+                .get(&batch.source_revision)
+                .ok_or("retired virtual measurement source")?;
+            if batch.rows.len() != range.len()
+                || batch.rows.iter().map(|(row, _)| *row).ne(range.clone())
+            {
+                return Err("virtual measurements do not match materialized range".into());
+            }
+            let owner = sources
+                .owner_for_revision(batch.source_revision)
+                .ok_or("retired virtual measurement source")?
+                .to_owned();
+            let (source, _) = sources.measure(
+                &owner,
+                batch.source_revision,
+                crate::virtual_source::VirtualMeasurementContext {
+                    width: batch.width,
+                    scale,
+                    layout_revision,
+                },
+                &batch.rows,
+            )?;
+            replacements.insert(batch.source_revision, source);
+        }
+        fn replace(
+            node: &mut PanelNode,
+            replacements: &BTreeMap<u64, Arc<crate::virtual_source::VirtualSource>>,
+        ) -> bool {
+            let mut changed = false;
+            if let PanelNode::Div {
+                collection: Some(collection),
+                ..
+            } = node
+                && let Some(previous) = &collection.source
+                && let Some(source) = replacements.get(&previous.revision())
+            {
+                let geometry = source.geometry_handle();
+                changed |= !Arc::ptr_eq(&collection.heights, &geometry);
+                collection.heights = geometry;
+                collection.source = Some(Arc::clone(source));
+            }
+            match node {
+                PanelNode::Box { children, .. }
+                | PanelNode::Layer { children, .. }
+                | PanelNode::Div { children, .. }
+                | PanelNode::Surface { children, .. }
+                | PanelNode::Row { children, .. }
+                | PanelNode::Column { children, .. }
+                | PanelNode::ScrollView { children, .. } => {
+                    for child in children {
+                        changed |= replace(child, replacements);
+                    }
+                }
+                _ => {}
+            }
+            changed
+        }
+        let changed = replace(&mut self.node, &replacements);
+        self.sources = sources;
+        Ok(changed)
+    }
+
     pub fn generation(&self) -> u64 {
         self.generation
     }
@@ -4034,7 +5126,12 @@ impl RetainedPanelTree {
         expected_surface_id: Option<&str>,
         stylesheet: &StyleSheet,
     ) -> Result<PanelNode, String> {
-        let node = parse_panel_for_manifest(candidate, manifest, expected_surface_id)?;
+        let node = parse_panel_for_manifest_with_sources(
+            candidate,
+            manifest,
+            expected_surface_id,
+            &mut self.sources.clone(),
+        )?;
         if let Some(surface_id) = expected_surface_id {
             let grant = manifest
                 .surfaces
@@ -4067,8 +5164,34 @@ impl RetainedPanelTree {
         }
         let mut source = self.source.clone();
         let mut node = self.node.clone();
+        let sources = std::cell::RefCell::new(self.sources.clone());
         let mut visited = 0_u64;
         for operation in &patch.operations {
+            // A fragment retains all source roots, but `node` represents only
+            // this host window. Never pair a sibling's source with that node.
+            if let Some(roots) = source.as_array() {
+                let selected = roots
+                    .iter()
+                    .find(|root| root.get("id").and_then(Value::as_str) == expected_surface_id)
+                    .ok_or("native patch fragment has no selected host window")?;
+                let target = match operation {
+                    NativePatchOperation::SetPrimitive { target, .. }
+                    | NativePatchOperation::ReplaceSubtree { target, .. } => target.clone(),
+                    NativePatchOperation::InsertChild { parent, .. }
+                    | NativePatchOperation::RemoveChild { parent, .. }
+                    | NativePatchOperation::MoveChild { parent, .. } => parent.clone(),
+                    NativePatchOperation::ReplaceHandlerSlot { slot, .. } => {
+                        find_handler_slot(selected, slot)
+                            .ok_or("native patch handler is outside the host window")?
+                            .0
+                    }
+                };
+                if selected.get("__nativeId").and_then(Value::as_str) != Some(target.as_str())
+                    && !source_contains_id(selected, &target)
+                {
+                    return Err("native patch target is outside the host window".into());
+                }
+            }
             match operation {
                 NativePatchOperation::SetPrimitive {
                     target,
@@ -4078,13 +5201,19 @@ impl RetainedPanelTree {
                     if !is_primitive_patch_value(value, property) {
                         return Err("setPrimitive contains a non-primitive value".into());
                     }
-                    if mutate_flattened_target(&mut source, &mut node, target, &mut |source| {
-                        source
-                            .as_object_mut()
-                            .ok_or("native patch target is not an object")?
-                            .insert(property.clone(), value.clone());
-                        Ok(())
-                    })? {
+                    if mutate_flattened_target(
+                        &mut source,
+                        &mut node,
+                        target,
+                        &sources,
+                        &mut |source| {
+                            source
+                                .as_object_mut()
+                                .ok_or("native patch target is not an object")?
+                                .insert(property.clone(), value.clone());
+                            Ok(())
+                        },
+                    )? {
                         continue;
                     }
                     mutate_target(
@@ -4092,6 +5221,7 @@ impl RetainedPanelTree {
                         &mut node,
                         target,
                         &mut visited,
+                        &sources,
                         &mut |source, typed| {
                             let object = source
                                 .as_object_mut()
@@ -4107,7 +5237,7 @@ impl RetainedPanelTree {
                                         "setPrimitive property {property:?} requires subtree replacement"
                                     ));
                                 }
-                                *typed = parse_patched_node(source, typed)?;
+                                *typed = parse_patched_node(source, typed, &sources)?;
                             }
                             Ok(())
                         },
@@ -4128,6 +5258,7 @@ impl RetainedPanelTree {
                         &mut node,
                         &target,
                         &mut visited,
+                        &sources,
                         &mut |source, typed| {
                             let implicit_id = source.get("id").is_none();
                             source
@@ -4152,12 +5283,14 @@ impl RetainedPanelTree {
                     {
                         return Err(format!("inserted native child {child_id:?} already exists"));
                     }
-                    let typed_child = PanelNode::parse(child)?;
+                    let typed_child =
+                        PanelNode::parse_with_sources(child, &mut sources.borrow_mut())?;
                     mutate_target(
                         &mut source,
                         &mut node,
                         parent,
                         &mut visited,
+                        &sources,
                         &mut |source, typed| {
                             let children = source
                                 .get_mut("children")
@@ -4186,6 +5319,7 @@ impl RetainedPanelTree {
                         &mut node,
                         parent,
                         &mut visited,
+                        &sources,
                         &mut |source, typed| {
                             let children = source
                                 .get_mut("children")
@@ -4219,6 +5353,7 @@ impl RetainedPanelTree {
                         &mut node,
                         parent,
                         &mut visited,
+                        &sources,
                         &mut |source, typed| {
                             let children = source
                                 .get_mut("children")
@@ -4258,17 +5393,21 @@ impl RetainedPanelTree {
                         return Err("replacement subtree identity differs from its target".into());
                     }
                     if target == "root" {
-                        let typed =
-                            parse_panel_for_manifest(replacement, manifest, expected_surface_id)?;
+                        let typed = parse_panel_for_manifest_with_sources(
+                            replacement,
+                            manifest,
+                            expected_surface_id,
+                            &mut sources.borrow_mut(),
+                        )?;
                         source = replacement.clone();
                         node = typed;
                         visited = visited.saturating_add(1);
                     } else {
                         let typed = if let Some(previous) = find_typed_node(&source, &node, target)
                         {
-                            parse_patched_node(replacement, previous)?
+                            parse_patched_node(replacement, previous, &sources)?
                         } else {
-                            PanelNode::parse(replacement)?
+                            PanelNode::parse_with_sources(replacement, &mut sources.borrow_mut())?
                         };
                         replace_source_and_typed(
                             &mut source,
@@ -4277,6 +5416,7 @@ impl RetainedPanelTree {
                             replacement,
                             &typed,
                             &mut visited,
+                            &sources,
                         )?;
                     }
                 }
@@ -4285,7 +5425,7 @@ impl RetainedPanelTree {
         // Re-admission builds authoritative identity/handler indexes and
         // validates manifest/root constraints, but retain the incrementally
         // mutated typed tree rather than reparsing the complete candidate.
-        let (nodes, handler_slots) = index_native_source(&source)?;
+        let (nodes, handler_slots) = index_native_source_checked(&source, true)?;
         if let Some(surface_id) = expected_surface_id {
             let grant = manifest
                 .surfaces
@@ -4294,12 +5434,15 @@ impl RetainedPanelTree {
                 .ok_or("rendered surface is no longer declared")?;
             node.requested_surface(grant, stylesheet)?;
         }
+        let mut sources = sources.into_inner();
+        retain_collection_sources(&source, &mut sources);
         *self = Self {
             node,
             source,
             generation,
             nodes,
             handler_slots,
+            sources,
         };
         Ok(NativePatchApplyCounters {
             transport_bytes,
@@ -4307,6 +5450,37 @@ impl RetainedPanelTree {
             nodes_mutated: patch.operations.len() as u64,
         })
     }
+}
+
+fn retain_collection_sources(
+    source: &Value,
+    sources: &mut crate::virtual_source::VirtualSourceCatalog,
+) {
+    if sources.source_count() == 0 {
+        return;
+    }
+    fn owners<'a>(value: &'a Value, result: &mut std::collections::HashSet<&'a str>) {
+        if let Some(values) = value.as_array() {
+            for value in values {
+                owners(value, result);
+            }
+        } else if let Some(object) = value.as_object() {
+            if object.get("kind").and_then(Value::as_str) == Some("div")
+                && object.get("collection").is_some_and(|collection| {
+                    collection.get("keys").is_some() || collection.get("source").is_some()
+                })
+                && let Some(id) = object.get("__nativeId").and_then(Value::as_str)
+            {
+                result.insert(id);
+            }
+            if let Some(children) = object.get("children") {
+                owners(children, result);
+            }
+        }
+    }
+    let mut retained_owners = std::collections::HashSet::new();
+    owners(source, &mut retained_owners);
+    sources.retain_owners(&retained_owners);
 }
 
 /// Reparse only a Surface's bounded scalar declaration. Its already-admitted
@@ -4371,7 +5545,13 @@ fn update_surface_scalars(node: &mut PanelNode, source: &Value) -> Result<(), St
     Ok(())
 }
 
-fn parse_patched_node(source: &Value, previous: &PanelNode) -> Result<PanelNode, String> {
+type ParseSources = std::cell::RefCell<crate::virtual_source::VirtualSourceCatalog>;
+
+fn parse_patched_node(
+    source: &Value,
+    previous: &PanelNode,
+    sources: &ParseSources,
+) -> Result<PanelNode, String> {
     let mut source = source.clone();
     if source.get("id").is_none() {
         let id = match previous {
@@ -4396,7 +5576,7 @@ fn parse_patched_node(source: &Value, previous: &PanelNode) -> Result<PanelNode,
                 .insert("id".into(), Value::String(id.to_owned()));
         }
     }
-    PanelNode::parse(&source)
+    PanelNode::parse_with_sources(&source, &mut sources.borrow_mut())
 }
 
 fn find_typed_node<'a>(
@@ -4637,10 +5817,11 @@ fn find_handler_slot(value: &Value, requested: &str) -> Option<(String, String)>
 fn mutate_source_only(
     source: &mut Value,
     target: &str,
+    sources: &ParseSources,
     operation: &mut impl FnMut(&mut Value, &mut PanelNode) -> Result<(), String>,
 ) -> Result<(), String> {
     if source.get("__nativeId").and_then(Value::as_str) == Some(target) {
-        let mut typed = PanelNode::parse(source)?;
+        let mut typed = PanelNode::parse_with_sources(source, &mut sources.borrow_mut())?;
         return operation(source, &mut typed);
     }
     let children = source
@@ -4651,7 +5832,7 @@ fn mutate_source_only(
         if child.get("__nativeId").and_then(Value::as_str) == Some(target)
             || source_contains_id(child, target)
         {
-            return mutate_source_only(child, target, operation);
+            return mutate_source_only(child, target, sources, operation);
         }
     }
     Err(format!("native patch target {target:?} disappeared"))
@@ -4662,6 +5843,7 @@ fn mutate_target(
     typed: &mut PanelNode,
     target: &str,
     visited: &mut u64,
+    sources: &ParseSources,
     operation: &mut impl FnMut(&mut Value, &mut PanelNode) -> Result<(), String>,
 ) -> Result<(), String> {
     *visited = visited.saturating_add(1);
@@ -4676,7 +5858,7 @@ fn mutate_target(
                     || source_contains_id(root, target)
             })
             .ok_or_else(|| format!("native patch target {target:?} disappeared"))?;
-        return mutate_target(root, typed, target, visited, operation);
+        return mutate_target(root, typed, target, visited, sources, operation);
     }
     let children = source
         .get_mut("children")
@@ -4689,15 +5871,15 @@ fn mutate_target(
         // not align. Apply the bounded mutation within this source subtree and
         // reparse only the nearest misaligned ancestor instead of rejecting a
         // valid retained update (for example a clock label beside elements).
-        mutate_source_only(source, target, operation)?;
-        *typed = parse_patched_node(source, typed)?;
+        mutate_source_only(source, target, sources, operation)?;
+        *typed = parse_patched_node(source, typed, sources)?;
         return Ok(());
     }
     for (source, typed) in children.iter_mut().zip(typed_children) {
         if source.get("__nativeId").and_then(Value::as_str) == Some(target)
             || source_contains_id(source, target)
         {
-            return mutate_target(source, typed, target, visited, operation);
+            return mutate_target(source, typed, target, visited, sources, operation);
         }
     }
     Err(format!("native patch target {target:?} disappeared"))
@@ -4707,6 +5889,7 @@ fn mutate_flattened_target(
     source: &mut Value,
     typed: &mut PanelNode,
     target: &str,
+    sources: &ParseSources,
     operation: &mut impl FnMut(&mut Value) -> Result<(), String>,
 ) -> Result<bool, String> {
     if typed_children_mut(typed).is_ok() || !source_contains_id(source, target) {
@@ -4734,7 +5917,7 @@ fn mutate_flattened_target(
         Err(format!("native patch target {target:?} disappeared"))
     }
     mutate(source, target, operation)?;
-    *typed = PanelNode::parse(source)?;
+    *typed = PanelNode::parse_with_sources(source, &mut sources.borrow_mut())?;
     Ok(true)
 }
 
@@ -4762,20 +5945,50 @@ type NativeSourceIndex = (
 );
 
 fn index_native_source(source: &Value) -> Result<NativeSourceIndex, String> {
+    index_native_source_checked(source, false)
+}
+
+fn index_native_source_checked(
+    source: &Value,
+    validate_collections: bool,
+) -> Result<NativeSourceIndex, String> {
     fn visit(
         value: &Value,
         nodes: &mut BTreeMap<NativeNodeId, String>,
         slots: &mut BTreeMap<HandlerSlotId, usize>,
+        validate_collections: bool,
     ) -> Result<(), String> {
         if let Some(values) = value.as_array() {
             for value in values {
-                visit(value, nodes, slots)?;
+                visit(value, nodes, slots, validate_collections)?;
             }
             return Ok(());
         }
         let Some(object) = value.as_object() else {
             return Ok(());
         };
+        // Structural deltas can change row count without reparsing their
+        // retained parent. Check the final transaction during the existing
+        // index walk, not intermediate remove/insert states or the full source
+        // height array.
+        if validate_collections
+            && object.get("kind").and_then(Value::as_str) == Some("div")
+            && let Some(collection) = object.get("collection")
+        {
+            let start = collection.get("start").map_or(Some(0), Value::as_u64);
+            let end = collection.get("end").map_or(Some(0), Value::as_u64);
+            let count = object
+                .get("children")
+                .and_then(Value::as_array)
+                .map(Vec::len);
+            let range_len = start
+                .zip(end)
+                .and_then(|(start, end)| end.checked_sub(start));
+            if !matches!((range_len, count), (Some(length), Some(count)) if length == count as u64)
+            {
+                return Err("virtual collection children differ from its range".into());
+            }
+        }
         if let Some(id) = object.get("__nativeId").and_then(Value::as_str) {
             let kind = object
                 .get("kind")
@@ -4806,13 +6019,13 @@ fn index_native_source(source: &Value) -> Result<NativeSourceIndex, String> {
             }
         }
         if let Some(children) = object.get("children") {
-            visit(children, nodes, slots)?;
+            visit(children, nodes, slots, validate_collections)?;
         }
         Ok(())
     }
     let mut nodes = BTreeMap::new();
     let mut slots = BTreeMap::new();
-    visit(source, &mut nodes, &mut slots)?;
+    visit(source, &mut nodes, &mut slots, validate_collections)?;
     Ok((nodes, slots))
 }
 
@@ -4823,6 +6036,7 @@ fn replace_source_and_typed(
     replacement: &Value,
     replacement_typed: &PanelNode,
     visited: &mut u64,
+    sources: &ParseSources,
 ) -> Result<(), String> {
     fn replace_source_only(
         source: &mut Value,
@@ -4868,6 +6082,7 @@ fn replace_source_and_typed(
             replacement,
             replacement_typed,
             visited,
+            sources,
         );
     }
     let source_children = source
@@ -4889,7 +6104,7 @@ fn replace_source_and_typed(
         | PanelNode::MenuItem { children, .. } => children,
         _ => {
             replace_source_only(source, target, replacement)?;
-            *typed = PanelNode::parse(source)?;
+            *typed = PanelNode::parse_with_sources(source, &mut sources.borrow_mut())?;
             return Ok(());
         }
     };
@@ -4897,7 +6112,7 @@ fn replace_source_and_typed(
         || source_children.iter().any(|child| !child.is_object())
     {
         replace_source_only(source, target, replacement)?;
-        *typed = PanelNode::parse(source)?;
+        *typed = PanelNode::parse_with_sources(source, &mut sources.borrow_mut())?;
         return Ok(());
     }
     for (child_source, child_typed) in source_children.iter_mut().zip(typed_children) {
@@ -4911,6 +6126,7 @@ fn replace_source_and_typed(
                 replacement,
                 replacement_typed,
                 visited,
+                sources,
             );
         }
     }
@@ -4940,6 +6156,20 @@ pub fn parse_panel_for_manifest(
     manifest: &PluginManifest,
     expected_surface_id: Option<&str>,
 ) -> Result<PanelNode, String> {
+    parse_panel_for_manifest_with_sources(
+        value,
+        manifest,
+        expected_surface_id,
+        &mut Default::default(),
+    )
+}
+
+fn parse_panel_for_manifest_with_sources(
+    value: &Value,
+    manifest: &PluginManifest,
+    expected_surface_id: Option<&str>,
+    sources: &mut crate::virtual_source::VirtualSourceCatalog,
+) -> Result<PanelNode, String> {
     if let Some(roots) = value.as_array() {
         if roots.len() > 32 {
             return Err("package render exceeds 32 top-level windows".into());
@@ -4960,7 +6190,7 @@ pub fn parse_panel_for_manifest(
             if !identities.insert(id) {
                 return Err(format!("duplicate top-level window {id:?}"));
             }
-            let node = parse_panel_for_manifest(root, manifest, Some(id))?;
+            let node = parse_panel_for_manifest_with_sources(root, manifest, Some(id), sources)?;
             if expected_surface_id == Some(id) {
                 selected = Some(node);
             }
@@ -5010,7 +6240,7 @@ pub fn parse_panel_for_manifest(
         }
     }
     assign_control_ids(&mut root, "root");
-    let node = PanelNode::parse(&root)?;
+    let node = PanelNode::parse_with_sources(&root, sources)?;
     fn collect_windows<'a>(
         node: &'a PanelNode,
         found: &mut Vec<(&'a WindowRequest, Length, Length)>,
@@ -5152,6 +6382,211 @@ mod class_lookup_tests {
     use serde_json::{Value, json};
 
     #[test]
+    fn registered_virtual_sources_survive_compact_patches_and_retire_with_nodes() {
+        use std::sync::Arc;
+        let manifest = nickel_core::plugins::PluginManifest {
+            composition: None,
+            api_version: 1,
+            id: "test".into(),
+            name: "Test".into(),
+            author: None,
+            version: None,
+            entry: "index.js".into(),
+            stylesheet: None,
+            images: Vec::new(),
+            surfaces: Vec::new(),
+            validation_data: Default::default(),
+            capabilities: Vec::new(),
+            settings: Vec::new(),
+        };
+        let source = json!({"kind":"div","id":"rows","__nativeId":"root","action":0,
+            "collection":{"keys":(0..10000).map(|i| format!("row-{i}")).collect::<Vec<_>>(),
+                "heights":(0..10000).map(|i| if i%2==0 {20} else {70}).collect::<Vec<_>>(),"start":0,"end":0},
+            "children":[]});
+        let mut tree = RetainedPanelTree::admit(&source, &manifest, None, 1).unwrap();
+        let PanelNode::Div {
+            collection: Some(collection),
+            ..
+        } = tree.node()
+        else {
+            panic!("missing collection")
+        };
+        let logical = Arc::clone(collection.source.as_ref().unwrap());
+        let revision = logical.revision();
+        let compact = json!({"kind":"div","id":"rows","__nativeId":"root","action":0,
+        "collection":{"source":revision,"start":20,"end":22},"children":[
+            {"kind":"text","__nativeId":"root/@row-20","key":"row-20","children":["20"]},
+            {"kind":"text","__nativeId":"root/@row-21","key":"row-21","children":["21"]}
+        ]});
+        let patch = |node| NativePatchEnvelope {
+            version: 1,
+            counters: Default::default(),
+            operations: vec![NativePatchOperation::ReplaceSubtree {
+                target: "root".into(),
+                node,
+            }],
+        };
+        let sheet = super::StyleSheet::compile("").unwrap();
+        tree.apply_patch(&patch(compact.clone()), &manifest, None, &sheet, 2, 512)
+            .unwrap();
+        let PanelNode::Div {
+            collection: Some(collection),
+            ..
+        } = tree.node()
+        else {
+            panic!("missing collection")
+        };
+        assert!(Arc::ptr_eq(&logical, collection.source.as_ref().unwrap()));
+        assert!(!collection.needs_source_ack);
+        assert!(serde_json::to_vec(tree.source()).unwrap().len() < 1024);
+        {
+            let mut measured = tree.clone();
+            let frame = nickel_ui::UiFrame::layout(
+                nickel_ui::VerticalScroll::new(super::PluginMessage::Scroll, 0.0)
+                    .child(measured.node().view(&super::PluginImages::new(), &sheet)),
+                nickel_ui::Rect::new(0.0, 0.0, 300.0, 200.0),
+            );
+            let batches = measured
+                .node()
+                .virtual_collection_measurements(frame.resolved_layout())
+                .unwrap();
+            assert!(
+                measured
+                    .apply_virtual_measurements(&batches, 1.0, 1)
+                    .unwrap()
+            );
+            assert_eq!(measured.generation(), tree.generation());
+            assert_eq!(measured.source(), tree.source());
+            assert_eq!(measured.handler_slots(), tree.handler_slots());
+            assert_ne!(measured.node(), tree.node());
+            let corrected = measured.sources.resolve("root", revision).unwrap();
+            assert_eq!(corrected.geometry().height(20), Some(batches[0].rows[0].1));
+            assert!(
+                !measured
+                    .apply_virtual_measurements(&batches, 1.0, 1)
+                    .unwrap()
+            );
+            assert!(Arc::ptr_eq(
+                &corrected,
+                &measured.sources.resolve("root", revision).unwrap()
+            ));
+            let readmitted = measured.readmit(&compact, &manifest, None, 3).unwrap();
+            assert_eq!(readmitted.node(), measured.node());
+            let before_failure = measured.clone();
+            let mut invalid_batches = batches.clone();
+            invalid_batches[0].rows[0].1 = 321.0;
+            invalid_batches.push(super::VirtualCollectionMeasurements {
+                source_revision: u64::MAX,
+                width: 300.0,
+                rows: vec![],
+                anchor: None,
+            });
+            assert!(
+                measured
+                    .apply_virtual_measurements(&invalid_batches, 1.0, 1)
+                    .is_err()
+            );
+            assert_eq!(measured.node(), before_failure.node());
+            assert_eq!(
+                measured.sources.payload_bytes(),
+                before_failure.sources.payload_bytes()
+            );
+            assert!(Arc::ptr_eq(
+                &corrected,
+                &measured.sources.resolve("root", revision).unwrap()
+            ));
+            let mut stale_range = batches.clone();
+            stale_range[0].rows[0].0 = 0;
+            assert!(
+                measured
+                    .apply_virtual_measurements(&stale_range, 1.0, 1)
+                    .is_err()
+            );
+        }
+        let accepted = tree.clone();
+        let mut invalid = source.clone();
+        invalid["collection"]["end"] = json!(1);
+        assert!(
+            tree.apply_patch(&patch(invalid), &manifest, None, &sheet, 3, 512)
+                .is_err()
+        );
+        assert_eq!(tree.generation(), accepted.generation());
+        assert_eq!(tree.source(), accepted.source());
+        assert!(Arc::ptr_eq(
+            &logical,
+            &tree.sources.resolve("root", revision).unwrap()
+        ));
+        let readmitted = tree.readmit(&compact, &manifest, None, 3).unwrap();
+        assert!(Arc::ptr_eq(
+            &logical,
+            &readmitted.sources.resolve("root", revision).unwrap()
+        ));
+        let mut wrong_owner = compact.clone();
+        wrong_owner["__nativeId"] = json!("different");
+        assert!(tree.readmit(&wrong_owner, &manifest, None, 3).is_err());
+        let replacement = json!({"kind":"column","__nativeId":"root","children":[]});
+        tree.apply_patch(&patch(replacement), &manifest, None, &sheet, 3, 128)
+            .unwrap();
+        assert_eq!(tree.sources.source_count(), 0);
+        assert!(tree.readmit(&compact, &manifest, None, 4).is_err());
+    }
+
+    #[test]
+    fn virtual_collection_structural_patch_preserves_range_atomically() {
+        let row = json!({"kind":"text","key":"a","__nativeId":"root/@a","children":["A"]});
+        let source = json!({"kind":"div","id":"rows","__nativeId":"root","action":0,
+            "collection":{"heights":[20],"start":0,"end":1},"children":[row.clone()]});
+        let manifest = nickel_core::plugins::PluginManifest {
+            composition: None,
+            api_version: 1,
+            id: "test".into(),
+            name: "Test".into(),
+            author: None,
+            version: None,
+            entry: "index.js".into(),
+            stylesheet: None,
+            images: Vec::new(),
+            surfaces: Vec::new(),
+            validation_data: Default::default(),
+            capabilities: Vec::new(),
+            settings: Vec::new(),
+        };
+        let sheet = super::StyleSheet::compile("").unwrap();
+        let mut retained = RetainedPanelTree::admit(&source, &manifest, None, 1).unwrap();
+        let mut patch = NativePatchEnvelope {
+            version: 1,
+            operations: vec![NativePatchOperation::RemoveChild {
+                parent: "root".into(),
+                key: "a".into(),
+                child_id: "root/@a".into(),
+                index: 0,
+            }],
+            counters: Default::default(),
+        };
+        assert!(
+            retained
+                .apply_patch(&patch, &manifest, None, &sheet, 2, 1)
+                .is_err()
+        );
+        assert_eq!(retained.generation(), 1);
+        assert_eq!(retained.source(), &source);
+        assert_eq!(retained.node(), &PanelNode::parse(&source).unwrap());
+        patch.operations.push(NativePatchOperation::InsertChild {
+            parent: "root".into(),
+            key: "a".into(),
+            child_id: "root/@a".into(),
+            index: 0,
+            node: row,
+        });
+        retained
+            .apply_patch(&patch, &manifest, None, &sheet, 2, 1)
+            .unwrap();
+        assert_eq!(retained.source(), &source);
+        assert_eq!(retained.node(), &PanelNode::parse(&source).unwrap());
+        assert_eq!(retained.generation(), 2);
+    }
+
+    #[test]
     fn namespaced_target_below_fragment_root_matches_cold_tree() {
         let target =
             "root/#1/export:shell.taskbar::root/#0/@io.nickel.codex.project.7bad8b9af270552f";
@@ -5170,6 +6605,7 @@ mod class_lookup_tests {
             &replacement,
             &replacement_typed,
             &mut visited,
+            &Default::default(),
         )
         .unwrap();
         assert_eq!(source[0]["children"][0], replacement);
@@ -5205,6 +6641,7 @@ mod class_lookup_tests {
             &replacement,
             &replacement_typed,
             &mut visited,
+            &Default::default(),
         )
         .unwrap();
         assert_eq!(source["children"][1], replacement);
@@ -5649,6 +7086,401 @@ fn child_text(children: &[Value]) -> Result<String, String> {
 mod tests {
     use super::*;
     use nickel_ui::{Rect, UiFrame, backend::PaintCommand};
+
+    #[test]
+    fn fragment_patch_cannot_mutate_a_sibling_window() {
+        let manifest: PluginManifest = serde_json::from_str(include_str!(
+            "../../../assets/plugins/example-two-windows/plugin.json"
+        ))
+        .unwrap();
+        let source = serde_json::json!([
+            {"kind":"window","id":"home","width":400,"height":240,
+             "__nativeId":"root/#0","children":[
+                {"kind":"text","__nativeId":"root/#0/#0","children":["Home"]}]},
+            {"kind":"window","id":"details","width":450,"height":260,
+             "__nativeId":"root/#1","children":[
+                {"kind":"text","__nativeId":"root/#1/#0","children":["Details"]}]}
+        ]);
+        let mut retained = RetainedPanelTree::admit(&source, &manifest, Some("home"), 1).unwrap();
+        let before = retained.node().clone();
+        let patch = NativePatchEnvelope {
+            version: 1,
+            operations: vec![NativePatchOperation::SetPrimitive {
+                target: "root/#1/#0".into(),
+                property: "children".into(),
+                value: serde_json::json!(["wrong window"]),
+            }],
+            counters: Default::default(),
+        };
+        let error = retained
+            .apply_patch(
+                &patch,
+                &manifest,
+                Some("home"),
+                &StyleSheet::default(),
+                2,
+                0,
+            )
+            .unwrap_err();
+        assert!(error.contains("outside the host window"), "{error}");
+        assert_eq!(retained.node(), &before);
+        assert_eq!(retained.source(), &source);
+        assert_eq!(retained.generation(), 1);
+        let mut selected_patch = patch.clone();
+        if let NativePatchOperation::SetPrimitive { target, .. } = &mut selected_patch.operations[0]
+        {
+            *target = "root/#0/#0".into();
+        }
+        let mut mixed = selected_patch.clone();
+        mixed.operations.extend(patch.operations);
+        assert!(
+            retained
+                .apply_patch(
+                    &mixed,
+                    &manifest,
+                    Some("home"),
+                    &StyleSheet::default(),
+                    2,
+                    0
+                )
+                .is_err()
+        );
+        assert_eq!(
+            retained.source(),
+            &source,
+            "rejected batches must be atomic"
+        );
+        retained
+            .apply_patch(
+                &selected_patch,
+                &manifest,
+                Some("home"),
+                &StyleSheet::default(),
+                2,
+                0,
+            )
+            .unwrap();
+        assert_eq!(retained.source()[1], source[1]);
+        assert_eq!(retained.generation(), 2);
+    }
+
+    #[test]
+    fn nested_container_builders_fit_the_normal_thread_stack() {
+        std::thread::Builder::new()
+            .name("nested-presentation-stack".into())
+            .stack_size(2 * 1024 * 1024)
+            .spawn(|| {
+                let mut value = serde_json::json!({"kind":"text","children":["stack-safe leaf"]});
+                for (index, kind) in ["box", "layer", "row", "column", "scroll-view", "div"]
+                    .into_iter().cycle().take(12).enumerate()
+                {
+                    value = serde_json::json!({
+                        "kind":kind,"id":format!("container-{index}"),
+                        "x":0,"y":0,"width":300,"height":200,"children":[value]
+                    });
+                }
+                value = serde_json::json!({"kind":"window","id":"stack-root","width":300,"height":200,"children":[value]});
+                let node = PanelNode::parse(&value).unwrap();
+                let frame = UiFrame::layout(
+                    node.view(&PluginImages::new(), &StyleSheet::default()),
+                    Rect::new(0.0, 0.0, 300.0, 200.0),
+                );
+                assert!(frame.resolved_layout().nodes().iter().any(|node|
+                    node.accessibility_label.as_deref() == Some("stack-safe leaf")));
+            })
+            .unwrap().join().unwrap();
+    }
+
+    #[test]
+    fn wallpaper_image_demand_follows_native_scroll_clip_and_viewport() {
+        let node = PanelNode::parse(&serde_json::json!({
+            "kind":"column", "children": (0..20).map(|index| serde_json::json!({
+                "kind":"image", "id":format!("preview-{index}"),
+                "asset":format!("wallpaper:{index}"), "width":160, "height":40, "children":[]
+            })).collect::<Vec<_>>()
+        }))
+        .unwrap();
+        let viewport = Rect::new(0.0, 0.0, 300.0, 100.0);
+        let frame_at = |offset| {
+            UiFrame::layout(
+                VerticalScroll::new(PluginMessage::Scroll, offset)
+                    .child(node.view(&PluginImages::new(), &StyleSheet::default())),
+                viewport,
+            )
+        };
+        let first = frame_at(0.0);
+        assert_eq!(
+            node.visible_wallpaper_assets(first.resolved_layout(), viewport),
+            vec!["wallpaper:0", "wallpaper:1", "wallpaper:2"]
+        );
+        let scrolled = frame_at(400.0);
+        assert_eq!(
+            node.visible_wallpaper_assets(scrolled.resolved_layout(), viewport),
+            vec!["wallpaper:10", "wallpaper:11", "wallpaper:12"]
+        );
+        assert_eq!(
+            node.visible_wallpaper_assets(
+                scrolled.resolved_layout(),
+                Rect::new(0.0, 0.0, 300.0, 40.0)
+            ),
+            vec!["wallpaper:10"]
+        );
+        assert!(
+            node.visible_wallpaper_assets(
+                scrolled.resolved_layout(),
+                Rect::new(0.0, 200.0, 300.0, 100.0)
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn virtual_measurements_use_bounded_keyed_native_rows() {
+        for count in [100usize, 1_000, 10_000] {
+            let keys: Vec<_> = (0..count).map(|row| format!("row/{row}/é")).collect();
+            let row =
+                |class: &str| serde_json::json!({"kind":"div","className":class,"children":[]});
+            let node = PanelNode::parse(&serde_json::json!({
+                "kind":"div","id":"settings/rows","className":"rows","__nativeId":"native/rows","action":0,
+                "collection":{"keys":keys,"count":count,"height":20,"start":20,"end":22},
+                "children":[row("short"),row("tall")]
+            }))
+            .unwrap();
+            let sheet = StyleSheet::compile(
+                ".rows { width: 200px; } .short { height: 26px; } .tall { height: 74px; }",
+            )
+            .unwrap();
+            let frame = UiFrame::layout(
+                VerticalScroll::new(PluginMessage::Scroll, 400.0)
+                    .child(node.view(&PluginImages::new(), &sheet)),
+                Rect::new(0.0, 0.0, 300.0, 200.0),
+            );
+            let measurements = node
+                .virtual_collection_measurements(frame.resolved_layout())
+                .unwrap();
+            assert_eq!(measurements.len(), 1);
+            // The native scrollbar reserves 16 logical pixels.
+            assert_eq!(measurements[0].width, 284.0);
+            assert_eq!(measurements[0].rows, vec![(20, 26.0), (21, 74.0)]);
+            let semantics = frame.semantic_nodes();
+            assert!(
+                semantics
+                    .iter()
+                    .any(|node| node.role == Some(SemanticRole::List))
+            );
+            let items: Vec<_> = semantics
+                .iter()
+                .filter(|node| node.role == Some(SemanticRole::ListItem))
+                .collect();
+            assert_eq!(
+                items.len(),
+                2,
+                "offscreen logical rows must not become semantic view nodes"
+            );
+            assert_eq!(
+                items[0].description.as_deref(),
+                Some(format!("item 21 of {count}").as_str())
+            );
+            assert_eq!(
+                items[1].description.as_deref(),
+                Some(format!("item 22 of {count}").as_str())
+            );
+            assert!(frame.resolved_layout().nodes().len() < 24);
+            let PanelNode::Div {
+                collection: Some(collection),
+                ..
+            } = &node
+            else {
+                unreachable!()
+            };
+            let source = collection.source.as_ref().unwrap();
+            assert!(
+                measurements[0]
+                    .anchor
+                    .as_ref()
+                    .unwrap()
+                    .as_str()
+                    .ends_with(&virtual_row_id(source, 20))
+            );
+            let clipped_frame = UiFrame::layout(
+                VerticalScroll::new(PluginMessage::Scroll, 450.0)
+                    .child(node.view(&PluginImages::new(), &sheet)),
+                Rect::new(0.0, 0.0, 300.0, 200.0),
+            );
+            let clipped = node
+                .virtual_collection_measurements(clipped_frame.resolved_layout())
+                .unwrap();
+            assert!(
+                clipped[0]
+                    .anchor
+                    .as_ref()
+                    .unwrap()
+                    .as_str()
+                    .ends_with(&virtual_row_id(source, 21)),
+                "fully clipped overscan row is not selected as the anchor"
+            );
+            let id = virtual_row_id(source, 21);
+            let original_id = frame
+                .resolved_layout()
+                .nodes()
+                .iter()
+                .find(|row| row.id.as_str().ends_with(&id))
+                .unwrap()
+                .id
+                .clone();
+            let mut next = node.clone();
+            let PanelNode::Div {
+                collection: Some(collection),
+                children,
+                ..
+            } = &mut next
+            else {
+                unreachable!()
+            };
+            collection.range = 21..23;
+            children.swap(0, 1);
+            let next_frame = UiFrame::layout(
+                VerticalScroll::new(PluginMessage::Scroll, 420.0)
+                    .child(next.view(&PluginImages::new(), &sheet)),
+                Rect::new(0.0, 0.0, 300.0, 200.0),
+            );
+            let next_id = &next_frame
+                .resolved_layout()
+                .nodes()
+                .iter()
+                .find(|row| row.id.as_str().ends_with(&id))
+                .unwrap()
+                .id;
+            assert_eq!(
+                &original_id, next_id,
+                "overlapping keyed row keeps its full native identity"
+            );
+            assert_eq!(
+                next.virtual_collection_measurements(next_frame.resolved_layout())
+                    .unwrap()[0]
+                    .rows,
+                vec![(21, 74.0), (22, 26.0)]
+            );
+            let next_semantics = next_frame.semantic_nodes();
+            let surviving = next_semantics
+                .iter()
+                .find(|node| node.id == original_id)
+                .unwrap();
+            assert_eq!(
+                surviving.description.as_deref(),
+                Some(format!("item 22 of {count}").as_str())
+            );
+        }
+    }
+
+    #[test]
+    fn virtual_collection_admission_rejects_invalid_geometry_and_ranges() {
+        let valid = serde_json::json!({"kind":"div","id":"rows","action":0,"collection":{"heights":[20,40],"start":0,"end":0},"children":[]});
+        let accepted = PanelNode::parse(&valid).unwrap();
+        assert!(accepted.contains_virtual_collection());
+        assert_eq!(accepted.button_action("rows"), None);
+        for (name, value) in [
+            ("start", serde_json::json!(-1)),
+            ("end", serde_json::json!(3)),
+            ("end", serde_json::json!(1)),
+            ("gap", serde_json::json!(-1)),
+            ("overscan", serde_json::json!(9000)),
+            ("heights", serde_json::json!([0])),
+            ("heights", serde_json::json!(["20"])),
+        ] {
+            let mut invalid = valid.clone();
+            invalid["collection"][name] = value;
+            assert!(
+                PanelNode::parse(&invalid).is_err(),
+                "accepted invalid {name}"
+            );
+        }
+        let mut missing_action = valid.clone();
+        missing_action.as_object_mut().unwrap().remove("action");
+        assert!(PanelNode::parse(&missing_action).is_err());
+    }
+
+    #[test]
+    fn uniform_virtual_collection_admission_is_compact_and_unambiguous() {
+        let valid = serde_json::json!({"kind":"div","id":"rows","action":0,"collection":{"count":10000,"height":20,"start":0,"end":0},"children":[]});
+        let mut registered = valid.clone();
+        registered["__nativeId"] = serde_json::json!("root");
+        registered["collection"]["keys"] = serde_json::json!(
+            (0..10000)
+                .map(|index| index.to_string())
+                .collect::<Vec<_>>()
+        );
+        let PanelNode::Div {
+            collection: Some(registered_collection),
+            ..
+        } = PanelNode::parse(&registered).unwrap()
+        else {
+            panic!("missing registered source")
+        };
+        assert_eq!(registered_collection.heights.retained_bytes(), 0);
+        assert_eq!(
+            registered_collection
+                .source
+                .as_ref()
+                .unwrap()
+                .ordinal("9999"),
+            Some(9999)
+        );
+        let mut wrong_count = registered.clone();
+        wrong_count["collection"]["count"] = serde_json::json!(9999);
+        assert!(PanelNode::parse(&wrong_count).is_err());
+        let mut ambiguous = registered.clone();
+        ambiguous["collection"]["heights"] = serde_json::json!([20]);
+        assert!(PanelNode::parse(&ambiguous).is_err());
+        for missing in ["count", "height"] {
+            let mut invalid = registered.clone();
+            invalid["collection"]
+                .as_object_mut()
+                .unwrap()
+                .remove(missing);
+            assert!(PanelNode::parse(&invalid).is_err());
+        }
+        let PanelNode::Div {
+            collection: Some(collection),
+            ..
+        } = PanelNode::parse(&valid).unwrap()
+        else {
+            panic!("missing collection")
+        };
+        assert_eq!(collection.heights.len(), 10_000);
+        assert_eq!(collection.heights.retained_bytes(), 0);
+        assert_eq!(
+            collection.heights.window_for_range(0..0).unwrap().total,
+            200_000.0
+        );
+        for (name, value) in [
+            ("count", serde_json::json!(-1)),
+            ("count", serde_json::json!(10001)),
+            ("count", serde_json::json!(1.5)),
+            ("height", serde_json::json!(0)),
+            ("height", serde_json::json!(8193)),
+            ("height", serde_json::json!("20")),
+            ("heights", serde_json::json!([20])),
+        ] {
+            let mut invalid = valid.clone();
+            invalid["collection"][name] = value;
+            assert!(
+                PanelNode::parse(&invalid).is_err(),
+                "accepted invalid {name}"
+            );
+        }
+        for missing in ["count", "height"] {
+            let mut invalid = valid.clone();
+            invalid["collection"]
+                .as_object_mut()
+                .unwrap()
+                .remove(missing);
+            assert!(PanelNode::parse(&invalid).is_err());
+        }
+        let mut empty = valid;
+        empty["collection"]["count"] = serde_json::json!(0);
+        assert!(PanelNode::parse(&empty).is_ok());
+    }
 
     #[test]
     fn styled_flex_content_fills_its_allocated_frame() {

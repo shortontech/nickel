@@ -304,7 +304,7 @@ impl LiveShell {
             input,
             None,
             "on-screen-keyboard",
-            self.keyboard_host.inspect(),
+            self.keyboard_host.input_lease(),
             None,
         );
         self.keyboard_host_event_authorized(ingress, width, height, Some(authority))

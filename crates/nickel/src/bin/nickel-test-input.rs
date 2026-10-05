@@ -988,7 +988,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         (
             env::var_os("NICKEL_SHELL_TEST_CONTROL")
                 .map(PathBuf::from)
-                .ok_or("NICKEL_SHELL_TEST_CONTROL is not set")?,
+                .filter(|path| path.exists())
+                .unwrap_or_else(|| control.clone()),
             request.expect("runtime diagnostics request exists"),
         )
     } else {

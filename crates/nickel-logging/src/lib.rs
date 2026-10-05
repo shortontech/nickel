@@ -12,6 +12,13 @@ use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 const MAX_LOG_BYTES: u64 = 5 * 1024 * 1024;
 
+fn target_in_namespace(target: &str, namespace: &str) -> bool {
+    target == namespace
+        || target
+            .strip_prefix(namespace)
+            .is_some_and(|suffix| suffix.starts_with("::"))
+}
+
 fn diagnostic_metadata_allowed(metadata: &tracing::Metadata<'_>) -> bool {
     // These dependencies log entire RPC messages, HTTP/2 headers/frames, or
     // rendered text, including input text, image data and credentials. Reject them before
@@ -27,18 +34,15 @@ fn diagnostic_metadata_allowed(metadata: &tracing::Metadata<'_>) -> bool {
         "smithay::wayland::input_method",
     ]
     .iter()
-    .any(|prefix| {
-        target == *prefix
-            || target
-                .strip_prefix(prefix)
-                .is_some_and(|suffix| suffix.starts_with("::"))
-    }) {
+    .any(|prefix| target_in_namespace(target, prefix))
+    {
         return false;
     }
-    !matches!(
-        metadata.target().split("::").next(),
-        Some("rmcp" | "h2" | "cosmic_text")
-    )
+    // This runs for renderer spans too. Check the fixed namespaces directly
+    // rather than constructing a general substring searcher for every event.
+    !["rmcp", "h2", "cosmic_text"]
+        .iter()
+        .any(|namespace| target_in_namespace(target, namespace))
 }
 
 pub fn init(application: &str) -> io::Result<PathBuf> {
@@ -203,6 +207,36 @@ fn install_panic_logging() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn diagnostic_namespace_matching_requires_a_complete_segment() {
+        for namespace in [
+            "rmcp",
+            "h2",
+            "cosmic_text",
+            "smithay::input",
+            "smithay::wayland::text_input",
+            "smithay::wayland::input_method",
+        ] {
+            assert!(super::target_in_namespace(namespace, namespace));
+            assert!(super::target_in_namespace(
+                &format!("{namespace}::child::event"),
+                namespace
+            ));
+            for target in [
+                String::new(),
+                format!("{namespace}_adapter"),
+                format!("{namespace}:child"),
+                format!("other::{namespace}"),
+                "smithay::backend::renderer::gles".to_owned(),
+            ] {
+                assert!(
+                    !super::target_in_namespace(&target, namespace),
+                    "{target:?} must not match {namespace:?}"
+                );
+            }
+        }
+    }
+
     use super::rotate_if_needed;
     use std::{fs, io::Write};
 

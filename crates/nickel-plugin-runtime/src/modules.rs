@@ -187,6 +187,10 @@ impl JsxModuleGraph {
                 self.local_components
             ));
             output.push_str(r#"
+function __nickelSetContributionCatalog(catalog) {
+    Object.keys(__nickelContributionCatalog).forEach(key => delete __nickelContributionCatalog[key]);
+    Object.assign(__nickelContributionCatalog, catalog);
+}
 function __nickelComponentProxy(selection) {
     const local = __nickelLocalComponents[selection.contract ? 'export:' + selection.contract : 'contribution:' + selection.contribution];
     if (local) return __nickelPublicComponents.get(local);

@@ -164,7 +164,7 @@ pub(crate) struct AppearanceCapabilities {
     wallpaper: wallpaper::WallpaperState,
     appearance_snapshot: Option<Value>,
     wallpaper_snapshot: Option<Value>,
-    pub(crate) wallpaper_images: crate::plugin_panel::PluginImages,
+    pub(crate) previews: crate::wallpaper_previews::WallpaperPreviews,
     preview_revisions: Option<Vec<crate::wallpaper_selection::CandidateRevision>>,
 }
 impl Default for AppearanceCapabilities {
@@ -175,12 +175,35 @@ impl Default for AppearanceCapabilities {
             wallpaper: Default::default(),
             appearance_snapshot: None,
             wallpaper_snapshot: None,
-            wallpaper_images: Default::default(),
+            previews: Default::default(),
             preview_revisions: None,
         }
     }
 }
 impl AppearanceCapabilities {
+    #[cfg(test)]
+    pub(crate) fn install_wallpaper_preview_fixture(
+        &mut self,
+        catalog: crate::wallpaper_selection::Catalog,
+    ) {
+        let images = catalog
+            .choices(None)
+            .into_iter()
+            .enumerate()
+            .map(|(index, choice)| {
+                json!({"previewAsset":format!("wallpaper:{}", choice.id),
+                "id":choice.id,"label":format!("Wallpaper {index}"),"configured":false})
+            })
+            .collect::<Vec<_>>();
+        self.preview_revisions = Some(catalog.revisions());
+        self.previews.set_catalog(catalog);
+        self.wallpaper_snapshot = Some(json!({
+            "available":true,"writable":false,"generation":1,
+            "configured":{"custom_image_configured":false,"position":"fill"},
+            "images":images,"chooser":{"available":false,"pending":false,"result":null}
+        }));
+    }
+
     pub(crate) fn refresh(&mut self, resource: &str) -> Value {
         let observed_at_us = self.started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
         let result = if resource == "appearance" {
@@ -195,10 +218,7 @@ impl AppearanceCapabilities {
             wallpaper::PreparedRead::prepare_with_check(|| Ok(())).and_then(|read| {
                 let snapshot = self.wallpaper.observe(&read, observed_at_us)?;
                 let revisions = read.catalog.revisions();
-                if self.preview_revisions.as_ref() != Some(&revisions) {
-                    self.wallpaper_images = read.catalog.previews();
-                    self.preview_revisions = Some(revisions);
-                }
+                let catalog_changed = self.preview_revisions.as_ref() != Some(&revisions);
                 let labels = read.catalog.presentation();
                 let mut value = serde_json::to_value(snapshot).map_err(|e| e.to_string())?;
                 for image in value["images"].as_array_mut().into_iter().flatten() {
@@ -210,9 +230,13 @@ impl AppearanceCapabilities {
                         .unwrap_or_else(|| "Wallpaper".into())
                         .into();
                     let asset = format!("wallpaper:{id}");
-                    if self.wallpaper_images.contains_key(&asset) {
-                        image["previewAsset"] = asset.into();
-                    }
+                    image["previewAsset"] = asset.into();
+                }
+                // Advertise opaque assets without decoding. Native visible-image
+                // demand fills the placeholders after the row window is admitted.
+                if catalog_changed {
+                    self.previews.set_catalog(read.catalog);
+                    self.preview_revisions = Some(revisions);
                 }
                 Ok(value)
             })
@@ -224,6 +248,10 @@ impl AppearanceCapabilities {
         if resource == "appearance" {
             self.appearance_snapshot = Some(value.clone());
         } else {
+            if value["available"] != true {
+                self.previews.clear_catalog();
+                self.preview_revisions = None;
+            }
             self.wallpaper_snapshot = Some(value.clone());
         }
         value

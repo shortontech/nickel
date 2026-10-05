@@ -1,6 +1,37 @@
 // @jsx h
 import "./styles/default-apps.css";
 
+const associationKey = item => item.id;
+const associationHeight = target => 66 + Math.max(0, target.handlers.length * 40 - 8)
+    + (target.detail ? 32 : 0) + (target.protected ? 28 : 0)
+    + (target.capability === "nativeConsent" ? 48 : 0) + (target.handlersTruncated ? 28 : 0);
+let nextHandlerList = 0;
+
+function AssociationCard({target, catalog}) {
+    // Compact mount-local names avoid embedding long target IDs in collection IDs.
+    // Native source revisions, not these presentation names, own authority.
+    const listId = useMemo(() => {
+        if (nextHandlerList >= Number.MAX_SAFE_INTEGER) throw Error("Association list identities exhausted");
+        return "default-app-handlers-" + nextHandlerList++;
+    }, []);
+    return <Column className="default-app-card">
+        <Text className="default-app-title">{target.family + " · " + target.id}</Text>
+        {target.detail ? <Text wrap={true}>{target.detail}</Text> : null}
+        {target.protected ? <Text>This association is protected.</Text> : null}
+        {target.capability === "nativeConsent" ? <Text wrap={true}>Changing this association requires confirmation in system settings.</Text> : null}
+        {target.handlersTruncated ? <Text>More applications are available in system settings.</Text> : null}
+        <VirtualColumn id={listId} items={target.handlers} itemKey={associationKey}
+            itemHeight={32} gap={8} overscan={96}
+            renderItem={handler => <Button key={handler.id} id={listId + "/" + handler.id}
+                className={handler.id === target.effectiveHandlerId ? "default-app-handler selected" : "default-app-handler"}
+                state={handler.id === target.effectiveHandlerId ? "selected" : "unselected"}
+                disabled={catalog.writable === false || !catalog.operations.setDefault || !target.canSetDefault || target.protected || handler.protected || handler.id === target.effectiveHandlerId}
+                onClick={() => nickel.associations.setDefault(target.id, handler.id, catalog.revision)}>
+                {handler.name + (handler.id === target.effectiveHandlerId ? " · Current" : "")}
+            </Button>} />
+    </Column>;
+}
+
 export function DefaultApps() {
     const catalog = nickel.associations.get();
     const [query, setQuery] = useState("");
@@ -23,21 +54,9 @@ export function DefaultApps() {
         {catalog.operations.openSystemSettings ? <Button id="default-app-system-settings" disabled={catalog.writable === false}
             onClick={() => nickel.associations.openSystemSettings()}>Open system default applications</Button> : null}
         {catalog.available && !targets.length ? <Text>No matching associations.</Text> : null}
-        {targets.map((target, targetIndex) => <Column key={target.id} className="default-app-card">
-            <Text className="default-app-title">{target.family + " · " + target.id}</Text>
-            {target.detail ? <Text wrap={true}>{target.detail}</Text> : null}
-            {target.protected ? <Text>This association is protected.</Text> : null}
-            {target.capability === "nativeConsent" ? <Text wrap={true}>Changing this association requires confirmation in system settings.</Text> : null}
-            {target.handlersTruncated ? <Text>More applications are available in system settings.</Text> : null}
-            {target.handlers.map((handler, handlerIndex) => <Button key={handler.id}
-                id={"default-app-handler-" + targetIndex + "-" + handlerIndex}
-                className={handler.id === target.effectiveHandlerId ? "default-app-handler selected" : "default-app-handler"}
-                state={handler.id === target.effectiveHandlerId ? "selected" : "unselected"}
-                disabled={catalog.writable === false || !catalog.operations.setDefault || !target.canSetDefault || target.protected || handler.protected || handler.id === target.effectiveHandlerId}
-                onClick={() => nickel.associations.setDefault(target.id, handler.id, catalog.revision)}>
-                {handler.name + (handler.id === target.effectiveHandlerId ? " · Current" : "")}
-            </Button>)}
-        </Column>)}
+        <VirtualColumn id="default-app-targets" items={targets} itemKey={associationKey}
+            itemHeight={associationHeight} gap={16} overscan={96}
+            renderItem={target => <AssociationCard key={target.id} target={target} catalog={catalog} />} />
     </Column>;
 }
 

@@ -5595,11 +5595,18 @@ impl NickelSession {
         }
         self.internal_shell_declared_placements
             .retain(|surface, _| retained_declarations.contains(surface));
+        let mut activated_new_window = false;
         for (runtime, key) in plugin_windows {
-            self.register_internal_application_with_plugin(runtime, Some(&key));
+            activated_new_window |= self
+                .register_internal_application_with_plugin(runtime, Some(&key))
+                .is_some()
+                && self.internal_ui.focused() == Some(runtime);
         }
-        if let Some(runtime) =
-            focused_owner.and_then(|owner| self.internal_shell_surfaces.get(&owner).copied())
+        // Preserve focus on a pure output reconciliation, but do not undo the
+        // activation of a window just opened by the previously focused launcher.
+        if !activated_new_window
+            && let Some(runtime) =
+                focused_owner.and_then(|owner| self.internal_shell_surfaces.get(&owner).copied())
         {
             self.focus_internal_surface(runtime);
         }
@@ -5655,7 +5662,10 @@ impl NickelSession {
                 let project_menu_changed = host.sync_project_menu(
                     &mut self.internal_ui,
                     codex_menu_visible,
-                    placement.clone(),
+                    internal_codex_project_menu_placement(
+                        &outputs,
+                        menu_output.as_deref().or(fallback.as_deref()),
+                    ),
                 );
                 if project_menu_changed {
                     self.schedule_internal_ui_frame();
@@ -5911,6 +5921,13 @@ impl NickelSession {
         self.remote_window_identities.remove(&id);
         self.schedule_remote_resource_retirement();
         self.notify_protocol_snapshot();
+    }
+
+    pub(crate) fn titlebar_cache_owners(&self) -> impl Iterator<Item = u64> + '_ {
+        self.surface_windows
+            .values()
+            .chain(self.internal_surface_windows.values())
+            .map(|id| id.0)
     }
 
     fn sync_internal_window_decorations(&mut self) {
@@ -7042,6 +7059,10 @@ impl NickelSession {
     /// both hosted applications and coordinator scenes at the same input boundary.
     fn dismiss_unfocused_internal_popovers(&mut self) {
         use crate::winit_shell::SurfaceRole;
+        let codex_menu_blurred = self
+            .internal_codex
+            .as_mut()
+            .is_some_and(|host| host.dismiss_unfocused_project_menu(&mut self.internal_ui));
         let focused = self.internal_ui.focused();
         let control_blurred = self.internal_shell.as_ref().is_some_and(|shell| {
             shell.surfaces().iter().any(|surface| {
@@ -7057,7 +7078,8 @@ impl NickelSession {
         });
         let launcher_blurred = self.internal_shell.as_ref().is_some_and(|shell| {
             shell.surfaces().iter().any(|surface| {
-                surface.role == SurfaceRole::Launcher
+                (surface.role == SurfaceRole::Launcher
+                    || surface.plugin.as_ref() == Some(&shell.active_shell_surface_key("launcher")))
                     && shell.visible(surface.id)
                     && self
                         .internal_shell_surfaces
@@ -7067,7 +7089,9 @@ impl NickelSession {
         });
         let window_menu_blurred = self.internal_shell.as_ref().is_some_and(|shell| {
             shell.surfaces().iter().any(|surface| {
-                surface.role == SurfaceRole::WindowContextMenu
+                (surface.role == SurfaceRole::WindowContextMenu
+                    || surface.plugin.as_ref()
+                        == Some(&shell.active_shell_surface_key("window-menu")))
                     && shell.visible(surface.id)
                     && self
                         .internal_shell_surfaces
@@ -7075,10 +7099,13 @@ impl NickelSession {
                         .is_some_and(|id| self.internal_ui.is_visible(*id) && focused != Some(*id))
             })
         });
-        if !launcher_blurred && !control_blurred && !window_menu_blurred {
+        if !launcher_blurred && !control_blurred && !window_menu_blurred && !codex_menu_blurred {
             return;
         }
         if let Some(shell) = self.internal_shell.as_mut() {
+            if codex_menu_blurred {
+                shell.close_codex_project_menu();
+            }
             if launcher_blurred {
                 shell.dismiss_ephemeral_on_focus_loss(SurfaceRole::Launcher);
             }
@@ -7187,7 +7214,9 @@ impl NickelSession {
             }
             pointer_paint_only &= crate::live_shell::passive_pointer_batch(&batch);
             let changes = shell.step_slot_changes(shell_id, batch);
-            if let Some(scene) = shell.take_pointer_paint_scene(shell_id) {
+            if let Some(scene) =
+                shell.take_pointer_paint_scene(shell_id, changes.contains(&shell_id))
+            {
                 if changes.iter().all(|id| *id == shell_id) {
                     if !changes.is_empty() {
                         pointer_scenes.push((runtime_id, scene));
@@ -7606,9 +7635,21 @@ impl NickelSession {
                 }
                 continue;
             }
-            let Some(scene) = shell.scene(surface.id) else {
+            // A newly hosted lifetime may reuse a shell slot whose previous
+            // window had different native geometry. Its first frame must use
+            // this placement, just like subsequent configure/repaint frames.
+            let Some(scene) = shell.scene_at_size(surface.id, viewport_size) else {
                 continue;
             };
+            tracing::debug!(
+                surface = ?surface.id,
+                role = ?surface.role,
+                requested_size = ?surface.size,
+                native_size = ?viewport_size,
+                output = ?placement.output,
+                scale = output_scale,
+                "create internal shell native viewport"
+            );
             let runtime_id = self
                 .internal_ui
                 .insert_scene(scene, placement, output_scale);
@@ -13203,6 +13244,7 @@ impl NickelSession {
     }
 
     fn unlock_session(&mut self) {
+        tracing::info!(locked = self.locked, "compositor received session unlock");
         if !self.locked {
             return;
         }
@@ -13222,6 +13264,7 @@ impl NickelSession {
             self.realize_seat_focus(None, FocusScope::Ordinary);
         }
         self.notify_lock_state();
+        tracing::info!("compositor completed unlock state and surface reconciliation");
         // Exposing ordinary clients after removing the full-output lock scene requires a complete
         // native redraw. Without invalidation, a later lock cycle can reuse damage history from a
         // still-occluded frame and leave only newly changing shell surfaces visible.
@@ -16399,6 +16442,32 @@ fn avoid_trusted_control_collision(
         }
     }
     menu
+}
+
+fn internal_codex_project_menu_placement(
+    outputs: &[(crate::internal_shell::InternalOutput, i32, i32)],
+    requested_output: Option<&str>,
+) -> crate::internal_codex::CodexSurfacePlacement {
+    let selected = requested_output
+        .and_then(|name| outputs.iter().find(|(output, _, _)| output.name == name))
+        .or_else(|| outputs.first());
+    let Some((output, origin_x, origin_y)) = selected else {
+        return crate::internal_codex::CodexSurfacePlacement::default();
+    };
+    let work_height = output
+        .height
+        .saturating_sub(crate::winit_shell::PANEL_HEIGHT);
+    let width = 360.min(output.width.saturating_sub(16).max(1));
+    let height = 420.min(work_height.saturating_sub(16).max(1));
+    crate::internal_codex::CodexSurfacePlacement {
+        output: Some(output.name.clone()),
+        origin: (
+            origin_x + output.width.saturating_sub(width + 8) as i32,
+            origin_y + work_height.saturating_sub(height + 8) as i32,
+        ),
+        scale: output.scale,
+        chat_size: Some((width, height)),
+    }
 }
 
 fn internal_codex_chat_placement(

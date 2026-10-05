@@ -160,6 +160,7 @@ mod screenshot;
 mod session_host;
 mod shortcut_capabilities;
 mod softbuffer_presenter;
+mod wallpaper_previews;
 mod wallpaper_selection;
 #[cfg(target_os = "windows")]
 mod wgpu_presenter;

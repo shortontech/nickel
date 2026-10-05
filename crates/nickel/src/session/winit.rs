@@ -923,9 +923,7 @@ fn window_frame_groups(
     icons: Option<&crate::session::window_frame::FrameIcons>,
     palette: &ThemePalette,
 ) -> Vec<WinitWindowFrameGroup> {
-    crate::session::window_frame::retain_titlebars_for_windows(
-        state.surface_windows.values().map(|id| id.0),
-    );
+    crate::session::window_frame::retain_titlebars_for_windows(state.titlebar_cache_owners());
     let Some(output_geometry) = state.space.output_geometry(output) else {
         return Vec::new();
     };

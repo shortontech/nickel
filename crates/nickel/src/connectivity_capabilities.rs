@@ -19,7 +19,7 @@ pub(crate) fn wifi_snapshot(status: &NetworkStatus) -> Value {
         "enabled": status.enabled,
         "connected": status.connected,
         "adaptersAvailable": status.adapters_available,
-        "adapters": status.adapters.iter().take(256).map(|adapter| json!({"name":adapter.name.chars().take(512).collect::<String>(),"description":adapter.description.chars().take(512).collect::<String>(),"connected":adapter.connected,"speedBitsPerSecond":adapter.speed_bits_per_second})).collect::<Vec<_>>(),
+        "adapters": status.adapters.iter().take(256).filter(|adapter| !adapter.id.is_empty() && adapter.id.len() <= 512).map(|adapter| json!({"id":adapter.id,"name":adapter.name.chars().take(512).collect::<String>(),"description":adapter.description.chars().take(512).collect::<String>(),"connected":adapter.connected,"speedBitsPerSecond":adapter.speed_bits_per_second})).collect::<Vec<_>>(),
         "operations": {"setEnabled": status.available, "connect": status.available, "disconnect": status.available && cfg!(target_os = "linux")},
         "networks": status.networks.iter().take(256).filter(|item| !item.id.is_empty() && item.id.len() <= 512).map(|item| json!({
             "id": item.id, "name": item.name.chars().take(512).collect::<String>(),
@@ -327,6 +327,7 @@ mod tests {
         let snapshot = wifi_snapshot(&NetworkStatus {
             adapters_available: true,
             adapters: vec![crate::platform::NetworkAdapterStatus {
+                id: "adapter-eth0".into(),
                 name: "eth0".into(),
                 description: "Ethernet".into(),
                 connected: true,
@@ -335,6 +336,7 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(snapshot["adaptersAvailable"], true);
+        assert_eq!(snapshot["adapters"][0]["id"], "adapter-eth0");
         assert_eq!(snapshot["adapters"][0]["speedBitsPerSecond"], Value::Null);
         assert_eq!(
             wifi_snapshot(&NetworkStatus::default())["adaptersAvailable"],

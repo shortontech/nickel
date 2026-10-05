@@ -2547,7 +2547,7 @@ impl NickelSession {
                 ShellSettings::load_default().resolve_appearance(Appearance::default()),
             );
             crate::session::window_frame::retain_titlebars_for_windows(
-                self.surface_windows.values().map(|id| id.0),
+                self.titlebar_cache_owners(),
             );
             let mut client_element_starts = Vec::new();
             if let Some(output_geometry) = self.space.output_geometry(&output) {

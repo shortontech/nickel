@@ -2,6 +2,11 @@ window.settings-window {
     background: var(--nickel-background);
 }
 
+window.settings-window button:focus {
+    background: var(--nickel-selected);
+    border-color: var(--nickel-text);
+}
+
 div.settings-shell {
     display: flex;
     flex-direction: row;

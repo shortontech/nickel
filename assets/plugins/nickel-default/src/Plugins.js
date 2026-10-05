@@ -1,19 +1,47 @@
 // @jsx h
 import "./styles/plugins.css";
+const pluginKey = plugin => plugin.id;
+const settingKey = setting => setting.id;
+const compositionKey = (_, index) => String(index);
+const pluginHeight = plugin => Math.min(8192, 300 + plugin.composition.length * 28 + (plugin.settings || []).length * 128);
+const settingHeight = setting => setting.description ? 140 : 100;
+function settingType(setting) {
+    const kind = setting.kind.kind;
+    return kind === "boolean" ? "switch" : kind === "integer" ? "number" : kind === "choice" ? "select" : "text";
+}
 function memoryValue(value) {
     return value === null || value === undefined ? "Unavailable" : Math.round(value / 1024) + " KiB";
 }
-function PluginSetting({ plugin, setting, revision, writable }) {
+function PluginSetting({ plugin, setting, revision, writable, draftScope }) {
     const Control = nickel.component("shell.settings.controls");
     const kind = setting.kind;
-    const type = kind.kind === "boolean" ? "switch" : kind.kind === "integer" ? "number" : kind.kind === "choice" ? "select" : "text";
+    const type = settingType(setting);
     return h(Column, { className: "plugin-setting" },
         h(Text, null, setting.label),
         setting.description ? h(Text, { wrap: true }, setting.description) : null,
-        writable ? h(Control, { controlId: "plugin-setting/" + plugin.id + "/" + setting.id, setting: { id: setting.id, providerPackage: plugin.id, label: setting.label, type, value: setting.value,
+        writable ? h(Control, { controlId: "plugin-setting/" + plugin.id + "/" + setting.id, draftState: draftScope.controls[setting.id]?.type === type ? draftScope.controls[setting.id].state : undefined, onDraftChange: next => {
+                draftScope.controls[setting.id] = { type, state: next };
+            }, setting: { id: setting.id, providerPackage: plugin.id, label: setting.label, type, value: setting.value,
                 min: kind.min, max: kind.max, maxLength: kind.max_length,
                 options: (kind.options || []).map(option => ({ label: option, value: option })),
                 onChange: value => nickel.plugins.setSetting(plugin.id, setting.id, value, revision) } }) : h(Text, null, String(setting.value)));
+}
+function PluginCard({ plugin, index, revision, writable, canManage, setReview, draftScope }) {
+    return h(Column, { className: "plugin-card" },
+        h(Row, null,
+            h(Text, { className: "plugin-title" }, plugin.name),
+            h(Spacer, null),
+            h(Button, { id: "plugin-toggle-" + index, disabled: !canManage, accessibilityLabel: (plugin.enabled ? "Disable " : "Enable ") + plugin.name, onClick: () => plugin.enabled ? nickel.plugins.disable(plugin.id, revision) : setReview({ id: plugin.id, revision }) }, plugin.enabled ? "Disable" : "Enable")),
+        plugin.shell ? plugin.selected ? h(Text, null, "Selected shell") : h(Button, { id: "plugin-preview-shell-" + index, disabled: !canManage, onClick: () => plugin.enabled ? nickel.plugins.selectShell(plugin.id, revision) : setReview({ id: plugin.id, revision, selectShell: true }) }, "Preview shell") : null,
+        h(Text, { wrap: true }, plugin.id + (plugin.version ? " · " + plugin.version : "") + (plugin.author ? " · " + plugin.author : "")),
+        h(Text, { wrap: true }, "Status: " + plugin.health.state + (plugin.health.reason ? " · " + plugin.health.reason : "")),
+        h(Text, { wrap: true }, "Authorized capabilities: " + (plugin.grants.length ? plugin.grants.join(", ") : "None")),
+        h(Text, { wrap: true }, "Surfaces: " + (plugin.surfaces.length ? plugin.surfaces.join(", ") : "None")),
+        plugin.composition.length ? h(VirtualColumn, { id: "plugin-composition/" + plugin.id, items: plugin.composition, itemKey: compositionKey, itemHeight: 20, gap: 8, overscan: 96, renderItem: entry => h(Text, { wrap: true }, entry) }) : null,
+        h(Text, { wrap: true }, "JavaScript heap: " + memoryValue(plugin.memory.jsHeapBytes) + " · Native UI: " + memoryValue(plugin.memory.nativeUiBytes) + " · Textures: " + memoryValue(plugin.memory.textureBytes)),
+        h(Text, { wrap: true }, "Tracked peak: " + memoryValue(plugin.memory.trackedPeakBytes) + " · Timers: " + plugin.memory.timers + " · Subscriptions: " + plugin.memory.subscriptions),
+        plugin.settings?.length ? h(VirtualColumn, { id: "plugin-settings/" + plugin.id, items: plugin.settings, itemKey: settingKey, itemHeight: settingHeight, gap: 8, overscan: 96, renderItem: setting => h(PluginSetting, { key: setting.id, plugin: plugin, setting: setting, revision: revision, writable: writable, draftScope: draftScope }) }) : null,
+        h(Text, { wrap: true }, "Memory reports tracked package resources. Per component and total process memory are unavailable."));
 }
 export function Plugins() {
     const catalog = nickel.plugins.get();
@@ -22,10 +50,33 @@ export function Plugins() {
     const shellName = id => catalog.plugins.find(plugin => plugin.id === id)?.name || id;
     const [query, setQuery] = useState("");
     const [review, setReview] = useState(null);
+    const draftScopes = useRef(Object.create(null));
+    // Draft ownership outlives materialized cards, but removed plugin/setting
+    // identities and changed editor types must retire their state offscreen too.
+    useMemo(() => {
+        const present = Object.create(null);
+        for (const plugin of catalog.plugins) {
+            present[plugin.id] = true;
+            const scope = draftScopes.current[plugin.id] || (draftScopes.current[plugin.id] = {
+                controls: Object.create(null),
+            });
+            const paths = Object.create(null);
+            for (const setting of plugin.settings || []) {
+                const type = settingType(setting);
+                paths[setting.id] = type;
+            }
+            for (const id of Object.keys(scope.controls))
+                if (paths[id] !== scope.controls[id].type)
+                    delete scope.controls[id];
+        }
+        for (const id of Object.keys(draftScopes.current))
+            if (!present[id])
+                delete draftScopes.current[id];
+    }, [catalog.plugins]);
     const candidate = review && catalog.plugins.find(plugin => plugin.id === review.id);
     const reviewCurrent = candidate && !candidate.enabled && review.revision === catalog.revision;
     const needle = query.trim().toLowerCase();
-    const plugins = catalog.plugins.filter(plugin => (plugin.name + " " + plugin.id).toLowerCase().includes(needle));
+    const plugins = useMemo(() => catalog.plugins.filter(plugin => (plugin.name + " " + plugin.id).toLowerCase().includes(needle)), [catalog.plugins, needle]);
     return h(Column, { className: "plugins-page" },
         h(TextField, { id: "plugins-search", accessibilityLabel: "Search plugins", placeholder: "Search plugins", value: query, onChange: setQuery }),
         !catalog.available ? h(Text, { wrap: true }, catalog.reason || "Plugin inventory unavailable.") : null,
@@ -53,20 +104,6 @@ export function Plugins() {
                 h(Button, { id: "plugin-review-cancel", onClick: () => setReview(null) }, "Cancel"),
                 h(Button, { id: "plugin-review-confirm", disabled: !canManage || !reviewCurrent, onClick: () => { review.selectShell ? nickel.plugins.selectShell(candidate.id, review.revision) : nickel.plugins.enable(candidate.id, review.revision); setReview(null); } }, review.selectShell ? "Enable and preview shell" : "Enable plugin"))) : null,
         catalog.available && !plugins.length ? h(Text, null, "No matching plugins.") : null,
-        plugins.map((plugin, index) => h(Column, { key: plugin.id, className: "plugin-card" },
-            h(Row, null,
-                h(Text, { className: "plugin-title" }, plugin.name),
-                h(Spacer, null),
-                h(Button, { id: "plugin-toggle-" + index, disabled: !canManage, accessibilityLabel: (plugin.enabled ? "Disable " : "Enable ") + plugin.name, onClick: () => plugin.enabled ? nickel.plugins.disable(plugin.id, catalog.revision) : setReview({ id: plugin.id, revision: catalog.revision }) }, plugin.enabled ? "Disable" : "Enable")),
-            plugin.shell ? plugin.selected ? h(Text, null, "Selected shell") : h(Button, { id: "plugin-preview-shell-" + index, disabled: !canManage, onClick: () => plugin.enabled ? nickel.plugins.selectShell(plugin.id, catalog.revision) : setReview({ id: plugin.id, revision: catalog.revision, selectShell: true }) }, "Preview shell") : null,
-            h(Text, { wrap: true }, plugin.id + (plugin.version ? " · " + plugin.version : "") + (plugin.author ? " · " + plugin.author : "")),
-            h(Text, { wrap: true }, "Status: " + plugin.health.state + (plugin.health.reason ? " · " + plugin.health.reason : "")),
-            h(Text, { wrap: true }, "Authorized capabilities: " + (plugin.grants.length ? plugin.grants.join(", ") : "None")),
-            h(Text, { wrap: true }, "Surfaces: " + (plugin.surfaces.length ? plugin.surfaces.join(", ") : "None")),
-            plugin.composition.map((entry, entryIndex) => h(Text, { key: entryIndex, wrap: true }, entry)),
-            h(Text, { wrap: true }, "JavaScript heap: " + memoryValue(plugin.memory.jsHeapBytes) + " · Native UI: " + memoryValue(plugin.memory.nativeUiBytes) + " · Textures: " + memoryValue(plugin.memory.textureBytes)),
-            h(Text, { wrap: true }, "Tracked peak: " + memoryValue(plugin.memory.trackedPeakBytes) + " · Timers: " + plugin.memory.timers + " · Subscriptions: " + plugin.memory.subscriptions),
-            (plugin.settings || []).map(setting => h(PluginSetting, { key: setting.id, plugin: plugin, setting: setting, revision: catalog.revision, writable: catalog.writable })),
-            h(Text, { wrap: true }, "Memory reports tracked package resources. Per component and total process memory are unavailable."))));
+        h(VirtualColumn, { id: "settings-plugins", items: plugins, itemKey: pluginKey, itemHeight: pluginHeight, gap: 12, overscan: 96, renderItem: (plugin, index) => h(PluginCard, { key: plugin.id, plugin: plugin, index: index, revision: catalog.revision, writable: catalog.writable, canManage: canManage, setReview: setReview, draftScope: draftScopes.current[plugin.id] }) }));
 }
 registerSettingsPage({ id: "plugins", group: "Shell", label: "Plugins", description: "Inspect plugin status, capabilities and memory; enable or disable packages", component: Plugins });

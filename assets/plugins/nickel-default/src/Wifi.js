@@ -1,5 +1,7 @@
 // @jsx h
 import "./styles/connectivity.css";
+const networkKey = network => network.id;
+const adapterKey = adapter => adapter.id;
 export function Wifi() {
     const wifi = nickel.wifi.get();
     return h(Column, { className: "connectivity-page" },
@@ -10,15 +12,15 @@ export function Wifi() {
         !wifi.available ? h(Text, { wrap: true }, wifi.reason || "The Wi-Fi service is unavailable.") : null,
         h(Text, { className: "connectivity-description", wrap: true }, "Nickel can connect saved network profiles. Set up a new network or enter its password in system settings."),
         wifi.available && !wifi.networks.length ? h(Text, null, wifi.enabled ? "No networks are reported by the Wi-Fi service." : "Turn on Wi-Fi to view networks.") : null,
-        wifi.networks.map(network => h(Column, { key: network.id, className: "connectivity-card" },
-            h(Text, { className: "connectivity-name" }, network.name || "Unnamed network"),
-            h(Text, null, network.connected ? "Connected" : network.saved ? "Saved profile" : "No saved profile"),
-            h(Text, { className: "connectivity-description" }, "Signal: " + network.signalPercent + "%"),
-            network.connected ? wifi.operations.disconnect ? h(Button, { id: "settings-wifi-disconnect/" + network.id, disabled: !network.canDisconnect, onClick: () => nickel.wifi.disconnect(network.id) }, "Disconnect") : null : network.saved ? wifi.operations.connect ? h(Button, { id: "settings-wifi-connect/" + network.id, disabled: !network.canConnect, onClick: () => nickel.wifi.connect(network.id) }, "Connect") : h(Text, null, "Connecting is unavailable.") : h(Text, { wrap: true }, "Save this network in system settings before connecting."))),
+        h(VirtualColumn, { id: "settings-wifi-networks", items: wifi.networks, itemKey: networkKey, itemHeight: 160, gap: 16, overscan: 96, renderItem: network => h(Column, { key: network.id, className: "connectivity-card" },
+                h(Text, { className: "connectivity-name" }, network.name || "Unnamed network"),
+                h(Text, null, network.connected ? "Connected" : network.saved ? "Saved profile" : "No saved profile"),
+                h(Text, { className: "connectivity-description" }, "Signal: " + network.signalPercent + "%"),
+                network.connected ? wifi.operations.disconnect ? h(Button, { id: "settings-wifi-disconnect/" + network.id, disabled: !network.canDisconnect, onClick: () => nickel.wifi.disconnect(network.id) }, "Disconnect") : null : network.saved ? wifi.operations.connect ? h(Button, { id: "settings-wifi-connect/" + network.id, disabled: !network.canConnect, onClick: () => nickel.wifi.connect(network.id) }, "Connect") : h(Text, null, "Connecting is unavailable.") : h(Text, { wrap: true }, "Save this network in system settings before connecting.")) }),
         h(Text, { className: "connectivity-title" }, "Network adapters"),
         !wifi.adaptersAvailable ? h(Text, null, "Network adapter inventory is unavailable.") : !(wifi.adapters || []).length ? h(Text, null, "No network adapters are reported.") : null,
-        (wifi.adapters || []).map((adapter, index) => h(Column, { key: index, className: "connectivity-card" },
-            h(Text, null, adapter.name),
-            h(Text, { wrap: true }, adapter.description + " · " + (adapter.connected ? "Connected" : "Disconnected") + (adapter.speedBitsPerSecond ? " · " + Math.round(adapter.speedBitsPerSecond / 1000000) + " Mbps" : "")))));
+        (wifi.adapters || []).length ? h(VirtualColumn, { id: "settings-wifi-adapters", items: wifi.adapters, itemKey: adapterKey, itemHeight: 100, gap: 16, overscan: 96, renderItem: adapter => h(Column, { key: adapter.id, className: "connectivity-card" },
+                h(Text, null, adapter.name),
+                h(Text, { wrap: true }, adapter.description + " · " + (adapter.connected ? "Connected" : "Disconnected") + (adapter.speedBitsPerSecond ? " · " + Math.round(adapter.speedBitsPerSecond / 1000000) + " Mbps" : ""))) }) : null);
 }
 registerSettingsPage({ id: "wifi", group: "Network", label: "Wi-Fi", description: "Saved network profiles and wireless connectivity", component: Wifi });

@@ -253,10 +253,15 @@ impl<A: crate::Application + 'static> InternalUiSurface for HostedApplication<A>
 /// The collection is intentionally not `Send`: the compositor decides which
 /// thread owns UI state, while individual applications remain free to contain
 /// thread-affine resources.
-#[derive(Default)]
 pub struct InternalSurfaceSet {
     next_id: u64,
     surfaces: BTreeMap<InternalSurfaceId, Box<dyn InternalUiSurface>>,
+}
+
+impl Default for InternalSurfaceSet {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl InternalSurfaceSet {
@@ -345,6 +350,17 @@ impl InternalSurfaceSet {
 mod tests {
     use super::*;
     use crate::{ActionKind, Button, HostEvent, SemanticAction, Text, View, ViewContext};
+
+    #[test]
+    fn both_constructors_allocate_nonzero_nonreused_surface_identities() {
+        for mut surfaces in [InternalSurfaceSet::new(), InternalSurfaceSet::default()] {
+            let first = surfaces.insert(Counter { count: 0 }, 100, 48);
+            assert_ne!(first.snapshot_token(), 0);
+            surfaces.remove(first);
+            let next = surfaces.insert(Counter { count: 0 }, 100, 48);
+            assert!(next.snapshot_token() > first.snapshot_token());
+        }
+    }
 
     struct Counter {
         count: usize,

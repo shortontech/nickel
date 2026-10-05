@@ -286,6 +286,19 @@ impl InternalCodexHost {
         Ok(())
     }
 
+    pub(crate) fn dismiss_unfocused_project_menu(
+        &mut self,
+        runtime: &mut InternalUiRuntime,
+    ) -> bool {
+        let Some(id) = self.project_controller else {
+            return false;
+        };
+        if runtime.is_visible(id) && runtime.focused() != Some(id) {
+            return runtime.set_visible(id, false);
+        }
+        false
+    }
+
     pub fn sync_project_menu(
         &mut self,
         runtime: &mut InternalUiRuntime,
@@ -701,7 +714,10 @@ mod tests {
                 .iter()
                 .any(|node| node.role == Some(nickel_ui::SemanticRole::TextField))
         );
-        host.sync_project_menu(&mut runtime, false, CodexSurfacePlacement::default());
+        runtime.focus_surface(application);
+        assert!(host.dismiss_unfocused_project_menu(&mut runtime));
+        assert_eq!(runtime.focused(), Some(application));
+        assert!(!host.dismiss_unfocused_project_menu(&mut runtime));
         assert!(!runtime.is_visible(menu));
     }
 

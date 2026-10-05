@@ -204,6 +204,8 @@ declare function Badge(props: NickelBadgeProps): JSX.Element;
 declare function Row(props: NickelProps): JSX.Element;
 declare function Column(props: NickelProps): JSX.Element;
 declare function ScrollView(props: NickelProps & { id: string; height?: number; grow?: boolean }): JSX.Element;
+/** Embedded virtual rows selected by the native ancestor viewport. Stable item keys must be unique, nonempty, and at most 512 UTF-8 bytes. Native row slots have a minimum height of one logical pixel, matching Collection; itemHeight supplies initial estimates. */
+declare function VirtualColumn<T>(props: { id: string; className?: string; items: readonly T[]; itemKey: (item: T, index: number) => string; itemHeight: number | ((item: T, index: number) => number); gap?: number; overscan?: number; renderItem: (item: T, index: number) => JSX.Element }): JSX.Element;
 declare function Text(props: NickelTextProps): JSX.Element;
 declare function Image(props: NickelImageProps): JSX.Element;
 declare function ImageButton(props: NickelImageButtonProps): JSX.Element;
@@ -481,7 +483,7 @@ interface NickelPreferences {
 }
 interface NickelPreferencesSnapshot extends NickelWritable {configured?:Readonly<NickelPreferences>;applications?:ReadonlyArray<Readonly<{id:string}>>;iconThemes?:ReadonlyArray<string>;unavailableSelections?:Readonly<{preferredTerminal:boolean;preferredFileManager:boolean;fileIconTheme:boolean}>}
 interface NickelWifiNetwork {id:string;name:string;signalPercent:number;connected:boolean;saved:boolean;canConnect:boolean;canDisconnect:boolean}
-interface NickelWifiSnapshot extends NickelWritable {enabled:boolean;adaptersAvailable:boolean;adapters:ReadonlyArray<Readonly<{name:string;description:string;connected:boolean;speedBitsPerSecond:number|null}>>;networks:ReadonlyArray<Readonly<NickelWifiNetwork>>;operations:Readonly<{setEnabled?:boolean;connect?:boolean;disconnect?:boolean}>}
+interface NickelWifiSnapshot extends NickelWritable {enabled:boolean;adaptersAvailable:boolean;adapters:ReadonlyArray<Readonly<{id:string;name:string;description:string;connected:boolean;speedBitsPerSecond:number|null}>>;networks:ReadonlyArray<Readonly<NickelWifiNetwork>>;operations:Readonly<{setEnabled?:boolean;connect?:boolean;disconnect?:boolean}>}
 interface NickelBluetoothDevice {id:string;name:string;paired:boolean;connected:boolean;batteryPercent:number|null;kind:string|null;signalDbm:number|null}
 interface NickelBluetoothSnapshot extends NickelWritable {adapterName:string;powered:boolean;discovering:boolean;devices:ReadonlyArray<Readonly<NickelBluetoothDevice>>;operations:Readonly<{setPowered?:boolean;setDiscovery?:boolean;connect?:boolean;disconnect?:boolean;pair?:boolean}>}
 interface NickelAssociationHandler {id:string;name:string;icon:string|null;source:string;protected:boolean}

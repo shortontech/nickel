@@ -581,6 +581,7 @@ fn read_network_status(connection: &Connection) -> zbus::Result<(NetworkStatus, 
             })
             .map(|speed| u64::from(speed) * if device_type == 1 { 1_000_000 } else { 1_000 });
             adapters.push(super::super::NetworkAdapterStatus {
+                id: device_path.as_str().to_owned(),
                 name: device
                     .get_property::<String>("Interface")
                     .unwrap_or_default(),

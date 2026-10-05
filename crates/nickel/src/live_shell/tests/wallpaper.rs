@@ -74,6 +74,62 @@
         assert!(production.contains(".foreground(label_foreground)"));
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn wallpaper_change_invalidates_desktop_siblings_after_settings_input() {
+        with_package_runtime_stack(|| {
+            use crate::internal_shell::{InternalOutput, InternalShellCoordinator};
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("wallpaper.png");
+            RgbaImage::from_pixel(8, 8, Rgba([20, 80, 230, 255]))
+                .save(&path)
+                .unwrap();
+            let mut coordinator = InternalShellCoordinator::new(
+                Arc::new(crate::session_host::PlatformSessionHost),
+                crate::PanelEdge::Bottom,
+            )
+            .unwrap();
+            coordinator.shell_mut().show_plugin_window("nickel-default", "settings").unwrap();
+            coordinator.set_outputs(&[0, 1].map(|index| InternalOutput {
+                name: format!("wallpaper-{index}"),
+                x: index * 800,
+                y: 0,
+                width: 800,
+                height: 600,
+                scale: 1.0,
+            }));
+            let desktops = coordinator.surfaces().iter()
+                .filter(|surface| surface.role == SurfaceRole::Desktop)
+                .map(|surface| surface.id).collect::<Vec<_>>();
+            assert_eq!(desktops.len(), 2);
+            let settings = coordinator.surfaces().iter()
+                .find(|surface| surface.plugin.as_ref().is_some_and(|key| key.surface_id == "settings"))
+                .unwrap().id;
+            coordinator.scene(settings).unwrap();
+            for desktop in &desktops {
+                coordinator.scene(*desktop).unwrap();
+            }
+            assert!(coordinator.shell_mut().refresh_configured_wallpaper(Some(path)));
+            let changed = coordinator.step_slot_changes(settings, HostBatch::default());
+            for desktop in &desktops {
+                assert!(changed.contains(desktop), "wallpaper commit must invalidate every desktop");
+                let scene = coordinator.scene(*desktop).unwrap();
+                assert!(nickel_ui::backend::contains_image_pixels(
+                    &scene, coordinator.shell_mut().wallpaper.as_ref().unwrap()
+                ));
+            }
+            let unchanged = coordinator.step_slot_changes(settings, HostBatch::default());
+            assert!(desktops.iter().all(|desktop| !unchanged.contains(desktop)));
+            assert!(coordinator.shell_mut().refresh_configured_wallpaper(None));
+            let reset = coordinator.poll(Instant::now());
+            for desktop in &desktops {
+                assert!(reset.contains(desktop), "deadline reconciliation must invalidate wallpaper reset");
+                coordinator.scene(*desktop).unwrap();
+            }
+            assert!(!coordinator.shell_mut().desktop_presentation_dirty());
+        });
+    }
+
     #[test]
     fn configured_wallpaper_changes_replace_the_live_desktop_image() {
         with_package_runtime_stack(|| {

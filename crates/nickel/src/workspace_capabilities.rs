@@ -44,7 +44,11 @@ impl WorkspaceEffect {
                 value["id"]
                     .as_str()
                     .filter(|id| !id.is_empty() && id.len() <= 20)
-                    .and_then(|id| id.parse::<u64>().ok())
+                    .and_then(|id| {
+                        id.parse::<u64>()
+                            .ok()
+                            .filter(|parsed| parsed.to_string() == id)
+                    })
                     .ok_or("invalid workspace identity")?,
             )
         };
@@ -64,12 +68,15 @@ impl WorkspaceEffect {
         {
             return Err("workspace observation is stale or operation unavailable".into());
         }
-        if let Some(id) = self.id
-            && !snapshot["workspaces"]
-                .as_array()
-                .is_some_and(|entries| entries.iter().any(|entry| entry["id"] == id))
-        {
-            return Err("workspace no longer exists".into());
+        if let Some(id) = self.id {
+            let identity = id.to_string();
+            if !snapshot["workspaces"].as_array().is_some_and(|entries| {
+                entries
+                    .iter()
+                    .any(|entry| entry["id"].as_str() == Some(identity.as_str()))
+            }) {
+                return Err("workspace no longer exists".into());
+            }
         }
         Ok(())
     }
@@ -77,6 +84,28 @@ impl WorkspaceEffect {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn workspace_identity_round_trips_without_numeric_coercion() {
+        let observed = snapshot(
+            &[WorkspaceSummary {
+                id: u64::MAX,
+                active: true,
+            }],
+            true,
+        );
+        let request = json!({"type":"workspaces.switch","id":u64::MAX.to_string(),"revision":observed["revision"]});
+        let effect = WorkspaceEffect::parse(&request).unwrap();
+        assert_eq!(effect.id, Some(u64::MAX));
+        assert!(effect.validate(&observed).is_ok());
+        let mut numeric = observed.clone();
+        numeric["workspaces"][0]["id"] = json!(u64::MAX);
+        assert!(effect.validate(&numeric).is_err());
+        for id in ["044", "+44", " 44", "18446744073709551616"] {
+            let mut invalid = request.clone();
+            invalid["id"] = json!(id);
+            assert!(WorkspaceEffect::parse(&invalid).is_err(), "{id}");
+        }
+    }
     #[test]
     fn workspace_requests_use_stable_ids_and_reject_changed_inventory_or_unsupported_operations() {
         let entries = [

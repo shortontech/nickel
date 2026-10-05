@@ -786,6 +786,7 @@ pub fn network_status() -> super::NetworkStatus {
         .unwrap_or_default()
         .into_iter()
         .map(|adapter| super::NetworkAdapterStatus {
+            id: adapter.id,
             name: adapter.name,
             description: adapter.description,
             connected: adapter.connected,

@@ -293,6 +293,15 @@ pub enum UiEvent {
     /// Moves accessibility focus through the same production focus state used
     /// by keyboard navigation, so the visible focus treatment cannot diverge.
     AccessibilityFocus(UiId),
+    /// Native logical-row focus. Geometry is prepared from the current native
+    /// collection source, never from a package callback or remote node ordinal.
+    AccessibilityRevealVirtualRow {
+        collection: UiId,
+        revision: u64,
+        ordinal: usize,
+        leading: f32,
+        height: f32,
+    },
     AccessibilityActivate(UiId),
     AccessibilityContextMenu(UiId),
     TextInput(String),
@@ -775,6 +784,7 @@ impl UiEvent {
             | Self::ControllerActivate
             | Self::ControllerContextMenu => InputSource::Controller,
             Self::AccessibilityFocus(_)
+            | Self::AccessibilityRevealVirtualRow { .. }
             | Self::AccessibilityActivate(_)
             | Self::AccessibilityContextMenu(_) => InputSource::Accessibility,
             Self::FocusNext
@@ -1260,6 +1270,7 @@ pub struct Element<Message = String> {
     /// bounded structural metadata. Without one, retained reconciliation
     /// conservatively rebuilds every content-sensitive phase.
     content_revision: Option<u64>,
+    virtual_navigation: Option<VirtualNavigation>,
     kind: Kind,
     style: Style,
     message: Option<Message>,
@@ -1288,6 +1299,7 @@ impl<Message> Element<Message> {
             id: None,
             source: None,
             content_revision: None,
+            virtual_navigation: None,
             style: Style::default(),
             message: None,
             context_message: None,
@@ -1335,6 +1347,7 @@ impl<Message> Element<Message> {
             id: None,
             source: None,
             content_revision: None,
+            virtual_navigation: None,
             style: Style::default(),
             message: None,
             context_message: None,
@@ -1379,6 +1392,46 @@ impl<Message> Element<Message> {
             child.set_inherited_content_revision(revision);
         }
         self
+    }
+
+    /// Version immutable, callback-free text in a source-owned declaration.
+    /// The source must change the revision when text or accessibility payloads
+    /// change. Does not assign revisions to editors, selection regions, or
+    /// action-bearing nodes; their transient state needs separate lifecycles.
+    /// Explicit revisions already supplied by a component are preserved.
+    pub fn static_text_content_revision(mut self, revision: u64) -> Self {
+        self.set_static_text_content_revision(revision, false);
+        self
+    }
+
+    fn set_static_text_content_revision(&mut self, revision: u64, selection_region: bool) {
+        let selection_region = selection_region
+            || self.style.selection_region
+            || self.style.selection_document.is_some();
+        if !selection_region
+            && self.content_revision.is_none()
+            && matches!(
+                self.kind,
+                Kind::Text {
+                    input_value: None,
+                    ..
+                }
+            )
+            && self.text_mapper.is_none()
+            && self.message.is_none()
+            && self.context_message.is_none()
+            && self.focus_message.is_none()
+            && self.blur_message.is_none()
+            && self.drag_seed.is_none()
+            && self.drop_message.is_none()
+            && self.option_messages.is_empty()
+            && self.inline_messages.is_empty()
+        {
+            self.content_revision = Some(revision);
+        }
+        for child in &mut self.children {
+            child.set_static_text_content_revision(revision, selection_region);
+        }
     }
 
     fn set_inherited_content_revision(&mut self, revision: u64) {
@@ -1740,6 +1793,7 @@ impl<Message> Element<Message> {
             id: self.id,
             source: self.source,
             content_revision: self.content_revision,
+            virtual_navigation: self.virtual_navigation,
             style: self.style,
             message: self.message.map(&mut *map),
             context_message: self.context_message.map(&mut *map),
@@ -2542,6 +2596,13 @@ pub struct AnyView<Message = String>(Element<Message>);
 impl<Message> AnyView<Message> {
     pub fn new(component: impl Component<Message>) -> Self {
         Self(component.into_element())
+    }
+
+    /// Apply source-owned static-text revisions in place, without moving the
+    /// declaration through another by-value component conversion.
+    /// See [`Element::static_text_content_revision`] for the source contract.
+    pub fn set_static_text_content_revision(&mut self, revision: u64) {
+        self.0.set_static_text_content_revision(revision, false);
     }
 }
 

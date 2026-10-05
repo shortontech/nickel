@@ -707,7 +707,7 @@ mod platform {
 
         #[test]
         fn connectivity_settings_use_native_controls_and_revision_bound_public_clients() {
-            // Boa evaluation plus native view construction needs more than the test thread default.
+            // Package evaluation plus native view construction needs more than the test thread default.
             std::thread::Builder::new().stack_size(16 * 1024 * 1024).spawn(|| {
             use nickel_plugin_runtime::{JsxModuleGraph, ModuleSource};
             use nickel_ui::SemanticRole;
@@ -791,6 +791,7 @@ mod platform {
             let mut app = PluginPanelApplication::from_package(&package).unwrap();
             app.sync_data(&data).unwrap();
             let mut host = UiHost::new(app, 520, 340);
+            nickel_shell::plugin_panel::step_host(&mut host, None, Default::default()).unwrap();
             let connect = host
                 .query_unique(&SemanticSelector::RoleAndName {
                     role: SemanticRole::Button,
@@ -806,9 +807,22 @@ mod platform {
                 [nickel_shell::plugin_panel::PluginEffect::Connectivity { .. }]
             ));
             // Capture the actual public handler effect: the profile ID and observed revision survive rendering.
-            let tree = runtime
+            let mut tree = runtime
                 .render("__nickelRender()", |node| Ok(node.clone()))
                 .unwrap();
+            fn find_collection<'a>(node: &'a serde_json::Value, id: &str) -> Option<&'a serde_json::Value> {
+                if node["id"] == id { return Some(node); }
+                node["children"].as_array()?.iter().find_map(|child| find_collection(child, id))
+            }
+            // The runtime-only half supplies explicit viewport acknowledgements;
+            // the native half above and production Settings tests exercise actual layout.
+            for (source, id, count) in [(1, "settings-wifi-networks", 2), (2, "settings-bluetooth-devices", 1)] {
+                let collection = find_collection(&tree, id).unwrap();
+                assert_eq!(collection["collection"]["count"], count);
+                let action = collection["action"].as_u64().unwrap();
+                let feedback = serde_json::to_string(&serde_json::json!({"start":0,"end":count,"source":source}).to_string()).unwrap();
+                tree = runtime.render(&format!("__nickelDispatch({action},{feedback})"), |node| Ok(node.clone())).unwrap();
+            }
             fn find_action(node: &serde_json::Value, label: &str) -> Option<u64> {
                 if node["kind"] == "button"
                     && node["children"].as_array().is_some_and(|children| {
@@ -1181,9 +1195,10 @@ mod platform {
                 let last_recent = host.query(&SemanticSelector::RoleAndName {role:SemanticRole::Button,name:"Steam".into()})
                     .into_iter().max_by(|a,b| a.bounds.origin.y.total_cmp(&b.bounds.origin.y)).unwrap();
                 let footer = target(&host, SemanticRole::Button, "Local session");
-                assert!(last_recent.bounds.origin.y + last_recent.bounds.size.height <= footer.bounds.origin.y,
-                    "all five recent rows fit above the dashboard footer");
                 capture(&host, "dashboard", 608, 628);
+                assert!(last_recent.bounds.origin.y + last_recent.bounds.size.height <= footer.bounds.origin.y,
+                    "all five recent rows fit above the dashboard footer: last recent {:?}, footer {:?}",
+                    last_recent.bounds, footer.bounds);
                 let light = nickel_core::theme::ThemePalette::from_appearance(nickel_core::theme::Appearance {
                     mode: nickel_core::theme::ThemeMode::Light,
                     ..Default::default()

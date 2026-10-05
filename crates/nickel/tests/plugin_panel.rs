@@ -4,7 +4,21 @@ use nickel_shell::plugin_panel::{PluginEffect, PluginPanelApplication, surface};
 #[test]
 fn generic_color_swatch_renders_accessible_radio_and_custom_action() {
     let script = "function App() { return h(Panel, {}, h(ColorSwatch, {id: 'blue', color: '#336699', selected: true, accessibilityLabel: 'Blue accent', onClick: () => nickel.request('show-launcher')}), h(ColorSwatch, {id: 'custom', accessibilityLabel: 'Custom color', onClick: () => nickel.request('show-launcher')})); }";
-    let host = UiHost::new(PluginPanelApplication::new(script).unwrap(), 320, 80);
+    let mut package = PluginPackage::load(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../assets/plugins/hello-panel"
+    ))
+    .unwrap();
+    package.source = script.into();
+    // Control geometry belongs to package CSS, not native hard-coded defaults.
+    package.stylesheet.push_str(include_str!(
+        "../../../assets/plugins/nickel-default/src/styles/controls.css"
+    ));
+    let mut host = UiHost::new(
+        PluginPanelApplication::from_package(&package).unwrap(),
+        320,
+        80,
+    );
     assert!(
         host.query_unique(&SemanticSelector::RoleAndName {
             role: SemanticRole::Radio,
@@ -31,6 +45,22 @@ fn generic_color_swatch_renders_accessible_radio_and_custom_action() {
             ..
         }
     )));
+    for (role, name) in [
+        (SemanticRole::Radio, "Blue accent"),
+        (SemanticRole::Button, "Custom color"),
+    ] {
+        let target = host
+            .query_unique(&SemanticSelector::RoleAndName {
+                role,
+                name: name.into(),
+            })
+            .unwrap();
+        host.perform_semantic_action(target.id, SemanticAction::Invoke(ActionKind::Activate));
+        assert_eq!(
+            host.application_mut().take_effects(),
+            vec![PluginEffect::ShowLauncher]
+        );
+    }
 }
 
 #[test]

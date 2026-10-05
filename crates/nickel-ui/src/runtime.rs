@@ -1297,6 +1297,14 @@ pub trait Application: Sized {
 
     fn view(&self, context: ViewContext) -> impl View<Self::Message>;
 
+    /// Opt in only when `view` depends exclusively on application state and its
+    /// ViewContext, not unreported external/interior-mutability inputs. The host
+    /// may reuse its declaration for native-state-only layout invalidation.
+    /// Application updates, polling, completions and context changes still rebuild.
+    fn retain_view_for_native_layout(&self) -> bool {
+        false
+    }
+
     fn frame_overlays(&self, _context: ViewContext) -> Vec<FrameOverlay<Self::Message>> {
         Vec::new()
     }
@@ -1405,6 +1413,9 @@ pub struct UiHost<A: Application> {
     application: A,
     state: UiStateStore,
     tree: UiFrame<A::Message>,
+    // Refreshed when the frame changes; accounting walks retained nodes and must
+    // not run again for unchanged input batches.
+    retained_frame_bytes: usize,
     tree_remote_access_protected: bool,
     bounds: Rect,
     scale_factor: f32,
@@ -1430,6 +1441,7 @@ pub struct UiHost<A: Application> {
 pub struct UiHostViewport<Message> {
     state: UiStateStore,
     tree: UiFrame<Message>,
+    retained_frame_bytes: usize,
     tree_remote_access_protected: bool,
     bounds: Rect,
     scale_factor: f32,
@@ -1987,6 +1999,45 @@ pub struct HostInspection {
     pub overlay_failures: Vec<OverlayDeclarationFailure>,
 }
 
+/// A native row's position within its nearest scroll viewport. Capture and
+/// restore on the same host around a synchronous geometry update; this is not
+/// a persistent or externally dispatchable scroll capability.
+#[derive(Clone, Debug)]
+pub struct ScrollAnchor {
+    owner: UiId,
+    target: UiId,
+    viewport_y: f32,
+    viewport_height: f32,
+}
+
+impl ScrollAnchor {
+    pub fn target(&self) -> &UiId {
+        &self.target
+    }
+
+    /// A viewport can preserve one row position per geometry transaction.
+    pub fn shares_scroll_owner(&self, other: &Self) -> bool {
+        self.owner == other.owner
+    }
+}
+
+/// Constant-size input-recipient projection. Does not collect tree diagnostics.
+/// Adapters still own authorization and normalized ingress admission.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HostInputLease {
+    pub frame_generation: u64,
+    pub window_focused: bool,
+}
+
+impl From<HostInspection> for HostInputLease {
+    fn from(inspection: HostInspection) -> Self {
+        Self {
+            frame_generation: inspection.frame_generation,
+            window_focused: inspection.window_focused,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MessageEvidence {
     pub type_name: &'static str,
@@ -2090,6 +2141,8 @@ pub struct HostTelemetry {
     pub semantic_nodes_rebuilt: usize,
     pub semantic_nodes_reused: usize,
     pub retained_paint_refreshes: usize,
+    /// Existing subtree hit-stack entries saved/restored during retained paint.
+    pub paint_interaction_records_saved: usize,
     /// Time from beginning the host step through application message dispatch.
     pub input_to_message_us: u64,
     /// Time from beginning the host step through the resolved frame.
@@ -2132,7 +2185,8 @@ impl Default for HostEventOutcome {
 }
 
 impl HostEventOutcome {
-    fn merge(&mut self, mut other: Self) {
+    /// Accumulate a bounded follow-up step without discarding work or effects.
+    pub fn merge(&mut self, mut other: Self) {
         self.changed |= other.changed;
         self.disposition = self.disposition.merge(other.disposition);
         self.invalidation = self.invalidation.merge(other.invalidation);
@@ -2218,6 +2272,10 @@ impl HostEventOutcome {
             .telemetry
             .retained_paint_refreshes
             .saturating_add(other.telemetry.retained_paint_refreshes);
+        self.telemetry.paint_interaction_records_saved = self
+            .telemetry
+            .paint_interaction_records_saved
+            .saturating_add(other.telemetry.paint_interaction_records_saved);
         self.telemetry.input_to_message_us = self
             .telemetry
             .input_to_message_us
@@ -2286,6 +2344,7 @@ impl<A: Application> UiHost<A> {
         UiHostViewport {
             tree_remote_access_protected: self.application.remote_access_protected(),
             state,
+            retained_frame_bytes: tree.resource_diagnostics().estimated_retained_bytes,
             tree,
             bounds,
             scale_factor: 1.0,
@@ -2314,6 +2373,10 @@ impl<A: Application> UiHost<A> {
         UiHostViewport {
             state: std::mem::replace(&mut self.state, viewport.state),
             tree: std::mem::replace(&mut self.tree, viewport.tree),
+            retained_frame_bytes: std::mem::replace(
+                &mut self.retained_frame_bytes,
+                viewport.retained_frame_bytes,
+            ),
             tree_remote_access_protected: std::mem::replace(
                 &mut self.tree_remote_access_protected,
                 viewport.tree_remote_access_protected,
@@ -2417,6 +2480,7 @@ impl<A: Application> UiHost<A> {
             tree_remote_access_protected: application.remote_access_protected(),
             application,
             state,
+            retained_frame_bytes: tree.resource_diagnostics().estimated_retained_bytes,
             tree,
             bounds,
             scale_factor: 1.0,
@@ -2527,6 +2591,14 @@ impl<A: Application> UiHost<A> {
         self.frame_generation
     }
 
+    /// Read only the state needed to bind a normalized input recipient.
+    pub fn input_lease(&self) -> HostInputLease {
+        HostInputLease {
+            frame_generation: self.frame_generation,
+            window_focused: self.state.window_focused(),
+        }
+    }
+
     /// Bounded, protected-value-free projection. Adapters still own authorization.
     pub fn bounded_semantic_nodes(
         &self,
@@ -2546,6 +2618,11 @@ impl<A: Application> UiHost<A> {
     /// Computed component geometry for the explicitly enabled local test socket.
     pub fn layout_snapshot(&self) -> String {
         self.tree.resolved_layout().deterministic_snapshot()
+    }
+
+    /// Borrow resolved native geometry without collecting diagnostics.
+    pub fn resolved_layout(&self) -> &crate::ResolvedLayout {
+        self.tree.resolved_layout()
     }
 
     /// Protection is queried from live application state as well as the tree,
@@ -2619,6 +2696,63 @@ impl<A: Application> UiHost<A> {
         A::Message: PartialEq,
     {
         self.tree.scroll_extent(scroll)
+    }
+
+    pub fn capture_scroll_anchor(&self, target: &UiId) -> Option<ScrollAnchor> {
+        let (owner, viewport_y, extent, visible) = self.tree.scroll_anchor_geometry(target)?;
+        visible.then(|| ScrollAnchor {
+            owner,
+            target: target.clone(),
+            viewport_y,
+            viewport_height: extent.viewport.height,
+        })
+    }
+
+    /// Restore only an existing target under its original scroll owner. Removed
+    /// or reparented rows are ignored, and native scroll limits remain binding.
+    /// A shrinking viewport caps the old position so the target stays visible.
+    /// The returned outcome includes the corrective layout's work and effects.
+    pub fn restore_scroll_anchor(&mut self, anchor: &ScrollAnchor) -> Option<HostEventOutcome> {
+        let (owner, viewport_y, extent, _) = self.tree.scroll_anchor_geometry(&anchor.target)?;
+        if owner != anchor.owner {
+            return None;
+        }
+        let desired_y = if extent.viewport.height < anchor.viewport_height {
+            let height = self
+                .tree
+                .resolved_layout()
+                .find(&anchor.target)?
+                .allocated
+                .size
+                .height;
+            // Preserve a partially clipped top anchor, but do not restore a
+            // formerly visible target beneath the new viewport's bottom edge.
+            anchor
+                .viewport_y
+                .min((extent.viewport.height - height).max(0.0))
+        } else {
+            anchor.viewport_y
+        };
+        let delta = viewport_y - desired_y;
+        if !delta.is_finite() || delta.abs() < 0.01 {
+            return None;
+        }
+        let maximum = (extent.content.height - extent.viewport.height).max(0.0);
+        let stored_offset = self
+            .state
+            .state(&owner)
+            .map_or(extent.offset, |state| state.scroll_offset);
+        if self
+            .state
+            .scroll_by(owner, extent.offset + delta - stored_offset, maximum)
+            == Invalidation::None
+        {
+            return None;
+        }
+        Some(self.step(HostBatch {
+            application_changed: true,
+            ..Default::default()
+        }))
     }
 
     /// Scrolls the canonical view state just enough to reveal a message-bound
@@ -2849,6 +2983,10 @@ impl<A: Application> UiHost<A> {
                 } else {
                     self.state = prior_state;
                     self.tree = prior_tree;
+                    // Cloning can change vector capacities, so account the
+                    // restored tree rather than reuse the original estimate.
+                    self.retained_frame_bytes =
+                        self.tree.resource_diagnostics().estimated_retained_bytes;
                     self.input_dispatcher = prior_dispatcher;
                     self.pending_long_press = prior_pending_long_press;
                     self.overlay_failures = prior_overlay_failures;
@@ -3130,6 +3268,7 @@ impl<A: Application> UiHost<A> {
                 | UiEvent::ActivateFocused
                 | UiEvent::KeyboardActivate
                 | UiEvent::AccessibilityFocus(_)
+                | UiEvent::AccessibilityRevealVirtualRow { .. }
                 | UiEvent::AccessibilityActivate(_)
                 | UiEvent::AccessibilityContextMenu(_)
         );
@@ -3160,7 +3299,10 @@ impl<A: Application> UiHost<A> {
             return self.arbitrate_activation_target(Some(target));
         }
         let after = preview.current_target();
-        if after.is_some_and(|target| target != owner) {
+        if after.is_some_and(|target| target != owner)
+            || (preview.virtual_focus.is_some()
+                && preview.virtual_focus != self.state.virtual_focus)
+        {
             TouchIntentArbitration::CancelThenDispatch
         } else if after == Some(owner)
             && (!outcome.messages.is_empty()
@@ -3196,6 +3338,29 @@ impl<A: Application> UiHost<A> {
     }
 
     pub fn step(&mut self, batch: HostBatch) -> HostEventOutcome {
+        let may_retain_view = self.application.retain_view_for_native_layout()
+            && !batch.application_changed
+            && batch.completions.is_empty()
+            && batch.surface_size.is_none_or(|(width, height)| {
+                Rect::new(0.0, 0.0, width as f32, height as f32) == self.bounds
+            })
+            && batch.scale_factor.is_none_or(|scale| {
+                !scale.is_finite() || scale <= 0.0 || scale == self.scale_factor
+            })
+            && batch.window_focused.is_none()
+            && !batch.events.is_empty()
+            && batch.events.iter().all(|event| match event {
+                HostEvent::Ui(UiEvent::Scroll { .. }) => true,
+                HostEvent::Normalized { input, .. } => matches!(
+                    input,
+                    nickel_input::InputEvent::Pointer(nickel_input::PointerEvent::Axis { .. })
+                ),
+                HostEvent::NormalizedIngress(envelope) => matches!(
+                    &envelope.input,
+                    nickel_input::InputEvent::Pointer(nickel_input::PointerEvent::Axis { .. })
+                ),
+                _ => false,
+            });
         let prior_view_context = ViewContext::from_host(self.bounds, &self.state, Some(&self.tree));
         let prior_transient = self.state.open_overlay_id().cloned();
         self.state.clipboard_text_limit = batch.clipboard_text_limit;
@@ -3573,15 +3738,21 @@ impl<A: Application> UiHost<A> {
                 .flatten();
             if let Some(work) = retained_paint {
                 self.frame_generation = self.frame_generation.wrapping_add(1);
-                let resources = self.tree.resource_diagnostics();
+                self.retained_frame_bytes = self
+                    .retained_frame_bytes
+                    .saturating_sub(work.vector_bytes_before)
+                    .saturating_add(work.vector_bytes_after);
                 combined.telemetry.retained_paint_refreshes = 1;
+                combined.telemetry.paint_interaction_records_saved = work.interaction_records_saved;
                 combined.telemetry.paint_commands_emitted = work.emitted_commands;
                 combined.telemetry.paint_fragments_rebuilt = work.rebuilt_fragments;
                 combined.telemetry.paint_fragments_reused = work.reused_fragments;
                 combined.telemetry.paint_damage_rects = work.damage_rects;
-                combined.telemetry.semantic_nodes_reused = resources.accessibility_node_count;
+                combined.telemetry.semantic_nodes_reused = self.tree.accessibility_nodes().len();
             } else {
-                let (paint_list_us, layout_us, rebuild_outcome) = self.rebuild_timed();
+                let (paint_list_us, layout_us, rebuild_outcome) = self.rebuild_timed_retaining(
+                    may_retain_view && view_context_unchanged && combined.messages.is_empty(),
+                );
                 combined.merge(rebuild_outcome);
                 combined.telemetry.paint_list_us = paint_list_us;
                 combined.telemetry.layout_us = layout_us;
@@ -3717,8 +3888,7 @@ impl<A: Application> UiHost<A> {
         .into_iter()
         .flatten()
         .min();
-        combined.telemetry.retained_frame_bytes =
-            self.tree.resource_diagnostics().estimated_retained_bytes;
+        combined.telemetry.retained_frame_bytes = self.retained_frame_bytes;
         combined.telemetry.input_to_frame_us = elapsed_us(step_started);
         combined
     }
@@ -3800,6 +3970,7 @@ impl<A: Application> UiHost<A> {
             UiEvent::AccessibilityFocus(target)
             | UiEvent::AccessibilityActivate(target)
             | UiEvent::AccessibilityContextMenu(target) => Some(target.clone()),
+            UiEvent::AccessibilityRevealVirtualRow { collection, .. } => Some(collection.clone()),
             _ => None,
         };
         let mut outcome =
@@ -4058,7 +4229,11 @@ impl<A: Application> UiHost<A> {
     }
 
     fn rebuild_timed(&mut self) -> (u64, u64, HostEventOutcome) {
-        let mut view_calls = 1usize;
+        self.rebuild_timed_retaining(false)
+    }
+
+    fn rebuild_timed_retaining(&mut self, retain: bool) -> (u64, u64, HostEventOutcome) {
+        let mut view_calls = 0usize;
         let focused_before = self
             .state
             .window_focused()
@@ -4074,7 +4249,13 @@ impl<A: Application> UiHost<A> {
         let context = ViewContext::from_host(self.bounds, &self.state, Some(&self.tree));
         let overlay_interaction = OverlayInteractionSnapshot::capture(&self.state, &self.tree);
         let paint_started = Instant::now();
-        let view = self.application.view(context.clone());
+        let view = retain
+            .then(|| self.tree.retained_declaration())
+            .flatten()
+            .unwrap_or_else(|| {
+                view_calls += 1;
+                crate::Component::into_element(self.application.view(context.clone()))
+            });
         let overlays = self.application.frame_overlays(context);
         let open_overlay = self.state.open_overlay_id().cloned();
         let blocking_overlay = blocking_overlay_is_open(&overlays, open_overlay.as_ref());
@@ -4145,6 +4326,7 @@ impl<A: Application> UiHost<A> {
         }
         let layout_us = elapsed_us(layout_started);
         let resources = self.tree.resource_diagnostics();
+        self.retained_frame_bytes = resources.estimated_retained_bytes;
         cancellation.telemetry.view_calls =
             cancellation.telemetry.view_calls.saturating_add(view_calls);
         cancellation.telemetry.nodes_measured = cancellation
@@ -4188,6 +4370,20 @@ impl<A: Application> UiHost<A> {
                 paint_list_us.saturating_add(next_paint_us),
                 layout_us.saturating_add(next_layout_us),
                 outcome,
+            );
+        }
+        let boundary = self.tree.reconcile_virtual_boundary(&mut self.state);
+        if boundary != Invalidation::None {
+            // The request was consumed before selection. At most one native
+            // follow-up resolves reveal geometry and selection paint; package
+            // row admission remains the application's normal viewport work.
+            let (next_paint_us, next_layout_us, next_outcome) = self.rebuild_timed_retaining(true);
+            cancellation.invalidation = cancellation.invalidation.merge(boundary);
+            cancellation.merge(next_outcome);
+            return (
+                paint_list_us.saturating_add(next_paint_us),
+                layout_us.saturating_add(next_layout_us),
+                cancellation,
             );
         }
         (paint_list_us, layout_us, cancellation)
@@ -5283,6 +5479,213 @@ mod tests {
         native_input_source_binding, native_pointer_source_binding, queue_continuous_input,
         revoke_native_ingress, transform_is_current, wait_duration,
     };
+
+    #[test]
+    fn scroll_anchor_preserves_keyed_row_through_geometry_changes() {
+        struct AnchoredRows {
+            leading: f32,
+            nested: bool,
+            present: bool,
+            updates: usize,
+        }
+        impl Application for AnchoredRows {
+            type Message = bool;
+            fn update(&mut self, _: bool) {
+                self.updates += 1;
+            }
+            fn view(&self, _: ViewContext) -> impl crate::View<bool> {
+                let mut rows = crate::Column::new().child(crate::Spacer::vertical(self.leading));
+                if self.present {
+                    rows = rows.child(crate::Container::new().id("keyed-row").height(30.0));
+                }
+                rows = rows.child(crate::Spacer::vertical(1_000.0));
+                let inner = crate::VerticalScroll::new(true, 80.0)
+                    .id("inner")
+                    .child(rows);
+                if self.nested {
+                    crate::AnyView::new(
+                        crate::VerticalScroll::new(false, 30.0).id("outer").child(
+                            crate::Column::new()
+                                .child(crate::Spacer::vertical(50.0))
+                                .child(crate::Container::new().height(120.0).child(inner))
+                                .child(crate::Spacer::vertical(1_000.0)),
+                        ),
+                    )
+                } else {
+                    crate::AnyView::new(inner)
+                }
+            }
+        }
+        for nested in [false, true] {
+            let mut host = UiHost::new(
+                AnchoredRows {
+                    leading: 100.0,
+                    nested,
+                    present: true,
+                    updates: 0,
+                },
+                300,
+                200,
+            );
+            let target = host
+                .resolved_layout()
+                .nodes()
+                .iter()
+                .find(|node| node.id.as_str().ends_with("/keyed-row"))
+                .unwrap()
+                .id
+                .clone();
+            let inner = host
+                .resolved_layout()
+                .nodes()
+                .iter()
+                .find(|node| node.id.as_str().ends_with("/inner"))
+                .unwrap()
+                .id
+                .clone();
+            host.state.scroll_by(inner, 80.0, 1_000.0);
+            if nested {
+                host.state
+                    .scroll_by(crate::UiId::from("root/outer"), 30.0, 1_000.0);
+            }
+            host.step(HostBatch {
+                application_changed: true,
+                ..Default::default()
+            });
+            let anchor = host.capture_scroll_anchor(&target).expect("visible row");
+            let original_y = host
+                .resolved_layout()
+                .find(&target)
+                .unwrap()
+                .allocated
+                .origin
+                .y;
+            let outer_offset = host.scroll_extent(&false).map(|extent| extent.offset);
+            for leading in [160.0, 50.0, 500.0] {
+                host.application_mut().leading = leading;
+                host.step(HostBatch {
+                    application_changed: true,
+                    ..Default::default()
+                });
+                if leading == 500.0 {
+                    assert!(
+                        host.capture_scroll_anchor(&target).is_none(),
+                        "offscreen rows cannot become new anchors"
+                    );
+                }
+                let outcome = host
+                    .restore_scroll_anchor(&anchor)
+                    .expect("geometry correction");
+                assert!(outcome.changed);
+                assert!(outcome.telemetry.view_calls > 0);
+                assert!(
+                    (host
+                        .resolved_layout()
+                        .find(&target)
+                        .unwrap()
+                        .allocated
+                        .origin
+                        .y
+                        - original_y)
+                        .abs()
+                        < 0.02
+                );
+                assert_eq!(
+                    host.scroll_extent(&false).map(|extent| extent.offset),
+                    outer_offset
+                );
+                assert!(host.restore_scroll_anchor(&anchor).is_none());
+            }
+            host.application_mut().leading = 0.0;
+            host.step(HostBatch {
+                application_changed: true,
+                ..Default::default()
+            });
+            assert!(host.restore_scroll_anchor(&anchor).is_some());
+            assert_eq!(
+                host.scroll_extent(&true).unwrap().offset,
+                0.0,
+                "anchoring cannot scroll beyond the new beginning"
+            );
+            assert!(host.restore_scroll_anchor(&anchor).is_none());
+            assert_eq!(
+                host.application().updates,
+                0,
+                "anchoring does not synthesize package callbacks"
+            );
+            host.application_mut().present = false;
+            host.step(HostBatch {
+                application_changed: true,
+                ..Default::default()
+            });
+            assert!(host.restore_scroll_anchor(&anchor).is_none());
+            assert!(host.capture_scroll_anchor(&target).is_none());
+        }
+    }
+
+    #[test]
+    fn scroll_anchor_keeps_a_focused_control_inside_a_smaller_viewport() {
+        struct App;
+        impl Application for App {
+            type Message = ();
+            fn update(&mut self, _: ()) {
+                panic!("anchor restoration must not activate controls");
+            }
+            fn view(&self, context: ViewContext) -> impl crate::View<()> {
+                crate::Column::new()
+                    .id("scroll")
+                    .height(context.viewport.size.height)
+                    .overflow_y(crate::Overflow::Auto)
+                    .child(crate::Spacer::vertical(400.0))
+                    .child(
+                        crate::Button::new((), "Selected")
+                            .id("selected")
+                            .height(30.0)
+                            .shrink(0.0),
+                    )
+                    .child(crate::Spacer::vertical(600.0))
+            }
+        }
+        let mut host = UiHost::new(App, 320, 600);
+        let target = host
+            .query_unique(&crate::SemanticSelector::RoleAndName {
+                role: crate::SemanticRole::Button,
+                name: "Selected".into(),
+            })
+            .unwrap()
+            .id;
+        host.request_focus(target.clone());
+        let anchor = host.capture_scroll_anchor(&target).unwrap();
+        host.step(HostBatch {
+            surface_size: Some((320, 200)),
+            ..Default::default()
+        });
+        host.restore_scroll_anchor(&anchor);
+        let bounds = host.resolved_layout().find(&target).unwrap().allocated;
+        assert!(
+            bounds.origin.y >= 0.0 && bounds.origin.y + bounds.size.height <= 200.01,
+            "restored target is outside the resized viewport: {bounds:?}"
+        );
+        assert_eq!(host.inspect().keyboard_focus, Some(target));
+        assert!(host.restore_scroll_anchor(&anchor).is_none());
+    }
+
+    #[test]
+    fn input_lease_matches_full_inspection_across_focus_and_resize() {
+        let mut host = UiHost::new(ControllerApplication, 320, 200);
+        for focused in [true, false, true] {
+            host.step(HostBatch {
+                window_focused: Some(focused),
+                surface_size: Some((400, 240)),
+                ..Default::default()
+            });
+            let lease = host.input_lease();
+            let full = host.inspect();
+            assert_eq!(lease.frame_generation, full.frame_generation);
+            assert_eq!(lease.window_focused, full.window_focused);
+            assert_eq!(lease, super::HostInputLease::from(full));
+        }
+    }
 
     #[test]
     fn controller_poll_ownership_is_explicit_and_role_scoped() {
@@ -6647,6 +7050,50 @@ mod tests {
     }
 
     #[test]
+    fn retained_resource_accounting_tracks_frame_and_viewport_lifetimes() {
+        for nodes in [100, 1_000, 10_000] {
+            let mut host = UiHost::new(RetainedPaintFixture::new(nodes), 640, 480);
+            let assert_accounted = |host: &mut UiHost<RetainedPaintFixture>| {
+                let expected = host.tree.resource_diagnostics().estimated_retained_bytes;
+                assert_eq!(host.retained_frame_bytes, expected);
+                let outcome = host.step(HostBatch::default());
+                assert!(!outcome.changed);
+                assert_eq!(outcome.telemetry.retained_frame_bytes, expected);
+            };
+            assert_accounted(&mut host);
+            host.adopt_input_modality(crate::InputModality::Pointer);
+            let point = semantic_center(&host, "Item 0");
+            host.handle_event(UiEvent::PointerMoved(point));
+            assert_accounted(&mut host);
+            // A sentinel demonstrates that an unchanged batch consumes the
+            // stored estimate instead of traversing the frame to recompute it.
+            let accounted = host.retained_frame_bytes;
+            host.retained_frame_bytes = 123;
+            assert_eq!(
+                host.step(HostBatch::default())
+                    .telemetry
+                    .retained_frame_bytes,
+                123
+            );
+            let motion = host.handle_event(UiEvent::PointerMoved(point));
+            assert!(!motion.changed);
+            assert_eq!(motion.telemetry.retained_frame_bytes, 123);
+            host.retained_frame_bytes = accounted;
+            host.application_mut().label_revision += 1;
+            host.step(HostBatch {
+                application_changed: true,
+                ..HostBatch::default()
+            });
+            assert_accounted(&mut host);
+            let viewport = host.new_viewport(320, 240);
+            let prior = host.replace_viewport(viewport);
+            assert_accounted(&mut host);
+            host.replace_viewport(prior);
+            assert_accounted(&mut host);
+        }
+    }
+
+    #[test]
     fn unchanged_frames_do_no_component_or_semantic_work_and_render_cleanly() {
         let mut host = UiHost::new(RetainedPaintFixture::new(24), 640, 480);
         host.application().views.set(0);
@@ -6715,6 +7162,162 @@ mod tests {
             && right.origin.x < left.origin.x + left.size.width
             && left.origin.y < right.origin.y + right.size.height
             && right.origin.y < left.origin.y + left.size.height
+    }
+
+    #[test]
+    fn hover_with_offscreen_editors_and_dropdowns_reuses_layout_and_matches_cold_frame() {
+        struct App;
+        impl Application for App {
+            type Message = ();
+            fn update(&mut self, _: ()) {}
+            fn view(&self, _: ViewContext) -> impl crate::View<()> {
+                crate::VerticalScroll::new((), 0.0)
+                    .id("scroll")
+                    .height(100.0)
+                    .child(
+                        crate::Column::new()
+                            .child(Button::new((), "Visible button").id("button"))
+                            .child(crate::Spacer::vertical(500.0))
+                            .child(crate::TextField::on_change("offscreen", |_| ()).id("editor"))
+                            .child(
+                                crate::Dropdown::new((), "Choice", [("Choice", ())]).id("dropdown"),
+                            ),
+                    )
+            }
+        }
+        let mut retained = UiHost::new(App, 320, 100);
+        let mut cold = UiHost::new(App, 320, 100);
+        retained.adopt_input_modality(InputModality::Pointer);
+        cold.adopt_input_modality(InputModality::Pointer);
+        let point = semantic_center(&retained, "Visible button");
+        for event in [
+            UiEvent::PointerMoved(point),
+            UiEvent::PointerPressed(point),
+            UiEvent::PointerReleased(point),
+            UiEvent::PointerMoved(crate::Point { x: 350.0, y: 90.0 }),
+        ] {
+            let motion = matches!(event, UiEvent::PointerMoved(_));
+            let outcome = retained.handle_event(event.clone());
+            cold.handle_event(event);
+            cold.rebuild();
+            assert_cold_equivalent(&retained, &cold);
+            // Press/activation can change keyboard focus or application state.
+            if motion {
+                assert_eq!(outcome.telemetry.view_calls, 0);
+                assert_eq!(outcome.telemetry.nodes_measured, 0);
+                assert_eq!(outcome.telemetry.nodes_placed, 0);
+                assert_eq!(outcome.telemetry.semantic_nodes_rebuilt, 0);
+                assert!(!outcome.telemetry.rebuilt);
+            }
+        }
+    }
+
+    #[test]
+    fn native_scroll_reuses_opted_in_view_but_application_changes_rebuild() {
+        struct App {
+            retain: bool,
+            views: std::cell::Cell<usize>,
+        }
+        impl Application for App {
+            type Message = ();
+            fn update(&mut self, _: ()) {}
+            fn retain_view_for_native_layout(&self) -> bool {
+                self.retain
+            }
+            fn view(&self, _: ViewContext) -> impl crate::View<()> {
+                self.views.set(self.views.get() + 1);
+                crate::Column::new()
+                    .id("scroll")
+                    .height(100.0)
+                    .overflow_y(crate::Overflow::Auto)
+                    .child(
+                        crate::Column::new()
+                            .child(crate::Text::new("Top"))
+                            .child(crate::Spacer::vertical(500.0))
+                            .child(crate::Text::new("Bottom")),
+                    )
+            }
+        }
+        let mut retained = UiHost::new(
+            App {
+                retain: true,
+                views: std::cell::Cell::new(0),
+            },
+            320,
+            100,
+        );
+        let mut cold = UiHost::new(
+            App {
+                retain: false,
+                views: std::cell::Cell::new(0),
+            },
+            320,
+            100,
+        );
+        retained.adopt_input_modality(InputModality::Pointer);
+        cold.adopt_input_modality(InputModality::Pointer);
+        for delta_y in [40.0, 1000.0, -1000.0] {
+            let event = UiEvent::Scroll {
+                point: crate::Point { x: 100.0, y: 50.0 },
+                delta_y,
+            };
+            let before = retained.application().views.get();
+            let outcome = retained.step(HostBatch {
+                events: vec![HostEvent::Ui(event.clone())],
+                surface_size: Some((320, 100)),
+                scale_factor: Some(1.0),
+                ..Default::default()
+            });
+            cold.step(HostBatch {
+                events: vec![HostEvent::Ui(event)],
+                surface_size: Some((320, 100)),
+                scale_factor: Some(1.0),
+                ..Default::default()
+            });
+            assert!(outcome.changed);
+            assert_eq!(outcome.telemetry.view_calls, 0);
+            assert_eq!(retained.application().views.get(), before);
+            assert_cold_equivalent(&retained, &cold);
+        }
+        let outcome = retained.step(HostBatch {
+            application_changed: true,
+            ..Default::default()
+        });
+        assert_eq!(outcome.telemetry.view_calls, 1);
+        for (index, delta) in [40.0, -40.0].into_iter().enumerate() {
+            let event = || {
+                synthetic_normalized(
+                    InputEvent::Pointer(nickel_input::PointerEvent::Axis {
+                        device: nickel_input::DeviceId(1),
+                        order: nickel_input::EventOrder(index as u64 + 100),
+                        delta: nickel_input::Vector { x: 0.0, y: -delta },
+                        discrete: None,
+                        position: Some(nickel_input::Point { x: 100.0, y: 50.0 }),
+                    }),
+                    None,
+                )
+            };
+            let outcome = retained.step(HostBatch {
+                events: vec![event()],
+                surface_size: Some((320, 100)),
+                scale_factor: Some(1.0),
+                ..Default::default()
+            });
+            cold.step(HostBatch {
+                events: vec![event()],
+                surface_size: Some((320, 100)),
+                scale_factor: Some(1.0),
+                ..Default::default()
+            });
+            assert!(outcome.changed);
+            assert_eq!(outcome.telemetry.view_calls, 0);
+            assert_cold_equivalent(&retained, &cold);
+        }
+        let outcome = retained.step(HostBatch {
+            surface_size: Some((300, 90)),
+            ..Default::default()
+        });
+        assert_eq!(outcome.telemetry.view_calls, 1);
     }
 
     #[test]
@@ -7633,6 +8236,13 @@ mod tests {
             UiEvent::AccessibilityActivate(background.clone()),
             UiEvent::AccessibilityFocus(background.clone()),
             UiEvent::AccessibilityContextMenu(background.clone()),
+            UiEvent::AccessibilityRevealVirtualRow {
+                collection: background.clone(),
+                revision: 1,
+                ordinal: 0,
+                leading: 0.0,
+                height: 24.0,
+            },
         ] {
             let outcome = host.handle_event(event);
             assert_eq!(
@@ -9278,6 +9888,80 @@ mod tests {
         assert!(!accessibility.input_dispatcher.touch_active());
         assert!(accessibility.pending_long_press.is_none());
         assert_eq!(accessibility.state.focused(), Some(&second_id));
+    }
+
+    #[test]
+    fn deferred_virtual_focus_cancels_touch_only_for_a_valid_request() {
+        use crate::Component;
+
+        struct VirtualApplication;
+        impl Application for VirtualApplication {
+            type Message = ();
+            fn update(&mut self, (): ()) {}
+            fn view(&self, _context: ViewContext) -> impl crate::View<()> {
+                let heights = crate::VirtualHeightIndex::new(&[24.0; 100], 0.0);
+                crate::VerticalScroll::new((), 0.0).id("scroll").child(
+                    crate::VirtualColumn::new()
+                        .logical_navigation(100, 1)
+                        .window(heights.window_for_range(0..6).unwrap())
+                        .children((0..6).map(|ordinal| {
+                            Button::new((), format!("Row {ordinal}"))
+                                .id(format!("row-{ordinal}"))
+                                .height(24.0)
+                        }))
+                        .into_element()
+                        .id("rows"),
+                )
+            }
+        }
+        let mut host = UiHost::new(VirtualApplication, 320, 96);
+        let collection = host
+            .tree
+            .resolved_layout()
+            .nodes()
+            .iter()
+            .find(|node| node.virtual_navigation.is_some())
+            .unwrap()
+            .id
+            .clone();
+        host.handle_input(
+            &InputEvent::Touch(TouchEvent::Started {
+                device: DeviceId(5),
+                order: EventOrder(1),
+                contact: TouchId(1),
+                position: Point { x: 40.0, y: 12.0 },
+            }),
+            None,
+        );
+        assert!(host.input_dispatcher.touch_active());
+        let request = |revision| HostBatch {
+            events: vec![HostEvent::Ui(UiEvent::AccessibilityRevealVirtualRow {
+                collection: collection.clone(),
+                revision,
+                ordinal: 50,
+                leading: 1200.0,
+                height: 24.0,
+            })],
+            ..HostBatch::default()
+        };
+        host.step(request(2));
+        assert!(host.input_dispatcher.touch_active());
+        assert!(host.state.virtual_focus.is_none());
+        let outcome = host.step(request(1));
+        assert!(outcome.messages.is_empty());
+        assert!(!host.input_dispatcher.touch_active());
+        assert!(host.pending_long_press.is_none());
+        assert!(host.state.virtual_focus.is_some());
+        let ended = host.handle_input(
+            &InputEvent::Touch(TouchEvent::Ended {
+                device: DeviceId(5),
+                order: EventOrder(2),
+                contact: TouchId(1),
+                position: Point { x: 40.0, y: 12.0 },
+            }),
+            None,
+        );
+        assert!(ended.messages.is_empty());
     }
 
     #[test]
