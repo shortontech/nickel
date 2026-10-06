@@ -3195,3 +3195,63 @@ fn focused_selection_is_visually_distinct_and_survives_window_focus_loss() {
     let unfocused = nickel_ui_testkit::render_host(scenario.host(), 820, 620, 1.0);
     assert_ne!(focused, unfocused);
 }
+
+#[test]
+#[ignore = "release-mode internal resize layout benchmark"]
+fn internal_resize_layout_benchmark() {
+    let browser = DirectoryBrowser::fixture(
+        (0..4096)
+            .map(|index| FileEntry {
+                display_name_override: None,
+                name: format!("item-{index}.txt").into(),
+                path: PathBuf::from(format!("/fixture/item-{index}.txt")),
+                is_directory: false,
+                size: Some(1),
+                modified: None,
+            })
+            .collect(),
+    );
+    let app = FileApp::with_browser(browser, String::new());
+    let palette = ThemePalette::from_appearance(
+        ShellSettings::load_default().resolve_appearance(nickel_platform::appearance()),
+    );
+    nickel_ui::with_text_measure_cache_mode(nickel_ui::TextMeasureCacheMode::Enabled, || {
+        let warm = nickel_ui::UiFrame::layout(
+            app.build_view(860.0, 620.0, palette, false),
+            Rect::new(0.0, 0.0, 860.0, 620.0),
+        );
+        std::hint::black_box(warm);
+        let before = nickel_ui::text_layout_cache_diagnostics();
+        let mut samples = Vec::new();
+        for index in 0..120 {
+            let width = 800.0 + index as f32 * 2.0;
+            let height = 600.0 + (index % 30) as f32;
+            let started = std::time::Instant::now();
+            let frame = nickel_ui::UiFrame::layout(
+                app.build_view(width, height, palette, false),
+                Rect::new(0.0, 0.0, width, height),
+            );
+            samples.push(started.elapsed().as_secs_f64() * 1000.0);
+            let mounted = frame
+                .semantic_nodes()
+                .iter()
+                .filter(|node| node.id.as_str().contains("/file-entry-"))
+                .count();
+            assert!(
+                mounted <= 64,
+                "resize must retain virtualization: {mounted}"
+            );
+            std::hint::black_box(frame);
+        }
+        samples.sort_by(f64::total_cmp);
+        let after = nickel_ui::text_layout_cache_diagnostics();
+        println!(
+            "file resize layout: median={:.3}ms p95={:.3}ms text_hits={} text_misses={} evictions={}",
+            samples[60],
+            samples[114],
+            after.hits - before.hits,
+            after.misses - before.misses,
+            after.evictions - before.evictions
+        );
+    });
+}

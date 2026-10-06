@@ -2400,7 +2400,9 @@ impl InternalUiRuntime {
         let changed = surface.placement != placement;
         surface.placement = placement;
         if resized {
-            surface.renderer.suspend();
+            // A visible resize changes frame geometry, not resource identity.
+            // Rendering detects the new extent and repaints while retaining
+            // image hashes, glyphs, and reusable scratch allocations.
             surface.dirty = true;
             if let Some(host) = self.surfaces.get_mut(id) {
                 host.step(HostBatch {
@@ -2509,7 +2511,9 @@ impl InternalUiRuntime {
         surface.placement = placement;
         surface.scale_factor = scale;
         if resized {
-            surface.renderer.suspend();
+            // A visible resize changes frame geometry, not resource identity.
+            // Rendering detects the new extent and repaints while retaining
+            // image hashes, glyphs, and reusable scratch allocations.
             surface.dirty = true;
             if let Some(host) = self.surfaces.get_mut(id) {
                 host.step(HostBatch {
@@ -3737,6 +3741,77 @@ mod tests {
         assert_eq!(runtime.surfaces.ids().collect::<Vec<_>>(), vec![id]);
         assert!(!runtime.configure_surface(id, target, 1.5));
         assert!(runtime.drain_routed_events().is_empty());
+    }
+
+    #[test]
+    fn visible_resize_retains_image_hashes_and_text_scratch() {
+        use std::sync::Arc;
+        let mut runtime = InternalUiRuntime::default();
+        let image = Arc::new(image::RgbaImage::from_pixel(
+            32,
+            32,
+            image::Rgba([20, 40, 60, 255]),
+        ));
+        let commands = vec![
+            PaintCommand::Image {
+                bounds: nickel_ui::Rect::new(0.0, 0.0, 32.0, 32.0),
+                id: 7,
+                generation: 1,
+                image,
+                high_density: None,
+            },
+            PaintCommand::Text {
+                bounds: nickel_ui::Rect::new(40.0, 0.0, 120.0, 24.0),
+                text: "File manager".into(),
+                scale: 1.0,
+                color: 0xffffffff,
+                align: nickel_ui::TextAlign::Start,
+                bold: false,
+                wrap: false,
+            },
+        ];
+        let mut target = placement(Some("DP-1"));
+        target.role = InternalSurfaceRole::Application;
+        target.geometry = (0, 0, 200, 80);
+        let id = runtime.insert_scene(commands, target.clone(), 1.0);
+        runtime.render_buffer(id);
+        let before = runtime.renderer_diagnostics(id).unwrap();
+        let hashed = runtime.presentation[&id].renderer.image_hashes.hashed_bytes;
+        assert!(before.text_scratch_bytes > 4);
+        for index in 0..20 {
+            target.geometry.2 += 1;
+            if index % 2 == 0 {
+                runtime.configure_surface(id, target.clone(), 1.0);
+            } else {
+                runtime.configure_application(id, target.clone());
+            }
+            assert_eq!(
+                runtime.renderer_diagnostics(id).unwrap().text_scratch_bytes,
+                before.text_scratch_bytes
+            );
+            runtime.render_buffer(id);
+        }
+        let after = runtime.renderer_diagnostics(id).unwrap();
+        assert_eq!(
+            runtime.presentation[&id].renderer.image_hashes.hashed_bytes,
+            hashed
+        );
+        assert_eq!(after.image_uploads, before.image_uploads);
+        assert_eq!(after.text_cache_misses, before.text_cache_misses);
+        assert_eq!(runtime.surfaces.get(id).unwrap().logical_size(), (220, 80));
+        // Hiding the owner still releases regenerable private state.
+        runtime.set_visible(id, false);
+        assert_eq!(
+            runtime.renderer_diagnostics(id).unwrap().text_scratch_bytes,
+            4
+        );
+        assert!(
+            runtime.presentation[&id]
+                .renderer
+                .image_hashes
+                .entries
+                .is_empty()
+        );
     }
 
     #[test]

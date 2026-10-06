@@ -6999,6 +6999,27 @@ pub(super) fn measure_element<Message>(
     element: &Element<Message>,
     constraints: Constraints,
 ) -> Size {
+    // A definite box does not depend on its children's intrinsic size. Grid
+    // and flex measurement can visit a subtree repeatedly before placement;
+    // stop here rather than shaping its labels on every such visit.
+    let definite = |length: Length, available: f32| match length {
+        Length::Px(_) => Some(length.resolve(available, 0.0)),
+        Length::Fill | Length::Percent(_) if available.is_finite() => {
+            Some(length.resolve(available, 0.0))
+        }
+        _ => None,
+    };
+    if let (Some(width), Some(height)) = (
+        definite(element.style.width, constraints.max.width),
+        definite(element.style.height, constraints.max.height),
+    ) {
+        let min_width = element.style.min_width.max(0.0);
+        let min_height = element.style.min_height.max(0.0);
+        return constraints.constrain(Size::new(
+            width.clamp(min_width, element.style.max_width.max(min_width)),
+            height.clamp(min_height, element.style.max_height.max(min_height)),
+        ));
+    }
     let horizontal_padding = element.style.padding.width();
     let vertical_padding = element.style.padding.height();
     let child_max = Size::new(

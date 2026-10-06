@@ -7041,3 +7041,59 @@ fn bounded_semantics_refuse_protected_values_without_publishing_lengths() {
         Err(BoundedSemanticError::ProtectedSurface)
     );
 }
+
+#[test]
+fn definite_boxes_measure_without_shaping_their_descendants() {
+    let box_element = Container::<()>::new()
+        .width(240.0)
+        .height(90.0)
+        .padding(Insets::all(8.0))
+        .child(Text::new("Wrapped text still needs layout and paint inside the box").wrap(true))
+        .into_element();
+    let before = text_layout_cache_diagnostics();
+    assert_eq!(
+        box_element.measure(Constraints::loose(Size::new(500.0, 400.0))),
+        Size::new(240.0, 90.0)
+    );
+    let after = text_layout_cache_diagnostics();
+    assert_eq!(after.hits, before.hits);
+    assert_eq!(after.misses, before.misses);
+    let frame = UiFrame::layout(box_element, Rect::new(0.0, 0.0, 240.0, 90.0));
+    assert!(
+        frame
+            .commands()
+            .iter()
+            .any(|command| matches!(command, PaintCommand::Text { .. }))
+    );
+    assert!(frame.resolved_layout().nodes().len() > 1);
+}
+
+#[test]
+fn definite_measurement_preserves_parent_constraints_and_style_limits() {
+    let mut element = Container::<()>::new()
+        .width(240.0)
+        .height(90.0)
+        .into_element();
+    element.style.min_width = 300.0;
+    element.style.max_height = 60.0;
+    assert_eq!(
+        element.measure(Constraints::loose(Size::new(280.0, 400.0))),
+        Size::new(280.0, 60.0)
+    );
+    element.style.width = Length::Percent(0.5);
+    element.style.height = Length::Fill;
+    element.style.min_width = 0.0;
+    element.style.max_height = f32::INFINITY;
+    assert_eq!(
+        element.measure(Constraints::loose(Size::new(280.0, 400.0))),
+        Size::new(140.0, 400.0)
+    );
+    // Unbounded percentages and fill still depend on intrinsic content.
+    element
+        .children
+        .push(Container::new().width(42.0).height(17.0).into_element());
+    assert_eq!(
+        element.measure(Constraints::unbounded()),
+        Size::new(42.0, 17.0)
+    );
+}

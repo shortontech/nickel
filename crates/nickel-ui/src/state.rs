@@ -17,15 +17,15 @@ pub enum InputModality {
 }
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct UiId(String);
+pub struct UiId(Arc<str>);
 
 impl UiId {
     pub fn new(value: impl Into<String>) -> Self {
-        Self(value.into())
+        Self(Arc::from(value.into()))
     }
 
     pub fn scoped(&self, child: impl AsRef<str>) -> Self {
-        Self(format!("{}/{}", self.0, child.as_ref()))
+        Self::new(format!("{}/{}", self.0, child.as_ref()))
     }
 
     pub fn as_str(&self) -> &str {
@@ -942,6 +942,22 @@ fn replace_if_changed(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cloned_ui_ids_share_text_and_preserve_string_identity() {
+        use std::hash::{Hash, Hasher};
+        let id = UiId::new("files/toolbar/location");
+        let cloned = id.clone();
+        assert!(Arc::ptr_eq(&id.0, &cloned.0));
+        assert_eq!(id, UiId::new(id.as_str()));
+        assert_eq!(id.scoped("child").as_str(), "files/toolbar/location/child");
+        assert!(UiId::new("a") < UiId::new("b"));
+        let mut id_hash = std::hash::DefaultHasher::new();
+        let mut text_hash = std::hash::DefaultHasher::new();
+        id.hash(&mut id_hash);
+        id.as_str().hash(&mut text_hash);
+        assert_eq!(id_hash.finish(), text_hash.finish());
+    }
 
     #[test]
     fn controller_projection_never_retains_a_second_widget_target() {
