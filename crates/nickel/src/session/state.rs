@@ -8112,10 +8112,14 @@ impl NickelSession {
     }
 
     pub(crate) fn configured_output_scale(&self, output: &Output) -> OutputScale {
-        self.output_scale_preferences
-            .get(&stable_output_identity(output))
-            .map(|scale| OutputScale::Fractional(scale.factor()))
-            .unwrap_or(OutputScale::Integer(1))
+        OutputScale::Fractional(
+            self.output_scale_preferences
+                .resolved_scale(
+                    &stable_output_identity(output),
+                    nickel_platform::inherited_desktop_preferences().scale,
+                )
+                .factor(),
+        )
     }
     /// Map a compositor-managed window only while its Wayland client has a
     /// buffer attached. X11 windows and non-XDG surfaces are unaffected.

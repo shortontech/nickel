@@ -199,6 +199,27 @@ fn find_program(names: &[&str]) -> Option<std::path::PathBuf> {
 }
 
 #[cfg(target_os = "linux")]
+pub(crate) fn read_gtk_interface_setting(key: &str) -> Option<String> {
+    if ![
+        "icon-theme",
+        "cursor-theme",
+        "cursor-size",
+        "scaling-factor",
+    ]
+    .contains(&key)
+    {
+        return None;
+    }
+    let mut command = std::process::Command::new(find_program(&["gsettings"])?);
+    command.args(["get", "org.gnome.desktop.interface", key]);
+    PreparedToolkitCommand(command)
+        .spawn()
+        .ok()?
+        .wait(|| Ok(()))
+        .ok()
+}
+
+#[cfg(target_os = "linux")]
 impl LinuxToolkitScaleBackend {
     pub fn detect() -> Self {
         Self {

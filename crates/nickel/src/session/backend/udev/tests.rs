@@ -5,9 +5,9 @@ use super::{
     damage_bounding_box, dependent_renderers_after_primary_removal, device_activation_priority,
     drm_render_strategy, mapped_damage_rows, mark_disabled_outputs_absent,
     no_usable_drm_device_error, normalize_capture_rows, paced_render_delay,
-    parse_kde_cursor_settings, pending_recovery_devices, primary_dependency_to_activate,
-    published_disabled_outputs, render_primary_available, renderer_retained_reason,
-    should_attempt_scanned_connector, union_rectangles,
+    pending_recovery_devices, primary_dependency_to_activate, published_disabled_outputs,
+    render_primary_available, renderer_retained_reason, should_attempt_scanned_connector,
+    union_rectangles,
 };
 use crate::session::task_switcher_render::{
     BufferKey as TaskSwitcherBufferKey, contained_preview_bounds, draw_contained_preview,
@@ -484,20 +484,6 @@ fn task_switcher_keeps_the_selection_in_a_centered_bounded_window() {
     assert_eq!(visible_range(9, 0), 0..5);
     assert_eq!(visible_range(9, 4), 2..7);
     assert_eq!(visible_range(9, 8), 4..9);
-}
-
-#[test]
-fn reads_cursor_preferences_from_kde_mouse_group() {
-    let settings = parse_kde_cursor_settings(
-        "[Keyboard]\nRepeatDelay=600\n[Mouse]\ncursorTheme=Oxygen_Black\ncursorSize=36\n",
-    );
-    assert_eq!(settings, (Some("Oxygen_Black".into()), Some(36)));
-}
-
-#[test]
-fn ignores_cursor_preferences_outside_kde_mouse_group() {
-    let settings = parse_kde_cursor_settings("[Other]\ncursorTheme=Oxygen_Black\ncursorSize=36\n");
-    assert_eq!(settings, (None, None));
 }
 
 #[test]

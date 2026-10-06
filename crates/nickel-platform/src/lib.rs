@@ -8,6 +8,8 @@ mod default_apps;
 mod executable_identity;
 #[cfg(target_os = "linux")]
 pub use default_apps::spawn_with_default;
+#[cfg(target_os = "linux")]
+mod desktop_preferences;
 mod maintenance;
 mod media;
 mod peripherals;
@@ -15,6 +17,8 @@ mod platform_contract;
 #[cfg(target_os = "windows")]
 pub mod process_identity;
 mod toolkit_scale;
+#[cfg(target_os = "linux")]
+pub use desktop_preferences::{InheritedDesktopPreferences, inherited_desktop_preferences};
 mod toolkit_transaction;
 #[cfg(target_os = "windows")]
 pub mod windows_connectivity;

@@ -522,32 +522,10 @@ pub fn system_icon_theme() -> String {
     {
         return theme;
     }
-    let config_home = env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")));
-    config_home
-        .and_then(|directory| fs::read_to_string(directory.join("kdeglobals")).ok())
-        .and_then(|contents| value_in_section(&contents, "Icons", "Theme"))
+    crate::inherited_desktop_preferences()
+        .icon_theme
+        .clone()
         .unwrap_or_else(|| "hicolor".to_owned())
-}
-
-fn value_in_section(contents: &str, section: &str, key: &str) -> Option<String> {
-    let mut in_section = false;
-    for line in contents.lines().map(str::trim) {
-        if line.starts_with('[') && line.ends_with(']') {
-            in_section = &line[1..line.len() - 1] == section;
-        } else if in_section
-            && let Some(value) = line
-                .strip_prefix(key)
-                .and_then(|line| line.strip_prefix('='))
-        {
-            let value = value.trim();
-            if !value.is_empty() {
-                return Some(value.to_owned());
-            }
-        }
-    }
-    None
 }
 
 fn icon_name(path: &Path) -> &'static str {
@@ -619,7 +597,7 @@ mod tests {
     use super::{
         decode_file_uri, desktop_entry_display_name_with, desktop_entry_icon_with,
         gsettings_color_scheme, icon_name, installed_icon_themes_in, load_icon,
-        path_icon_theme_revision, path_icon_with_theme, value_in_section,
+        path_icon_theme_revision, path_icon_with_theme,
     };
     use nickel_core::theme::ThemeMode;
 
@@ -800,15 +778,6 @@ mod tests {
         .unwrap();
 
         assert_eq!(installed_icon_themes_in([root.path().into()]), ["Usable"]);
-    }
-
-    #[test]
-    fn kde_theme_parser_ignores_values_outside_icons_section() {
-        let settings = "[General]\nTheme=Wrong\n[Icons]\nTheme=Papirus-Dark\n";
-        assert_eq!(
-            value_in_section(settings, "Icons", "Theme").as_deref(),
-            Some("Papirus-Dark")
-        );
     }
 
     #[test]

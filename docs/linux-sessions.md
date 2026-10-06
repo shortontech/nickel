@@ -2,6 +2,26 @@
 
 Run commands from the repository root.
 
+## Desktop preference inheritance
+
+Native sessions use saved Nickel output scales first. Outputs without a saved
+scale inherit GTK's nonzero `org.gnome.desktop.interface` scaling factor, then
+KDE's `[KScreen] ScaleFactor`, then 100%. GTK automatic scaling (`0`) does not
+provide a numeric fallback. Imported values do not write Nickel preferences.
+
+System icon and cursor defaults similarly prefer GTK over KDE. GTK interface
+settings are followed by GTK 4 and GTK 3 `settings.ini` files, then `kdeglobals`
+and `kcminputrc`. Explicit Nickel icon selections and cursor environment
+overrides take precedence. The bounded inherited snapshot is taken once per
+process, so external changes to these defaults apply on the next session.
+
+Nickel's application scaling policy remains separate from output scaling. Its
+existing GTK and Qt setters use Nickel's chosen policy and retain independent
+read-back and ownership records. Follow-Nickel clears inherited GTK and Qt scale
+environment overrides, including `QT_SCREEN_SCALE_FACTORS`, so clients follow
+the compositor. Custom mode supplies Nickel's chosen factors and also clears
+per-screen Qt overrides; Unchanged mode preserves the launch environment.
+
 ## Linux Nested Session
 
 Run Nickel inside an existing Linux desktop:

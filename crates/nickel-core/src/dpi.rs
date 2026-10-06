@@ -126,6 +126,9 @@ impl PersistedOutputScales {
     pub fn get(&self, identity: &str) -> Option<Scale120> {
         self.scales.get(identity).copied()
     }
+    pub fn resolved_scale(&self, identity: &str, inherited: Option<Scale120>) -> Scale120 {
+        self.get(identity).or(inherited).unwrap_or(Scale120::ONE)
+    }
     pub fn set(&mut self, identity: impl Into<String>, scale: Scale120) {
         self.scales.insert(identity.into(), scale);
     }
@@ -216,6 +219,7 @@ impl ApplicationScaleSettings {
                 ("GDK_SCALE".into(), String::new()),
                 ("GDK_DPI_SCALE".into(), String::new()),
                 ("QT_SCALE_FACTOR".into(), String::new()),
+                ("QT_SCREEN_SCALE_FACTORS".into(), String::new()),
             ]),
             ApplicationScalePolicy::Unchanged => BTreeMap::new(),
             ApplicationScalePolicy::Custom(scale) => BTreeMap::from([
@@ -228,6 +232,7 @@ impl ApplicationScaleSettings {
                     ),
                 ),
                 ("QT_SCALE_FACTOR".into(), format!("{:.6}", scale.factor())),
+                ("QT_SCREEN_SCALE_FACTORS".into(), String::new()),
             ]),
         }
     }
@@ -732,9 +737,32 @@ mod tests {
     }
 
     #[test]
+    fn saved_output_scale_wins_over_inherited_defaults_without_persisting_them() {
+        let mut scales = PersistedOutputScales::default();
+        let inherited = Scale120::new(180);
+        assert_eq!(
+            scales.resolved_scale("new-output", inherited),
+            inherited.unwrap()
+        );
+        assert_eq!(scales.resolved_scale("new-output", None), Scale120::ONE);
+        assert!(scales.serialize().is_empty());
+        scales.set("saved-output", Scale120::ONE);
+        assert_eq!(
+            scales.resolved_scale("saved-output", inherited),
+            Scale120::ONE
+        );
+    }
+
+    #[test]
     fn launch_environment_never_stacks_follow_mode_and_preserves_unchanged_mode() {
         let follow = ApplicationScaleSettings::default().launch_environment(true);
         assert_eq!(follow.get("QT_SCALE_FACTOR").map(String::as_str), Some(""));
+        assert_eq!(
+            follow.get("QT_SCREEN_SCALE_FACTORS").map(String::as_str),
+            Some("")
+        );
+        assert_eq!(follow.get("GDK_SCALE").map(String::as_str), Some(""));
+        assert_eq!(follow.get("GDK_DPI_SCALE").map(String::as_str), Some(""));
         assert!(
             ApplicationScaleSettings {
                 policy: ApplicationScalePolicy::Unchanged,
@@ -750,5 +778,6 @@ mod tests {
         .launch_environment(true);
         assert_eq!(custom["GDK_SCALE"], "2");
         assert_eq!(custom["QT_SCALE_FACTOR"], "1.250000");
+        assert_eq!(custom["QT_SCREEN_SCALE_FACTORS"], "");
     }
 }

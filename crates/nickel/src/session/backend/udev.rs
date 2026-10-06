@@ -3507,17 +3507,17 @@ fn themed_cursors() -> HashMap<smithay::input::pointer::CursorIcon, CursorBuffer
 }
 
 fn themed_cursor(names: &[&str]) -> Option<CursorBuffer> {
-    let kde_cursor_settings = kde_cursor_settings();
+    let inherited = nickel_platform::inherited_desktop_preferences();
     let theme_name = std::env::var("XCURSOR_THEME")
         .ok()
         .filter(|theme| !theme.is_empty())
-        .or_else(|| kde_cursor_settings.0.clone())
+        .or_else(|| inherited.cursor_theme.clone())
         .unwrap_or_else(|| "default".into());
     let requested_size = std::env::var("XCURSOR_SIZE")
         .ok()
         .and_then(|size| size.parse::<u32>().ok())
         .filter(|size| *size > 0)
-        .or(kde_cursor_settings.1)
+        .or(inherited.cursor_size)
         .unwrap_or(24);
     let theme = xcursor::CursorTheme::load(&theme_name);
     if let Some(path) = names.iter().find_map(|name| theme.load_icon(name))
@@ -3548,46 +3548,6 @@ fn themed_cursor(names: &[&str]) -> Option<CursorBuffer> {
     }
     tracing::warn!(theme = %theme_name, ?names, "could not load desktop cursor");
     None
-}
-
-fn kde_cursor_settings() -> (Option<String>, Option<u32>) {
-    let Some(config_home) = std::env::var_os("XDG_CONFIG_HOME")
-        .map(std::path::PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME")
-                .map(std::path::PathBuf::from)
-                .map(|home| home.join(".config"))
-        })
-    else {
-        return (None, None);
-    };
-    let Ok(contents) = std::fs::read_to_string(config_home.join("kcminputrc")) else {
-        return (None, None);
-    };
-    parse_kde_cursor_settings(&contents)
-}
-
-fn parse_kde_cursor_settings(contents: &str) -> (Option<String>, Option<u32>) {
-    let mut in_mouse_group = false;
-    let mut theme = None;
-    let mut size = None;
-    for line in contents.lines().map(str::trim) {
-        if line.starts_with('[') && line.ends_with(']') {
-            in_mouse_group = line == "[Mouse]";
-            continue;
-        }
-        if !in_mouse_group {
-            continue;
-        }
-        if let Some(value) = line.strip_prefix("cursorTheme=")
-            && !value.is_empty()
-        {
-            theme = Some(value.to_owned());
-        } else if let Some(value) = line.strip_prefix("cursorSize=") {
-            size = value.parse().ok().filter(|size| *size > 0);
-        }
-    }
-    (theme, size)
 }
 
 fn fallback_arrow_cursor() -> CursorBuffer {
