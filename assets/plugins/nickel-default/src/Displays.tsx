@@ -63,7 +63,7 @@ export function Displays() {
     if (!snapshot.available) return <Column><Text wrap={true}>{snapshot.reason || "Display control is unavailable."}</Text><ApplicationScaleControls/></Column>;
     if (!selected) return <Column><Text>No displays are available.</Text><ApplicationScaleControls/></Column>;
     return <Column className="display-page">
-        <Row><Text className="display-heading">Arrange displays</Text><Button id="display-identify" disabled={!snapshot.operations?.identify} onClick={()=>nickel.displays.identify(snapshot.revision)}>Identify</Button></Row>
+        <Row className="display-toolbar"><Text className="display-heading">Arrange displays</Text><Button id="display-identify" disabled={!snapshot.operations?.identify} onClick={()=>nickel.displays.identify(snapshot.revision)}>Identify</Button></Row>
         <Text wrap={true}>Drag displays to match their physical positions. Apply to preview your changes.</Text>
         <Layer id="display-arrangement" className="display-arrangement">
             {view.cards.map((card,index) => <Box key={card.name} x={card.x} y={card.y} width={card.width} height={card.height}>

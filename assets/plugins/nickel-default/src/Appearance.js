@@ -1,10 +1,40 @@
 // @jsx h
 import { fromHsv, toHexColor } from "./colors.js";
+import { ThemePicker } from "./ThemePicker.tsx";
 import "./styles/appearance.css";
 const defaults = { theme: "system", accent_hue: null, accent_intensity: null, reduce_transparency: false, animations: "normal" };
 const wallpaperKey = image => image.id;
 // Estimates only: native layout corrects these for the current font, width, and scale.
 const wallpaperHeight = image => image.previewAsset ? 126 : 36;
+function AppearanceSlider({ value, max, onCommit, ...props }) {
+    const [draft, setDraft] = useState(null);
+    const drag = useRef(false);
+    const committed = useRef(value);
+    const base = useRef(value);
+    if (base.current !== value) {
+        base.current = value;
+        committed.current = value;
+    }
+    const commit = next => {
+        if (committed.current !== next) {
+            committed.current = next;
+            onCommit(next);
+        }
+        setDraft(null);
+    };
+    return h(Slider, { ...props, min: 0, max: max, step: 1, value: draft && draft.base === value ? draft.value : value, onChange: next => drag.current ? setDraft({ base: value, value: next }) : commit(next), onDrag: gesture => {
+            if (gesture.phase === "start")
+                drag.current = true;
+            if (gesture.phase === "end") {
+                drag.current = false;
+                commit(Math.round(Math.max(0, Math.min(1, (gesture.x - gesture.bounds.x) / Math.max(1, gesture.bounds.width))) * max));
+            }
+            if (gesture.phase === "cancel") {
+                drag.current = false;
+                setDraft(null);
+            }
+        } });
+}
 export function Appearance() {
     const appearance = nickel.appearance.get();
     const wallpaper = nickel.wallpaper.get();
@@ -21,6 +51,7 @@ export function Appearance() {
     const validHue = customHue.trim() !== "" && Number.isInteger(hueNumber) && hueNumber >= 0 && hueNumber <= 359;
     return h(Column, { className: "appearance-page" },
         !appearance.writable ? h(Text, null, "Appearance is read only.") : null,
+        h(ThemePicker, null),
         h(Column, { className: "appearance-card" },
             h(Text, { className: "appearance-heading" }, "Theme"),
             h(Row, { className: "appearance-choices" }, modes.map(mode => h(Button, { key: mode.id, id: "appearance-mode-" + mode.id, className: configured.theme === mode.id ? "appearance-choice selected" : "appearance-choice", state: configured.theme === mode.id ? "selected" : "unselected", disabled: !appearance.writable, onClick: () => set({ theme: mode.id }) }, mode.label)))),
@@ -31,10 +62,9 @@ export function Appearance() {
                         set({ accent_hue: value }); } })),
                 h(Button, { id: "appearance-accent-custom", disabled: !appearance.writable, onClick: () => { setCustomHue(String(hue)); setCustomOpen(true); } }, "Custom hue")),
             h(Text, null, "Hue: " + hue + "°"),
-            appearance.writable ? h(Slider, { id: "appearance-hue", accessibilityLabel: "Interface hue", min: 0, max: 359, step: 1, value: hue, onChange: value => set({ accent_hue: value }) }) : null,
+            appearance.writable ? h(AppearanceSlider, { id: "appearance-hue", accessibilityLabel: "Interface hue", max: 359, value: hue, onCommit: value => set({ accent_hue: value }) }) : null,
             h(Text, null, "Color intensity: " + intensity + "%"),
-            appearance.writable ? h(Slider, { id: "appearance-intensity", accessibilityLabel: "Color intensity", min: 0, max: 100, step: 1, value: intensity, onChange: value => set({ accent_intensity: value }) }) : null,
-            h(Button, { id: "appearance-inherit-accent", disabled: !appearance.writable, onClick: () => set({ accent_hue: null, accent_intensity: null }) }, "Use system accent")),
+            appearance.writable ? h(AppearanceSlider, { id: "appearance-intensity", accessibilityLabel: "Color intensity", max: 100, value: intensity, onCommit: value => set({ accent_intensity: value }) }) : null),
         h(Column, { className: "appearance-card" },
             h(Text, { className: "appearance-heading" }, "Interface"),
             h(Row, null,
@@ -46,7 +76,7 @@ export function Appearance() {
             h(Text, { className: "appearance-heading" }, "Wallpaper"),
             !wallpaper.available ? h(Text, { wrap: true }, wallpaper.reason || "Wallpaper is unavailable.") : h(Column, null,
                 h(Text, null, wallpaper.configured.custom_image_configured ? "Custom image" : "Default wallpaper"),
-                h(Row, { className: "appearance-choices" }, ["center", "tile", "stretch", "fit", "span", "fill"].map(position => h(Button, { key: position, id: "appearance-wallpaper-position-" + position, disabled: !wallpaper.writable, state: wallpaper.configured.position === position ? "selected" : "unselected", onClick: () => nickel.wallpaper.setPosition(position) }, position))),
+                h("div", { className: "appearance-wallpaper-positions" }, ["center", "tile", "stretch", "fit", "span", "fill"].map(position => h(Button, { key: position, id: "appearance-wallpaper-position-" + position, disabled: !wallpaper.writable, state: wallpaper.configured.position === position ? "selected" : "unselected", onClick: () => nickel.wallpaper.setPosition(position) }, position))),
                 h(Button, { id: "appearance-wallpaper-choose", disabled: !wallpaper.writable || !wallpaper.chooser?.available || wallpaper.chooser.pending, onClick: () => nickel.wallpaper.chooseImage() }, wallpaper.chooser?.pending ? "Choosing image…" : "Choose image…"),
                 wallpaper.chooser?.result ? h(Text, { wrap: true }, wallpaper.chooser.result.reason || ({ applied: "Wallpaper applied", cancelled: "Image choice cancelled" })[wallpaper.chooser.result.status] || "") : null,
                 h(VirtualColumn, { id: "appearance-wallpapers", items: wallpaper.images, itemKey: wallpaperKey, itemHeight: wallpaperHeight, overscan: 96, renderItem: (image, index) => h(Column, { key: image.id },

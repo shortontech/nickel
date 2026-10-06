@@ -25,3 +25,12 @@ row.display-actions {
 .display-page slider {
     width: 100%;
 }
+
+row.display-toolbar { gap: 16px; align-items: center; }
+button#display-identify {
+    min-height: 36px;
+    padding: 8px 12px;
+    background: var(--nickel-control);
+    border: 1px solid var(--nickel-border);
+    border-radius: var(--nickel-radius-control);
+}

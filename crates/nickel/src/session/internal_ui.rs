@@ -2330,6 +2330,31 @@ impl InternalUiRuntime {
         true
     }
 
+    pub(crate) fn refresh_window_decoration_colors(
+        &mut self,
+        theme: nickel_ui::SemanticTheme,
+    ) -> bool {
+        let mut changed = false;
+        for surface in self.presentation.values_mut() {
+            let Some(decoration) = surface.decoration.as_mut() else {
+                continue;
+            };
+            let background = theme.surfaces.sidebar;
+            let foreground = if decoration.active {
+                theme.text.primary
+            } else {
+                theme.text.secondary
+            };
+            if decoration.background != background || decoration.foreground != foreground {
+                decoration.background = background;
+                decoration.foreground = foreground;
+                surface.dirty = true;
+                changed = true;
+            }
+        }
+        changed
+    }
+
     pub(crate) fn internal_frame_target(
         &self,
         point: (f64, f64),
@@ -3910,6 +3935,72 @@ mod tests {
 
         assert!(runtime.submit_or_activate());
         assert_eq!(runtime.application::<SubmitCounter>(id).unwrap().0, 1);
+    }
+
+    #[test]
+    fn decoration_theme_refresh_repaints_active_and_inactive_windows() {
+        let mut runtime = InternalUiRuntime::default();
+        let mut ids = Vec::new();
+        for active in [true, false] {
+            let id = runtime.insert(
+                Counter(0),
+                InternalSurfacePlacement {
+                    role: InternalSurfaceRole::Application,
+                    geometry: (100, 80, 460, 240),
+                    output: None,
+                },
+                1.0,
+            );
+            runtime.set_window_decoration(
+                id,
+                InternalWindowDecoration {
+                    owner: 7,
+                    title: "Hosted app".into(),
+                    active,
+                    maximized: false,
+                    background: 0xff202020,
+                    foreground: 0xffffffff,
+                },
+            );
+            ids.push(id);
+        }
+        for appearance in [
+            nickel_core::theme::Appearance {
+                mode: nickel_core::theme::ThemeMode::Light,
+                accent: [220, 120, 40],
+                intensity: 85,
+            },
+            nickel_core::theme::Appearance {
+                mode: nickel_core::theme::ThemeMode::Dark,
+                accent: [90, 60, 220],
+                intensity: 85,
+            },
+        ] {
+            for surface in runtime.presentation.values_mut() {
+                surface.dirty = false;
+            }
+            let theme = nickel_ui::SemanticTheme::from(
+                nickel_core::theme::ThemePalette::from_appearance(appearance),
+            );
+            assert!(runtime.refresh_window_decoration_colors(theme));
+            for id in &ids {
+                let surface = &runtime.presentation[id];
+                let decoration = surface.decoration.as_ref().unwrap();
+                assert!(surface.dirty);
+                assert_eq!(decoration.background, theme.surfaces.sidebar);
+                assert_eq!(
+                    decoration.foreground,
+                    if decoration.active {
+                        theme.text.primary
+                    } else {
+                        theme.text.secondary
+                    }
+                );
+                assert_eq!(decoration.title, "Hosted app");
+                assert_eq!(decoration.owner, 7);
+            }
+            assert!(!runtime.refresh_window_decoration_colors(theme));
+        }
     }
 
     #[test]

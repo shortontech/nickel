@@ -787,7 +787,15 @@ impl<Message: Clone> UiFrame<Message> {
             DragGesture {
                 phase,
                 position,
-                bounds: hit.target_bounds,
+                bounds: if self
+                    .resolved_layout()
+                    .find(id)
+                    .is_some_and(|node| node.component == "Slider")
+                {
+                    hit.value_bounds.unwrap_or(hit.target_bounds)
+                } else {
+                    hit.target_bounds
+                },
             },
         ))
     }

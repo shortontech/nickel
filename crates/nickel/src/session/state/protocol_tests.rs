@@ -8181,6 +8181,14 @@ fn opening_settings_transfers_focus_from_launcher_and_dismisses_it() {
     assert!(!session.internal_shell.as_ref().unwrap().launcher_visible());
     assert!(session.internal_ui.is_visible(runtime));
     assert_eq!(session.internal_ui.focused(), Some(runtime));
+    session.set_launcher_visible(true);
+    assert_ne!(session.internal_ui.focused(), Some(runtime));
+    assert!(session.focus_plugin_surface("nickel-default", "settings"));
+    session.flush_internal_shell_input();
+    assert_eq!(session.internal_shell_surfaces[&settings], runtime);
+    assert_eq!(session.internal_ui.focused(), Some(runtime));
+    assert!(session.internal_ui.is_visible(runtime));
+    assert!(!session.internal_shell.as_ref().unwrap().launcher_visible());
 }
 
 #[test]
@@ -10384,4 +10392,53 @@ fn transient_output_hit_testing_uses_both_global_axes() {
     assert!(!output_contains_logical_point(lower, 960, -40));
     assert!(!output_contains_logical_point(upper, 960, 1040));
     assert!(output_contains_logical_point(lower, 960, 1040));
+}
+
+#[test]
+fn plugin_window_placement_keeps_decorated_frame_inside_work_area() {
+    use nickel_core::plugins::{PluginSurfaceAnchor as Anchor, PluginSurfaceKind as Kind};
+    let outputs = [(
+        crate::internal_shell::InternalOutput {
+            name: "compact".into(),
+            x: 1200,
+            y: -100,
+            width: 1280,
+            height: 664,
+            scale: 1.0,
+        },
+        1200,
+        -100,
+    )];
+    for size in [(1100, 800), (600, 400)] {
+        for anchor in [
+            Anchor::Center,
+            Anchor::TopLeft,
+            Anchor::TopRight,
+            Anchor::BottomLeft,
+            Anchor::BottomRight,
+        ] {
+            let mut placement = crate::session::InternalSurfacePlacement {
+                role: crate::session::InternalSurfaceRole::Overlay,
+                geometry: (0, 0, size.0, size.1),
+                output: Some("compact".into()),
+            };
+            super::apply_internal_plugin_surface_placement(
+                &mut placement,
+                Kind::Window,
+                0,
+                anchor,
+                (0, 0),
+                &outputs,
+            );
+            let outer = crate::session::window_frame::outer_geometry(
+                super::internal_placement_geometry(&placement),
+            );
+            assert!(outer.x >= 1200 && outer.y >= -100);
+            assert!(outer.x + outer.width <= 2480 && outer.y + outer.height <= 564);
+            if anchor == Anchor::Center {
+                assert!((outer.x - 1200 - (1280 - outer.width) / 2).abs() <= 1);
+                assert!((outer.y + 100 - (664 - outer.height) / 2).abs() <= 1);
+            }
+        }
+    }
 }

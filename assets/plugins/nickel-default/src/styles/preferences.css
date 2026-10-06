@@ -12,3 +12,29 @@ row.preferences-row { width: 100%; gap: 12px; align-items: center; }
 column.preferences-description { flex-grow: 1; gap: 6px; }
 row.preferences-choices { gap: 8px; }
 button.preferences-choice.selected { border-color: var(--nickel-accent); }
+
+column.preferences-page button {
+    min-height: 36px;
+    padding: 8px 12px;
+    background: var(--nickel-control);
+    color: var(--nickel-text);
+    border: 1px solid var(--nickel-border);
+    border-radius: var(--nickel-radius-control);
+    font-size: var(--nickel-font-size);
+    line-height: var(--nickel-line-height);
+}
+column.preferences-page button:hover { background: var(--nickel-surface-hover); }
+column.preferences-page button:active { background: var(--nickel-selected); }
+column.preferences-page button.selected {
+    background: var(--nickel-selected);
+    border-color: var(--nickel-accent);
+}
+
+column.preferences-page text { color: var(--nickel-text); }
+
+@media (prefers-color-scheme: light) {
+    column.preferences-card {
+        background: var(--nickel-card);
+        border-width: 0px;
+    }
+}

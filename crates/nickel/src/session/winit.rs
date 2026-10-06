@@ -105,21 +105,33 @@ pub fn init_winit(
         || "Nickel nested session".to_owned(),
         |order| format!("Nickel physical emergency test — press {order}"),
     );
-    let (mut backend, winit) = if let Ok(size) = std::env::var("NICKEL_NESTED_SIZE") {
-        let (width, height) = parse_nested_size(&size)
-            .ok_or("NICKEL_NESTED_SIZE must be WIDTHxHEIGHT, each between 320 and 8192")?;
-        winit::init_from_attributes::<GlesRenderer>(
-            smithay::reexports::winit::window::WindowAttributes::default()
-                .with_surface_size(smithay::reexports::winit::dpi::LogicalSize::new(
-                    width, height,
-                ))
-                .with_decorations(true)
-                .with_title(title)
-                .with_visible(true),
-        )?
-    } else {
-        winit::init::<GlesRenderer>()?
+    use smithay::reexports::winit::platform::{
+        wayland::WindowAttributesWayland, x11::WindowAttributesX11,
     };
+    let (width, height) = match std::env::var("NICKEL_NESTED_SIZE") {
+        Ok(size) => parse_nested_size(&size)
+            .ok_or("NICKEL_NESTED_SIZE must be WIDTHxHEIGHT, each between 320 and 8192")?,
+        Err(_) => (1280, 800),
+    };
+    let attributes = smithay::reexports::winit::window::WindowAttributes::default()
+        .with_surface_size(smithay::reexports::winit::dpi::LogicalSize::new(
+            width, height,
+        ))
+        .with_decorations(true)
+        .with_title(title)
+        .with_visible(true);
+    let attributes = if std::env::var_os("WAYLAND_DISPLAY").is_some()
+        || std::env::var_os("WAYLAND_SOCKET").is_some()
+    {
+        attributes.with_platform_attributes(Box::new(
+            WindowAttributesWayland::default().with_name("nickel-nested", "nickel-nested"),
+        ))
+    } else {
+        attributes.with_platform_attributes(Box::new(
+            WindowAttributesX11::default().with_name("nickel-nested", "nickel-nested"),
+        ))
+    };
+    let (mut backend, winit) = winit::init_from_attributes::<GlesRenderer>(attributes)?;
     if physical_emergency_order.is_some() {
         use smithay::reexports::winit::window::UserAttentionType;
         backend

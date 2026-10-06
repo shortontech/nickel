@@ -95,15 +95,15 @@ export function FileArtwork() {
     return h(Column, { className: "preferences-page" },
         h(PreferenceStatus, { snapshot: snapshot }),
         snapshot.available ? h(Column, { className: "preferences-card" },
-            h(Text, { className: "preferences-heading" }, "File artwork"),
-            h(Row, { className: "preferences-choices" }, [{ value: "nickel", label: "Nickel icons" }, { value: "system", label: "System icons" }].map(option => h(Button, { key: option.value, id: "preferences-file-icons-" + option.value, disabled: !snapshot.writable, state: configured.fileIconProvider === option.value ? "selected" : "unselected", onClick: () => set({ fileIconProvider: option.value }) }, option.label))),
+            h(Text, { className: "preferences-heading" }, "Icon provider"),
+            h(Row, { className: "preferences-choices" }, [{ value: "nickel", label: "Nickel icons" }, { value: "system", label: "System icons" }].map(option => h(Button, { key: option.value, id: "preferences-file-icons-" + option.value, disabled: !snapshot.writable, className: configured.fileIconProvider === option.value ? "preferences-choice selected" : "preferences-choice", state: configured.fileIconProvider === option.value ? "selected" : "unselected", onClick: () => set({ fileIconProvider: option.value }) }, option.label))),
             h(Text, { wrap: true }, !usesSystemIcons ? "Nickel artwork" + (configured.fileIconTheme ? ". Saved system theme: " + configured.fileIconTheme : "")
                 : snapshot.unavailableSelections?.fileIconTheme ? "Configured theme " + configured.fileIconTheme + " is unavailable; Nickel artwork is used until you select another theme."
                     : configured.fileIconTheme ? "Selected system theme: " + configured.fileIconTheme : "System default icon theme"),
-            usesSystemIcons ? h(Button, { id: "preferences-file-theme-system", disabled: !snapshot.writable, onClick: () => set({ fileIconProvider: "system", fileIconTheme: null }) }, "Use system default icon theme") : null,
+            usesSystemIcons ? h(Button, { id: "preferences-file-theme-system", disabled: !snapshot.writable, className: configured.fileIconTheme === null ? "preferences-choice selected" : "preferences-choice", state: configured.fileIconTheme === null ? "selected" : "unselected", onClick: () => set({ fileIconProvider: "system", fileIconTheme: null }) }, "Use system default icon theme") : null,
             usesSystemIcons && themes.length ? h(Column, { className: "preferences-page" },
                 h(TextField, { id: "preferences-file-theme-search", accessibilityLabel: "Search icon themes", placeholder: "Search installed icon themes", value: query, onChange: setQuery }),
-                filtered.slice(0, 40).map((theme, index) => h(Button, { key: theme, id: "preferences-file-theme-choice-" + index, disabled: !snapshot.writable, state: configured.fileIconTheme === theme ? "selected" : "unselected", onClick: () => set({ fileIconProvider: "system", fileIconTheme: theme }) }, theme.slice(0, 120))),
+                filtered.slice(0, 40).map((theme, index) => h(Button, { key: theme, id: "preferences-file-theme-choice-" + index, disabled: !snapshot.writable, className: configured.fileIconTheme === theme ? "preferences-choice selected" : "preferences-choice", state: configured.fileIconTheme === theme ? "selected" : "unselected", onClick: () => set({ fileIconProvider: "system", fileIconTheme: theme }) }, theme.slice(0, 120))),
                 filtered.length > 40 ? h(Text, null, "Search to narrow the remaining icon themes.") : null,
                 !filtered.length ? h(Text, null, "No installed icon themes match.") : null) : usesSystemIcons ? h(Text, null, "No installed icon themes are available on this platform.") : null) : null);
 }

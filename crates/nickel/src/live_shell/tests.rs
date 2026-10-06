@@ -269,6 +269,46 @@ fn embedded_package_can_enable_with_all_windows_initially_closed() {
 }
 
 #[test]
+fn failed_active_shell_can_retry_without_disabling_or_restarting_the_session() {
+    with_package_runtime_stack(|| {
+        let mut shell = LiveShell::new().unwrap();
+        assert!(!shell.active_shell_failed());
+        assert!(!shell.retry_active_shell().unwrap());
+        assert!(shell.fail_installed_plugin_runtime("nickel-default", "render failed".into()));
+        assert!(shell.active_shell_failed());
+        assert!(
+            shell
+                .plugin_registry
+                .get("nickel-default")
+                .unwrap()
+                .desired_enabled
+        );
+        assert!(shell.shell_selection_preview.is_none());
+        assert_eq!(shell.taskbar_reservation_height(), 0);
+        let mut broken = crate::bundled_plugin_assets::load_package("nickel-default").unwrap();
+        broken.manifest.composition.as_mut().unwrap().extends = Some("missing-base".into());
+        let original = shell
+            .external_plugin_packages
+            .insert(
+                "nickel-default".into(),
+                nickel_core::plugins::PluginPackageSource::embedded(broken),
+            )
+            .unwrap();
+        assert!(shell.retry_active_shell().is_err());
+        assert!(shell.active_shell_failed());
+        assert_eq!(shell.taskbar_reservation_height(), 0);
+        shell
+            .external_plugin_packages
+            .insert("nickel-default".into(), original);
+        assert!(shell.retry_active_shell().unwrap());
+        assert!(!shell.active_shell_failed());
+        assert_eq!(shell.taskbar_reservation_height(), 56);
+        assert!(shell.can_show_launcher());
+        assert!(!shell.retry_active_shell().unwrap());
+    });
+}
+
+#[test]
 fn stock_shell_package_handles_semantic_taskbar_input_and_global_surface_intents() {
     with_package_runtime_stack(|| {
         let mut shell = LiveShell::new().unwrap();
@@ -3895,5 +3935,107 @@ fn replicated_taskbar_keeps_one_output_agnostic_viewport_across_monitors() {
                 .sync_host_data_field("viewport", &viewport)
                 .unwrap()
         );
+    });
+}
+
+#[test]
+fn built_in_running_applications_publish_their_taskbar_artwork() {
+    with_package_runtime_stack(|| {
+        let mut shell = LiveShell::new().unwrap();
+        shell.windows = [
+            ("nickel-nested", "Nickel nested session"),
+            ("nickel-default", "Nickel Settings"),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, (id, title))| crate::model::OpenWindow {
+            id: crate::model::WindowId(71 + index as u64),
+            application_id: Some(crate::model::ApplicationId::new(id)),
+            active: false,
+            title: title.into(),
+            state: crate::model::WindowState::default(),
+        })
+        .collect();
+        let apps = shell
+            .external_plugin_applications("nickel-default")
+            .unwrap();
+        let demand = ["nickel-nested", "nickel-default"]
+            .map(crate::application_capabilities::icon_asset)
+            .into_iter()
+            .collect();
+        let images = shell.plugin_application_images(Some(&apps), None, &demand);
+        for id in ["nickel-nested", "nickel-default"] {
+            let actual = images
+                .get(&crate::application_capabilities::icon_asset(id))
+                .unwrap();
+            let expected = crate::icons::nickel_application(if id == "nickel-default" {
+                "Nickel Settings"
+            } else {
+                id
+            })
+            .unwrap();
+            assert_eq!(actual.0, expected.0);
+            assert!(Arc::ptr_eq(&actual.1, &expected.1));
+        }
+    });
+}
+
+#[test]
+fn committed_appearance_recolors_retained_settings_and_taskbar_surfaces() {
+    with_package_runtime_stack(|| {
+        use nickel_core::shell_settings::{ShellSettings, ThemePreference};
+        use nickel_ui::backend::PaintCommand;
+        let mut shell = LiveShell::new().unwrap();
+        shell.launch_settings(None);
+        let taskbar = shell.active_shell_surface_key("taskbar");
+        let settings = shell.active_shell_surface_key("settings");
+        let surfaces = [(taskbar, 1280, 56), (settings, 900, 700)];
+        let mut light_scenes = Vec::new();
+        for theme in [ThemePreference::Light, ThemePreference::Dark] {
+            let configured = ShellSettings {
+                theme,
+                ..Default::default()
+            };
+            shell.apply_committed_appearance(configured.clone());
+            assert_eq!(
+                shell.take_preferences_commit().unwrap().theme,
+                configured.theme
+            );
+            for (index, (key, width, height)) in surfaces.iter().enumerate() {
+                let commands = shell.plugin_panel_scene(key, *width, *height).unwrap();
+                let fills = commands
+                    .iter()
+                    .filter_map(|command| match command {
+                        PaintCommand::Fill { color, .. }
+                        | PaintCommand::RoundedFill { color, .. }
+                        | PaintCommand::TopRoundedFill { color, .. } => Some(*color),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                let base = if key.surface_id == "taskbar" {
+                    shell.palette.panel
+                } else {
+                    shell.palette.background
+                };
+                let rgb = if key.surface_id == "settings" && theme == ThemePreference::Light {
+                    let channel =
+                        |shift: u32| (((base >> shift) & 255_u32) * 82 + 255 * 18 + 50) / 100;
+                    (channel(16) << 16) | (channel(8) << 8) | channel(0)
+                } else {
+                    base
+                };
+                let expected = 0xff00_0000 | rgb;
+                assert!(
+                    fills.contains(&expected),
+                    "{} did not receive the current palette",
+                    key.surface_id
+                );
+                if theme == ThemePreference::Light {
+                    light_scenes.push(fills);
+                } else {
+                    assert_ne!(fills, light_scenes[index]);
+                }
+            }
+        }
     });
 }

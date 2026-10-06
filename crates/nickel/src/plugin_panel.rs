@@ -1659,6 +1659,15 @@ impl PluginPanelApplication {
         }
     }
 
+    /// The last native view must belong to the admitted declaration before
+    /// its layout can supply virtual row keys or scroll anchors. Host resource
+    /// projection can admit another declaration before the next host step.
+    pub(crate) fn native_view_matches_accepted(&self) -> bool {
+        self.native_text_revision
+            .get()
+            .is_some_and(|(generation, _, _)| generation == self.accepted.generation())
+    }
+
     pub(crate) fn virtual_collection_feedback(
         &self,
         generation: u64,
@@ -5148,6 +5157,55 @@ mod tests {
     }
 
     #[test]
+    fn projected_virtual_rows_resolve_new_geometry_before_anchor_measurement() {
+        with_package_runtime_stack(|| {
+            let source = r#"
+                const items = Array.from({length:1000}, (_, index) => index);
+                const reversed = [...items].reverse();
+                const itemKey = item => String(item);
+                function App() { return h(FixedWindow,{width:'100%',height:'100%'},
+                    h(ScrollView,{id:'scroller',height:120},h(VirtualColumn,{
+                        id:'rows',items:nickel.data.reversed ? reversed : items,
+                        itemKey,itemHeight:24,overscan:48,
+                        renderItem:item=>h(Button,{id:'row-'+item,onClick:()=>{}},'Row '+item)
+                    }))); }
+            "#;
+            let mut host =
+                nickel_ui::UiHost::new(PluginPanelApplication::new(source).unwrap(), 320, 120);
+            step_host(&mut host, None, Default::default()).unwrap();
+            assert!(
+                host.query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                    role: SemanticRole::Button,
+                    name: "Row 0".into(),
+                })
+                .is_ok()
+            );
+            // Match production projection: admission occurs before host.step,
+            // so the old native frame cannot measure the newly admitted keys.
+            host.application_mut()
+                .sync_data(&serde_json::json!({"reversed":true}))
+                .unwrap();
+            step_host(
+                &mut host,
+                None,
+                nickel_ui::HostBatch {
+                    application_changed: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert!(
+                host.query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                    role: SemanticRole::Button,
+                    name: "Row 999".into(),
+                })
+                .is_ok()
+            );
+            assert!(host.application().last_error().is_none());
+        });
+    }
+
+    #[test]
     fn virtual_measurements_preserve_anchor_on_preview_height_change() {
         with_package_runtime_stack(|| {
             let source = r#"
@@ -8356,7 +8414,7 @@ mod tests {
                         role: nickel_ui::SemanticRole::Button,
                         name: name.into(),
                     })
-                    .unwrap();
+                    .unwrap_or_else(|error| panic!("missing {name}: {error:?}"));
                 host.step(nickel_ui::HostBatch {
                     events: vec![nickel_ui::HostEvent::Ui(
                         nickel_ui::UiEvent::AccessibilityActivate(button.id),
@@ -8650,6 +8708,93 @@ mod tests {
             app.update(app.button_message("apply").unwrap());
             assert!(app.take_effects().is_empty());
         }
+    }
+
+    #[test]
+    fn file_artwork_controls_have_visible_native_bounds_and_dispatch_choices() {
+        with_package_runtime_stack(|| {
+            let mut package = PluginPackage::load(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../assets/plugins/example-window"
+            ))
+            .unwrap();
+            package.manifest.surfaces[0].width = 809;
+            package.manifest.surfaces[0].height = 529;
+            package.manifest.capabilities = vec![
+                PluginCapability::PreferencesRead,
+                PluginCapability::PreferencesControl,
+            ];
+            package.source =
+                include_str!("../../../assets/plugins/nickel-default/src/Preferences.js")
+                    .lines()
+                    .filter(|line| {
+                        !line.starts_with("import ") && !line.starts_with("registerSettingsPage(")
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+                    .replace("export function", "function");
+            package.source.push_str("\nfunction App() { return h(Window, {id:'main',width:809,height:529}, h(FileArtwork)); }");
+            package.stylesheet = format!(
+                "{}\n{}",
+                include_str!("../../../assets/plugins/nickel-default/src/styles/controls.css"),
+                include_str!("../../../assets/plugins/nickel-default/src/styles/preferences.css")
+            );
+            let snapshot = serde_json::json!({"available":true,"writable":true,"revision":"0123456789abcdef",
+                "configured":{"barOnAllDisplays":true,"allWindowsOnEveryBar":true,"desktopCount":4,"preferredTerminal":null,"preferredFileManager":null,"fileIconProvider":"system","fileIconTheme":"breeze-dark","idleDimSeconds":300,"idleLockSeconds":900,"idleSuspendSeconds":null},
+                "iconThemes":["breeze-dark","Papirus"],"unavailableSelections":{}});
+            let mut app = PluginPanelApplication::new_with_manifest(
+                &package.source,
+                &package.manifest,
+                Some(serde_json::json!({"preferences":snapshot}).to_string()),
+            )
+            .unwrap();
+            app.stylesheet = StyleSheet::compile(&package.stylesheet).unwrap();
+            let mut host = nickel_ui::UiHost::new(app, 809, 529);
+            step_host(
+                &mut host,
+                None,
+                nickel_ui::HostBatch {
+                    application_changed: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            for label in [
+                "Nickel icons",
+                "System icons",
+                "Use system default icon theme",
+                "breeze-dark",
+                "Papirus",
+            ] {
+                let target = host
+                    .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                        role: nickel_ui::SemanticRole::Button,
+                        name: label.into(),
+                    })
+                    .unwrap();
+                assert!(
+                    target.bounds.size.width > 20.0,
+                    "{label} has no usable width"
+                );
+                assert!(
+                    target.bounds.size.height >= 36.0,
+                    "{label} has no usable height"
+                );
+                assert!(
+                    target.bounds.origin.y + target.bounds.size.height <= 529.0,
+                    "{label} is clipped"
+                );
+            }
+            let app = host.application_mut();
+            app.update(
+                app.button_message("preferences-file-theme-choice-1")
+                    .unwrap(),
+            );
+            assert!(matches!(
+                app.take_effects().as_slice(),
+                [PluginEffect::Preferences { .. }]
+            ));
+        });
     }
 
     #[test]
@@ -9503,6 +9648,41 @@ mod tests {
                 id: "org.example.Editor".into()
             }]
         );
+    }
+
+    #[test]
+    fn stock_launcher_settings_requests_show_then_focus() {
+        with_package_runtime_stack(|| {
+            let package = crate::bundled_plugin_assets::load_package("nickel-default").unwrap();
+            let surface = package
+                .manifest
+                .surfaces
+                .iter()
+                .find(|surface| surface.id == "launcher")
+                .unwrap();
+            let mut application = PluginPanelApplication::from_package_surface(
+                &package,
+                &Default::default(),
+                surface,
+            )
+            .unwrap();
+            for _ in 0..2 {
+                application.update(application.button_message("launcher-settings").unwrap());
+                assert_eq!(
+                    application.take_effects(),
+                    vec![
+                        PluginEffect::ShowPluginSurface {
+                            plugin_id: "nickel-default".into(),
+                            surface_id: "settings".into()
+                        },
+                        PluginEffect::FocusPluginSurface {
+                            plugin_id: "nickel-default".into(),
+                            surface_id: "settings".into()
+                        },
+                    ]
+                );
+            }
+        });
     }
 
     #[test]
@@ -10894,6 +11074,139 @@ mod tests {
         Ok((application, host))
     }
 
+    #[test]
+    fn appearance_theme_picker_previews_shell_and_exposes_keep_and_revert() {
+        with_package_runtime_stack(|| {
+            let (mut application, _composition) =
+                settings_admission_application("nickel-default/appearance").unwrap();
+            let mut catalog = serde_json::json!({"available":true,"writable":true,"revision":"7","shellPreview":null,
+                "plugins":[{"id":"nickel-default","name":"Default","shell":true,"selected":true,"enabled":true},
+                    {"id":"nickel-cupertino-dock","name":"Cupertino","shell":true,"selected":false,"enabled":true}]});
+            application
+                .sync_host_data_field("plugins", &catalog)
+                .unwrap();
+            let mut host = nickel_ui::UiHost::new(application, 1100, 1000);
+            crate::live_shell::step_plugin_host(&mut host, None, Default::default()).unwrap();
+            for _ in 0..32 {
+                if !host.application().virtual_work_pending {
+                    break;
+                }
+                let now = host.next_deadline();
+                crate::live_shell::step_plugin_host(
+                    &mut host,
+                    None,
+                    nickel_ui::HostBatch {
+                        now,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            }
+            let activate = |host: &mut nickel_ui::UiHost<PluginPanelApplication>, name: &str| {
+                let target = host
+                    .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                        role: SemanticRole::Button,
+                        name: name.into(),
+                    })
+                    .unwrap();
+                host.perform_semantic_action(
+                    target.id,
+                    nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
+                );
+                assert!(host.application_mut().last_error().is_none());
+            };
+            activate(&mut host, "Preview Cupertino");
+            assert!(
+                matches!(host.application_mut().take_effects().as_slice(), [PluginEffect::ShellSelection { effect, .. }] if effect.id == "nickel-cupertino-dock" && effect.revision == 7)
+            );
+            catalog["shellPreview"] = serde_json::json!({"token":"11","previousShell":"nickel-default","selectedShell":"nickel-cupertino-dock","canConfirm":true,"canRevert":true});
+            host.application_mut()
+                .sync_host_data_field("plugins", &catalog)
+                .unwrap();
+            crate::live_shell::step_plugin_host(
+                &mut host,
+                None,
+                nickel_ui::HostBatch {
+                    application_changed: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            activate(&mut host, "Keep theme");
+            assert!(
+                matches!(host.application_mut().take_effects().as_slice(), [PluginEffect::ShellPreviewDecision { effect, .. }] if effect.confirm)
+            );
+            activate(&mut host, "Restore previous theme");
+            assert!(
+                matches!(host.application_mut().take_effects().as_slice(), [PluginEffect::ShellPreviewDecision { effect, .. }] if !effect.confirm)
+            );
+        });
+    }
+
+    #[test]
+    fn appearance_sliders_commit_once_on_release_and_cancel_without_writing() {
+        std::thread::Builder::new()
+            .stack_size(32 * 1024 * 1024)
+            .spawn(|| {
+                let (application, _composition) =
+                    settings_admission_application("nickel-default/appearance").unwrap();
+                let mut host = nickel_ui::UiHost::new(application, 1100, 1400);
+                for name in ["Interface hue", "Color intensity"] {
+                    let slider = host
+                        .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                            role: SemanticRole::Slider,
+                            name: name.into(),
+                        })
+                        .unwrap();
+                    let point = |fraction| Point {
+                        x: slider.bounds.origin.x + slider.bounds.size.width * fraction,
+                        y: slider.bounds.origin.y + slider.bounds.size.height / 2.0,
+                    };
+                    let send = |host: &mut nickel_ui::UiHost<PluginPanelApplication>, event| {
+                        crate::live_shell::step_plugin_host(
+                            host,
+                            None,
+                            nickel_ui::HostBatch {
+                                events: vec![nickel_ui::HostEvent::Ui(event)],
+                                ..Default::default()
+                            },
+                        )
+                        .unwrap();
+                        assert!(host.application_mut().last_error().is_none());
+                    };
+                    host.application_mut().take_effects();
+                    send(&mut host, nickel_ui::UiEvent::PointerMoved(point(0.2)));
+                    send(&mut host, nickel_ui::UiEvent::PointerPressed(point(0.2)));
+                    for fraction in [0.3, 0.5, 0.7] {
+                        send(&mut host, nickel_ui::UiEvent::PointerMoved(point(fraction)));
+                        assert!(host.application_mut().take_effects().is_empty());
+                    }
+                    send(&mut host, nickel_ui::UiEvent::PointerReleased(point(0.7)));
+                    assert!(matches!(
+                        host.application_mut().take_effects().as_slice(),
+                        [PluginEffect::Appearance { .. }]
+                    ));
+                    send(&mut host, nickel_ui::UiEvent::PointerPressed(point(0.1)));
+                    send(&mut host, nickel_ui::UiEvent::PointerMoved(point(0.4)));
+                    send(&mut host, nickel_ui::UiEvent::PointerCancelled);
+                    assert!(host.application_mut().take_effects().is_empty());
+                    host.perform_semantic_action(
+                        slider.id,
+                        nickel_ui::SemanticAction::SetValue(nickel_ui::SemanticValueInput::Number(
+                            80.0,
+                        )),
+                    );
+                    assert!(matches!(
+                        host.application_mut().take_effects().as_slice(),
+                        [PluginEffect::Appearance { .. }]
+                    ));
+                }
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
     fn settings_profile_totals(diagnostics: &Value) -> [u64; 7] {
         diagnostics["profiles"]
             .as_array()
@@ -12174,7 +12487,17 @@ mod tests {
             host.application_mut()
                 .sync_host_data_fields(&[("plugins", &nested)])
                 .unwrap();
-            step_host(&mut host, None, Default::default()).unwrap();
+            // Live shell projection updates the admitted tree before stepping
+            // the native host. Its previous layout still contains the old rows.
+            step_host(
+                &mut host,
+                None,
+                nickel_ui::HostBatch {
+                    application_changed: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
             settle(&mut host, "nested settings mount");
             assert!(host.query_unique(&editor(0)).is_ok());
             assert!(host.query_unique(&editor(127)).is_err());
@@ -12275,6 +12598,66 @@ mod tests {
                 "restoring an editor type must not resurrect a retired draft"
             );
             assert!(host.application_mut().take_effects().is_empty());
+        });
+    }
+
+    #[test]
+    fn production_display_drag_updates_box_geometry_without_failing_shell() {
+        with_package_runtime_stack(|| {
+            let outputs = (0..2).map(|index| serde_json::json!({
+                "name":format!("DP-{}", index + 1),"model":format!("Fixture {}", index + 1),
+                "physical_width_mm":500,"physical_height_mm":300,
+                "enabled":true,"primary":index == 0,"scale_120":120,"transform":"normal",
+                "geometry":{"x":index * 1920,"y":0,"width":1920,"height":1080},
+                "work_area":{"x":index * 1920,"y":0,"width":1920,"height":1080},
+                "current_mode":{"width":1920,"height":1080,"refresh_millihz":60000},"modes":[]
+            })).collect::<Vec<_>>();
+            let (mut application, _composition) =
+                settings_admission_application("nickel-default/displays").unwrap();
+            application.sync_host_data_field("displays", &serde_json::json!({"available":true,"revision":"0123456789abcdef","operations":{"identify":true},"outputs":outputs})).unwrap();
+            let mut host = nickel_ui::UiHost::new(application, 1100, 800);
+            crate::live_shell::step_plugin_host(&mut host, None, Default::default()).unwrap();
+            let card = host
+                .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                    role: SemanticRole::Button,
+                    name: "Fixture 2 display, DP-2".into(),
+                })
+                .unwrap();
+            let start = Point {
+                x: card.bounds.origin.x + 40.0,
+                y: card.bounds.origin.y + 40.0,
+            };
+            let end = Point {
+                x: start.x + 120.0,
+                y: start.y + 30.0,
+            };
+            let before = host.application().accepted.source().clone();
+            for event in [
+                nickel_ui::UiEvent::PointerMoved(start),
+                nickel_ui::UiEvent::PointerPressed(start),
+                nickel_ui::UiEvent::PointerMoved(end),
+                nickel_ui::UiEvent::PointerReleased(end),
+            ] {
+                crate::live_shell::step_plugin_host(
+                    &mut host,
+                    None,
+                    nickel_ui::HostBatch {
+                        events: vec![nickel_ui::HostEvent::Ui(event)],
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                assert!(host.application_mut().last_error().is_none());
+            }
+            assert_ne!(host.application().accepted.source(), &before);
+            assert!(host.application_mut().take_effects().is_empty());
+            assert!(
+                host.query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                    role: SemanticRole::Button,
+                    name: "Fixture 2 display, DP-2".into()
+                })
+                .is_ok()
+            );
         });
     }
 

@@ -208,7 +208,7 @@ export function Launcher() {
             <Button id="launcher-account" className="launcher-account-button" onClick={() => nickel.surfaces.show("quick-settings")}>{session.account?.displayName || "Local session"}</Button>
             <Button id="launcher-view-places" className="launcher-link" onClick={() => changeView("places")}>Places</Button>
             {session.support.logout ? <Button id="launcher-logout" className="launcher-link" onClick={() => {setLogoutOpen(true); nickel.openDialog("launcher-logout-dialog");}}>Log out</Button> : null}
-            <Button id="launcher-settings" className="launcher-link" onClick={() => nickel.surfaces.show("settings")}>Settings</Button>
+            <Button id="launcher-settings" className="launcher-link" onClick={() => { nickel.surfaces.show("settings"); nickel.surfaces.focus("settings"); }}>Settings</Button>
         </Row>}
         <Dialog id="launcher-logout-dialog" anchor="launcher-logout" open={logoutOpen} onClose={() => setLogoutOpen(false)} width={320} height={160}>
             <Column>

@@ -42,6 +42,7 @@ pub fn resized(source: &RgbaImage, width: u32, height: u32) -> RgbaImage {
 pub fn nickel_application(identity_or_name: &str) -> Option<(u16, Arc<RgbaImage>)> {
     static SETTINGS: OnceLock<Option<Arc<RgbaImage>>> = OnceLock::new();
     static FILE: OnceLock<Option<Arc<RgbaImage>>> = OnceLock::new();
+    static NESTED: OnceLock<Option<Arc<RgbaImage>>> = OnceLock::new();
     let (id, bytes, cache): (u16, &[u8], &OnceLock<Option<Arc<RgbaImage>>>) = if identity_or_name
         == "nickel-default/settings"
         || identity_or_name.starts_with("Nickel Settings")
@@ -57,6 +58,20 @@ pub fn nickel_application(identity_or_name: &str) -> Option<(u16, Arc<RgbaImage>
             include_bytes!("../../../assets/icons/nickel-file.png"),
             &FILE,
         )
+    } else if identity_or_name == "nickel-nested"
+        || identity_or_name == "Nickel nested session"
+        || identity_or_name.starts_with("Nickel physical emergency test —")
+    {
+        return NESTED
+            .get_or_init(|| {
+                load_svg_bytes(
+                    include_bytes!("../../../assets/icons/nickel-start.svg"),
+                    RASTER_SIZE,
+                )
+                .map(Arc::new)
+            })
+            .as_ref()
+            .map(|image| (0x3002, Arc::clone(image)));
     } else {
         return None;
     };
@@ -230,6 +245,18 @@ mod tests {
         let (settings_id, settings) = nickel_application("Nickel Settings").unwrap();
         let (file_id, file) = nickel_application("Nickel File").unwrap();
 
+        let (nested_id, nested) = nickel_application("nickel-nested").unwrap();
+        assert_ne!(nested_id, settings_id);
+        assert_ne!(nested_id, file_id);
+        assert!(nested.pixels().any(|pixel| pixel.0[3] != 0));
+        assert!(std::sync::Arc::ptr_eq(
+            &nested,
+            &nickel_application("Nickel nested session").unwrap().1
+        ));
+        assert!(std::sync::Arc::ptr_eq(
+            &settings,
+            &nickel_application("nickel-default/settings").unwrap().1
+        ));
         assert_ne!(settings_id, file_id);
         assert!(settings.pixels().any(|pixel| pixel.0[3] != 0));
         assert!(file.pixels().any(|pixel| pixel.0[3] != 0));

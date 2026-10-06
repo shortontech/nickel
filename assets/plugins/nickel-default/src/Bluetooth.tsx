@@ -1,6 +1,16 @@
 // @jsx h
 import "./styles/connectivity.css";
 const deviceKey = device => device.id;
+const deviceTypes = {
+    "audio-card": ["\uf028", "Audio device"],
+    "audio-headset": ["\uf025", "Headset"],
+    "audio-headphones": ["\uf025", "Headphones"],
+    "input-keyboard": ["\uf11c", "Keyboard"],
+    "input-mouse": ["\uf245", "Mouse"],
+    "phone": ["\uf10b", "Phone"],
+    "computer": ["\uf109", "Computer"],
+};
+const deviceType = kind => Object.hasOwn(deviceTypes, kind) ? deviceTypes[kind] : ["\uf293", "Bluetooth device"];
 
 export function Bluetooth() {
     const bluetooth = nickel.bluetooth.get();
@@ -22,7 +32,10 @@ export function Bluetooth() {
             itemKey={deviceKey} itemHeight={180} gap={16} overscan={96}
             renderItem={device => <Column key={device.id} className="connectivity-card">
             <Text className="connectivity-name">{device.name || "Unnamed device"}</Text>
-            {device.kind ? <Text>{device.kind}</Text> : null}
+            {device.kind ? <Row className="connectivity-device-type">
+                <Text accessibilityLabel={deviceType(device.kind)[1]}>{deviceType(device.kind)[0]}</Text>
+                <Text>{deviceType(device.kind)[1]}</Text>
+            </Row> : null}
             {device.batteryPercent !== null && device.batteryPercent !== undefined ? <Text>{"Battery: " + device.batteryPercent + "%"}</Text> : null}
             {device.signalDbm !== null && device.signalDbm !== undefined ? <Text>{"Signal: " + device.signalDbm + " dBm"}</Text> : null}
             <Text>{device.connected ? "Connected" : device.paired ? "Paired" : "Not paired"}</Text>

@@ -1001,7 +1001,11 @@ pub(crate) fn step_plugin_host(
     let now = batch.now;
     let mut before_update: Vec<nickel_ui::ScrollAnchor> = Vec::new();
     let mut virtual_targets = Vec::new();
-    if geometry_or_data_changed {
+    // Projection may already have admitted a new tree. Its row keys cannot
+    // measure the previous native view. Resolve that tree in host.step below
+    // before collecting measurements; inline snapshot updates can still take
+    // anchors here from their matching pre-update tree and layout.
+    if geometry_or_data_changed && host.application().native_view_matches_accepted() {
         if host.application().has_virtual_collections() {
             let inspection = host.inspect();
             let targets = if inspection.modality == nickel_ui::InputModality::Controller {
@@ -1467,11 +1471,14 @@ impl LiveShell {
         }
         // Bundled source is an ordinary package, initially disabled. Persisted
         // activation still goes through the same reviewed lifecycle as disk sources.
-        let package = crate::bundled_plugin_assets::load_package("nickel-default")?;
-        let id = package.manifest.id.clone();
-        if let std::collections::btree_map::Entry::Vacant(e) = external_plugin_packages.entry(id) {
-            plugin_registry.register(package.manifest.clone())?;
-            e.insert(nickel_core::plugins::PluginPackageSource::embedded(package));
+        for id in ["nickel-default", "nickel-cupertino-dock"] {
+            let package = crate::bundled_plugin_assets::load_package(id)?;
+            if let std::collections::btree_map::Entry::Vacant(e) =
+                external_plugin_packages.entry(id.to_owned())
+            {
+                plugin_registry.register(package.manifest.clone())?;
+                e.insert(nickel_core::plugins::PluginPackageSource::embedded(package));
+            }
         }
         let plugin_settings = plugin_registry
             .entries()
@@ -3530,7 +3537,25 @@ impl LiveShell {
             let Some(id) = item["id"].as_str() else {
                 continue;
             };
-            let icon = if let Some(application) = self
+            let icon = if let Some(icon) = crate::icons::nickel_application(id)
+                .or_else(|| {
+                    item["name"]
+                        .as_str()
+                        .and_then(crate::icons::nickel_application)
+                })
+                .or_else(|| {
+                    self.windows
+                        .iter()
+                        .filter(|window| {
+                            window
+                                .application_id
+                                .as_ref()
+                                .is_some_and(|application| application.as_str() == id)
+                        })
+                        .find_map(|window| crate::icons::nickel_application(&window.title))
+                }) {
+                icon
+            } else if let Some(application) = self
                 .launcher
                 .applications()
                 .find(|application| application.id() == id)
@@ -3571,6 +3596,13 @@ impl LiveShell {
                 }),
             nickel_platform::installed_icon_themes(),
         )
+    }
+
+    fn apply_committed_appearance(&mut self, settings: ShellSettings) {
+        // A committed appearance change affects every surface, including those
+        // outside the package that supplied the callback.
+        self.preferences_commit_pending = Some(settings.clone());
+        self.apply_shell_settings(settings);
     }
 
     pub(crate) fn take_preferences_commit(&mut self) -> Option<ShellSettings> {
@@ -4237,12 +4269,14 @@ impl LiveShell {
         let workspaces = self.plugin_workspace_snapshot(&key.plugin_id);
         let desktop = self.plugin_desktop_snapshot(&key.plugin_id);
         let keyboard_data = self.plugin_keyboard_snapshot(&key.plugin_id);
+        let palette = self.palette;
         let preparation = (|| {
             let host = self.plugin_panel_host_for(key)?;
             let projected = (|| -> Result<bool, String> {
                 // Geometry is published first. Focus is a distinct UiHost fact,
                 // so hooks never observe a new focus paired with stale output
                 // or scale state from this presentation pass.
+                let theme_changed = host.application_mut().sync_theme_palette(palette)?;
                 let geometry_changed = host.application_mut().sync_surface_geometry(
                     surface_authority.0.as_deref(),
                     surface_authority.1,
@@ -4305,7 +4339,8 @@ impl LiveShell {
                         "plugin projection change source"
                     );
                 }
-                Ok(geometry_changed
+                Ok(theme_changed
+                    || geometry_changed
                     || focus_changed
                     || surface_changed
                     || resource_changed
@@ -5662,11 +5697,30 @@ impl LiveShell {
             .collect()
     }
 
+    pub(crate) fn active_shell_failed(&self) -> bool {
+        self.plugin_registry
+            .get(&self.active_shell_package_id)
+            .is_some_and(|entry| {
+                entry.desired_enabled
+                    && matches!(entry.health, nickel_core::plugins::PluginHealth::Failed(_))
+            })
+    }
+
+    pub(crate) fn retry_active_shell(&mut self) -> Result<bool, String> {
+        if !self.active_shell_failed() {
+            return Ok(false);
+        }
+        let id = self.active_shell_package_id.clone();
+        self.set_plugin_enabled(&id, true)
+    }
+
     pub fn set_plugin_enabled(&mut self, id: &str, enabled: bool) -> Result<bool, String> {
         let Some(entry) = self.plugin_registry.get(id) else {
             return Err(format!("unknown plugin {id:?}"));
         };
-        if entry.desired_enabled == enabled {
+        if entry.desired_enabled == enabled
+            && !(enabled && matches!(entry.health, nickel_core::plugins::PluginHealth::Failed(_)))
+        {
             return Ok(false);
         }
         let external_panel = if enabled {
@@ -7463,7 +7517,16 @@ impl LiveShell {
                                     settings,
                                 ),
                             ) => {
-                                changed |= self.apply_shell_settings(settings);
+                                let mode = settings
+                                    .resolve_appearance(
+                                        crate::appearance_capabilities::system_appearance(),
+                                    )
+                                    .mode;
+                                self.apply_committed_appearance(settings);
+                                if let Err(error) = nickel_platform::publish_color_scheme(mode) {
+                                    tracing::warn!(%error, "could not publish application color scheme");
+                                }
+                                changed = true;
                             }
                             Ok(crate::appearance_capabilities::CommittedAppearance::Wallpaper(
                                 settings,

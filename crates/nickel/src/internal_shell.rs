@@ -1665,7 +1665,7 @@ impl InternalShellCoordinator {
         .1
     }
 
-    fn reserved_panel_height(&self, output: &str) -> u32 {
+    pub(crate) fn reserved_panel_height(&self, output: &str) -> u32 {
         reserved_panel_measure(
             &self.entries,
             output,
@@ -1708,6 +1708,14 @@ impl InternalShellCoordinator {
 
     pub(crate) fn set_plugin_enabled(&mut self, id: &str, enabled: bool) -> Result<bool, String> {
         self.shell.set_plugin_enabled(id, enabled)
+    }
+
+    pub(crate) fn active_shell_failed(&self) -> bool {
+        self.shell.active_shell_failed()
+    }
+
+    pub(crate) fn retry_active_shell(&mut self) -> Result<bool, String> {
+        self.shell.retry_active_shell()
     }
 
     pub(crate) fn close_plugin_window(

@@ -3747,6 +3747,11 @@ impl<Message> Slider<Message> {
         slider
     }
 
+    pub fn on_drag(mut self, (seed, map): (Message, fn(Message, DragGesture) -> Message)) -> Self {
+        self.0 = self.0.on_drag(seed, map);
+        self
+    }
+
     pub fn parts(
         mut self,
         track: DropdownPartStyle,

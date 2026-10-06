@@ -197,7 +197,7 @@ definitions only.
 Supported declarations are `padding`, `margin`, `border` (solid only),
 `border-width`, `border-color`, `border-radius`, `font-size`, `line-height`
 (pixel lengths), `box-shadow` (`x y blur spread color`), `background` or
-`background-color`, `color`, `gap`, `width`,
+`background-color`, `color`, `icon-color`, `gap`, `width`,
 `height`, `min-width`, `max-width`, `min-height`, `max-height`, `display`,
 `flex-direction`, `flex`, `flex-grow`, `flex-shrink`, `flex-basis`, `align-items`,
 `justify-content`, `text-align` (`start`, `center`, or `end`), and
@@ -250,7 +250,13 @@ Nickel supplies overridable semantic defaults. Color tokens are `background`,
 `panel`, `surface`, `surface-hover`, `text`, `muted`, `accent`, `accent-soft`,
 `complement`, `raised`, `control`, `border`, `soft-text`, `selected`, and
 `selected-border`, each prefixed with `--nickel-`. Aliases include
-`--nickel-surface-raised` and `--nickel-text-muted`. Metric defaults are
+`--nickel-surface-raised` and `--nickel-text-muted`.
+`--nickel-background-raised` and `--nickel-panel-raised` offer lighter tinted
+backgrounds in light mode and retain their base colors in dark mode.
+`--nickel-card` keeps the raised background’s perceptual lightness with a small
+hue shift in light mode; it uses the surface color in dark mode.
+`--nickel-card` keeps the raised background’s perceptual lightness with a small
+hue shift in light mode; it uses the surface color in dark mode. Metric defaults are
 `--nickel-radius-control: 8px`, `--nickel-radius-card: 12px`,
 `--nickel-spacing-control: 8px`, `--nickel-font-size: 14px`, and
 `--nickel-line-height: 20px`. Host appearance changes refresh palette defaults;
@@ -625,3 +631,9 @@ complete copy/edit/validate/live-dev starting point. It extends the versioned
 Settings, and exposes a registered setting through inherited Settings. Components
 execute with their author's grants in the shared package host; selecting a public
 component does not grant its caller the provider's capabilities.
+
+Button `icon-color` tints icon artwork while preserving its alpha coverage, including antialiased edges. Without it, icons retain their original colors.
+
+Sliders support `onDrag` lifecycle events. Their gesture bounds describe the
+value track, so release coordinates can be converted to the normalized value.
+Use a local draft during dragging to defer expensive host writes until release.

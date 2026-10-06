@@ -270,3 +270,14 @@ The launcher uses an anchored overlay with a 120×36 All apps button and an
 alphabetical app list. Default-shell `nickel-plugin dev` previews copy saved
 launcher pins and recents into the temporary profile at startup. Changes made
 inside the preview remain in that temporary profile.
+
+## Light and dark styling
+
+The host supplies surface, text, border, and accent tokens from the configured
+appearance. The default shell uses these tokens directly so its bar and other
+surfaces follow the chosen accent and light/dark mode. Changing appearance updates
+the existing stylesheet and its interaction styles without restarting the package.
+The resolved mode also drives `@media (prefers-color-scheme: light)` and
+`@media (prefers-color-scheme: dark)`. Comma-separated light/dark queries and
+nested media blocks are supported; other media features are rejected by the
+bounded CSS parser.

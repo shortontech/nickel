@@ -159,7 +159,7 @@ export function Launcher() {
                 h(Button, { id: "launcher-account", className: "launcher-account-button", onClick: () => nickel.surfaces.show("quick-settings") }, session.account?.displayName || "Local session"),
                 h(Button, { id: "launcher-view-places", className: "launcher-link", onClick: () => changeView("places") }, "Places"),
                 session.support.logout ? h(Button, { id: "launcher-logout", className: "launcher-link", onClick: () => { setLogoutOpen(true); nickel.openDialog("launcher-logout-dialog"); } }, "Log out") : null,
-                h(Button, { id: "launcher-settings", className: "launcher-link", onClick: () => nickel.surfaces.show("settings") }, "Settings")),
+                h(Button, { id: "launcher-settings", className: "launcher-link", onClick: () => { nickel.surfaces.show("settings"); nickel.surfaces.focus("settings"); } }, "Settings")),
             h(Dialog, { id: "launcher-logout-dialog", anchor: "launcher-logout", open: logoutOpen, onClose: () => setLogoutOpen(false), width: 320, height: 160 },
                 h(Column, null,
                     h(Text, null, "Log out of this session?"),

@@ -5,10 +5,11 @@ The `nickel` executable owns both the native Linux compositor session and the us
 compositor process and communicate through typed in-process authority.
 
 There is no independently restartable shell process, PID registration barrier, or `--role shell`
-recovery path. Restarting the shell therefore means restarting the session. The compositor retains
-its own recovery panel for fatal internal runtime failures and safe logout. This panel is not a
-Wayland client and remains available when normal shell presentation cannot be drawn. System
-virtual-terminal chords remain available.
+recovery path. When the active shell package fails, the compositor shows its own recovery panel.
+Retry reloads the failed package in place without restarting the compositor or its applications;
+if loading fails again, recovery remains available. Desired plugin activation is preserved.
+The panel also offers safe logout. It is not a Wayland client and remains available when normal
+shell presentation cannot be drawn. System virtual-terminal chords remain available.
 
 XWayland is supervised separately. A failed XWayland process is torn down and restarted without
 ending the Wayland compositor or its native clients. Optional login services publish explicit

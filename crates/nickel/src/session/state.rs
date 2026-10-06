@@ -7338,6 +7338,7 @@ impl NickelSession {
             .internal_shell
             .as_mut()
             .and_then(|shell| shell.take_preferences_commit());
+        let changed = if committed.is_some() { None } else { changed };
         if let Some(settings) = committed {
             if let Ok(transitions) = self
                 .workspaces
@@ -7379,6 +7380,7 @@ impl NickelSession {
         changed: Option<&[nickel_ui::InternalSurfaceId]>,
         request_frame: bool,
     ) {
+        let recovery_was_visible = self.shell_recovery_visible();
         let Some(mut shell) = self.internal_shell.take() else {
             return;
         };
@@ -7686,7 +7688,12 @@ impl NickelSession {
                 focus_on_show = Some(runtime_id);
             }
         }
+        self.internal_ui
+            .refresh_window_decoration_colors(shell.semantic_theme());
         self.internal_shell = Some(shell);
+        if recovery_was_visible != self.shell_recovery_visible() {
+            self.request_output_redraw();
+        }
         for (runtime, key) in plugin_windows {
             self.register_internal_application_with_plugin(runtime, Some(&key));
         }
@@ -9323,13 +9330,35 @@ impl NickelSession {
 
     pub fn shell_recovery_visible(&self) -> bool {
         crate::session::shell_recovery_visible_for(self.shell_failure_count)
+            || self
+                .internal_shell
+                .as_ref()
+                .is_some_and(|shell| shell.active_shell_failed())
     }
 
     pub(crate) fn retry_shell_from_recovery(&mut self) -> bool {
         if !self.shell_recovery_visible() {
             return false;
         }
-        false
+        let result = self
+            .internal_shell
+            .as_mut()
+            .map(|shell| shell.retry_active_shell());
+        match result {
+            Some(Ok(true)) => {
+                self.shell_failure_count = 0;
+                self.reconcile_internal_shell_outputs();
+                self.sync_internal_shell();
+                self.request_output_redraw();
+                true
+            }
+            Some(Err(error)) => {
+                tracing::warn!(%error, "active shell recovery retry failed");
+                self.request_output_redraw();
+                false
+            }
+            _ => false,
+        }
     }
 
     pub(crate) fn exit_from_recovery(&mut self) -> bool {
@@ -16251,6 +16280,27 @@ fn adjust_internal_plugin_surface_placement(
     else {
         return;
     };
+    // Application anchors refer to the available work area, excluding panels.
+    let work_outputs;
+    let outputs = if kind == nickel_core::plugins::PluginSurfaceKind::Window {
+        work_outputs = outputs
+            .iter()
+            .map(|(output, x, y)| {
+                let reserved = shell.reserved_panel_height(&output.name).min(output.height);
+                let mut output = output.clone();
+                output.height -= reserved;
+                let y = if shell.panel_edge() == crate::winit_shell::PanelEdge::Top {
+                    y.saturating_add(reserved as i32)
+                } else {
+                    *y
+                };
+                (output, *x, y)
+            })
+            .collect::<Vec<_>>();
+        work_outputs.as_slice()
+    } else {
+        outputs
+    };
     apply_internal_plugin_surface_placement(
         placement,
         kind,
@@ -16312,6 +16362,31 @@ fn apply_internal_plugin_surface_placement(
             .iter()
             .find(|(output, _, _)| placement.output.as_deref() == Some(output.name.as_str()))
         {
+            if kind == nickel_core::plugins::PluginSurfaceKind::Window {
+                let border = crate::session::window_frame::RESIZE_BORDER.max(0) as u32;
+                let titlebar = crate::session::window_frame::TITLEBAR_HEIGHT.max(0) as u32;
+                // Anchor the complete decorated frame, then convert back to content coordinates.
+                let width = placement
+                    .geometry
+                    .2
+                    .min(output.width.saturating_sub(border * 2).max(1));
+                let height = placement
+                    .geometry
+                    .3
+                    .min(output.height.saturating_sub(titlebar + border * 2).max(1));
+                let (outer_x, outer_y) = anchor.position(
+                    (*x, *y, output.width, output.height),
+                    (width + border * 2, height + titlebar + border * 2),
+                    offset,
+                );
+                placement.geometry = (
+                    outer_x + border as i32,
+                    outer_y + (titlebar + border) as i32,
+                    width,
+                    height,
+                );
+                return;
+            }
             let (placed_x, placed_y) = anchor.position(
                 (*x, *y, output.width, output.height),
                 (placement.geometry.2, placement.geometry.3),

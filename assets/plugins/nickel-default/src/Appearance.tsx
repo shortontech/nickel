@@ -1,11 +1,35 @@
 // @jsx h
 import { fromHsv, toHexColor } from "./colors.js";
+import { ThemePicker } from "./ThemePicker.tsx";
 import "./styles/appearance.css";
 
 const defaults = {theme:"system", accent_hue:null, accent_intensity:null, reduce_transparency:false, animations:"normal"};
 const wallpaperKey = image => image.id;
 // Estimates only: native layout corrects these for the current font, width, and scale.
 const wallpaperHeight = image => image.previewAsset ? 126 : 36;
+
+function AppearanceSlider({value, max, onCommit, ...props}) {
+    const [draft, setDraft] = useState(null);
+    const drag = useRef(false);
+    const committed = useRef(value);
+    const base = useRef(value);
+    if (base.current !== value) { base.current = value; committed.current = value; }
+    const commit = next => {
+        if (committed.current !== next) { committed.current = next; onCommit(next); }
+        setDraft(null);
+    };
+    return <Slider {...props} min={0} max={max} step={1}
+        value={draft && draft.base === value ? draft.value : value}
+        onChange={next => drag.current ? setDraft({base:value, value:next}) : commit(next)}
+        onDrag={gesture => {
+            if (gesture.phase === "start") drag.current = true;
+            if (gesture.phase === "end") {
+                drag.current = false;
+                commit(Math.round(Math.max(0, Math.min(1, (gesture.x - gesture.bounds.x) / Math.max(1, gesture.bounds.width))) * max));
+            }
+            if (gesture.phase === "cancel") { drag.current = false; setDraft(null); }
+        }} />;
+}
 
 export function Appearance() {
     const appearance = nickel.appearance.get();
@@ -22,6 +46,7 @@ export function Appearance() {
     const validHue = customHue.trim() !== "" && Number.isInteger(hueNumber) && hueNumber >= 0 && hueNumber <= 359;
     return <Column className="appearance-page">
         {!appearance.writable ? <Text>Appearance is read only.</Text> : null}
+        <ThemePicker />
         <Column className="appearance-card">
             <Text className="appearance-heading">Theme</Text>
             <Row className="appearance-choices">
@@ -42,13 +67,11 @@ export function Appearance() {
                     onClick={() => {setCustomHue(String(hue)); setCustomOpen(true);}}>Custom hue</Button>
             </Row>
             <Text>{"Hue: " + hue + "°"}</Text>
-            {appearance.writable ? <Slider id="appearance-hue" accessibilityLabel="Interface hue"
-                min={0} max={359} step={1} value={hue} onChange={value => set({accent_hue:value})} /> : null}
+            {appearance.writable ? <AppearanceSlider id="appearance-hue" accessibilityLabel="Interface hue"
+                max={359} value={hue} onCommit={value => set({accent_hue:value})} /> : null}
             <Text>{"Color intensity: " + intensity + "%"}</Text>
-            {appearance.writable ? <Slider id="appearance-intensity" accessibilityLabel="Color intensity"
-                min={0} max={100} step={1} value={intensity} onChange={value => set({accent_intensity:value})} /> : null}
-            <Button id="appearance-inherit-accent" disabled={!appearance.writable}
-                onClick={() => set({accent_hue:null,accent_intensity:null})}>Use system accent</Button>
+            {appearance.writable ? <AppearanceSlider id="appearance-intensity" accessibilityLabel="Color intensity"
+                max={100} value={intensity} onCommit={value => set({accent_intensity:value})} /> : null}
         </Column>
         <Column className="appearance-card">
             <Text className="appearance-heading">Interface</Text>
@@ -69,12 +92,12 @@ export function Appearance() {
             <Text className="appearance-heading">Wallpaper</Text>
             {!wallpaper.available ? <Text wrap={true}>{wallpaper.reason || "Wallpaper is unavailable."}</Text> : <Column>
                 <Text>{wallpaper.configured.custom_image_configured ? "Custom image" : "Default wallpaper"}</Text>
-                <Row className="appearance-choices">
+                <div className="appearance-wallpaper-positions">
                     {["center","tile","stretch","fit","span","fill"].map(position => <Button key={position}
                         id={"appearance-wallpaper-position-" + position} disabled={!wallpaper.writable}
                         state={wallpaper.configured.position === position ? "selected" : "unselected"}
                         onClick={() => nickel.wallpaper.setPosition(position)}>{position}</Button>)}
-                </Row>
+                </div>
                 <Button id="appearance-wallpaper-choose" disabled={!wallpaper.writable || !wallpaper.chooser?.available || wallpaper.chooser.pending}
                     onClick={() => nickel.wallpaper.chooseImage()}>{wallpaper.chooser?.pending ? "Choosing image…" : "Choose image…"}</Button>
                 {wallpaper.chooser?.result ? <Text wrap={true}>{wallpaper.chooser.result.reason || ({applied:"Wallpaper applied",cancelled:"Image choice cancelled"})[wallpaper.chooser.result.status] || ""}</Text> : null}

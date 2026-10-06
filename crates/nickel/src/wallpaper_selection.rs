@@ -369,20 +369,12 @@ fn opaque_id(root: &Path, path: &Path) -> String {
 }
 
 fn wallpaper_roots() -> Vec<PathBuf> {
-    let mut roots = nickel_storage::config_path("wallpapers")
+    // Installed desktop environments do not supply Nickel's wallpaper catalog.
+    // Custom images remain available through the native image chooser.
+    nickel_storage::config_path("wallpapers")
         .ok()
         .into_iter()
-        .collect::<Vec<_>>();
-    #[cfg(target_os = "linux")]
-    roots.extend([
-        PathBuf::from("/usr/share/backgrounds"),
-        PathBuf::from("/usr/share/wallpapers"),
-    ]);
-    #[cfg(target_os = "windows")]
-    if let Some(windows) = std::env::var_os("WINDIR") {
-        roots.push(PathBuf::from(windows).join("Web").join("Wallpaper"));
-    }
-    roots
+        .collect()
 }
 
 #[cfg(test)]

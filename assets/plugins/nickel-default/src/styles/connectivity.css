@@ -22,3 +22,12 @@ column.connectivity-card {
 .connectivity-description {
     color: var(--nickel-text-muted);
 }
+
+row.connectivity-device-type { gap: 8px; align-items: center; }
+
+@media (prefers-color-scheme: light) {
+    column.connectivity-card {
+        background: var(--nickel-card);
+        border-width: 0px;
+    }
+}

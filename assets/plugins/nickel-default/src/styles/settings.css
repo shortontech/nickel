@@ -1,5 +1,6 @@
 window.settings-window {
-    background: var(--nickel-background);
+    color: var(--nickel-text);
+    background: var(--nickel-background-raised);
 }
 
 window.settings-window button:focus {
@@ -26,7 +27,7 @@ div.settings-sidebar {
     height: 100%;
     gap: 8px;
     padding: 16px;
-    background: var(--nickel-surface);
+    background: var(--nickel-panel-raised);
 }
 
 div.settings-sidebar.narrow {
@@ -71,7 +72,7 @@ button.settings-destination {
 }
 
 button.settings-destination.active {
-    background: var(--nickel-surface-raised);
+    background: var(--nickel-accent-soft);
     border: 1px solid var(--nickel-accent);
 }
 
@@ -86,7 +87,7 @@ div.settings-detail {
     flex-direction: column;
     width: 100%;
     flex-grow: 1;
-    background: var(--nickel-background);
+    background: var(--nickel-background-raised);
 }
 
 div.settings-detail.pairing {
@@ -125,6 +126,7 @@ button.settings-back {
 }
 
 scroll-view.settings-content {
+    padding: 16px;
     width: 100%;
     flex-grow: 1;
 }

@@ -2464,7 +2464,17 @@ fn resolve_application_id(native_app_id: &str, launcher: &Launcher) -> Option<Ap
         .applications()
         .find(|application| application.matches_native_id(native_app_id))
         .map(|application| application.application_id().clone())
-        .or_else(|| (native_app_id == "nickel-file").then(|| ApplicationId::new(native_app_id)))
+        .or_else(|| {
+            matches!(
+                native_app_id,
+                "nickel-file"
+                    | "nickel-nested"
+                    | "nickel-default/settings"
+                    | "nickel-default"
+                    | "nickel-cupertino-dock"
+            )
+            .then(|| ApplicationId::new(native_app_id))
+        })
 }
 
 #[cfg(test)]
@@ -3030,6 +3040,24 @@ mod tests {
                 .map(|id| id.as_str().to_owned()),
             Some("org.nickel.Terminal.desktop".into())
         );
+    }
+
+    #[test]
+    fn built_in_window_identities_need_no_desktop_entry() {
+        let launcher = Launcher::new(Vec::new());
+        for id in [
+            "nickel-nested",
+            "nickel-default/settings",
+            "nickel-file",
+            "nickel-default",
+            "nickel-cupertino-dock",
+        ] {
+            assert_eq!(
+                resolve_application_id(id, &launcher).map(|id| id.as_str().to_owned()),
+                Some(id.to_owned())
+            );
+        }
+        assert!(resolve_application_id("unknown-app", &launcher).is_none());
     }
 
     #[test]

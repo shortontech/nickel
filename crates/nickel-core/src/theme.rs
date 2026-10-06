@@ -23,6 +23,7 @@ impl Default for Appearance {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ThemePalette {
+    pub mode: ThemeMode,
     pub background: u32,
     pub panel: u32,
     pub surface: u32,
@@ -41,6 +42,7 @@ impl ThemePalette {
         let accent = Oklch::new(seed.l, seed.c * intensity, seed.h).to_rgb();
         let dark = appearance.mode == ThemeMode::Dark;
         Self {
+            mode: appearance.mode,
             background: Oklch::new(
                 if dark { 0.115 } else { 0.890 },
                 if dark { 0.006 } else { 0.035 } * intensity,
@@ -144,6 +146,12 @@ impl Oklch {
     }
 }
 
+/// Shift a surface hue while retaining its perceptual lightness and chroma.
+pub fn shifted_surface_hue(rgb: u32, degrees: f32) -> u32 {
+    let color = Oklch::from_srgb([(rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8]);
+    Oklch::new(color.l, color.c, color.h + degrees).to_rgb()
+}
+
 pub fn accent_hue(rgb: [u8; 3]) -> u16 {
     Oklch::from_srgb(rgb).h.round().rem_euclid(360.0) as u16
 }
@@ -177,6 +185,19 @@ mod tests {
         let left = luminance(left);
         let right = luminance(right);
         (left.max(right) + 0.05) / (left.min(right) + 0.05)
+    }
+
+    #[test]
+    fn surface_hue_shift_keeps_perceptual_lightness() {
+        for rgb in [0xdad2ed, 0xf0d9d0, 0xcde3d9] {
+            let shifted = super::shifted_surface_hue(rgb, 8.0);
+            let unpack = |rgb| [(rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8];
+            let before = super::Oklch::from_srgb(unpack(rgb));
+            let after = super::Oklch::from_srgb(unpack(shifted));
+            assert!((before.l - after.l).abs() < 0.003);
+            assert!((before.c - after.c).abs() < 0.003);
+            assert_ne!(rgb, shifted);
+        }
     }
 
     #[test]

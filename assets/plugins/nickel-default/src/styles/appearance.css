@@ -38,3 +38,19 @@ column.appearance-page button {
 button.appearance-choice.selected {
     border-color: var(--nickel-accent);
 }
+
+div.appearance-wallpaper-positions {
+    display: grid;
+    width: 100%;
+    grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
+    gap: 8px;
+}
+
+@media (prefers-color-scheme: light) {
+    column.appearance-card {
+        background: var(--nickel-card);
+        border-width: 0px;
+    }
+}
+
+row.appearance-theme-row { width: 100%; gap: 12px; align-items: center; }

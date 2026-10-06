@@ -9,7 +9,7 @@ use nickel_core::plugins::{PluginManifest, PluginSurface, PluginSurfaceKind};
 use nickel_plugin_runtime::{JsxRuntime, NativePatchEnvelope, NativePatchOperation};
 use nickel_ui::{
     AnyView, Column, ComponentBuilderExt, Container, DragGesture, DropGesture, Dropdown,
-    DropdownPartStyle, Grid, Image, ImageFit, Layer, Length, OverlayMenuItem, Point, Row,
+    DropdownPartStyle, Grid, Icon, Image, ImageFit, Layer, Length, OverlayMenuItem, Point, Row,
     SemanticRole, Shortcut, Slider, Spacer, Text, TextField as UiTextField, VerticalScroll,
 };
 use serde_json::Value;
@@ -500,6 +500,7 @@ pub enum PanelNode {
         value: f32,
         label: String,
         action: usize,
+        drag_action: Option<usize>,
     },
     Switch {
         id: String,
@@ -2245,6 +2246,10 @@ impl PanelNode {
                         .and_then(Value::as_u64)
                         .and_then(|action| usize::try_from(action).ok())
                         .ok_or("slider needs an onChange handler")?,
+                    drag_action: value
+                        .get("dragAction")
+                        .and_then(Value::as_u64)
+                        .and_then(|action| usize::try_from(action).ok()),
                 })
             }
             "switch" | "checkbox" => {
@@ -3022,6 +3027,7 @@ impl PanelNode {
             value,
             label,
             action,
+            drag_action,
         } = self
         else {
             unreachable!()
@@ -3054,6 +3060,20 @@ impl PanelNode {
             part("slider-fill", &fill_style),
             part("slider-thumb", &thumb_style),
         );
+        let slider = if let Some(drag) = drag_action {
+            slider.on_drag((
+                Message::from_plugin_scoped(
+                    PluginMessage::Button {
+                        click: *action,
+                        drag: *drag,
+                    },
+                    scope,
+                ),
+                Message::drag,
+            ))
+        } else {
+            slider
+        };
         let mut slider = slider
             .accessibility_label(label.clone())
             .css_frame(frame)
@@ -4510,9 +4530,18 @@ impl PanelNode {
                     .as_ref()
                     .and_then(|asset| images.get(asset))
                     .map_or_else(label_visual, |(id, image)| {
-                        let icon = Image::new(*id, Arc::clone(image))
-                            .width(*icon_size as f32)
-                            .height(*icon_size as f32);
+                        let icon = if let Some(color) = style.icon_color {
+                            AnyView::new(
+                                Icon::new(*id, Arc::clone(image), color, *icon_size as f32)
+                                    .decorative(),
+                            )
+                        } else {
+                            AnyView::new(
+                                Image::new(*id, Arc::clone(image))
+                                    .width(*icon_size as f32)
+                                    .height(*icon_size as f32),
+                            )
+                        };
                         if *show_label && *icon_above {
                             AnyView::new(
                                 Column::new()
@@ -5229,6 +5258,13 @@ impl RetainedPanelTree {
                             object.insert(property.clone(), value.clone());
                             if property == "className" && typed.container_children().is_some() {
                                 set_container_class_name(typed, value)?;
+                            } else if matches!(typed, PanelNode::Box { .. })
+                                && matches!(
+                                    property.as_str(),
+                                    "x" | "y" | "width" | "height" | "background" | "radius"
+                                )
+                            {
+                                update_box_scalars(typed, source)?;
                             } else if matches!(typed, PanelNode::Surface { .. }) {
                                 update_surface_scalars(typed, source)?;
                             } else {
@@ -5486,6 +5522,49 @@ fn retain_collection_sources(
 /// Reparse only a Surface's bounded scalar declaration. Its already-admitted
 /// children stay retained, so a root geometry or accessibility update does not
 /// turn into a subtree replacement or walk.
+fn update_box_scalars(node: &mut PanelNode, source: &Value) -> Result<(), String> {
+    // Validate with the production parser without reparsing retained descendants.
+    let mut shallow = source
+        .as_object()
+        .ok_or("patched box is not an object")?
+        .iter()
+        .filter(|(key, _)| key.as_str() != "children")
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect::<serde_json::Map<String, Value>>();
+    shallow.insert("children".into(), Value::Array(Vec::new()));
+    let PanelNode::Box {
+        x,
+        y,
+        width,
+        height,
+        background,
+        radius,
+        ..
+    } = PanelNode::parse(&Value::Object(shallow))?
+    else {
+        return Err("patched box no longer declares a box".into());
+    };
+    let PanelNode::Box {
+        x: current_x,
+        y: current_y,
+        width: current_width,
+        height: current_height,
+        background: current_background,
+        radius: current_radius,
+        ..
+    } = node
+    else {
+        unreachable!()
+    };
+    *current_x = x;
+    *current_y = y;
+    *current_width = width;
+    *current_height = height;
+    *current_background = background;
+    *current_radius = radius;
+    Ok(())
+}
+
 fn update_surface_scalars(node: &mut PanelNode, source: &Value) -> Result<(), String> {
     let mut shallow = source.clone();
     let object = shallow
@@ -5763,6 +5842,12 @@ fn set_typed_handler(
                 ..
             },
             "closeAction",
+        ) => *field = optional,
+        (
+            PanelNode::Slider {
+                drag_action: field, ..
+            },
+            "dragAction",
         ) => *field = optional,
         (PanelNode::Slider { action: field, .. }, "action")
         | (PanelNode::ColorSwatch { action: field, .. }, "action")
@@ -6754,6 +6839,69 @@ mod class_lookup_tests {
     }
 
     #[test]
+    fn box_geometry_patches_preserve_children_and_reject_unbounded_positions() {
+        let source = json!({"kind":"box","__nativeId":"box","x":0,"y":0,"width":200,"height":100,"children":[{"kind":"text","__nativeId":"child","children":["Display"]}]});
+        let manifest = nickel_core::plugins::PluginManifest {
+            composition: None,
+            api_version: 1,
+            id: "test".into(),
+            name: "Test".into(),
+            author: None,
+            version: None,
+            entry: "index.js".into(),
+            stylesheet: None,
+            images: Vec::new(),
+            surfaces: Vec::new(),
+            validation_data: Default::default(),
+            capabilities: Vec::new(),
+            settings: Vec::new(),
+        };
+        let stylesheet = super::StyleSheet::default();
+        let mut retained = RetainedPanelTree::admit(&source, &manifest, None, 1).unwrap();
+        for (generation, property, value) in [
+            (2, "x", 150),
+            (3, "y", 40),
+            (4, "width", 220),
+            (5, "height", 120),
+        ] {
+            let patch = NativePatchEnvelope {
+                version: 1,
+                operations: vec![NativePatchOperation::SetPrimitive {
+                    target: "box".into(),
+                    property: property.into(),
+                    value: json!(value),
+                }],
+                counters: Default::default(),
+            };
+            retained
+                .apply_patch(&patch, &manifest, None, &stylesheet, generation, 1)
+                .unwrap();
+            assert_eq!(
+                retained.node(),
+                &super::parse_panel_for_manifest(retained.source(), &manifest, None).unwrap()
+            );
+            assert_eq!(retained.source()["children"], source["children"]);
+        }
+        let accepted = retained.clone();
+        let invalid = NativePatchEnvelope {
+            version: 1,
+            operations: vec![NativePatchOperation::SetPrimitive {
+                target: "box".into(),
+                property: "x".into(),
+                value: json!(8193),
+            }],
+            counters: Default::default(),
+        };
+        assert!(
+            retained
+                .apply_patch(&invalid, &manifest, None, &stylesheet, 6, 1)
+                .is_err()
+        );
+        assert_eq!(retained.node(), accepted.node());
+        assert_eq!(retained.source(), accepted.source());
+    }
+
+    #[test]
     fn primitive_and_handler_patches_match_cold_admission_and_reject_atomically() {
         let source = json!({"kind":"column","__nativeId":"root","children":[
             {"kind":"text","__nativeId":"root/@label","key":"label","children":["old"]},
@@ -7531,6 +7679,33 @@ mod tests {
             assert!(frame.commands().iter().any(|command| matches!(command, PaintCommand::Text{text,align,..} if text==label && *align==expected)));
         }
         assert!(StyleSheet::compile("text { text-align: nonsense; }").is_err());
+    }
+
+    #[test]
+    fn button_icon_tint_preserves_alpha_and_original_artwork() {
+        let node = PanelNode::parse(
+            &serde_json::json!({"kind":"button","id":"logo","icon":"app","action":0,"children":[]}),
+        )
+        .unwrap();
+        let original = Arc::new(image::RgbaImage::from_pixel(
+            2,
+            2,
+            image::Rgba([40, 80, 120, 127]),
+        ));
+        let images = PluginImages::from([("app".into(), (7, Arc::clone(&original)))]);
+        for (css, expected) in [
+            ("button { icon-color: #eeccaa; }", [238, 204, 170, 127]),
+            ("", [40, 80, 120, 127]),
+        ] {
+            let sheet = StyleSheet::compile(css).unwrap();
+            let frame = UiFrame::layout_with_state(
+                node.view(&images, &sheet),
+                Rect::new(0.0, 0.0, 100.0, 60.0),
+                &mut Default::default(),
+            );
+            assert!(frame.commands().iter().any(|command| matches!(command, PaintCommand::Image { image, .. } if image.get_pixel(0, 0).0 == expected)));
+        }
+        assert_eq!(original.get_pixel(0, 0).0, [40, 80, 120, 127]);
     }
 
     #[test]
@@ -8314,6 +8489,7 @@ mod tests {
             value: 0.5,
             label: "Level".into(),
             action: 2,
+            drag_action: None,
         };
         let sheet = StyleSheet::compile(
             "slider { width: 200px; height: 40px; }

@@ -70,7 +70,7 @@ export function Displays() {
             h(Text, null, "No displays are available."),
             h(ApplicationScaleControls, null));
     return h(Column, { className: "display-page" },
-        h(Row, null,
+        h(Row, { className: "display-toolbar" },
             h(Text, { className: "display-heading" }, "Arrange displays"),
             h(Button, { id: "display-identify", disabled: !snapshot.operations?.identify, onClick: () => nickel.displays.identify(snapshot.revision) }, "Identify")),
         h(Text, { wrap: true }, "Drag displays to match their physical positions. Apply to preview your changes."),

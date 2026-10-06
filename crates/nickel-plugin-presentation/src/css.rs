@@ -61,6 +61,7 @@ pub struct ControlStyle {
     pub text_align: Option<TextAlign>,
     pub background: Option<u32>,
     pub color: Option<u32>,
+    pub icon_color: Option<u32>,
     pub grow: Option<f32>,
     pub gap: Option<f32>,
     pub bottom: Option<f32>,
@@ -211,6 +212,7 @@ impl Selector {
 
 #[derive(Clone, Debug)]
 struct Rule {
+    color_schemes: u8,
     selectors: Vec<Selector>,
     declarations: Vec<ParsedDeclaration>,
 }
@@ -247,6 +249,7 @@ enum Declaration {
     TextAlign(TextAlign),
     Background(u32),
     Color(u32),
+    IconColor(u32),
     Grow(f32),
     Gap(f32),
     Bottom(f32),
@@ -293,6 +296,7 @@ impl Declaration {
             Self::TextAlign(value) => style.text_align = Some(*value),
             Self::Background(value) => style.background = Some(*value),
             Self::Color(value) => style.color = Some(*value),
+            Self::IconColor(value) => style.icon_color = Some(*value),
             Self::Grow(value) => style.grow = Some(*value),
             Self::Gap(value) => style.gap = Some(*value),
             Self::Bottom(value) => style.bottom = Some(*value),
@@ -652,6 +656,7 @@ fn declaration(name: &str, value: &str) -> Result<Declaration, String> {
         }),
         "background-color" | "background" => Declaration::Background(color(value)?),
         "color" => Declaration::Color(color(value)?),
+        "icon-color" => Declaration::IconColor(color(value)?),
         "flex-grow" => {
             let n: f32 = value.parse().map_err(|_| "invalid flex-grow")?;
             if !n.is_finite() || !(0.0..=100.0).contains(&n) {
@@ -666,17 +671,79 @@ fn declaration(name: &str, value: &str) -> Result<Declaration, String> {
     })
 }
 
-struct CssRuleParser;
+struct CssRuleParser {
+    depth: u8,
+}
 
 impl<'i> AtRuleParser<'i> for CssRuleParser {
-    type Prelude = ();
-    type AtRule = Rule;
+    type Prelude = u8;
+    type AtRule = Vec<Rule>;
     type Error = String;
+
+    fn parse_prelude(
+        &mut self,
+        name: CowRcStr<'i>,
+        input: &mut Parser<'i>,
+    ) -> Result<u8, ParseError<String>> {
+        if !name.eq_ignore_ascii_case("media") || self.depth >= 8 {
+            return Err(ParseError::custom(
+                "unsupported or excessively nested CSS at-rule",
+            ));
+        }
+        let mut schemes = 0;
+        loop {
+            input.expect_parenthesis_block()?;
+            schemes |= input.parse_nested_block(|query| {
+                query.expect_ident_matching("prefers-color-scheme")?;
+                query.expect_colon()?;
+                let value = query.expect_ident()?;
+                let scheme = if value.eq_ignore_ascii_case("light") {
+                    1
+                } else if value.eq_ignore_ascii_case("dark") {
+                    2
+                } else {
+                    return Err(ParseError::custom("unsupported color scheme"));
+                };
+                query.expect_exhausted()?;
+                Ok(scheme)
+            })?;
+            if input.is_exhausted() {
+                break;
+            }
+            input.expect_comma()?;
+        }
+        Ok(schemes)
+    }
+
+    fn parse_block(
+        &mut self,
+        schemes: u8,
+        _start: &ParserState,
+        input: &mut Parser<'i>,
+    ) -> Result<Vec<Rule>, ParseError<String>> {
+        let mut nested = CssRuleParser {
+            depth: self.depth + 1,
+        };
+        let mut rules = Vec::new();
+        for result in StyleSheetParser::new(input, &mut nested) {
+            let mut children = result.map_err(|(error, ..)| error)?;
+            for rule in &mut children {
+                rule.color_schemes &= schemes;
+            }
+            rules.extend(children);
+            if rules.len() > 512 {
+                return Err(ParseError::custom(
+                    "plugin stylesheet has more than 512 rules",
+                ));
+            }
+        }
+        Ok(rules)
+    }
 }
 
 impl<'i> QualifiedRuleParser<'i> for CssRuleParser {
     type Prelude = Vec<Selector>;
-    type QualifiedRule = Rule;
+    type QualifiedRule = Vec<Rule>;
     type Error = String;
 
     fn parse_prelude(
@@ -773,10 +840,11 @@ impl<'i> QualifiedRuleParser<'i> for CssRuleParser {
                 "top and bottom are supported only on window selectors",
             ));
         }
-        Ok(Rule {
+        Ok(vec![Rule {
+            color_schemes: 3,
             selectors,
             declarations,
-        })
+        }])
     }
 }
 
@@ -839,7 +907,7 @@ fn palette_properties(palette: ThemePalette) -> HashMap<String, String> {
         };
         (channel(16) << 16) | (channel(8) << 8) | channel(0)
     };
-    let light = ((palette.text >> 16) & 0xff) < 0x80;
+    let light = palette.mode == nickel_core::theme::ThemeMode::Light;
     let raised = if light {
         blend(palette.surface, 0x00ff_ffff, 35)
     } else {
@@ -852,8 +920,35 @@ fn palette_properties(palette: ThemePalette) -> HashMap<String, String> {
     };
     for (name, color) in [
         ("background", palette.background),
+        (
+            "background-raised",
+            if light {
+                blend(palette.background, 0x00ff_ffff, 18)
+            } else {
+                palette.background
+            },
+        ),
+        (
+            "panel-raised",
+            if light {
+                blend(palette.panel, 0x00ff_ffff, 12)
+            } else {
+                palette.panel
+            },
+        ),
         ("panel", palette.panel),
         ("surface", palette.surface),
+        (
+            "card",
+            if light {
+                nickel_core::theme::shifted_surface_hue(
+                    blend(palette.background, 0x00ff_ffff, 18),
+                    8.0,
+                )
+            } else {
+                palette.surface
+            },
+        ),
         ("surface-hover", palette.surface_hover),
         ("text", palette.text),
         ("muted", palette.muted),
@@ -1121,7 +1216,7 @@ impl StyleSheet {
             return Err("plugin stylesheet exceeds 256 KiB".into());
         }
         let mut parser = Parser::new(source);
-        let mut rule_parser = CssRuleParser;
+        let mut rule_parser = CssRuleParser { depth: 0 };
         let mut rules = Vec::new();
         for result in StyleSheetParser::new(&mut parser, &mut rule_parser) {
             let rule = result.map_err(|(error, _, location)| {
@@ -1130,7 +1225,7 @@ impl StyleSheet {
                     location.line, location.column
                 )
             })?;
-            rules.push(rule);
+            rules.extend(rule);
             if rules.len() > 512 {
                 return Err("plugin stylesheet has more than 512 rules".into());
             }
@@ -1151,10 +1246,12 @@ impl StyleSheet {
                 }
             }
         }
+        let uses_palette =
+            source.contains("--nickel-") || rules.iter().any(|rule| rule.color_schemes != 3);
         let sheet = Self {
             rules,
             palette: Some(palette),
-            uses_palette: source.contains("--nickel-"),
+            uses_palette,
             reading_direction: ReadingDirection::LeftToRight,
             resolved: RefCell::default(),
             interaction_rules,
@@ -1163,6 +1260,16 @@ impl StyleSheet {
             interaction_rule_visits: Default::default(),
         };
         sheet.validate()?;
+        let mut other = sheet.clone();
+        other.palette = Some(ThemePalette::from_appearance(Appearance {
+            mode: if palette.mode == nickel_core::theme::ThemeMode::Light {
+                nickel_core::theme::ThemeMode::Dark
+            } else {
+                nickel_core::theme::ThemeMode::Light
+            },
+            ..Appearance::default()
+        }));
+        other.validate()?;
         Ok(sheet)
     }
 
@@ -1190,13 +1297,25 @@ impl StyleSheet {
         Ok(self.uses_palette)
     }
 
+    fn rule_active(&self, rule: &Rule) -> bool {
+        let palette = self
+            .palette
+            .unwrap_or_else(|| ThemePalette::from_appearance(Appearance::default()));
+        let scheme = if palette.mode == nickel_core::theme::ThemeMode::Light {
+            1
+        } else {
+            2
+        };
+        rule.color_schemes & scheme != 0
+    }
+
     fn validate(&self) -> Result<(), String> {
         let palette = self
             .palette
             .unwrap_or_else(|| ThemePalette::from_appearance(Appearance::default()));
         let mut root_properties = palette_properties(palette);
         let mut declared = HashSet::new();
-        for rule in &self.rules {
+        for rule in self.rules.iter().filter(|rule| self.rule_active(rule)) {
             for parsed in &rule.declarations {
                 if let ParsedDeclaration::Custom(name, value) = parsed {
                     declared.insert(name.clone());
@@ -1206,7 +1325,7 @@ impl StyleSheet {
                 }
             }
         }
-        for rule in &self.rules {
+        for rule in self.rules.iter().filter(|rule| self.rule_active(rule)) {
             if rule.selectors.iter().any(|selector| selector.root)
                 && rule
                     .declarations
@@ -1287,7 +1406,7 @@ impl StyleSheet {
             self.palette
                 .unwrap_or_else(|| ThemePalette::from_appearance(Appearance::default())),
         );
-        for rule in &self.rules {
+        for rule in self.rules.iter().filter(|rule| self.rule_active(rule)) {
             if rule.selectors.iter().any(|selector| selector.root) {
                 for declaration in &rule.declarations {
                     if let ParsedDeclaration::Custom(name, value) = declaration {
@@ -1297,7 +1416,7 @@ impl StyleSheet {
             }
         }
         properties.extend(inherited.clone());
-        for rule in &self.rules {
+        for rule in self.rules.iter().filter(|rule| self.rule_active(rule)) {
             if rule
                 .selectors
                 .iter()
@@ -1310,7 +1429,7 @@ impl StyleSheet {
                 }
             }
         }
-        for rule in &self.rules {
+        for rule in self.rules.iter().filter(|rule| self.rule_active(rule)) {
             if rule
                 .selectors
                 .iter()
@@ -1365,6 +1484,9 @@ impl StyleSheet {
         let mut style = ControlStyle::default();
         for &index in &self.interaction_rules[state.index()] {
             let rule = &self.rules[index];
+            if !self.rule_active(rule) {
+                continue;
+            }
             #[cfg(test)]
             self.interaction_rule_visits
                 .set(self.interaction_rule_visits.get() + 1);
@@ -2079,14 +2201,129 @@ mod tests {
     }
 
     #[test]
-    fn stock_shell_taskbar_stylesheet_compiles() {
-        let source = include_str!("../../../assets/plugins/nickel-default/src/styles/taskbar.css");
-        StyleSheet::compile(source).unwrap();
+    fn stock_shell_taskbar_follows_host_accent_and_mode() {
+        let source = concat!(
+            include_str!("../../../assets/plugins/nickel-default/src/styles/controls.css"),
+            include_str!("../../../assets/plugins/nickel-default/src/styles/taskbar.css"),
+            include_str!("../../../assets/plugins/nickel-default/src/styles/settings.css"),
+            include_str!("../../../assets/plugins/nickel-default/src/styles/appearance.css"),
+        );
+        let mut sheet = StyleSheet::compile(source).unwrap();
+        for mode in [
+            nickel_core::theme::ThemeMode::Dark,
+            nickel_core::theme::ThemeMode::Light,
+        ] {
+            let mut backgrounds = Vec::new();
+            for accent in [[220, 130, 30], [45, 100, 220]] {
+                let palette = ThemePalette::from_appearance(Appearance {
+                    mode,
+                    accent,
+                    intensity: 100,
+                });
+                sheet.set_palette(palette).unwrap();
+                let background = sheet.resolve("window", None, Some("taskbar")).background;
+                assert_eq!(background, Some(0xff00_0000 | palette.panel));
+                for (element, class, base) in [
+                    ("div", "settings-sidebar", palette.panel),
+                    ("window", "settings-window", palette.background),
+                    ("div", "settings-detail", palette.background),
+                ] {
+                    let actual = sheet
+                        .resolve(element, None, Some(class))
+                        .background
+                        .unwrap()
+                        & 0x00ff_ffff;
+                    if mode == nickel_core::theme::ThemeMode::Light {
+                        for shift in [0, 8, 16] {
+                            assert!(((actual >> shift) & 255) > ((base >> shift) & 255));
+                        }
+                        assert_ne!(actual, 0x00ff_ffff);
+                    } else {
+                        assert_eq!(actual, base);
+                    }
+                }
+                assert_eq!(
+                    sheet
+                        .resolve("button", None, Some("launcher-button"))
+                        .icon_color,
+                    Some(0xff00_0000 | palette.text)
+                );
+                assert_eq!(
+                    sheet
+                        .resolve("button", None, Some("settings-destination active"))
+                        .background,
+                    Some(0xff00_0000 | palette.accent_soft)
+                );
+                let card = sheet.resolve("column", None, Some("appearance-card"));
+                if mode == nickel_core::theme::ThemeMode::Light {
+                    assert_eq!(card.border_width, Some(0.0));
+                    assert_ne!(
+                        card.background,
+                        sheet
+                            .resolve("div", None, Some("settings-detail"))
+                            .background
+                    );
+                } else {
+                    assert_eq!(card.background, Some(0xff00_0000 | palette.surface));
+                }
+                backgrounds.push(background);
+            }
+            assert_ne!(backgrounds[0], backgrounds[1]);
+        }
     }
 
     #[test]
     fn stock_shell_launcher_stylesheet_compiles() {
         let source = include_str!("../../../assets/plugins/nickel-default/src/styles/launcher.css");
         StyleSheet::compile(source).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod color_scheme_tests {
+    use super::*;
+    #[test]
+    fn media_queries_switch_root_tokens_cascade_and_hover_without_reload() {
+        let mut sheet = StyleSheet::compile("@media (prefers-color-scheme: light) { :root { --ink: #112233; } button:hover { background: #abcdef; } } @media (prefers-color-scheme: dark) { :root { --ink: #ddeeff; } button:hover { background: #123456; } } text { color: var(--ink); }").unwrap();
+        for (mode, ink, hover) in [
+            (nickel_core::theme::ThemeMode::Light, 0xff112233, 0xffabcdef),
+            (nickel_core::theme::ThemeMode::Dark, 0xffddeeff, 0xff123456),
+            (nickel_core::theme::ThemeMode::Light, 0xff112233, 0xffabcdef),
+        ] {
+            sheet
+                .set_palette(ThemePalette::from_appearance(Appearance {
+                    mode,
+                    ..Appearance::default()
+                }))
+                .unwrap();
+            assert_eq!(sheet.resolve("text", None, None).color, Some(ink));
+            let style = sheet.resolve("button", None, None);
+            assert_eq!(
+                sheet
+                    .resolve_interaction_paint(
+                        "button",
+                        None,
+                        None,
+                        InteractionState::Hover,
+                        &style.custom_properties,
+                        &[]
+                    )
+                    .background,
+                Some(hover)
+            );
+        }
+    }
+    #[test]
+    fn dormant_media_rules_are_validated() {
+        assert!(
+            StyleSheet::compile(
+                "@media (prefers-color-scheme: light) { text { color: rubbish; } }"
+            )
+            .is_err()
+        );
+        assert!(
+            StyleSheet::compile("@media (prefers-color-scheme: sepia) { text { color: white; } }")
+                .is_err()
+        );
     }
 }

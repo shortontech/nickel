@@ -1,9 +1,9 @@
 window.taskbar {
     width: 100%;
     height: 56px;
-    background: #222730f2;
+    background: var(--nickel-panel);
     border-width: 1px;
-    border-color: #ffffff1f;
+    border-color: var(--nickel-border-soft);
     padding: 4px 8px;
 }
 
@@ -26,25 +26,29 @@ button.tray-button, button.clock-button {
     border: 1px solid transparent;
     border-radius: 8px;
     background: transparent;
-    color: #f3f5f8;
+    color: var(--nickel-text);
     font-size: 14px;
 }
 
 button.task-button.is-active {
-    background: #ffffff29;
-    border-color: #ffffff2e;
+    background: var(--nickel-selected);
+    border-color: var(--nickel-selected-border);
+}
+
+button.launcher-button {
+    icon-color: var(--nickel-text);
 }
 
 button.task-button:hover, button.launcher-button:hover,
 button.utility-button:hover, button.tray-button:hover,
 button.clock-button:hover {
-    background: #ffffff36;
+    background: var(--nickel-surface-hover);
 }
 
 button.task-button:active, button.launcher-button:active,
 button.utility-button:active, button.tray-button:active,
 button.clock-button:active {
-    background: #ffffff52;
+    background: var(--nickel-accent-soft);
 }
 
 button.clock-button {
@@ -55,12 +59,12 @@ badge.task-badge {
     width: 30px;
     height: 24px;
     border-radius: 12px;
-    color: #ffffff;
+    color: var(--nickel-text);
     font-size: 12px;
 }
 
 window.taskbar-menu {
-    background: #2b303cf1;
+    background: var(--nickel-surface-raised);
     padding: 8px;
 }
 
@@ -69,14 +73,14 @@ button.taskbar-menu-button {
     height: 48px;
     padding: 8px;
     background: transparent;
-    color: #f3f5f8;
+    color: var(--nickel-text);
     font-size: 14px;
 }
 
 button.taskbar-menu-button:hover {
-    background: #ffffff26;
+    background: var(--nickel-surface-hover);
 }
 
 button.taskbar-menu-button:active {
-    background: #ffffff40;
+    background: var(--nickel-accent-soft);
 }
