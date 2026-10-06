@@ -316,6 +316,12 @@ minimum target size; CSS thickness also enlarges it. Scroll semantics are unchan
 
 Parts inherit their owner's classes and custom properties and can match its ID.
 Select options can also have their own IDs.
+
+`Option` accepts an optional `icon` asset key, including host-provided
+`application:` artwork. Native dropdowns paint a 20px icon beside each label and
+beside the selected label, reserving space without changing input or accessibility
+ownership. Collapsed selects request only their selected application's artwork;
+opening the select admits artwork for its bounded option list.
 Interactive parts use their owning control or menu item's state; decorative
 parts do not become independent focus targets. Progress fill and text field
 caret/selection are ordinary paint parts. State classes such as `.on`, `.mixed`,

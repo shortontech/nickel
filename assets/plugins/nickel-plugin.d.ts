@@ -139,6 +139,8 @@ interface NickelSelectProps extends NickelProps {
     onClick: NickelClick;
 }
 interface NickelOptionProps extends NickelProps {
+    /** Optional package or application artwork asset key. */
+    icon?: string;
     id: string;
     onClick: NickelClick;
 }

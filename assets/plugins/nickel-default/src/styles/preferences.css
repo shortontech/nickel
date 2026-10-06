@@ -38,3 +38,7 @@ column.preferences-page text { color: var(--nickel-text); }
         border-width: 0px;
     }
 }
+
+select.preferences-provider { width: 100%; }
+select-header.preferences-provider { height: 40px; padding: 10px 36px 10px 12px; }
+option.preferences-provider { height: 40px; padding: 10px 12px; }

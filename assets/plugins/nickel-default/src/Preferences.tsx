@@ -83,29 +83,52 @@ export function IdlePreferences() {
     </Column>;
 }
 
+// Match provider identities rather than every application that can be launched.
+function isPreferredProvider(application, field) {
+    if (application.launchClass === "terminal") return false;
+    const identity = (application.id + " " + application.name).toLowerCase();
+    const names = field === "preferredTerminal"
+        ? ["terminal", "konsole", "kitty", "alacritty", "wezterm", "foot", "xterm", "uxterm", "urxvt", "rxvt", "tilix", "terminator", "terminology", "hyper", "contour", "ghostty", "st", "sakura", "guake", "yakuake", "rio", "warp", "kgx", "qterminal", "powershell", "pwsh", "cmd", "mintty", "windowsterminal"]
+        : ["files", "nautilus", "dolphin", "thunar", "nemo", "caja", "pcmanfm", "konqueror", "filemanager", "file-manager", "nickel-file", "explorer"];
+    const words = identity.split(/[^a-z0-9-]+/);
+    return names.some(name => words.includes(name)) || (field === "preferredTerminal"
+        && (application.id.toLowerCase().startsWith("org.gnome.console") || application.name.toLowerCase() === "console"));
+}
+
 function ApplicationPreference(props) {
     const [query, setQuery] = useState("");
+    const [open, setOpen] = useState(false);
+    const [showAll, setShowAll] = useState(false);
     const needle = query.trim().toLowerCase();
-    const installed = new Map(nickel.applications.list().map(application => [application.id, application.name]));
+    const installed = new Map(nickel.applications.list().map(application => [application.id, application]));
     const applications = props.snapshot.applications || [];
-    const choices = applications.map(application => ({id:application.id,
-        name:(installed.get(application.id) || application.id)}));
+    const choices = applications.map(application => {
+        const metadata = installed.get(application.id);
+        return {id:application.id, name:metadata?.name || application.id, icon:metadata?.icon, launchClass:metadata?.launchClass};
+    });
     const selected = choices.find(application => application.id === props.value);
-    const filtered = choices.filter(application => !needle || (application.id+" "+application.name).toLowerCase().includes(needle));
-    const set = id => nickel.preferences.set({[props.field]:id});
+    const providers = choices.filter(application => showAll || application.id === props.value || isPreferredProvider(application, props.field))
+        .sort((left,right) => left.id === props.value ? -1 : right.id === props.value ? 1 : left.name.localeCompare(right.name));
+    const filtered = providers.filter(application => application.id === props.value || !needle || (application.id+" "+application.name).toLowerCase().includes(needle));
+    const set = id => { nickel.preferences.set({[props.field]:id}); setOpen(false); };
+    const label = props.value === null ? "System default" : selected?.name || props.value;
     return <Column className="preferences-card">
         <Text className="preferences-heading">{props.label}</Text>
         <Text wrap={true}>{props.unavailable ? "The configured application is unavailable. It will be retained until you choose an application or restore the system default."
-            : props.value === null ? "System default" : "Current: " + (selected?.name || props.value)}</Text>
+            : props.value === null ? "System default" : "Current: " + label}</Text>
         <Button id={"preferences-"+props.field+"-system"} disabled={!props.snapshot.writable}
             state={props.value === null && !props.unavailable ? "selected" : "unselected"} onClick={() => set(null)}>Use system default</Button>
-        <TextField id={"preferences-"+props.field+"-search"} accessibilityLabel={"Search "+props.label.toLowerCase()}
-            placeholder="Search installed applications" value={query} onChange={setQuery} />
-        {filtered.slice(0,40).map((application,index) => <Button key={application.id} id={"preferences-"+props.field+"-choice-"+index}
-            disabled={!props.snapshot.writable} className={props.value === application.id ? "preferences-choice selected" : "preferences-choice"}
-            state={props.value === application.id ? "selected" : "unselected"} onClick={() => set(application.id)}>{application.name.slice(0,120)}</Button>)}
-        {filtered.length > 40 ? <Text>Search to narrow the remaining applications.</Text> : null}
-        {!filtered.length ? <Text>No installed applications match.</Text> : null}
+        <Button id={"preferences-"+props.field+"-show-all"} disabled={!props.snapshot.writable}
+            onClick={() => {setShowAll(!showAll); setQuery(""); setOpen(false);}}>{showAll ? "Show matching providers" : "Show all applications"}</Button>
+        {showAll || providers.length > 8 ? <TextField id={"preferences-"+props.field+"-search"} accessibilityLabel={"Search "+props.label.toLowerCase()}
+            placeholder={showAll ? "Search installed applications" : "Search providers"} value={query} onChange={value => {setQuery(value); setOpen(false);}} /> : null}
+        {props.snapshot.writable && filtered.length ? <Select id={"preferences-"+props.field+"-select"}
+            className="preferences-provider" accessibilityLabel={props.label} value={label.slice(0,120)} open={open} onClick={() => setOpen(!open)}>
+            {filtered.slice(0,8).map((application,index) => <Option key={application.id} id={"preferences-"+props.field+"-choice-"+index}
+                icon={application.icon} onClick={() => set(application.id)}>{application.name.slice(0,120)}</Option>)}
+        </Select> : null}
+        {filtered.length > 8 ? <Text>Search to narrow the remaining applications.</Text> : null}
+        {!filtered.length ? <Text>No installed providers match. Show all applications to choose another application.</Text> : null}
     </Column>;
 }
 

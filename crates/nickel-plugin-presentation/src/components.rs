@@ -17,6 +17,8 @@ use serde_json::Value;
 use crate::css::{ControlStyle, Display, FlexDirection, InteractionState, StyleSheet};
 
 pub type PluginImages = BTreeMap<String, (u16, Arc<image::RgbaImage>)>;
+/// Native option identity, label, callback, CSS classes, and optional artwork.
+pub type PluginSelectOption = (String, String, usize, Option<String>, Option<String>);
 
 /// Geometry observed from materialized native rows, never supplied by JSX.
 #[derive(Clone, Debug, PartialEq)]
@@ -531,7 +533,7 @@ pub enum PanelNode {
         value: String,
         open: bool,
         action: usize,
-        options: Vec<(String, String, usize, Option<String>)>,
+        options: Vec<PluginSelectOption>,
     },
     Spacer {
         class_name: Option<String>,
@@ -903,6 +905,23 @@ impl PanelNode {
             };
             if let Some(asset) = asset.filter(|asset| asset.starts_with("application:")) {
                 assets.insert(asset.clone());
+            }
+            if let PanelNode::Select {
+                options,
+                value,
+                open,
+                ..
+            } = node
+            {
+                for (_, label, _, _, icon) in options {
+                    if (*open || label == value)
+                        && let Some(asset) = icon
+                            .as_ref()
+                            .filter(|asset| asset.starts_with("application:"))
+                    {
+                        assets.insert(asset.clone());
+                    }
+                }
             }
             let children = match node {
                 PanelNode::Dialog {
@@ -1583,12 +1602,14 @@ impl PanelNode {
                         + class_name.as_ref().map_or(0, capacity)
                         + capacity(label)
                         + capacity(value)
-                        + (options.capacity() * std::mem::size_of::<(String, String, usize)>())
-                            as u64
+                        + (options.capacity() * std::mem::size_of::<PluginSelectOption>()) as u64
                         + options
                             .iter()
-                            .map(|(id, label, _, class)| {
-                                capacity(id) + capacity(label) + class.as_ref().map_or(0, capacity)
+                            .map(|(id, label, _, class, icon)| {
+                                capacity(id)
+                                    + capacity(label)
+                                    + class.as_ref().map_or(0, capacity)
+                                    + icon.as_ref().map_or(0, capacity)
                             })
                             .sum::<u64>()
                 }
@@ -2363,7 +2384,18 @@ impl PanelNode {
                         }
                         _ => return Err("option className is invalid".into()),
                     };
-                    options.push((id.to_owned(), label, action, option_class));
+                    let icon = match child.get("icon") {
+                        None | Some(Value::Null) => None,
+                        Some(Value::String(asset))
+                            if !asset.is_empty()
+                                && asset.len() <= 512
+                                && !asset.chars().any(char::is_control) =>
+                        {
+                            Some(asset.clone())
+                        }
+                        _ => return Err("option icon must be a bounded asset key".into()),
+                    };
+                    options.push((id.to_owned(), label, action, option_class, icon));
                 }
                 Ok(Self::Select {
                     id: value
@@ -3103,6 +3135,7 @@ impl PanelNode {
 
     fn view_select<Message: PluginUiMessage>(
         &self,
+        images: &PluginImages,
         stylesheet: &StyleSheet,
         scope: Option<&str>,
         inherited: InheritedTextStyle,
@@ -3178,7 +3211,7 @@ impl PanelNode {
         let select = Dropdown::new(
             Message::from_plugin_scoped(PluginMessage::Click(*action), scope),
             value,
-            options.iter().map(|(_, label, action, _)| {
+            options.iter().map(|(_, label, action, _, _)| {
                 (
                     label.as_str(),
                     Message::from_plugin_scoped(PluginMessage::Click(*action), scope),
@@ -3194,7 +3227,18 @@ impl PanelNode {
             with_interactions("option", &option_style, id),
             with_interactions("select-indicator", &indicator_style, id),
         )
-        .option_parts(options.iter().map(|(option_id, _, _, option_class)| {
+        .icons(
+            options
+                .iter()
+                .find(|(_, label, _, _, _)| label == value)
+                .and_then(|(_, _, _, _, icon)| icon.as_ref())
+                .and_then(|asset| images.get(asset))
+                .cloned(),
+            options.iter().map(|(_, _, _, _, icon)| {
+                icon.as_ref().and_then(|asset| images.get(asset)).cloned()
+            }),
+        )
+        .option_parts(options.iter().map(|(option_id, _, _, option_class, _)| {
             let classes = format!(
                 "{} {}",
                 class_name.as_deref().unwrap_or(""),
@@ -4259,7 +4303,7 @@ impl PanelNode {
                 }
                 with_margin(AnyView::new(control), &style)
             }
-            Self::Select { .. } => self.view_select(stylesheet, scope, inherited),
+            Self::Select { .. } => self.view_select(images, stylesheet, scope, inherited),
             Self::ColorSwatch { .. } => self.view_colorswatch(stylesheet, scope, inherited),
             Self::TextField {
                 id,
@@ -4784,8 +4828,8 @@ impl PanelNode {
                 } else {
                     options
                         .iter()
-                        .find(|(id, _, _, _)| id == requested_id)
-                        .map(|(_, _, action, _)| *action)
+                        .find(|(id, _, _, _, _)| id == requested_id)
+                        .map(|(_, _, action, _, _)| *action)
                 }
             }
             Self::Image {
@@ -8308,6 +8352,71 @@ mod tests {
     }
 
     #[test]
+    fn select_icons_follow_native_header_and_option_paint_and_demand() {
+        let mut node = PanelNode::parse(&serde_json::json!({
+            "kind":"select", "id":"providers", "accessibilityLabel":"Terminal", "value":"Konsole", "open":false, "action":1,
+            "children":[
+                {"kind":"option","id":"konsole","icon":"application:konsole","action":2,"children":["Konsole"]},
+                {"kind":"option","id":"kitty","icon":"application:kitty","action":3,"children":["Kitty"]}
+            ]
+        })).unwrap();
+        assert_eq!(
+            node.application_image_assets(),
+            ["application:konsole".to_owned()].into()
+        );
+        let mut images = PluginImages::new();
+        images.insert(
+            "application:konsole".into(),
+            (1, Arc::new(image::RgbaImage::new(20, 20))),
+        );
+        images.insert(
+            "application:kitty".into(),
+            (2, Arc::new(image::RgbaImage::new(20, 20))),
+        );
+        let sheet = StyleSheet::compile("select { width: 200px; } select-header { height:40px; padding:10px; color:#ffffff; } option { height:40px; padding:10px; color:#ffffff; }").unwrap();
+        let frame = UiFrame::layout(
+            node.view(&images, &sheet),
+            Rect::new(0.0, 0.0, 400.0, 300.0),
+        );
+        assert_eq!(
+            frame
+                .commands()
+                .iter()
+                .filter(|command| matches!(command, PaintCommand::Image { .. }))
+                .count(),
+            1
+        );
+        if let PanelNode::Select { open, .. } = &mut node {
+            *open = true;
+        }
+        assert_eq!(node.application_image_assets().len(), 2);
+        let frame = UiFrame::layout(
+            node.view(&images, &sheet),
+            Rect::new(0.0, 0.0, 400.0, 300.0),
+        );
+        assert_eq!(
+            frame
+                .commands()
+                .iter()
+                .filter(|command| matches!(command, PaintCommand::Image { .. }))
+                .count(),
+            3
+        );
+        assert!(
+            frame
+                .commands()
+                .iter()
+                .filter_map(|command| match command {
+                    PaintCommand::Text { bounds, text, .. }
+                        if text == "Konsole" || text == "Kitty" =>
+                        Some(bounds.origin.x),
+                    _ => None,
+                })
+                .all(|x| x >= 38.0)
+        );
+    }
+
+    #[test]
     fn select_has_no_stock_paint_without_stylesheet() {
         let node = PanelNode::Select {
             id: "choice".into(),
@@ -8316,7 +8425,7 @@ mod tests {
             value: "One".into(),
             open: false,
             action: 1,
-            options: vec![("one".into(), "One".into(), 2, None)],
+            options: vec![("one".into(), "One".into(), 2, None, None)],
         };
         let frame = UiFrame::layout(
             node.view(&PluginImages::new(), &StyleSheet::default()),
@@ -8342,8 +8451,8 @@ mod tests {
             open: true,
             action: 1,
             options: vec![
-                ("one".into(), "One".into(), 2, None),
-                ("two".into(), "Two".into(), 3, None),
+                ("one".into(), "One".into(), 2, None, None),
+                ("two".into(), "Two".into(), 3, None, None),
             ],
         };
         let sheet = StyleSheet::compile("select.custom { width: 160px; --ink: #abcdef; }
@@ -8383,7 +8492,7 @@ mod tests {
             value: "One".into(),
             open: true,
             action: 1,
-            options: vec![("one".into(), "One".into(), 2, None)],
+            options: vec![("one".into(), "One".into(), 2, None, None)],
         };
         let sheet = StyleSheet::compile(
             "select { width: 160px; }

@@ -957,6 +957,8 @@ pub(super) fn emit_element<Message: Clone>(
             presentation,
             option_presentations,
             resolved_options,
+            selected_icon,
+            option_icons,
             ..
         } => {
             let rect = node.content;
@@ -1010,10 +1012,14 @@ pub(super) fn emit_element<Message: Clone>(
                 header
             });
             if let Some(parts) = presentation {
+                let mut header_part = parts[0];
+                if selected_icon.is_some() {
+                    header_part.padding.left += 28.0;
+                }
                 paint_dropdown_part(
                     &mut tree.commands,
                     header,
-                    &parts[0],
+                    &header_part,
                     selected,
                     TextAlign::Start,
                 );
@@ -1049,7 +1055,7 @@ pub(super) fn emit_element<Message: Clone>(
                         top: if *overlay { 5.0 } else { 10.0 },
                         right: 36.0,
                         bottom: if *overlay { 4.0 } else { 8.0 },
-                        left: 12.0,
+                        left: if selected_icon.is_some() { 40.0 } else { 12.0 },
                     }),
                     text: selected.clone(),
                     scale: 2.0,
@@ -1072,6 +1078,18 @@ pub(super) fn emit_element<Message: Clone>(
                     bold: false,
                     wrap: false,
                 });
+            }
+            if let Some((id, image, generation)) = selected_icon {
+                paint_dropdown_icon(
+                    &mut tree.commands,
+                    header,
+                    *id,
+                    image,
+                    *generation,
+                    presentation
+                        .as_ref()
+                        .map_or(12.0, |parts| parts[0].padding.left),
+                );
             }
             // Keep the typed option topology available while collapsed so the
             // opening transition can select its declared entry target in the
@@ -1099,14 +1117,13 @@ pub(super) fn emit_element<Message: Clone>(
                     } else {
                         &mut tree.commands
                     };
+                    let icon = option_icons.get(index).and_then(Option::as_ref);
                     if let Some(parts) = presentation {
-                        paint_dropdown_part(
-                            commands,
-                            option_rect,
-                            option_part(index).unwrap_or(&parts[1]),
-                            option,
-                            TextAlign::Start,
-                        );
+                        let mut part = *option_part(index).unwrap_or(&parts[1]);
+                        if icon.is_some() {
+                            part.padding.left += 28.0;
+                        }
+                        paint_dropdown_part(commands, option_rect, &part, option, TextAlign::Start);
                     } else {
                         commands.push(PaintCommand::Fill {
                             rect: option_rect,
@@ -1117,7 +1134,7 @@ pub(super) fn emit_element<Message: Clone>(
                                 top: 7.0,
                                 right: 12.0,
                                 bottom: 7.0,
-                                left: 12.0,
+                                left: if icon.is_some() { 40.0 } else { 12.0 },
                             }),
                             text: option.clone(),
                             scale: 2.0,
@@ -1126,6 +1143,18 @@ pub(super) fn emit_element<Message: Clone>(
                             bold: false,
                             wrap: false,
                         });
+                    }
+                    if let Some((id, image, generation)) = icon {
+                        paint_dropdown_icon(
+                            commands,
+                            option_rect,
+                            *id,
+                            image,
+                            *generation,
+                            option_part(index)
+                                .or_else(|| presentation.as_ref().map(|parts| &parts[1]))
+                                .map_or(12.0, |part| part.padding.left),
+                        );
                     }
                     let option_id = node.id.scoped(format!("option-{index}"));
                     let message = element.option_messages.get(index).cloned().flatten();
@@ -1251,4 +1280,29 @@ pub(super) fn emit_element<Message: Clone>(
             bounds: paint_bounds(&tree.commands[fragment_start..], node.border_box),
         });
     }
+}
+
+fn paint_dropdown_icon(
+    commands: &mut Vec<PaintCommand>,
+    bounds: Rect,
+    id: u16,
+    image: &std::sync::Arc<image::RgbaImage>,
+    generation: u64,
+    left: f32,
+) {
+    let size = 20.0_f32
+        .min(bounds.size.height)
+        .min((bounds.size.width - left).max(0.0));
+    commands.push(PaintCommand::Image {
+        bounds: Rect::new(
+            bounds.origin.x + left,
+            bounds.origin.y + (bounds.size.height - size) / 2.0,
+            size,
+            size,
+        ),
+        id,
+        generation,
+        image: image.clone(),
+        high_density: None,
+    });
 }

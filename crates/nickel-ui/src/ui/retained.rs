@@ -378,11 +378,16 @@ fn signatures<Message>(element: &Element<Message>) -> PhaseSignatures {
             presentation,
             option_presentations,
             resolved_options,
+            selected_icon,
+            option_icons,
         } => {
             let _ = (selected, options, option_presentations, resolved_options);
             measure_content_sensitive = true;
             paint_content_sensitive = true;
             semantics_content_sensitive = true;
+            for icon in std::iter::once(selected_icon).chain(option_icons.iter()) {
+                paint.add(&icon.as_ref().map(|(id, _, generation)| (*id, *generation)));
+            }
             paint.add(expanded);
             paint.add(open_generation);
             paint.add(overlay);

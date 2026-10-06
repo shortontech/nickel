@@ -1213,6 +1213,8 @@ enum Kind {
         presentation: Option<Box<[DropdownPartStyle; 3]>>,
         option_presentations: Vec<DropdownPartStyle>,
         resolved_options: Vec<DropdownPartStyle>,
+        selected_icon: Option<(u16, Arc<RgbaImage>, u64)>,
+        option_icons: Vec<Option<(u16, Arc<RgbaImage>, u64)>>,
     },
 }
 

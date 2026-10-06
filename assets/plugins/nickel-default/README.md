@@ -271,6 +271,13 @@ alphabetical app list. Default-shell `nickel-plugin dev` previews copy saved
 launcher pins and recents into the temporary profile at startup. Changes made
 inside the preview remain in that temporary profile.
 
+## Preferred applications
+
+Preferred terminal and file-manager choices use native dropdowns with application
+icons. Names and desktop-entry IDs identify likely providers; the configured
+application remains available even when it does not match. “Show all applications”
+allows uncommon providers, with search to narrow larger lists.
+
 ## Light and dark styling
 
 The host supplies surface, text, border, and accent tokens from the configured

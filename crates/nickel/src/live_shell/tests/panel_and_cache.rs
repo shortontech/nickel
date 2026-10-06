@@ -70,6 +70,10 @@
             let host = &shell.plugin_surface_hosts[&key].1;
             assert!(host.application().application_image_demand().len() <= 6);
             assert!(host.resolved_layout().nodes().len() < 100);
+            // A completed artwork worker must repaint ordinary package windows,
+            // even when no input arrives to replace their initial placeholders.
+            shell.launcher_icon_revision = shell.launcher_icons.revision().wrapping_sub(1);
+            assert!(shell.refresh_fast_changes().contains(&SurfaceRole::Panel));
             let cached = shell.launcher_icons.diagnostics().entries;
             for _ in 0..16 { shell.plugin_panel_scene(&key, 300, 200).unwrap(); }
             assert_eq!(shell.launcher_icons.diagnostics().entries, cached);

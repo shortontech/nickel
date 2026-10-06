@@ -2017,6 +2017,13 @@ impl LiveShell {
         if icon_revision != self.launcher_icon_revision {
             self.launcher_icon_revision = icon_revision;
             redraw.extend([SurfaceRole::Launcher, SurfaceRole::Taskbar]);
+            // Settings and other package windows also consume application artwork.
+            // Replace their asynchronous placeholders without waiting for input.
+            for (key, (_, host)) in &self.plugin_surface_hosts {
+                if !host.application().application_image_demand().is_empty() {
+                    redraw.push(self.plugin_surface_redraw_role(key));
+                }
+            }
         }
         let tray = normalize_tray_items(self.tray_feed.snapshot());
         if tray != self.tray {

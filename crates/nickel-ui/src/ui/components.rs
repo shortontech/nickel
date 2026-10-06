@@ -3982,6 +3982,8 @@ impl<Message> Dropdown<Message> {
                 presentation: None,
                 option_presentations: Vec::new(),
                 resolved_options: Vec::new(),
+                selected_icon: None,
+                option_icons: Vec::new(),
             },
             style: Style::default(),
             message: Some(toggle_message),
@@ -4006,6 +4008,32 @@ impl<Message> Dropdown<Message> {
         };
         element.style.height = Length::Px(42.0);
         Self(element)
+    }
+
+    /// Optional artwork for the selected value and each native option row.
+    pub fn icons(
+        mut self,
+        selected: Option<(u16, Arc<RgbaImage>)>,
+        options: impl IntoIterator<Item = Option<(u16, Arc<RgbaImage>)>>,
+    ) -> Self {
+        if let Kind::Dropdown {
+            selected_icon,
+            option_icons,
+            ..
+        } = &mut self.0.kind
+        {
+            let artwork = |(id, image): (u16, Arc<RgbaImage>)| {
+                use std::hash::{Hash, Hasher};
+                let mut fingerprint = std::collections::hash_map::DefaultHasher::new();
+                image.width().hash(&mut fingerprint);
+                image.height().hash(&mut fingerprint);
+                image.as_raw().hash(&mut fingerprint);
+                (id, image, fingerprint.finish())
+            };
+            *selected_icon = selected.map(artwork);
+            *option_icons = options.into_iter().map(|icon| icon.map(artwork)).collect();
+        }
+        self
     }
 
     pub fn option_parts(mut self, styles: impl IntoIterator<Item = DropdownPartStyle>) -> Self {
@@ -4182,6 +4210,8 @@ impl<Message: Clone> Menu<Message> {
                 presentation: None,
                 option_presentations: Vec::new(),
                 resolved_options: Vec::new(),
+                selected_icon: None,
+                option_icons: Vec::new(),
             },
             style: Style::default(),
             message: Some(toggle_message.clone()),

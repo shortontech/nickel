@@ -137,6 +137,53 @@ fn preferences_package_pages_preserve_unavailable_choices_until_explicit_selecti
 }
 
 #[test]
+fn preferred_terminal_dropdown_filters_games_keeps_icons_and_allows_other_providers() {
+    let mut apps = runtime("apps", true);
+    apps.render("nickel.data.preferences.applications.push({id:'org.kde.konsole.desktop'},{id:'steam-disgaea.desktop'},{id:'custom.desktop'},{id:'emacs-term.desktop'}); nickel.data.applications.push({id:'org.kde.konsole.desktop',name:'Konsole',icon:'application:konsole'},{id:'steam-disgaea.desktop',name:'Disgaea 5 Complete',icon:'application:disgaea'},{id:'custom.desktop',name:'Custom Console',icon:'application:custom'},{id:'emacs-term.desktop',name:'Emacs (Terminal)',icon:'application:emacs',launchClass:'terminal'}); __nickelRender()", |value| Ok(value.clone())).unwrap();
+    let tree = render(&mut apps);
+    let select = node(&tree, "preferences-preferredTerminal-select").unwrap();
+    assert_eq!(select["kind"], "select");
+    assert!(!select.to_string().contains("Disgaea"));
+    assert!(!select.to_string().contains("Emacs"));
+    assert!(!select.to_string().contains("Custom Console"));
+    assert!(select.to_string().contains("application:konsole"));
+    let action = node(&tree, "preferences-preferredTerminal-show-all").unwrap()["action"]
+        .as_u64()
+        .unwrap();
+    apps.render(&format!("__nickelDispatch({action})"), |value| {
+        Ok(value.clone())
+    })
+    .unwrap();
+    let tree = render(&mut apps);
+    assert!(
+        node(&tree, "preferences-preferredTerminal-select")
+            .unwrap()
+            .to_string()
+            .contains("Custom Console")
+    );
+    assert!(apps.take_effects().unwrap().is_empty());
+    apps.render(
+        "nickel.data.preferences.configured.preferredTerminal='custom.desktop'; __nickelRender()",
+        |value| Ok(value.clone()),
+    )
+    .unwrap();
+    let action = node(&tree, "preferences-preferredTerminal-show-all").unwrap()["action"]
+        .as_u64()
+        .unwrap();
+    apps.render(&format!("__nickelDispatch({action})"), |value| {
+        Ok(value.clone())
+    })
+    .unwrap();
+    let tree = render(&mut apps);
+    assert!(
+        node(&tree, "preferences-preferredTerminal-select")
+            .unwrap()
+            .to_string()
+            .contains("Custom Console")
+    );
+}
+
+#[test]
 fn preferences_package_pages_disable_writes_without_control_availability() {
     for (page, id) in [
         ("shell", "preferences-desktop-count-8"),
