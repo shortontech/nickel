@@ -2,6 +2,23 @@ use super::PANEL_TRAY_ICON_SIZE;
 use crate::model::TrayItem;
 use std::sync::Arc;
 
+pub(super) fn plugin_tray_images(
+    items: &[TrayItem],
+    icons: &[Arc<image::RgbaImage>],
+) -> crate::plugin_panel::PluginImages {
+    items
+        .iter()
+        .zip(icons)
+        .enumerate()
+        .map(|(index, (item, icon))| {
+            (
+                format!("tray:{}", item.id),
+                (0x7100 + index as u16, Arc::clone(icon)),
+            )
+        })
+        .collect()
+}
+
 pub(super) fn panel_tray_icons(items: &[TrayItem]) -> Vec<Arc<image::RgbaImage>> {
     items
         .iter()
@@ -35,4 +52,24 @@ pub(super) fn tint_panel_icon(mut icon: image::RgbaImage, color: u32) -> image::
         pixel.0[..3].copy_from_slice(&tint);
     }
     icon
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn tray_artwork_uses_stable_item_keys_and_native_pixels() {
+        let items = vec![TrayItem {
+            id: "org.nickel.Test/Item".into(),
+            title: "Test".into(),
+            icon: image::RgbaImage::from_pixel(32, 32, image::Rgba([55, 200, 255, 255])),
+        }];
+        let icons = panel_tray_icons(&items);
+        let images = plugin_tray_images(&items, &icons);
+        let (id, image) = &images["tray:org.nickel.Test/Item"];
+        assert_eq!(*id, 0x7100);
+        assert!(Arc::ptr_eq(image, &icons[0]));
+        assert_eq!(image.get_pixel(0, 0).0, [55, 200, 255, 255]);
+        assert!(plugin_tray_images(&[], &[]).is_empty());
+    }
 }

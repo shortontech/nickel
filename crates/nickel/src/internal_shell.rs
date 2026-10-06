@@ -516,7 +516,9 @@ impl InternalShellCoordinator {
     pub(crate) fn layout_snapshot(&self, id: InternalSurfaceId) -> Option<String> {
         let entry = self.entries.iter().find(|entry| entry.id == id)?;
         let role = if self.is_taskbar_surface(entry) {
-            SurfaceRole::Taskbar
+            // The composed taskbar is a plugin host. Its legacy native role
+            // has no layout; querying it would fall back to the scene wrapper.
+            SurfaceRole::Panel
         } else {
             entry.role
         };

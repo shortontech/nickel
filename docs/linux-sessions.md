@@ -169,3 +169,20 @@ To pin reconnections to a specific provider, place its absolute executable path 
 `~/.config/nickel/secret-service-provider`). Nickel rejects a different process taking ownership of
 `org.freedesktop.secrets`; without this optional pin it reports the current owner for diagnosis but
 does not persist an automatic selection.
+
+## System tray
+
+Nickel provides the StatusNotifierWatcher on the session bus when another watcher is not
+running. Applications can register either a service name or an object path. Nickel verifies
+registration ownership, removes items whose bus owner leaves, and supplies bounded native
+artwork to packages with `tray-read`. Existing watchers remain authoritative when present.
+
+For an isolated live tray check, build `nickel-nested`, `nickel-test-input`,
+`nickel-test-tray`, and `nickel-nested-acceptance`, then run:
+
+```sh
+dbus-run-session -- env NICKEL_TEST_TRAY_ACCEPTANCE=1 target/debug/nickel-nested-acceptance
+```
+
+This checks that a real tray client's registration reaches the JSX taskbar and its
+button disappears on disconnect. It also runs the usual nested shell acceptance checks.

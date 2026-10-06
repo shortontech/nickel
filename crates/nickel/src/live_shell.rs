@@ -4138,19 +4138,19 @@ impl LiveShell {
     }
 
     fn plugin_owner_resource_fields(&mut self, id: &str) -> Vec<(&'static str, serde_json::Value)> {
-        let tray = self
-            .plugin_registry
-            .get(id)
-            .filter(|entry| {
-                entry
-                    .manifest
-                    .capabilities
-                    .contains(&nickel_core::plugins::PluginCapability::TrayRead)
-            })
-            .map(|_| {
-                serde_json::Value::Array(self.tray.iter().take(128).map(|item|
-                serde_json::json!({"id":item.id,"title":item.title,"icon":false})).collect())
-            });
+        let tray =
+            self.plugin_registry
+                .get(id)
+                .filter(|entry| {
+                    entry
+                        .manifest
+                        .capabilities
+                        .contains(&nickel_core::plugins::PluginCapability::TrayRead)
+                })
+                .map(|_| {
+                    serde_json::Value::Array(self.tray.iter().take(128).map(|item|
+                serde_json::json!({"id":item.id,"title":item.title,"icon":true})).collect())
+                });
         [
             ("clock", Some(crate::clock_capabilities::snapshot())),
             ("run", self.plugin_run_snapshot(id)),
@@ -4258,9 +4258,26 @@ impl LiveShell {
         let shortcuts = self.plugin_features(&key.plugin_id, true);
         let clock = crate::clock_capabilities::snapshot();
         let notifications = self.external_plugin_notifications(&key.plugin_id);
-        let tray = self.plugin_registry.get(&key.plugin_id)
-            .filter(|entry| entry.manifest.capabilities.contains(&nickel_core::plugins::PluginCapability::TrayRead))
-            .map(|_| serde_json::Value::Array(self.tray.iter().take(128).map(|item| serde_json::json!({"id":item.id,"title":item.title,"icon":false})).collect()));
+        let tray = self
+            .plugin_registry
+            .get(&key.plugin_id)
+            .filter(|entry| {
+                entry
+                    .manifest
+                    .capabilities
+                    .contains(&nickel_core::plugins::PluginCapability::TrayRead)
+            })
+            .map(|_| {
+                serde_json::Value::Array(
+                    self.tray
+                        .iter()
+                        .take(128)
+                        .map(
+                            |item| serde_json::json!({"id":item.id,"title":item.title,"icon":true}),
+                        )
+                        .collect(),
+                )
+            });
         let audio = self.plugin_audio(&key.plugin_id);
         let associations = self.plugin_associations(&key.plugin_id);
         let plugins = self.plugin_management(&key.plugin_id);
@@ -4394,12 +4411,19 @@ impl LiveShell {
         );
         application_images.insert("codex".into(), (u16::MAX, self.codex_icon.clone()));
         application_images.extend(preview_images);
+        if tray.is_some() {
+            application_images.extend(icon_resources::plugin_tray_images(
+                &self.tray,
+                &self.tray_icons,
+            ));
+        }
         if wallpaper.is_some() {
             application_images.extend(self.appearance_capabilities.previews.images().clone());
         }
         let result = (|| {
             let host = self.plugin_panel_host_for(key)?;
-            let images_changed = if applications.is_some()
+            let images_changed = if tray.is_some()
+                || applications.is_some()
                 || application_search.is_some()
                 || window_previews.is_some()
                 || wallpaper.is_some()

@@ -1582,8 +1582,11 @@ impl PluginPanelApplication {
 
     pub(crate) fn sync_application_images(&mut self, images: PluginImages) -> bool {
         let mut combined = self.images.clone();
-        combined
-            .retain(|key, _| !key.starts_with("application:") && !key.starts_with("wallpaper:"));
+        combined.retain(|key, _| {
+            !key.starts_with("application:")
+                && !key.starts_with("wallpaper:")
+                && !key.starts_with("tray:")
+        });
         combined.extend(images);
         self.sync_images(combined)
     }
@@ -7146,6 +7149,34 @@ mod tests {
             host.application_mut().take_effects(),
             vec![PluginEffect::ShowLauncher]
         );
+    }
+
+    #[test]
+    fn tray_artwork_paints_and_disappears_when_the_feed_is_cleared() {
+        let mut app = PluginPanelApplication::new("function App() { return h(Panel, {}, h(Button, {id:'tray-test', icon:'tray:test', accessibilityLabel:'Tray test', onClick:()=>nickel.request('show-launcher')}, '?')); }").unwrap();
+        let images = PluginImages::from([(
+            "tray:test".into(),
+            (
+                0x7100,
+                Arc::new(image::RgbaImage::from_pixel(
+                    24,
+                    24,
+                    image::Rgba([55, 200, 255, 255]),
+                )),
+            ),
+        )]);
+        assert!(app.sync_application_images(images));
+        let mut host = nickel_ui::UiHost::new(app, 300, 180);
+        assert!(host.commands().iter().any(|command| matches!(command, nickel_ui::backend::PaintCommand::Image { id, .. } if *id == 0x7100)));
+        assert!(
+            host.application_mut()
+                .sync_application_images(Default::default())
+        );
+        host.step(nickel_ui::HostBatch {
+            application_changed: true,
+            ..Default::default()
+        });
+        assert!(!host.commands().iter().any(|command| matches!(command, nickel_ui::backend::PaintCommand::Image { id, .. } if *id == 0x7100)));
     }
 
     #[test]

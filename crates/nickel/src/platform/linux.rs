@@ -48,6 +48,9 @@ pub use linux_guarded_control::{
     GuardedControlOrigin, GuardedControlOriginOwner, GuardedControlOutcome, submit_guarded_control,
 };
 
+#[path = "linux_tray_watcher.rs"]
+mod linux_tray_watcher;
+
 #[path = "linux_audio.rs"]
 mod linux_audio;
 #[path = "linux_control.rs"]
@@ -893,13 +896,21 @@ fn tray_worker(items: Arc<Mutex<Vec<TrayItem>>>, actions: mpsc::Receiver<(String
     let watcher_name: zbus::names::BusName<'_> = STATUS_NOTIFIER_WATCHER
         .try_into()
         .expect("status notifier watcher name is valid");
+    let own_watcher = Arc::new(linux_tray_watcher::WatcherState::default());
+    let installed = linux_tray_watcher::install(&connection, own_watcher.clone()).is_ok();
     let mut watcher = None;
     let mut failures = 0_u32;
     let mut next_attempt = std::time::Instant::now();
     let mut icon_cache = HashMap::new();
     loop {
         let now = std::time::Instant::now();
+        if installed {
+            linux_tray_watcher::prune(&connection, &own_watcher, &dbus);
+        }
         if watcher.is_none() && now >= next_attempt {
+            if installed {
+                linux_tray_watcher::claim(&connection);
+            }
             watcher = dbus
                 .name_has_owner(watcher_name.clone())
                 .ok()

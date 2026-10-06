@@ -406,6 +406,9 @@ fn exercise(
     verify_separate_plugin_dialog(test_input, &environment)?;
     verify_separate_plugin_overlay(test_input, &environment)?;
     verify_native_screenshot_lifecycle(test_input, &environment)?;
+    if env::var_os("NICKEL_TEST_TRAY_ACCEPTANCE").is_some() {
+        verify_tray_lifecycle(test_input, &environment)?;
+    }
     Ok(())
 }
 
@@ -1459,6 +1462,37 @@ fn assert_no_shell_child(compositor: u32) -> Result<(), String> {
             ));
         }
     }
+    Ok(())
+}
+
+fn verify_tray_lifecycle(test_input: &Path, environment: &[(String, String)]) -> Result<(), String> {
+    struct TrayClient(Child);
+    impl Drop for TrayClient {
+        fn drop(&mut self) { let _ = self.0.kill(); let _ = self.0.wait(); }
+    }
+    let fixture = sibling(test_input.parent().ok_or("missing test binary directory")?, "nickel-test-tray")?;
+    let mut client = TrayClient(Command::new(fixture).stdout(Stdio::null()).spawn().map_err(|error| error.to_string())?);
+    let wait = |visible: bool| -> Result<(), String> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let layouts = checked(test_input, environment, &["layouts"])?;
+            let mut nodes = Vec::new();
+            for line in layouts.lines().filter(|line| line.contains("nickel-default")) {
+                if let Some(surface) = line.split('\t').next() {
+                    nodes.extend(layout_nodes(test_input, environment, surface)?);
+                }
+            }
+            let found = nodes.iter().any(|node| node.contains("taskbar-tray-org.nickel.TestTray/StatusNotifierItem"));
+            if found == visible { return Ok(()); }
+            if Instant::now() >= deadline { return Err(format!("tray presence did not become {visible}: layouts={layouts}; taskbar nodes={nodes:?}")); }
+            thread::sleep(POLL);
+        }
+    };
+    wait(true)?;
+    client.0.kill().map_err(|error| error.to_string())?;
+    client.0.wait().map_err(|error| error.to_string())?;
+    wait(false)?;
+    println!("PASS: tray registration reaches JSX taskbar and disconnect removes its button");
     Ok(())
 }
 
