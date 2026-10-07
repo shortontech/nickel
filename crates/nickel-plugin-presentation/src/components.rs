@@ -4551,7 +4551,12 @@ impl PanelNode {
                     inherited.resolve(stylesheet, "button", Some(id), class_name.as_deref());
                 let text_style = inherited.apply(style.clone());
                 let label_visual = || {
-                    let title = styled_text(Text::new(label).wrap(true), &text_style);
+                    let title = styled_text(
+                        Text::new(label)
+                            .color(text_style.color.unwrap_or(0xfff4f6fa))
+                            .wrap(true),
+                        &text_style,
+                    );
                     if let Some(description) = description {
                         let inherited = inherited.extend(&text_style);
                         let description_style = inherited.apply(inherited.resolve(

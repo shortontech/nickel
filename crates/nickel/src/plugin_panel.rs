@@ -10347,6 +10347,85 @@ mod tests {
     }
 
     #[test]
+    fn dialog_buttons_stay_inside_confirmation_surface() {
+        let package = crate::bundled_plugin_assets::load_package("nickel-default").unwrap();
+        let surface = package
+            .manifest
+            .surfaces
+            .iter()
+            .find(|surface| surface.id == "launcher")
+            .unwrap();
+        let mut application =
+            PluginPanelApplication::from_package_surface(&package, &Default::default(), surface)
+                .unwrap();
+        application
+            .sync_host_data_field(
+                "session",
+                &serde_json::json!({
+                    "revision": "current",
+                    "account": {"displayName": "User", "username": "user"},
+                    "locked": false,
+                    "support": {"logout": true}
+                }),
+            )
+            .unwrap();
+        let mut host = nickel_ui::UiHost::new(application, surface.width, surface.height);
+        let open = host
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: nickel_ui::SemanticRole::Button,
+                name: "Log out".into(),
+            })
+            .unwrap();
+        host.step(nickel_ui::HostBatch {
+            events: vec![nickel_ui::HostEvent::Ui(
+                nickel_ui::UiEvent::AccessibilityActivate(open.id),
+            )],
+            ..Default::default()
+        });
+        let nodes = host.semantic_nodes();
+        let labels = host
+            .commands()
+            .iter()
+            .filter_map(|command| match command {
+                nickel_ui::backend::PaintCommand::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            labels.iter().filter(|label| **label == "Log out").count() >= 2,
+            "{labels:?}"
+        );
+        assert!(labels.contains(&"Cancel"), "{labels:?}");
+        let dialog = nodes
+            .iter()
+            .find(|node| node.role == Some(nickel_ui::SemanticRole::Dialog))
+            .unwrap();
+        let confirm = nodes
+            .iter()
+            .find(|node| node.id.as_str().contains("confirm-logout"))
+            .unwrap();
+        let cancel = nodes
+            .iter()
+            .find(|node| node.id.as_str().contains("cancel"))
+            .unwrap();
+        let dialog_bottom = dialog.bounds.origin.y + dialog.bounds.size.height;
+        assert!(
+            confirm.bounds.origin.y >= dialog.bounds.origin.y
+                && confirm.bounds.origin.y + confirm.bounds.size.height <= dialog_bottom,
+            "dialog={:?} confirm={:?}",
+            dialog.bounds,
+            confirm.bounds
+        );
+        assert!(
+            cancel.bounds.origin.y >= dialog.bounds.origin.y
+                && cancel.bounds.origin.y + cancel.bounds.size.height <= dialog_bottom,
+            "dialog={:?} cancel={:?}",
+            dialog.bounds,
+            cancel.bounds
+        );
+    }
+
+    #[test]
     fn installed_package_renders_declared_settings_data() {
         let mut external_manifest = manifest().clone();
         external_manifest.id = "org.example.settings-panel".into();
