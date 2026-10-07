@@ -4,6 +4,7 @@ use cosmic_text::{
 };
 use nickel_render_assets::ProcessFontSystem;
 use smallvec::{SmallVec, smallvec};
+use std::{collections::VecDeque, sync::Arc};
 
 #[cfg(debug_assertions)]
 mod image_profile {
@@ -128,6 +129,8 @@ pub struct SoftwareRenderer {
     clips: Vec<Rect>,
     text_rasters: Vec<Option<CachedSoftwareText>>,
     rejected_text_rasters: Vec<bool>,
+    image_rasters: VecDeque<CachedSoftwareImage>,
+    image_raster_bytes: usize,
     font_system: ProcessFontSystem,
     swash_cache: Option<SwashCache>,
     glyph_bytes: usize,
@@ -138,6 +141,28 @@ type SoftwareGlyphPixels = Vec<(i32, i32, TextColor)>;
 const SOFTWARE_TEXT_RASTER_BUDGET: usize = 2 * 1024 * 1024;
 const SOFTWARE_GLYPH_BYTE_BUDGET: usize = 2 * 1024 * 1024;
 const SOFTWARE_GLYPH_ENTRY_BUDGET: usize = 2048;
+const SOFTWARE_IMAGE_RASTER_BUDGET: usize = 2 * 1024 * 1024;
+const SOFTWARE_IMAGE_SOURCE_LIMIT: usize = 128 * 1024;
+const SOFTWARE_IMAGE_SIDE_LIMIT: u32 = 128;
+
+struct CachedSoftwareImage {
+    source: Arc<image::RgbaImage>,
+    rect_width: u32,
+    rect_height: u32,
+    fraction_x: u32,
+    fraction_y: u32,
+    width: u32,
+    pixels: Arc<[Pixel]>,
+}
+
+impl CachedSoftwareImage {
+    fn retained_bytes(&self) -> usize {
+        self.source
+            .as_raw()
+            .len()
+            .saturating_add(self.pixels.len() * std::mem::size_of::<Pixel>())
+    }
+}
 
 struct SampleDecorations<'a> {
     renderer: &'a mut SoftwareRenderer,
@@ -189,6 +214,9 @@ pub struct SoftwareRasterDiagnostics {
     pub candidate_allocated_bytes: u64,
     pub known_cache_peak_bytes: usize,
     pub rejected_rasters: u64,
+    pub image_cache_hits: u64,
+    pub image_cache_misses: u64,
+    pub image_cache_evictions: u64,
 }
 
 struct CachedSoftwareText {
@@ -209,6 +237,42 @@ impl CachedSoftwareText {
     }
 }
 type StrikeLines = Vec<(Rect, Color)>;
+
+// Plain-text samples are stored relative to their bounds, so moving an
+// otherwise identical label does not require shaping and rasterizing it again.
+fn text_raster_matches(previous: &PaintCommand, current: &PaintCommand) -> bool {
+    match (previous, current) {
+        (
+            PaintCommand::Text {
+                bounds: old_bounds,
+                text: old_text,
+                scale: old_scale,
+                color: old_color,
+                align: old_align,
+                bold: old_bold,
+                wrap: old_wrap,
+            },
+            PaintCommand::Text {
+                bounds: new_bounds,
+                text: new_text,
+                scale: new_scale,
+                color: new_color,
+                align: new_align,
+                bold: new_bold,
+                wrap: new_wrap,
+            },
+        ) => {
+            old_bounds.size == new_bounds.size
+                && old_text == new_text
+                && old_scale == new_scale
+                && old_color == new_color
+                && old_align == new_align
+                && old_bold == new_bold
+                && old_wrap == new_wrap
+        }
+        _ => previous == current,
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct PresenterCacheDiagnostics {
@@ -289,6 +353,8 @@ impl SoftwareRenderer {
             clips: Vec::new(),
             text_rasters: Vec::new(),
             rejected_text_rasters: Vec::new(),
+            image_rasters: VecDeque::new(),
+            image_raster_bytes: 0,
             font_system: ProcessFontSystem::new(),
             swash_cache: Some(SwashCache::new()),
             glyph_bytes: 0,
@@ -370,15 +436,19 @@ impl SoftwareRenderer {
         PresenterCacheDiagnostics {
             text_layouts,
             text_layout_bytes,
+            image_textures: self.image_rasters.len(),
             glyphs: self
                 .swash_cache
                 .as_ref()
                 .map_or(0, |cache| cache.image_cache.len()),
             glyph_atlas_bytes: self.glyph_bytes,
-            live_bytes: text_layout_bytes.saturating_add(self.glyph_bytes),
+            live_bytes: text_layout_bytes
+                .saturating_add(self.glyph_bytes)
+                .saturating_add(self.image_raster_bytes),
             peak_bytes: self.raster_stats.known_cache_peak_bytes,
-            hits: self.raster_stats.glyph_hits,
-            misses: self.raster_stats.glyph_misses,
+            hits: self.raster_stats.glyph_hits + self.raster_stats.image_cache_hits,
+            misses: self.raster_stats.glyph_misses + self.raster_stats.image_cache_misses,
+            evictions: self.raster_stats.image_cache_evictions,
             invalidations: self.raster_stats.glyph_resets,
             ..PresenterCacheDiagnostics::default()
         }
@@ -403,6 +473,8 @@ impl SoftwareRenderer {
         self.clips = Vec::new();
         self.text_rasters = Vec::new();
         self.rejected_text_rasters = Vec::new();
+        self.image_rasters.clear();
+        self.image_raster_bytes = 0;
         self.reset_glyph_cache();
     }
 
@@ -487,7 +559,11 @@ impl SoftwareRenderer {
         for (index, command) in commands.iter().enumerate() {
             // A changed command can be skipped by clipping. Retire its old
             // raster before committing the new authoritative command identity.
-            if self.previous_commands.get(index) != Some(command) {
+            if !self
+                .previous_commands
+                .get(index)
+                .is_some_and(|previous| text_raster_matches(previous, command))
+            {
                 self.text_rasters[index] = None;
                 self.rejected_text_rasters[index] = false;
             }
@@ -766,14 +842,50 @@ impl SoftwareRenderer {
         let Some(bounds) = intersection(rect, clip) else {
             return;
         };
-        self.for_pixels(bounds, |renderer, x, y| {
-            let progress = match gradient.axis {
-                GradientAxis::Horizontal => (x as f32 + 0.5 - rect.origin.x) / rect.size.width,
-                GradientAxis::Vertical => (y as f32 + 0.5 - rect.origin.y) / rect.size.height,
+        let x_start = bounds.origin.x.floor().max(0.0) as u32;
+        let y_start = bounds.origin.y.floor().max(0.0) as u32;
+        let x_end = (bounds.origin.x + bounds.size.width)
+            .ceil()
+            .min(self.width as f32) as u32;
+        let y_end = (bounds.origin.y + bounds.size.height)
+            .ceil()
+            .min(self.height as f32) as u32;
+        match gradient.axis {
+            GradientAxis::Vertical => {
+                for y in y_start..y_end {
+                    let progress =
+                        ((y as f32 + 0.5 - rect.origin.y) / rect.size.height).clamp(0.0, 1.0);
+                    let source = lerp_color(gradient.start, gradient.end, progress);
+                    if source.a == 255 {
+                        let start = (y * self.width + x_start) as usize;
+                        let end = (y * self.width + x_end) as usize;
+                        self.pixels[start..end].fill(source);
+                    } else {
+                        for x in x_start..x_end {
+                            self.blend(x, y, source);
+                        }
+                    }
+                }
             }
-            .clamp(0.0, 1.0);
-            renderer.blend(x, y, lerp_color(gradient.start, gradient.end, progress));
-        });
+            GradientAxis::Horizontal => {
+                let colors = (x_start..x_end)
+                    .map(|x| {
+                        let progress =
+                            ((x as f32 + 0.5 - rect.origin.x) / rect.size.width).clamp(0.0, 1.0);
+                        lerp_color(gradient.start, gradient.end, progress)
+                    })
+                    .collect::<Vec<_>>();
+                for y in y_start..y_end {
+                    for (x, source) in (x_start..x_end).zip(&colors) {
+                        if source.a == 255 {
+                            self.pixels[(y * self.width + x) as usize] = *source;
+                        } else {
+                            self.blend(x, y, *source);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     fn stroke(&mut self, rect: Rect, width: f32, color: Color, clip: Rect) {
@@ -813,8 +925,11 @@ impl SoftwareRenderer {
             return;
         };
         let cached = self.text_rasters[index].take();
-        if let Some(cached) = cached.filter(|_| self.previous_commands.get(index) == Some(command))
-        {
+        if let Some(cached) = cached.filter(|_| {
+            self.previous_commands
+                .get(index)
+                .is_some_and(|previous| text_raster_matches(previous, command))
+        }) {
             self.draw_cached_text(&cached, physical_rect(*bounds, self.scale), clip);
             self.text_rasters[index] = Some(cached);
             return;
@@ -1123,8 +1238,11 @@ impl SoftwareRenderer {
             return;
         };
         let cached = self.text_rasters[index].take();
-        if let Some(cached) = cached.filter(|_| self.previous_commands.get(index) == Some(command))
-        {
+        if let Some(cached) = cached.filter(|_| {
+            self.previous_commands
+                .get(index)
+                .is_some_and(|previous| text_raster_matches(previous, command))
+        }) {
             self.draw_cached_text(&cached, physical_rect(*bounds, self.scale), clip);
             self.text_rasters[index] = Some(cached);
             return;
@@ -1196,13 +1314,112 @@ impl SoftwareRenderer {
         self.text_rasters[index] = cached;
     }
 
-    fn image(&mut self, rect: Rect, image: &image::RgbaImage, clip: Rect) {
+    fn cached_image_samples(
+        &mut self,
+        rect: Rect,
+        image: &Arc<image::RgbaImage>,
+    ) -> Option<(Arc<[Pixel]>, u32, i32, i32)> {
+        // Cache only small images on exact pixel or half-pixel origins. Those
+        // positions preserve the same bilinear sample coordinates when moved.
+        let fraction_x = rect.origin.x - rect.origin.x.floor();
+        let fraction_y = rect.origin.y - rect.origin.y.floor();
+        if image.as_raw().len() > SOFTWARE_IMAGE_SOURCE_LIMIT
+            || !(fraction_x == 0.0 || fraction_x == 0.5)
+            || !(fraction_y == 0.0 || fraction_y == 0.5)
+            || rect.origin.x < 0.0
+            || rect.origin.y < 0.0
+            || rect.origin.x > 100_000.0
+            || rect.origin.y > 100_000.0
+        {
+            return None;
+        }
+        let base_x = rect.origin.x.floor() as i32;
+        let base_y = rect.origin.y.floor() as i32;
+        let width = ((rect.origin.x + rect.size.width).ceil() as i32 - base_x) as u32;
+        let height = ((rect.origin.y + rect.size.height).ceil() as i32 - base_y) as u32;
+        if width == 0
+            || height == 0
+            || width > SOFTWARE_IMAGE_SIDE_LIMIT
+            || height > SOFTWARE_IMAGE_SIDE_LIMIT
+        {
+            return None;
+        }
+        let old = self.image_rasters.iter().position(|cached| {
+            Arc::ptr_eq(&cached.source, image)
+                && cached.rect_width == rect.size.width.to_bits()
+                && cached.rect_height == rect.size.height.to_bits()
+                && cached.fraction_x == fraction_x.to_bits()
+                && cached.fraction_y == fraction_y.to_bits()
+        });
+        if let Some(index) = old {
+            self.raster_stats.image_cache_hits += 1;
+            let cached = self.image_rasters.remove(index).expect("cache index");
+            let samples = cached.pixels.clone();
+            let sample_width = cached.width;
+            self.image_rasters.push_back(cached);
+            return Some((samples, sample_width, base_x, base_y));
+        }
+        self.raster_stats.image_cache_misses += 1;
+        let mut samples = Vec::with_capacity((width * height) as usize);
+        for y in 0..height {
+            for x in 0..width {
+                let source_x = ((base_x as f32 + x as f32 + 0.5 - rect.origin.x) / rect.size.width)
+                    * image.width() as f32
+                    - 0.5;
+                let source_y = ((base_y as f32 + y as f32 + 0.5 - rect.origin.y)
+                    / rect.size.height)
+                    * image.height() as f32
+                    - 0.5;
+                let rgba = bilinear_sample(image, source_x, source_y);
+                samples.push(Pixel::rgba(rgba[0], rgba[1], rgba[2], rgba[3]));
+            }
+        }
+        let cached = CachedSoftwareImage {
+            source: image.clone(),
+            rect_width: rect.size.width.to_bits(),
+            rect_height: rect.size.height.to_bits(),
+            fraction_x: fraction_x.to_bits(),
+            fraction_y: fraction_y.to_bits(),
+            width,
+            pixels: samples.into(),
+        };
+        let bytes = cached.retained_bytes();
+        if bytes > SOFTWARE_IMAGE_RASTER_BUDGET {
+            return None;
+        }
+        while self.image_raster_bytes.saturating_add(bytes) > SOFTWARE_IMAGE_RASTER_BUDGET {
+            let evicted = self.image_rasters.pop_front().expect("nonempty cache");
+            self.image_raster_bytes -= evicted.retained_bytes();
+            self.raster_stats.image_cache_evictions += 1;
+        }
+        self.image_raster_bytes += bytes;
+        let samples = cached.pixels.clone();
+        self.image_rasters.push_back(cached);
+        self.raster_stats.known_cache_peak_bytes = self
+            .raster_stats
+            .known_cache_peak_bytes
+            .max(self.cache_diagnostics().live_bytes);
+        Some((samples, width, base_x, base_y))
+    }
+
+    fn image(&mut self, rect: Rect, image: &Arc<image::RgbaImage>, clip: Rect) {
         if image.width() == 0 || image.height() == 0 {
             return;
         }
         let Some(bounds) = intersection(rect, clip) else {
             return;
         };
+        if let Some((samples, sample_width, base_x, base_y)) =
+            self.cached_image_samples(rect, image)
+        {
+            self.for_pixels(bounds, |renderer, x, y| {
+                let offset_x = x as i32 - base_x;
+                let offset_y = y as i32 - base_y;
+                let source = samples[(offset_y as u32 * sample_width + offset_x as u32) as usize];
+                renderer.blend(x, y, source);
+            });
+            return;
+        }
         #[cfg(debug_assertions)]
         let profile_started = std::time::Instant::now();
         #[cfg(debug_assertions)]
@@ -1556,6 +1773,115 @@ mod tests {
     }
 
     #[test]
+    fn cached_moving_images_match_uncached_bilinear_pixels() {
+        use std::sync::Arc;
+
+        let source = Arc::new(image::RgbaImage::from_fn(96, 96, |x, y| {
+            image::Rgba([
+                (x * 2) as u8,
+                (y * 2) as u8,
+                (x + y) as u8,
+                ((x * 3 + y * 5) % 256) as u8,
+            ])
+        }));
+        let mut cached = SoftwareRenderer::new(180, 120, 1.0);
+        for (x, y) in [(10.0, 8.0), (40.0, 18.0), (15.5, 11.5), (52.5, 30.5)] {
+            let rect = Rect::new(x, y, 63.0, 63.0);
+            let clip = Rect::new(16.25, 13.25, 100.0, 80.0);
+            let commands = [
+                PaintCommand::PushClip(clip),
+                PaintCommand::Image {
+                    bounds: rect,
+                    id: 1,
+                    generation: 1,
+                    image: source.clone(),
+                    high_density: None,
+                },
+                PaintCommand::PopClip,
+            ];
+            cached.render(&commands);
+
+            let mut reference = SoftwareRenderer::new(180, 120, 1.0);
+            let bounds = super::intersection(rect, clip).unwrap();
+            reference.for_pixels(bounds, |renderer, px, py| {
+                let source_x = ((px as f32 + 0.5 - rect.origin.x) / rect.size.width)
+                    * source.width() as f32
+                    - 0.5;
+                let source_y = ((py as f32 + 0.5 - rect.origin.y) / rect.size.height)
+                    * source.height() as f32
+                    - 0.5;
+                let rgba = bilinear_sample(&source, source_x, source_y);
+                renderer.blend(px, py, Pixel::rgba(rgba[0], rgba[1], rgba[2], rgba[3]));
+            });
+            assert_eq!(cached.pixels(), reference.pixels());
+        }
+        assert_eq!(cached.raster_stats.image_cache_hits, 2);
+        assert_eq!(cached.raster_stats.image_cache_misses, 2);
+        cached.suspend();
+        assert_eq!(cached.cache_diagnostics().image_textures, 0);
+    }
+
+    #[test]
+    fn gradient_rows_and_columns_match_per_pixel_reference() {
+        for axis in [
+            crate::GradientAxis::Horizontal,
+            crate::GradientAxis::Vertical,
+        ] {
+            for (start, end) in [(0xff102030, 0xffc0d0e0), (0x80112233, 0x40aabbcc)] {
+                let gradient = crate::LinearGradient { start, end, axis };
+                let rect = Rect::new(2.5, 3.5, 49.0, 30.0);
+                let clip = Rect::new(5.25, 6.25, 42.0, 25.0);
+                let mut optimized = SoftwareRenderer::new(60, 40, 1.0);
+                optimized.render(&[
+                    PaintCommand::PushClip(clip),
+                    PaintCommand::Gradient { rect, gradient },
+                    PaintCommand::PopClip,
+                ]);
+                let mut reference = SoftwareRenderer::new(60, 40, 1.0);
+                reference.for_pixels(
+                    super::intersection(rect, clip).unwrap(),
+                    |renderer, x, y| {
+                        let progress = match axis {
+                            crate::GradientAxis::Horizontal => {
+                                (x as f32 + 0.5 - rect.origin.x) / rect.size.width
+                            }
+                            crate::GradientAxis::Vertical => {
+                                (y as f32 + 0.5 - rect.origin.y) / rect.size.height
+                            }
+                        }
+                        .clamp(0.0, 1.0);
+                        renderer.blend(x, y, super::lerp_color(start, end, progress));
+                    },
+                );
+                assert_eq!(optimized.pixels(), reference.pixels());
+            }
+        }
+    }
+
+    #[test]
+    fn small_image_cache_remains_bounded_under_source_churn() {
+        use std::sync::Arc;
+
+        let mut renderer = SoftwareRenderer::new(80, 80, 1.0);
+        for index in 0..80 {
+            let source = Arc::new(image::RgbaImage::from_pixel(
+                96,
+                96,
+                image::Rgba([index, 24, 48, 255]),
+            ));
+            renderer.render(&[PaintCommand::Image {
+                bounds: Rect::new(1.0, 1.0, 63.0, 63.0),
+                id: 1,
+                generation: index as u64,
+                image: source,
+                high_density: None,
+            }]);
+            assert!(renderer.image_raster_bytes <= super::SOFTWARE_IMAGE_RASTER_BUDGET);
+        }
+        assert!(renderer.raster_stats.image_cache_evictions > 0);
+    }
+
+    #[test]
     fn rounded_border_preserves_center_and_corner_background_at_multiple_scales() {
         for scale in [1.0, 1.5, 2.0] {
             let mut renderer =
@@ -1879,6 +2205,22 @@ mod tests {
                 assert_eq!(renderer.raster_stats.candidate_allocated_bytes, allocated);
             }
         }
+    }
+
+    #[test]
+    fn moved_plain_text_reuses_relative_raster_and_matches_fresh_pixels() {
+        let mut renderer = SoftwareRenderer::new(180, 90, 1.0);
+        let mut command = label(false, 1.0);
+        renderer.render(std::slice::from_ref(&command));
+        let allocated = renderer.raster_stats.candidate_allocated_bytes;
+        if let PaintCommand::Text { bounds, .. } = &mut command {
+            *bounds = Rect::new(19.3, 11.7, bounds.size.width, bounds.size.height);
+        }
+        renderer.render(std::slice::from_ref(&command));
+        let mut fresh = SoftwareRenderer::new(180, 90, 1.0);
+        fresh.render(std::slice::from_ref(&command));
+        assert_eq!(renderer.pixels(), fresh.pixels());
+        assert_eq!(renderer.raster_stats.candidate_allocated_bytes, allocated);
     }
 
     #[test]

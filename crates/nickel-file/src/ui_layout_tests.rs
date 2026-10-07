@@ -3399,12 +3399,37 @@ fn headless_software_resize_pipeline_benchmark() {
     let mut layout_ms = Vec::with_capacity(120);
     let mut raster_ms = Vec::with_capacity(120);
     let mut copy_ms = Vec::with_capacity(120);
+    let mut previous_commands = Vec::new();
+    let mut moved_text = 0;
+    let mut resized_text = 0;
+    let mut changed_text = 0;
     for index in 0..120 {
         let width = 1000 + (index % 24) * 12;
         let height = 720 + (index % 20) * 8;
         let started = std::time::Instant::now();
         host.resize(width, height);
         layout_ms.push(started.elapsed().as_secs_f64() * 1000.0);
+        if index > 0 {
+            for (old, new) in previous_commands.iter().zip(host.commands()) {
+                let text_bounds = |command: &nickel_ui::backend::PaintCommand| match command {
+                    nickel_ui::backend::PaintCommand::Text { bounds, .. }
+                    | nickel_ui::backend::PaintCommand::StyledText { bounds, .. } => Some(*bounds),
+                    _ => None,
+                };
+                if let (Some(old_bounds), Some(new_bounds)) = (text_bounds(old), text_bounds(new)) {
+                    if old_bounds.origin != new_bounds.origin {
+                        moved_text += 1;
+                    }
+                    if old_bounds.size != new_bounds.size {
+                        resized_text += 1;
+                    }
+                    if old != new {
+                        changed_text += 1;
+                    }
+                }
+            }
+        }
+        previous_commands = host.commands().to_vec();
 
         let started = std::time::Instant::now();
         renderer.resize(width, height, 1.0);
@@ -3423,8 +3448,9 @@ fn headless_software_resize_pipeline_benchmark() {
         samples.sort_by(f64::total_cmp);
     }
     let diagnostics = renderer.software_raster_diagnostics();
+    let cache = renderer.cache_diagnostics();
     println!(
-        "headless File resize: layout median/p95={:.3}/{:.3}ms raster median/p95={:.3}/{:.3}ms copy median/p95={:.3}/{:.3}ms full_repaints={} partial_repaints={} commands={}",
+        "headless File resize: layout median/p95={:.3}/{:.3}ms raster median/p95={:.3}/{:.3}ms copy median/p95={:.3}/{:.3}ms full_repaints={} partial_repaints={} commands={} glyph_hits={} glyph_misses={} candidate_bytes={} retained_text_bytes={} image_hits={} image_misses={} image_cache_bytes={}",
         layout_ms[60],
         layout_ms[114],
         raster_ms[60],
@@ -3434,7 +3460,108 @@ fn headless_software_resize_pipeline_benchmark() {
         diagnostics.full_repaints,
         diagnostics.partial_repaints,
         host.commands().len(),
+        diagnostics.glyph_hits,
+        diagnostics.glyph_misses,
+        diagnostics.candidate_allocated_bytes,
+        cache.text_layout_bytes,
+        diagnostics.image_cache_hits,
+        diagnostics.image_cache_misses,
+        cache.live_bytes - cache.text_layout_bytes - cache.glyph_atlas_bytes,
     );
+    println!(
+        "text command changes: moved={moved_text} resized={resized_text} changed={changed_text}"
+    );
+    if std::env::var_os("NICKEL_FILE_RESIZE_BREAKDOWN").is_some() {
+        use nickel_ui::backend::PaintCommand;
+        let mut image_sizes = std::collections::BTreeMap::new();
+        let mut image_pointers = std::collections::BTreeSet::new();
+        let mut image_fractions = std::collections::BTreeSet::new();
+        for command in host.commands() {
+            if let PaintCommand::Image { bounds, image, .. } = command {
+                *image_sizes
+                    .entry(format!(
+                        "{}x{} -> {:.0}x{:.0}",
+                        image.width(),
+                        image.height(),
+                        bounds.size.width,
+                        bounds.size.height
+                    ))
+                    .or_insert(0usize) += 1;
+                image_pointers.insert(std::sync::Arc::as_ptr(image) as usize);
+                image_fractions.insert((
+                    bounds.origin.x.fract().to_bits(),
+                    bounds.origin.y.fract().to_bits(),
+                ));
+            }
+        }
+        println!(
+            "image sizes: {image_sizes:?}; distinct sources={}; origin fractions={image_fractions:?}",
+            image_pointers.len()
+        );
+        for category in [
+            "plain-fill",
+            "rounded",
+            "gradient",
+            "text",
+            "image",
+            "stroke",
+        ] {
+            let mut isolated = nickel_ui::SoftwareRenderer::new_pixel_buffer(1100, 800, 1.0);
+            let mut samples = Vec::with_capacity(120);
+            let mut count = 0;
+            for index in 0..120 {
+                let width = 1000 + (index % 24) * 12;
+                let height = 720 + (index % 20) * 8;
+                host.resize(width, height);
+                let mut commands = host.commands().to_vec();
+                count = 0;
+                for command in &mut commands {
+                    let keep = match category {
+                        "plain-fill" => matches!(
+                            command,
+                            PaintCommand::Fill { .. } | PaintCommand::OverlayFill { .. }
+                        ),
+                        "rounded" => matches!(
+                            command,
+                            PaintCommand::RoundedFill { .. } | PaintCommand::TopRoundedFill { .. }
+                        ),
+                        "gradient" => matches!(command, PaintCommand::Gradient { .. }),
+                        "text" => matches!(
+                            command,
+                            PaintCommand::Text { .. } | PaintCommand::StyledText { .. }
+                        ),
+                        "image" => matches!(command, PaintCommand::Image { .. }),
+                        "stroke" => matches!(
+                            command,
+                            PaintCommand::Stroke { .. }
+                                | PaintCommand::OverlayStroke { .. }
+                                | PaintCommand::RoundedStroke { .. }
+                        ),
+                        _ => false,
+                    };
+                    if keep {
+                        count += 1;
+                    } else if !matches!(command, PaintCommand::PushClip(_) | PaintCommand::PopClip)
+                    {
+                        *command = PaintCommand::BackdropBlur {
+                            rect: Rect::new(0.0, 0.0, 0.0, 0.0),
+                            radius: 0.0,
+                            blur: 0.0,
+                        };
+                    }
+                }
+                let started = std::time::Instant::now();
+                isolated.resize(width, height, 1.0);
+                isolated.render(&commands);
+                samples.push(started.elapsed().as_secs_f64() * 1000.0);
+            }
+            samples.sort_by(f64::total_cmp);
+            println!(
+                "{category}: commands={count} raster median/p95={:.3}/{:.3}ms",
+                samples[60], samples[114]
+            );
+        }
+    }
 }
 
 // Run with a dedicated Xvfb server, for example:
