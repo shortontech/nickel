@@ -1,5 +1,6 @@
 import "./styles/controls.css";
 import "./Appearance.js";
+import "./ThemePicker.js";
 import "./DefaultApps.js";
 import "./Displays.js";
 import "./Wifi.js";

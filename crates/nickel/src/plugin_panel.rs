@@ -11220,10 +11220,10 @@ mod tests {
     }
 
     #[test]
-    fn appearance_theme_picker_previews_shell_and_exposes_keep_and_revert() {
+    fn shell_picker_previews_shell_and_exposes_keep_and_revert() {
         with_package_runtime_stack(|| {
             let (mut application, _composition) =
-                settings_admission_application("nickel-default/appearance").unwrap();
+                settings_admission_application("nickel-default/shell").unwrap();
             let mut catalog = serde_json::json!({"available":true,"writable":true,"revision":"7","shellPreview":null,
                 "plugins":[{"id":"nickel-default","name":"Default","shell":true,"selected":true,"enabled":true},
                     {"id":"nickel-cupertino-dock","name":"Cupertino","shell":true,"selected":false,"enabled":true}]});
@@ -11260,7 +11260,7 @@ mod tests {
                 );
                 assert!(host.application_mut().last_error().is_none());
             };
-            activate(&mut host, "Preview Cupertino");
+            activate(&mut host, "Try Cupertino");
             assert!(
                 matches!(host.application_mut().take_effects().as_slice(), [PluginEffect::ShellSelection { effect, .. }] if effect.id == "nickel-cupertino-dock" && effect.revision == 7)
             );
@@ -11277,11 +11277,11 @@ mod tests {
                 },
             )
             .unwrap();
-            activate(&mut host, "Keep theme");
+            activate(&mut host, "Keep shell");
             assert!(
                 matches!(host.application_mut().take_effects().as_slice(), [PluginEffect::ShellPreviewDecision { effect, .. }] if effect.confirm)
             );
-            activate(&mut host, "Restore previous theme");
+            activate(&mut host, "Restore previous shell");
             assert!(
                 matches!(host.application_mut().take_effects().as_slice(), [PluginEffect::ShellPreviewDecision { effect, .. }] if !effect.confirm)
             );

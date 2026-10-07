@@ -3089,23 +3089,16 @@ fn composed_shell_keeps_each_host_identity_when_launcher_opens_settings() {
 }
 
 #[test]
-fn selected_shell_overlay_reopen_reuses_quiescent_bounded_host() {
+fn launcher_reopen_remounts_factory_state_in_shared_runtime() {
     with_package_runtime_stack(|| {
         let mut shell = LiveShell::new().unwrap();
         let launcher = LiveShell::default_shell_surface_key("launcher");
         shell.global_shortcut(crate::platform::GlobalShortcut::ShowLauncher);
         assert!(shell.plugin_panel_scene(&launcher, 608, 628).is_some());
-        let (mount, settings_id, composition, mount_count) = {
+        let (mount, composition, mount_count) = {
             let host = shell.plugin_panel_host_ref(&launcher).unwrap();
-            let settings = host
-                .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
-                    role: nickel_ui::SemanticRole::Button,
-                    name: "Settings".into(),
-                })
-                .unwrap();
             (
                 host.application().diagnostic_mount(),
-                settings.id,
                 host.application().shared_composition_runtime().unwrap(),
                 host.application()
                     .shared_composition_runtime()
@@ -3117,29 +3110,25 @@ fn selected_shell_overlay_reopen_reuses_quiescent_bounded_host() {
 
         shell.global_shortcut(crate::platform::GlobalShortcut::HideLauncher);
         assert!(!shell.plugin_surface_hosts.contains_key(&launcher));
-        assert!(shell.warm_shell_surface_hosts.contains_key(&launcher));
-        assert_eq!(
-            shell.warm_shell_surface_hosts[&launcher].1.next_deadline(),
-            None
-        );
-        let parked_generation = shell.warm_shell_surface_hosts[&launcher]
-            .1
-            .inspect()
-            .frame_generation;
+        assert!(!shell.warm_shell_surface_hosts.contains_key(&launcher));
+        #[cfg(target_os = "windows")]
+        assert!(shell.take_pending_plugin_surface_focus().is_none());
 
         shell.global_shortcut(crate::platform::GlobalShortcut::ShowLauncher);
-        let host = shell.plugin_panel_host_ref(&launcher).unwrap();
-        assert_eq!(host.application().diagnostic_mount(), mount);
-        assert_eq!(host.inspect().frame_generation, parked_generation);
-        assert_eq!(composition.borrow().mount_count(), mount_count);
+        #[cfg(target_os = "windows")]
         assert_eq!(
+            shell.take_pending_plugin_surface_focus(),
+            Some(launcher.clone())
+        );
+        let host = shell.plugin_panel_host_ref(&launcher).unwrap();
+        assert_ne!(host.application().diagnostic_mount(), mount);
+        assert!(composition.borrow().mount_count() > mount_count);
+        assert!(
             host.query_unique(&nickel_ui::SemanticSelector::RoleAndName {
-                role: nickel_ui::SemanticRole::Button,
-                name: "Settings".into(),
+                role: nickel_ui::SemanticRole::TextField,
+                name: "Search apps, files, settings, or commands".into(),
             })
-            .unwrap()
-            .id,
-            settings_id
+            .is_ok()
         );
         assert!(shell.warm_shell_surface_hosts.len() <= super::WARM_SHELL_SURFACE_CAPACITY);
         assert!(

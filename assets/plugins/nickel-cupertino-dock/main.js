@@ -55,6 +55,21 @@ function DockItem({ item }) {
 function TrayItem({ item }) {
     return h(Button, { id: "cupertino-dock-tray-" + item.id, className: "dock-utility", width: 44, height: 52, accessibilityLabel: item.title, icon: item.icon ? "tray:" + item.id : null, iconSize: 30, showLabel: false, onContextMenu: () => nickel.tray.contextMenu(item.id), onClick: () => nickel.tray.activate(item.id) }, item.title.charAt(0).toUpperCase() || "?");
 }
+export function MenuBar() {
+    const windows = useWindows();
+    const active = windows.find(window => window.active);
+    const clock = nickel.clock.get();
+    const localTime = new Date(clock.unixMilliseconds + clock.utcOffsetMinutes * 60000);
+    const hours = localTime.getUTCHours();
+    const time = (hours % 12 || 12) + ":" + String(localTime.getUTCMinutes()).padStart(2, "0");
+    return h(FixedWindow, { id: "menu-bar", output: "all", edge: "top", width: "100%", height: 32, reserveWorkArea: true, className: "cupertino-menu-bar" },
+        h(Row, { className: "menu-bar-content" },
+            h(Button, { id: "cupertino-menu-launcher", className: "menu-bar-button", accessibilityLabel: "Open Nickel Launcher", onClick: () => nickel.surfaces.show("launcher") }, "N"),
+            h(Text, { className: "menu-bar-title" }, active?.title || "Nickel"),
+            h(Spacer, null),
+            h(Button, { id: "cupertino-menu-settings", className: "menu-bar-button", onClick: () => nickel.surfaces.show("settings") }, "Settings"),
+            h(Button, { id: "cupertino-menu-control", className: "menu-bar-button", onClick: () => nickel.surfaces.show("quick-settings") }, time)));
+}
 export function Taskbar() {
     const applications = useApplications();
     const windows = useWindows();
@@ -81,6 +96,8 @@ export function Taskbar() {
 }
 export function Shell() {
     const id = nickel.data.surface?.id || "taskbar";
+    if (id === "menu-bar")
+        return h(MenuBar, null);
     const contract = id === "taskbar" ? "shell.taskbar"
         : id === "launcher" ? "shell.launcher"
             : id === "quick-settings" ? "shell.quickSettings"

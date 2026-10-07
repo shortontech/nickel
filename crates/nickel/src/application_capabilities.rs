@@ -82,12 +82,18 @@ pub(crate) fn include_running(launcher: &Launcher, windows: &[crate::model::Open
         if items.len() >= APPLICATION_LIMIT {
             break;
         }
-        if !id.is_empty() && id.len() <= 256 && seen.insert(id.to_owned()) {
+        if !id.is_empty() && id.len() <= 256 {
             if let Some(application) = launcher
                 .applications()
-                .find(|application| application.id() == id)
+                .find(|application| application.matches_native_id(id))
             {
+                if !seen.insert(application.id().to_owned()) {
+                    continue;
+                }
                 items.push(item(launcher, application));
+                continue;
+            }
+            if !seen.insert(id.to_owned()) {
                 continue;
             }
             items.push(
@@ -324,6 +330,29 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn running_native_alias_reuses_pinned_catalog_identity() {
+        let application = app("windows-shortcut:chrome.lnk", "Google Chrome")
+            .with_identity_alias("windows-exe:c:\\program files\\google\\chrome\\chrome.exe");
+        let mut launcher = Launcher::new(vec![application]);
+        launcher.set_pins(vec![("windows-shortcut:chrome.lnk".into(), 0)]);
+        let window = crate::model::OpenWindow {
+            id: crate::model::WindowId(72),
+            application_id: Some(crate::model::ApplicationId::new(
+                "windows-exe:C:\\Program Files\\Google\\Chrome\\chrome.exe",
+            )),
+            active: true,
+            title: "Chrome".into(),
+            state: crate::model::WindowState::default(),
+        };
+
+        let applications = include_running(&launcher, &[window]);
+
+        assert_eq!(applications.as_array().unwrap().len(), 1);
+        assert_eq!(applications[0]["id"], "windows-shortcut:chrome.lnk");
+        assert_eq!(applications[0]["pinned"], true);
     }
     #[test]
     fn package_search_uses_native_ranking_without_changing_launcher_query_and_refreshes_pins() {

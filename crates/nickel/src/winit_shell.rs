@@ -692,6 +692,8 @@ pub struct WinitShell {
     external_events: Arc<Mutex<VecDeque<ShellUserEvent>>>,
     #[cfg(target_os = "windows")]
     event_thread: u32,
+    #[cfg(target_os = "windows")]
+    _window_thread_guard: crate::platform::InternalWindowThreadGuard,
     pending_events: VecDeque<ShellEvent>,
     displays: Vec<(DisplayGeometry, String)>,
     input_adapters: HashMap<WindowId, nickel_input::winit::Adapter>,
@@ -760,6 +762,8 @@ impl WinitShell {
             #[cfg(target_os = "windows")]
             // SAFETY: querying the identifier of the current thread has no preconditions.
             event_thread: unsafe { GetCurrentThreadId() },
+            #[cfg(target_os = "windows")]
+            _window_thread_guard: crate::platform::register_shell_window_thread(),
             pending_events: VecDeque::new(),
             displays: Vec::new(),
             input_adapters: HashMap::new(),
@@ -2799,24 +2803,6 @@ impl WinitShell {
                         return;
                     };
                     let surface = surfaces[index].id;
-                    #[cfg(target_os = "windows")]
-                    if let WindowEvent::KeyboardInput { event: key, .. } = &event {
-                        if key.physical_key
-                            == winit::keyboard::PhysicalKey::Code(
-                                winit::keyboard::KeyCode::PrintScreen,
-                            )
-                            && !key.repeat
-                        {
-                            crate::platform::handle_focused_shortcut(
-                                nickel_input::KeyCode::PrintScreen,
-                                if key.state == winit::event::ElementState::Pressed {
-                                    nickel_input::KeyEdge::Pressed
-                                } else {
-                                    nickel_input::KeyEdge::Released
-                                },
-                            );
-                        }
-                    }
                     let scale = surfaces[index].window.scale_factor();
                     let native_device = window_event_device(&event);
                     // Winit omits a device on lifecycle and IME events. Its documented dummy

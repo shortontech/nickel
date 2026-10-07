@@ -23,6 +23,7 @@
       "shell.settings.controls": "./src/Settings.tsx#SettingControl",
       "shell.settings.colorPicker": "./src/ColorPicker.tsx#ColorPicker",
       "shell.settings.appearance": "./src/Appearance.tsx#Appearance",
+      "shell.settings.shellSelection": "./src/ThemePicker.tsx#ThemePicker",
       "shell.settings.defaultApps": "./src/DefaultApps.tsx#DefaultApps",
       "shell.settings.displays": "./src/Displays.tsx#Displays",
       "shell.settings.wifi": "./src/Wifi.tsx#Wifi",

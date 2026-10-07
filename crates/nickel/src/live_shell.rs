@@ -3373,9 +3373,14 @@ impl LiveShell {
                 .iter()
                 .take(128)
                 .map(|window| {
+                    let application_id = window.application_id.as_ref().map(|id| {
+                        self.launcher
+                            .application(id)
+                            .map_or(id.as_str(), crate::model::Application::id)
+                    });
                     serde_json::json!({
                         "id": window.id.0.to_string(),
-                        "applicationId": window.application_id.as_ref().map(|id| id.as_str()),
+                        "applicationId": application_id,
                         "title": window.title.chars().take(120).collect::<String>(),
                         "active": window.active,
                         "minimized": window.state.minimized,
@@ -4540,6 +4545,9 @@ impl LiveShell {
         key.plugin_id == self.active_shell_package_id
             && self.is_shell_package(&key.plugin_id)
             && kind == nickel_core::plugins::PluginSurfaceKind::Overlay
+            // Launcher state is session-transient. Remount it after every hide so query,
+            // navigation, dialogs, menus, and text focus return to their initial values.
+            && key.surface_id != "launcher"
     }
 
     fn retire_warm_shell_surface(&mut self, key: &nickel_core::plugins::PluginSurfaceKey) {
@@ -9294,6 +9302,17 @@ impl LiveShell {
             self.set_default_shell_surface_visible("quick-settings", false);
         }
         self.set_default_shell_surface_visible("launcher", visible);
+        let key = self.active_shell_surface_key("launcher");
+        if visible {
+            if let Err(error) = self.focus_plugin_window(&key.plugin_id, &key.surface_id) {
+                tracing::warn!(%error, "launcher focus request failed");
+            }
+        } else {
+            #[cfg(target_os = "windows")]
+            if self.pending_plugin_surface_focus.as_ref() == Some(&key) {
+                self.pending_plugin_surface_focus = None;
+            }
+        }
     }
 
     pub(crate) fn launcher_intent_visible(&self) -> bool {

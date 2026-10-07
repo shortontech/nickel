@@ -29,6 +29,8 @@
     "features-read",
     "on-screen-keyboard-read",
     "on-screen-keyboard-show",
+    "plugins-control",
+    "plugins-read",
     "projects-menu-show",
     "tray-activate",
     "tray-context",
@@ -39,9 +41,17 @@
   ],
   "surfaces": [
     {
+      "id": "menu-bar",
+      "kind": "panel",
+      "width": 1920,
+      "height": 32,
+      "output": "all",
+      "reserve_work_area": true
+    },
+    {
       "id": "taskbar",
       "kind": "dock",
-      "width": 600,
+      "width": 900,
       "height": 112,
       "bottom_offset": 10,
       "output": "all"

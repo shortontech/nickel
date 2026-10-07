@@ -32,7 +32,6 @@ function PluginCard({ plugin, index, revision, writable, canManage, setReview, d
             h(Text, { className: "plugin-title" }, plugin.name),
             h(Spacer, null),
             h(Button, { id: "plugin-toggle-" + index, disabled: !canManage, accessibilityLabel: (plugin.enabled ? "Disable " : "Enable ") + plugin.name, onClick: () => plugin.enabled ? nickel.plugins.disable(plugin.id, revision) : setReview({ id: plugin.id, revision }) }, plugin.enabled ? "Disable" : "Enable")),
-        plugin.shell ? plugin.selected ? h(Text, null, "Selected shell") : h(Button, { id: "plugin-preview-shell-" + index, disabled: !canManage, onClick: () => plugin.enabled ? nickel.plugins.selectShell(plugin.id, revision) : setReview({ id: plugin.id, revision, selectShell: true }) }, "Preview shell") : null,
         h(Text, { wrap: true }, plugin.id + (plugin.version ? " · " + plugin.version : "") + (plugin.author ? " · " + plugin.author : "")),
         h(Text, { wrap: true }, "Status: " + plugin.health.state + (plugin.health.reason ? " · " + plugin.health.reason : "")),
         h(Text, { wrap: true }, "Authorized capabilities: " + (plugin.grants.length ? plugin.grants.join(", ") : "None")),
@@ -47,7 +46,6 @@ export function Plugins() {
     const catalog = nickel.plugins.get();
     const preview = catalog.shellPreview;
     const canManage = catalog.available && catalog.writable && !preview;
-    const shellName = id => catalog.plugins.find(plugin => plugin.id === id)?.name || id;
     const [query, setQuery] = useState("");
     const [review, setReview] = useState(null);
     const draftScopes = useRef(Object.create(null));
@@ -76,21 +74,14 @@ export function Plugins() {
     const candidate = review && catalog.plugins.find(plugin => plugin.id === review.id);
     const reviewCurrent = candidate && !candidate.enabled && review.revision === catalog.revision;
     const needle = query.trim().toLowerCase();
-    const plugins = useMemo(() => catalog.plugins.filter(plugin => (plugin.name + " " + plugin.id).toLowerCase().includes(needle)), [catalog.plugins, needle]);
+    const plugins = useMemo(() => catalog.plugins.filter(plugin => !plugin.shell && (plugin.name + " " + plugin.id).toLowerCase().includes(needle)), [catalog.plugins, needle]);
     return h(Column, { className: "plugins-page" },
         h(TextField, { id: "plugins-search", accessibilityLabel: "Search plugins", placeholder: "Search plugins", value: query, onChange: setQuery }),
         !catalog.available ? h(Text, { wrap: true }, catalog.reason || "Plugin inventory unavailable.") : null,
         catalog.available && !catalog.writable ? h(Text, null, "Plugin management is read only.") : null,
         catalog.truncated ? h(Text, { wrap: true }, "This inventory is incomplete.") : null,
         catalog.lastResult ? h(Text, { wrap: true }, catalog.lastResult.detail || ({ applied: "Plugin state updated.", preview: "Shell preview started.", confirmed: "Shell selection saved.", reverted: "Previous shell restored.", rejected: "Plugin change rejected." }[catalog.lastResult.status] || "Plugin operation: " + catalog.lastResult.status)) : null,
-        preview ? h(Column, { className: "plugin-card" },
-            h(Text, { className: "plugin-title" }, "Temporary shell preview"),
-            h(Text, { wrap: true }, "Previewing " + shellName(preview.selectedShell) + ". Previous shell: " + shellName(preview.previousShell) + "."),
-            h(Text, { wrap: true }, "Keep this shell before the recovery timer expires, or restore the previous shell. Unconfirmed previews revert automatically."),
-            h(Row, null,
-                h(Button, { id: "plugin-shell-confirm", disabled: !catalog.available || !catalog.writable || !preview.canConfirm, onClick: () => nickel.plugins.confirmShell(preview.token, catalog.revision) }, "Keep this shell"),
-                h(Button, { id: "plugin-shell-revert", disabled: !catalog.available || !catalog.writable || !preview.canRevert, onClick: () => nickel.plugins.revertShell(preview.token, catalog.revision) }, "Restore previous shell")),
-            h(Text, { wrap: true }, "Finish this preview before changing plugin activation or selecting another shell.")) : null,
+        preview ? h(Text, { wrap: true }, "Finish the temporary shell preview in the Shell setting before changing extensions.") : null,
         review ? h(Column, { className: "plugin-card" },
             h(Text, { className: "plugin-title" }, "Review plugin access"),
             candidate ? h(Column, null,
@@ -102,8 +93,8 @@ export function Plugins() {
             !reviewCurrent ? h(Text, { wrap: true }, "Plugin access changed. Cancel and review it again before enabling.") : null,
             h(Row, null,
                 h(Button, { id: "plugin-review-cancel", onClick: () => setReview(null) }, "Cancel"),
-                h(Button, { id: "plugin-review-confirm", disabled: !canManage || !reviewCurrent, onClick: () => { review.selectShell ? nickel.plugins.selectShell(candidate.id, review.revision) : nickel.plugins.enable(candidate.id, review.revision); setReview(null); } }, review.selectShell ? "Enable and preview shell" : "Enable plugin"))) : null,
-        catalog.available && !plugins.length ? h(Text, null, "No matching plugins.") : null,
+                h(Button, { id: "plugin-review-confirm", disabled: !canManage || !reviewCurrent, onClick: () => { nickel.plugins.enable(candidate.id, review.revision); setReview(null); } }, "Enable plugin"))) : null,
+        catalog.available && !plugins.length ? h(Text, null, "No matching extensions.") : null,
         h(VirtualColumn, { id: "settings-plugins", items: plugins, itemKey: pluginKey, itemHeight: pluginHeight, gap: 12, overscan: 96, renderItem: (plugin, index) => h(PluginCard, { key: plugin.id, plugin: plugin, index: index, revision: catalog.revision, writable: catalog.writable, canManage: canManage, setReview: setReview, draftScope: draftScopes.current[plugin.id] }) }));
 }
-registerSettingsPage({ id: "plugins", group: "Shell", label: "Plugins", description: "Inspect plugin status, capabilities and memory; enable or disable packages", component: Plugins });
+registerSettingsPage({ id: "plugins", group: "Shell", label: "Plugins", description: "Inspect extension status, capabilities and memory; enable or disable packages", component: Plugins });

@@ -1,5 +1,6 @@
 import "./styles/controls.css";
 import "./Appearance.tsx";
+import "./ThemePicker.tsx";
 import "./DefaultApps.tsx";
 import "./Displays.tsx";
 import "./Wifi.tsx";

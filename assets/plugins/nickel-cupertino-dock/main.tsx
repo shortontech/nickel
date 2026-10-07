@@ -74,6 +74,29 @@ function TrayItem({item}) {
         onClick={() => nickel.tray.activate(item.id)}>{item.title.charAt(0).toUpperCase() || "?"}</Button>;
 }
 
+export function MenuBar() {
+    const windows = useWindows();
+    const active = windows.find(window => window.active);
+    const clock = nickel.clock.get();
+    const localTime = new Date(clock.unixMilliseconds + clock.utcOffsetMinutes * 60000);
+    const hours = localTime.getUTCHours();
+    const time = (hours % 12 || 12) + ":" + String(localTime.getUTCMinutes()).padStart(2, "0");
+    return <FixedWindow id="menu-bar" output="all" edge="top" width="100%" height={32}
+        reserveWorkArea={true} className="cupertino-menu-bar">
+        <Row className="menu-bar-content">
+            <Button id="cupertino-menu-launcher" className="menu-bar-button"
+                accessibilityLabel="Open Nickel Launcher"
+                onClick={() => nickel.surfaces.show("launcher")}>N</Button>
+            <Text className="menu-bar-title">{active?.title || "Nickel"}</Text>
+            <Spacer />
+            <Button id="cupertino-menu-settings" className="menu-bar-button"
+                onClick={() => nickel.surfaces.show("settings")}>Settings</Button>
+            <Button id="cupertino-menu-control" className="menu-bar-button"
+                onClick={() => nickel.surfaces.show("quick-settings")}>{time}</Button>
+        </Row>
+    </FixedWindow>;
+}
+
 export function Taskbar() {
     const applications = useApplications();
     const windows = useWindows();
@@ -117,6 +140,7 @@ export function Taskbar() {
 
 export function Shell() {
     const id = nickel.data.surface?.id || "taskbar";
+    if (id === "menu-bar") return <MenuBar />;
     const contract = id === "taskbar" ? "shell.taskbar"
         : id === "launcher" ? "shell.launcher"
         : id === "quick-settings" ? "shell.quickSettings"

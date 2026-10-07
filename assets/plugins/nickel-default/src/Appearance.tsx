@@ -1,6 +1,5 @@
 // @jsx h
 import { fromHsv, toHexColor } from "./colors.js";
-import { ThemePicker } from "./ThemePicker.tsx";
 import "./styles/appearance.css";
 
 const defaults = {theme:"system", accent_hue:null, accent_intensity:null, reduce_transparency:false, animations:"normal"};
@@ -46,7 +45,6 @@ export function Appearance() {
     const validHue = customHue.trim() !== "" && Number.isInteger(hueNumber) && hueNumber >= 0 && hueNumber <= 359;
     return <Column className="appearance-page">
         {!appearance.writable ? <Text>Appearance is read only.</Text> : null}
-        <ThemePicker />
         <Column className="appearance-card">
             <Text className="appearance-heading">Theme</Text>
             <Row className="appearance-choices">
@@ -129,4 +127,4 @@ export function Appearance() {
     </Column>;
 }
 
-registerSettingsPage({id:"appearance", group:"Personalization", label:"Appearance", description:"Theme, accent, interface, and wallpaper", component:Appearance});
+registerSettingsPage({id:"appearance", group:"Personalization", label:"Appearance", description:"Color theme, accent, interface, and wallpaper", component:Appearance});

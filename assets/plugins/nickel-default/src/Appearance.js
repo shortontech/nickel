@@ -1,6 +1,5 @@
 // @jsx h
 import { fromHsv, toHexColor } from "./colors.js";
-import { ThemePicker } from "./ThemePicker.tsx";
 import "./styles/appearance.css";
 const defaults = { theme: "system", accent_hue: null, accent_intensity: null, reduce_transparency: false, animations: "normal" };
 const wallpaperKey = image => image.id;
@@ -51,7 +50,6 @@ export function Appearance() {
     const validHue = customHue.trim() !== "" && Number.isInteger(hueNumber) && hueNumber >= 0 && hueNumber <= 359;
     return h(Column, { className: "appearance-page" },
         !appearance.writable ? h(Text, null, "Appearance is read only.") : null,
-        h(ThemePicker, null),
         h(Column, { className: "appearance-card" },
             h(Text, { className: "appearance-heading" }, "Theme"),
             h(Row, { className: "appearance-choices" }, modes.map(mode => h(Button, { key: mode.id, id: "appearance-mode-" + mode.id, className: configured.theme === mode.id ? "appearance-choice selected" : "appearance-choice", state: configured.theme === mode.id ? "selected" : "unselected", disabled: !appearance.writable, onClick: () => set({ theme: mode.id }) }, mode.label)))),
@@ -93,4 +91,4 @@ export function Appearance() {
                     h(Button, { id: "appearance-custom-hue-apply", disabled: !validHue || !appearance.writable, onClick: () => { set({ accent_hue: hueNumber }); setCustomOpen(false); } }, "Apply"),
                     h(Button, { id: "appearance-custom-hue-cancel", onClick: () => setCustomOpen(false) }, "Cancel")))));
 }
-registerSettingsPage({ id: "appearance", group: "Personalization", label: "Appearance", description: "Theme, accent, interface, and wallpaper", component: Appearance });
+registerSettingsPage({ id: "appearance", group: "Personalization", label: "Appearance", description: "Color theme, accent, interface, and wallpaper", component: Appearance });
