@@ -3378,3 +3378,237 @@ fn internal_resize_layout_benchmark() {
         host.render_frame().commands.len()
     );
 }
+
+#[test]
+#[ignore = "release-mode headless File Manager software resize benchmark"]
+fn headless_software_resize_pipeline_benchmark() {
+    let entries = (0..4096)
+        .map(|index| FileEntry {
+            display_name_override: None,
+            name: format!("item-{index}.txt").into(),
+            path: PathBuf::from(format!("/fixture/item-{index}.txt")),
+            is_directory: false,
+            size: Some(1),
+            modified: None,
+        })
+        .collect();
+    let app = FileApp::with_browser(DirectoryBrowser::fixture(entries), String::new());
+    let mut host = UiHost::new(app, 1100, 800);
+    let mut renderer = nickel_ui::SoftwareRenderer::new_pixel_buffer(1100, 800, 1.0);
+    let mut presented = Vec::<u32>::new();
+    let mut layout_ms = Vec::with_capacity(120);
+    let mut raster_ms = Vec::with_capacity(120);
+    let mut copy_ms = Vec::with_capacity(120);
+    for index in 0..120 {
+        let width = 1000 + (index % 24) * 12;
+        let height = 720 + (index % 20) * 8;
+        let started = std::time::Instant::now();
+        host.resize(width, height);
+        layout_ms.push(started.elapsed().as_secs_f64() * 1000.0);
+
+        let started = std::time::Instant::now();
+        renderer.resize(width, height, 1.0);
+        assert!(!renderer.render(host.commands()).is_empty());
+        raster_ms.push(started.elapsed().as_secs_f64() * 1000.0);
+
+        let started = std::time::Instant::now();
+        presented.resize((width * height) as usize, 0);
+        for (target, pixel) in presented.iter_mut().zip(renderer.pixels()) {
+            *target = u32::from(pixel.r) << 16 | u32::from(pixel.g) << 8 | u32::from(pixel.b);
+        }
+        std::hint::black_box(&presented);
+        copy_ms.push(started.elapsed().as_secs_f64() * 1000.0);
+    }
+    for samples in [&mut layout_ms, &mut raster_ms, &mut copy_ms] {
+        samples.sort_by(f64::total_cmp);
+    }
+    let diagnostics = renderer.software_raster_diagnostics();
+    println!(
+        "headless File resize: layout median/p95={:.3}/{:.3}ms raster median/p95={:.3}/{:.3}ms copy median/p95={:.3}/{:.3}ms full_repaints={} partial_repaints={} commands={}",
+        layout_ms[60],
+        layout_ms[114],
+        raster_ms[60],
+        raster_ms[114],
+        copy_ms[60],
+        copy_ms[114],
+        diagnostics.full_repaints,
+        diagnostics.partial_repaints,
+        host.commands().len(),
+    );
+}
+
+// Run with a dedicated Xvfb server, for example:
+// Xvfb :88 -screen 0 1600x1200x24 -nolisten tcp
+// env -u WAYLAND_DISPLAY DISPLAY=:88 NICKEL_FILE_OFFSCREEN_RESIZE=1 \
+//   cargo test -p nickel-file --release offscreen_presented_software_resize_benchmark -- --ignored --nocapture
+// The window is mapped on that invisible display, so softbuffer presents every
+// resize frame through the same surface API as the standalone application.
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "requires a dedicated offscreen X11 display"]
+fn offscreen_presented_software_resize_benchmark() {
+    use std::{num::NonZeroU32, sync::Arc, time::Instant};
+    use winit::{
+        application::ApplicationHandler,
+        dpi::{LogicalSize, PhysicalSize},
+        event::WindowEvent,
+        event_loop::{ActiveEventLoop, ControlFlow, EventLoop, OwnedDisplayHandle},
+        platform::x11::EventLoopBuilderExtX11,
+        window::{Window, WindowAttributes, WindowId},
+    };
+
+    assert_eq!(
+        std::env::var("NICKEL_FILE_OFFSCREEN_RESIZE")
+            .ok()
+            .as_deref(),
+        Some("1"),
+        "set NICKEL_FILE_OFFSCREEN_RESIZE=1 only with DISPLAY pointing to an offscreen X server"
+    );
+    assert!(
+        std::env::var_os("WAYLAND_DISPLAY").is_none(),
+        "unset WAYLAND_DISPLAY so winit uses the offscreen X server"
+    );
+
+    struct Benchmark {
+        host: UiHost<FileApp>,
+        renderer: nickel_ui::SoftwareRenderer,
+        display: OwnedDisplayHandle,
+        window: Option<Arc<Window>>,
+        surface: Option<softbuffer::Surface<OwnedDisplayHandle, Arc<Window>>>,
+        started: Instant,
+        frames: usize,
+        rendered: usize,
+        presented: usize,
+        elapsed_ms: Vec<f64>,
+    }
+
+    impl Benchmark {
+        fn size(&self) -> (u32, u32) {
+            (
+                1000 + (self.frames % 24) as u32 * 12,
+                720 + (self.frames % 20) as u32 * 8,
+            )
+        }
+    }
+
+    impl ApplicationHandler for Benchmark {
+        fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+            if self.window.is_some() {
+                return;
+            }
+            let window = Arc::new(
+                event_loop
+                    .create_window(
+                        WindowAttributes::default()
+                            .with_title("Nickel File offscreen resize benchmark")
+                            .with_inner_size(LogicalSize::new(900, 700))
+                            .with_visible(true),
+                    )
+                    .unwrap(),
+            );
+            let context = softbuffer::Context::new(self.display.clone()).unwrap();
+            self.surface = Some(softbuffer::Surface::new(&context, window.clone()).unwrap());
+            let (width, height) = self.size();
+            let _ = window.request_inner_size(PhysicalSize::new(width, height));
+            self.window = Some(window);
+        }
+
+        fn window_event(
+            &mut self,
+            event_loop: &ActiveEventLoop,
+            window_id: WindowId,
+            event: WindowEvent,
+        ) {
+            let Some(window) = &self.window else { return };
+            if window.id() != window_id {
+                return;
+            }
+            if let WindowEvent::Resized(size) = event {
+                let (width, height) = self.size();
+                if size != PhysicalSize::new(width, height) {
+                    return;
+                }
+                let started = Instant::now();
+                self.host.resize(width, height);
+                self.renderer.resize(width, height, 1.0);
+                let damage = self.renderer.render(self.host.commands());
+                assert!(!damage.is_empty(), "every resize must rasterize a frame");
+                self.rendered += 1;
+                let surface = self.surface.as_mut().unwrap();
+                surface
+                    .resize(
+                        NonZeroU32::new(width).unwrap(),
+                        NonZeroU32::new(height).unwrap(),
+                    )
+                    .unwrap();
+                let mut buffer = surface.buffer_mut().unwrap();
+                for (target, pixel) in buffer.iter_mut().zip(self.renderer.pixels()) {
+                    *target =
+                        u32::from(pixel.r) << 16 | u32::from(pixel.g) << 8 | u32::from(pixel.b);
+                }
+                buffer.present().unwrap();
+                self.presented += 1;
+                self.elapsed_ms
+                    .push(started.elapsed().as_secs_f64() * 1000.0);
+                self.frames += 1;
+                if self.frames == 120 {
+                    event_loop.exit();
+                } else {
+                    let (width, height) = self.size();
+                    let _ = window.request_inner_size(PhysicalSize::new(width, height));
+                }
+            }
+        }
+
+        fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+            if self.started.elapsed().as_secs() > 30 {
+                event_loop.exit();
+            }
+        }
+    }
+
+    let entries = (0..4096)
+        .map(|index| FileEntry {
+            display_name_override: None,
+            name: format!("item-{index}.txt").into(),
+            path: PathBuf::from(format!("/fixture/item-{index}.txt")),
+            is_directory: false,
+            size: Some(1),
+            modified: None,
+        })
+        .collect();
+    let app = FileApp::with_browser(DirectoryBrowser::fixture(entries), String::new());
+    let mut event_loop_builder = EventLoop::builder();
+    event_loop_builder.with_any_thread(true);
+    let event_loop = event_loop_builder.build().unwrap();
+    event_loop.set_control_flow(ControlFlow::WaitUntil(
+        Instant::now() + std::time::Duration::from_secs(31),
+    ));
+    let mut benchmark = Benchmark {
+        host: UiHost::new(app, 900, 700),
+        renderer: nickel_ui::SoftwareRenderer::new_pixel_buffer(900, 700, 1.0),
+        display: event_loop.owned_display_handle(),
+        window: None,
+        surface: None,
+        started: Instant::now(),
+        frames: 0,
+        rendered: 0,
+        presented: 0,
+        elapsed_ms: Vec::new(),
+    };
+    event_loop.run_app(&mut benchmark).unwrap();
+    assert_eq!(benchmark.frames, 120, "offscreen window stopped resizing");
+    assert_eq!(benchmark.rendered, 120);
+    assert_eq!(benchmark.presented, 120);
+    benchmark.elapsed_ms.sort_by(f64::total_cmp);
+    println!(
+        "offscreen File resize: presented={} median/p95={:.3}/{:.3}ms full_repaints={}",
+        benchmark.presented,
+        benchmark.elapsed_ms[60],
+        benchmark.elapsed_ms[114],
+        benchmark
+            .renderer
+            .software_raster_diagnostics()
+            .full_repaints,
+    );
+}

@@ -325,7 +325,8 @@ impl SoftwareRenderer {
             self.height = height;
             self.pixels
                 .resize((self.width * self.height) as usize, Pixel::TRANSPARENT);
-            self.previous_commands.clear();
+            // The framebuffer is invalid, but text rasters for unchanged
+            // commands remain valid when the scale factor is unchanged.
             self.presented_generation = None;
             self.framebuffer_valid = false;
             self.raster_stats.framebuffer_peak_bytes = self
@@ -695,6 +696,7 @@ impl SoftwareRenderer {
             self.fill_rect(bounds, pixel(color));
             return;
         }
+        let source = pixel(color);
         self.for_pixels(bounds, |renderer, x, y| {
             let left = x as f32 + 0.5 - rect.origin.x;
             let top = y as f32 + 0.5 - rect.origin.y;
@@ -714,12 +716,21 @@ impl SoftwareRenderer {
                 (corners & 0b1000 != 0 && left < radius && bottom < radius)
                     .then_some((left - radius, bottom - radius))
             });
-            let coverage = rounded.map_or(1.0, |(dx, dy)| {
-                (radius + 0.5 - (dx * dx + dy * dy).sqrt()).clamp(0.0, 1.0)
-            });
-            if coverage > 0.0 {
-                let mut source = pixel(color);
-                source.a = (f32::from(source.a) * coverage).round() as u8;
+            if let Some((dx, dy)) = rounded {
+                let coverage = (radius + 0.5 - (dx * dx + dy * dy).sqrt()).clamp(0.0, 1.0);
+                if coverage == 0.0 {
+                    return;
+                }
+                if coverage < 1.0 {
+                    let mut covered = source;
+                    covered.a = (f32::from(source.a) * coverage).round() as u8;
+                    renderer.blend(x, y, covered);
+                    return;
+                }
+            }
+            if source.a == 255 {
+                renderer.pixels[(y * renderer.width + x) as usize] = source;
+            } else {
                 renderer.blend(x, y, source);
             }
         });
@@ -846,15 +857,25 @@ impl SoftwareRenderer {
             x: physical.origin.x.round(),
             y: physical.origin.y.round(),
         };
+        let clip_right = clip.origin.x + clip.size.width;
+        let clip_bottom = clip.origin.y + clip.size.height;
         for &(x, y, glyph_color) in &cached.pixels {
-            let glyph = Rect::new(origin.x + x as f32, origin.y + y as f32, 1.0, 1.0);
-            let Some(glyph) = intersection(glyph, clip) else {
-                continue;
-            };
-            self.for_pixels(glyph, |renderer, px, py| {
-                renderer.blend(
-                    px,
-                    py,
+            let px = origin.x + x as f32;
+            let py = origin.y + y as f32;
+            if px >= 0.0
+                && py >= 0.0
+                && px < self.width as f32
+                && py < self.height as f32
+                && clip.size.width > 0.0
+                && clip.size.height > 0.0
+                && px + 1.0 > clip.origin.x
+                && py + 1.0 > clip.origin.y
+                && px < clip_right
+                && py < clip_bottom
+            {
+                self.blend(
+                    px as u32,
+                    py as u32,
                     Pixel::rgba(
                         glyph_color.r(),
                         glyph_color.g(),
@@ -862,7 +883,7 @@ impl SoftwareRenderer {
                         glyph_color.a(),
                     ),
                 );
-            });
+            }
         }
         for &(rect, strike_color) in &cached.strikes {
             self.fill_round(rect, 0.0, 0, strike_color, clip);
@@ -1834,6 +1855,29 @@ mod tests {
             renderer.suspend();
             renderer.resize(160, 80, 1.25);
             assert!(!renderer.render(&commands).is_empty());
+        }
+    }
+
+    #[test]
+    fn size_only_resize_reuses_text_rasters_and_matches_fresh_pixels() {
+        for styled in [false, true] {
+            let commands = [
+                PaintCommand::PushClip(Rect::new(2.5, 2.5, 80.25, 24.25)),
+                label(styled, 1.0),
+                PaintCommand::PopClip,
+            ];
+            let mut renderer = SoftwareRenderer::new(160, 80, 1.0);
+            renderer.render(&commands);
+            assert!(renderer.text_rasters[1].is_some());
+            let allocated = renderer.raster_stats.candidate_allocated_bytes;
+            for (width, height) in [(180, 90), (120, 70), (160, 80)] {
+                renderer.resize(width, height, 1.0);
+                assert!(!renderer.render(&commands).is_empty());
+                let mut fresh = SoftwareRenderer::new(width, height, 1.0);
+                fresh.render(&commands);
+                assert_eq!(renderer.pixels(), fresh.pixels());
+                assert_eq!(renderer.raster_stats.candidate_allocated_bytes, allocated);
+            }
         }
     }
 
