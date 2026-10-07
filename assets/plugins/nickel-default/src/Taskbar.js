@@ -50,7 +50,7 @@ function Task(props) {
 }
 function TrayItem(props) {
     const item = props.item;
-    return h(Button, { id: "taskbar-tray-" + item.id, className: "tray-button", accessibilityLabel: item.title, icon: item.icon ? "tray:" + item.id : null, onContextMenu: () => nickel.tray.contextMenu(item.id), onClick: () => nickel.tray.activate(item.id) }, item.title.charAt(0).toUpperCase() || "?");
+    return h(Button, { id: "taskbar-tray-" + item.id, className: "tray-button", accessibilityLabel: item.title, icon: item.icon ? "tray:" + item.id : null, iconSize: 22, onContextMenu: () => nickel.tray.contextMenu(item.id), onClick: () => nickel.tray.activate(item.id) }, item.title.charAt(0).toUpperCase() || "?");
 }
 export function Taskbar(props) {
     const applications = useApplications();

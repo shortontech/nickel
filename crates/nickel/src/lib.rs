@@ -2493,6 +2493,12 @@ fn windows_test_layouts(
 /// Runs the Nickel desktop shell using process command-line arguments.
 pub fn run() -> Result<(), String> {
     #[cfg(target_os = "windows")]
+    if std::env::args_os().nth(1).as_deref()
+        == Some(std::ffi::OsStr::new("--nickel-activate-packaged-app"))
+    {
+        return platform::run_packaged_activation_child();
+    }
+    #[cfg(target_os = "windows")]
     if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--nickel-launch-broker"))
     {
         return windows_launch_broker::run_broker_child();
@@ -3196,12 +3202,18 @@ pub fn run() -> Result<(), String> {
                 let entry = shell.surface(surface).expect("routed plugin surface");
                 let key = entry.plugin_key().expect("plugin owner").clone();
                 let (width, height) = entry.window().size();
+                let is_quick_settings = key == state.active_shell_surface_key("quick-settings");
                 if !focused {
                     shell.stop_text_input(surface);
                 } else {
                     shell.set_active_output_from_surface(surface);
                 }
-                if state.plugin_panel_host_window_focus_for(&key, focused, width, height) {
+                let host_changed =
+                    state.plugin_panel_host_window_focus_for(&key, focused, width, height);
+                let dismissed = !focused
+                    && is_quick_settings
+                    && state.dismiss_ephemeral_on_focus_loss(SurfaceRole::ControlCenter);
+                if host_changed || dismissed {
                     sync_visibility(&mut shell, &mut state);
                     render_role(&mut shell, &mut state, SurfaceRole::Panel)?;
                 }

@@ -15,13 +15,43 @@ div.preview-content {
     gap: 8px;
 }
 
+column.preview-card {
+    width: 260px;
+    min-width: 260px;
+    max-width: 260px;
+    padding: 7px;
+    gap: 6px;
+    background: transparent;
+    border: 2px solid transparent;
+    border-radius: 8px;
+}
+
+column.preview-card.switcher-card {
+    width: 204px;
+    min-width: 204px;
+    max-width: 204px;
+}
+
+column.preview-card.selected {
+    background: var(--nickel-accent-soft);
+    border: 2px solid var(--nickel-accent);
+}
+
 window.window-preview text {
     color: #f3f5f8;
     font-size: 13px;
 }
 
-window.window-preview row {
+window.window-preview row.preview-header {
+    width: 100%;
     gap: 4px;
+    align-items: center;
+    justify-content: space-between;
+}
+
+window.window-preview text.preview-title {
+    min-width: 0px;
+    flex-shrink: 1;
 }
 
 window.window-preview button {

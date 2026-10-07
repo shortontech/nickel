@@ -6074,7 +6074,7 @@ impl LiveShell {
                 .chain(self.desktop_deadline)
                 .min(),
         );
-        push("on-screen-keyboard", Some(self.keyboard_deadline));
+        push("runtime-maintenance", Some(self.keyboard_deadline));
         push("clock", Some(self.clock_deadline));
         push(
             "plugin-image-admission",
@@ -6450,8 +6450,17 @@ impl LiveShell {
                 outcome.redraw.push(SurfaceRole::Taskbar);
             }
             outcome.visibility_changed |= visible != self.keyboard_visible;
-            self.keyboard_deadline =
-                now + Duration::from_millis(if self.keyboard_enabled { 100 } else { 1000 });
+            // The keyboard deadline also gives retained V8 runtimes a cooperative
+            // maintenance turn.  Do not run that whole-shell pass at the keyboard's
+            // interactive cadence merely because the feature is enabled: a hidden
+            // keyboard has no latency-sensitive work and otherwise keeps an idle
+            // desktop repainting ten times a second.
+            self.keyboard_deadline = now
+                + Duration::from_millis(if self.keyboard_enabled && self.keyboard_visible {
+                    100
+                } else {
+                    1000
+                });
         }
         if let Some((index, deadline)) = self.preview_pending
             && now >= deadline
@@ -9338,6 +9347,12 @@ impl LiveShell {
                 self.set_default_shell_surface_visible("launcher", false);
             }
             self.set_default_shell_surface_visible("quick-settings", visible);
+            if visible {
+                let key = self.active_shell_surface_key("quick-settings");
+                if let Err(error) = self.focus_plugin_window(&key.plugin_id, &key.surface_id) {
+                    tracing::warn!(%error, "control center focus request failed");
+                }
+            }
             return;
         }
 

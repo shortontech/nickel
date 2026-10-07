@@ -52,7 +52,18 @@ button.clock-button:active {
 }
 
 button.clock-button {
-    min-width: 120px;
+    width: 112px;
+    min-width: 112px;
+    max-width: 112px;
+    text-align: center;
+}
+
+button.tray-button {
+    width: 34px;
+    min-width: 34px;
+    max-width: 34px;
+    height: 42px;
+    padding: 10px 6px;
 }
 
 badge.task-badge {

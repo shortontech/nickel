@@ -2006,7 +2006,7 @@ fn cooperative_platform_maintenance_reconciles_only_dirty_sibling_hosts() {
         let due = shell.keyboard_deadline;
         let outcome = shell.poll_deadlines(due);
         assert!(!outcome.redraw.is_empty());
-        assert!(shell.keyboard_deadline > due);
+        assert_eq!(shell.keyboard_deadline, due + Duration::from_secs(1));
         assert!(
             shell.plugin_surface_hosts[&keys[0]]
                 .1
@@ -2019,6 +2019,20 @@ fn cooperative_platform_maintenance_reconciles_only_dirty_sibling_hosts() {
                 .resolved_frame_generation(),
             generations[1]
         );
+    });
+}
+
+#[test]
+fn visible_keyboard_uses_interactive_maintenance_cadence() {
+    with_package_runtime_stack(|| {
+        let mut shell = LiveShell::new().unwrap();
+        shell.keyboard_enabled = true;
+        shell.keyboard_visible = true;
+        let due = shell.keyboard_deadline;
+
+        shell.poll_deadlines(due);
+
+        assert_eq!(shell.keyboard_deadline, due + Duration::from_millis(100));
     });
 }
 
