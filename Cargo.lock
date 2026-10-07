@@ -3585,6 +3585,7 @@ dependencies = [
  "nickel-ui",
  "nickel-ui-testkit",
  "notify",
+ "nucleo-matcher",
  "raw-window-handle",
  "sha2",
  "sys-locale",

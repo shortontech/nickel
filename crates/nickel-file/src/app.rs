@@ -1,5 +1,6 @@
 use std::{
-    collections::HashSet,
+    cell::{Cell, RefCell},
+    collections::{HashMap, HashSet},
     ffi::OsString,
     hash::{DefaultHasher, Hash, Hasher},
     path::PathBuf,
@@ -32,9 +33,13 @@ use nickel_i18n::Localizer;
 #[cfg(not(target_os = "linux"))]
 use nickel_platform::{DefaultLaunchError as OpenPathError, open_with_default};
 use nickel_ui::{
-    AnyView, Application, FrameOverlay, Insets, OverlayAnchor, OverlayMenu, OverlayMenuItem,
-    OverlayStyle, Point, ReadingDirection, Size, TextField, TransientSurface, UiId, ViewContext,
-    ui,
+    AnyView, Application, CollectionSource, FrameOverlay, Insets, OverlayAnchor, OverlayMenu,
+    OverlayMenuItem, OverlayStyle, Point, ReadingDirection, Size, TextField, TransientSurface,
+    UiId, ViewContext, ui,
+};
+use nucleo_matcher::{
+    Config, Matcher,
+    pattern::{AtomKind, CaseMatching, Normalization, Pattern},
 };
 
 #[cfg(any(test, feature = "workbench-fixtures"))]
@@ -45,6 +50,7 @@ pub use fixtures::FileFixtureProvider;
 use fixtures::{FILE_FIXTURE_ASSETS, FILE_FIXTURE_VARIANTS, FileWorkbenchFixture};
 
 const DEFAULT_SIDEBAR_WIDTH: f32 = 190.0;
+const FILTER_DEBOUNCE: Duration = Duration::from_millis(150);
 pub(crate) const MIN_SIDEBAR_WIDTH: f32 = 150.0;
 pub(crate) const MAX_SIDEBAR_WIDTH: f32 = 360.0;
 pub(crate) const SIDEBAR_RESIZE_WIDTH: f32 = 5.0;
@@ -60,6 +66,7 @@ const DIRECTORY_WATCH_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const DIRECTORY_WATCH_RETRY_INTERVAL: Duration = Duration::from_secs(2);
 const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(500);
 const DOUBLE_CLICK_DISTANCE: f32 = 6.0;
+const SCROLL_ICON_DEBOUNCE: Duration = Duration::from_millis(50);
 
 fn entry_context_menu_id(path: &std::path::Path) -> String {
     let mut hasher = DefaultHasher::new();
@@ -147,6 +154,7 @@ pub enum FileMessage {
     Paste,
     ToggleCommandSurface,
     CommandQueryChanged(String),
+    FilterQueryChanged(String),
     CommandScroll(f32),
     ToggleAddressEditing,
     AddressChanged(String),
@@ -278,6 +286,7 @@ pub struct FileApp {
     #[cfg(target_os = "linux")]
     launches: crate::FileLaunches<(u64, String)>,
     pub(crate) icons: icons::ArtworkCache,
+    shared_nickel_icons: HashMap<SharedNickelIconKey, IconBitmap>,
     pub(crate) icon_rx:
         Option<Receiver<(u64, PathBuf, icons::ArtworkCacheKey, icons::ResolvedArtwork)>>,
     pub(crate) icon_poll_delay: std::time::Duration,
@@ -309,6 +318,13 @@ pub struct FileApp {
     pub(crate) places_open: bool,
     pub(crate) command_surface_open: bool,
     pub(crate) command_query: String,
+    pub(crate) filter_query: String,
+    applied_filter_query: String,
+    filter_deadline: Option<Instant>,
+    filter_cache: RefCell<Option<FilterCache>>,
+    collection_cache: RefCell<Option<FileCollectionCache>>,
+    sidebar_collection_cache: RefCell<Option<SidebarCollectionCache>>,
+    location_groups_revision: u64,
     pub(crate) command_scroll_offset: f32,
     pub(crate) pending_focus: Option<UiId>,
     pub(crate) address_editing: bool,
@@ -316,6 +332,11 @@ pub struct FileApp {
     pub(crate) tile_width: f32,
     pub(crate) file_scroll_offset: f32,
     pub(crate) sidebar_scroll_offset: f32,
+    viewport_size: Cell<(f32, f32)>,
+    viewport_changed_at: Cell<Instant>,
+    icons_viewport_size: (f32, f32),
+    icons_visible_range: std::ops::Range<usize>,
+    scroll_icon_deadline: Option<Instant>,
     pub(crate) view_mode: FileViewMode,
     pub(crate) sort_key: EntrySortKey,
     pub(crate) sort_direction: SortDirection,
@@ -406,7 +427,156 @@ pub(crate) struct FileTab {
     directory_watch_retry_at: Option<Instant>,
 }
 
+type SharedNickelIconKey = (icons::SemanticIconKind, u16, u16, icons::ArtworkAppearance);
+type IconBitmap = (u16, Arc<image::RgbaImage>);
+
+struct FilterCache {
+    tab_id: u64,
+    browser_revision: u64,
+    query: String,
+    indices: Arc<Vec<usize>>,
+}
+
+struct FileCollectionCache {
+    indices: Arc<Vec<usize>>,
+    source: CollectionSource<usize, usize>,
+}
+
+struct SidebarCollectionCache {
+    sidebar_revision: u64,
+    location_groups_revision: u64,
+    source: CollectionSource<layout::SidebarRow, String>,
+}
+
+// A single typo in a filename prefix should not hide an otherwise useful result.
+// Nucleo supplies the launcher's subsequence matching; this catches edits and swaps.
+fn typo_prefix_match(query: &str, name: &str) -> bool {
+    let query: Vec<char> = query.to_lowercase().chars().collect();
+    if !(4..=64).contains(&query.len()) {
+        return false;
+    }
+    let name: Vec<char> = name.to_lowercase().chars().take(query.len() + 1).collect();
+    if name.len() + 1 < query.len() {
+        return false;
+    }
+    let mut distance = vec![vec![0usize; name.len() + 1]; query.len() + 1];
+    for (index, row) in distance.iter_mut().enumerate() {
+        row[0] = index;
+    }
+    for (index, value) in distance[0].iter_mut().enumerate() {
+        *value = index;
+    }
+    for i in 1..=query.len() {
+        for j in 1..=name.len() {
+            distance[i][j] = (distance[i - 1][j] + 1)
+                .min(distance[i][j - 1] + 1)
+                .min(distance[i - 1][j - 1] + usize::from(query[i - 1] != name[j - 1]));
+            if i > 1 && j > 1 && query[i - 1] == name[j - 2] && query[i - 2] == name[j - 1] {
+                distance[i][j] = distance[i][j].min(distance[i - 2][j - 2] + 1);
+            }
+        }
+    }
+    ((query.len() - 1)..=name.len().min(query.len() + 1))
+        .any(|length| distance[query.len()][length] <= 1)
+}
+
 impl FileApp {
+    fn settle_filter(&mut self, now: Instant) -> bool {
+        if self.filter_deadline.is_none_or(|deadline| now < deadline) {
+            return false;
+        }
+        self.filter_deadline = None;
+        self.applied_filter_query.clone_from(&self.filter_query);
+        true
+    }
+
+    pub(crate) fn apply_filter_now(&mut self) {
+        self.filter_deadline = None;
+        self.applied_filter_query.clone_from(&self.filter_query);
+    }
+
+    /// Indices into the current directory listing, in its chosen sort order.
+    pub(crate) fn filtered_indices(&self) -> Arc<Vec<usize>> {
+        let query = self.applied_filter_query.trim();
+        let revision = self.browser.revision();
+        if let Some(cache) = self.filter_cache.borrow().as_ref()
+            && cache.tab_id == self.active_tab_id
+            && cache.browser_revision == revision
+            && cache.query == query
+        {
+            return Arc::clone(&cache.indices);
+        }
+        let indices = if query.is_empty() {
+            (0..self.browser.entries().len()).collect()
+        } else {
+            let pattern = Pattern::new(
+                query,
+                CaseMatching::Ignore,
+                Normalization::Smart,
+                AtomKind::Fuzzy,
+            );
+            let mut matcher = Matcher::new(Config::DEFAULT);
+            self.browser
+                .entries()
+                .iter()
+                .enumerate()
+                .filter_map(|(index, entry)| {
+                    let name = entry.display_name();
+                    let mut buffer = Vec::new();
+                    (pattern
+                        .score(
+                            nucleo_matcher::Utf32Str::new(&name, &mut buffer),
+                            &mut matcher,
+                        )
+                        .is_some()
+                        || typo_prefix_match(query, &name))
+                    .then_some(index)
+                })
+                .collect()
+        };
+        let indices = Arc::new(indices);
+        *self.filter_cache.borrow_mut() = Some(FilterCache {
+            tab_id: self.active_tab_id,
+            browser_revision: revision,
+            query: query.to_owned(),
+            indices: Arc::clone(&indices),
+        });
+        indices
+    }
+
+    pub(crate) fn file_collection_source(&self) -> CollectionSource<usize, usize> {
+        let indices = self.filtered_indices();
+        if let Some(cache) = self.collection_cache.borrow().as_ref()
+            && Arc::ptr_eq(&cache.indices, &indices)
+        {
+            return cache.source.clone();
+        }
+        let source = CollectionSource::try_new(indices.as_ref().clone(), |index| *index)
+            .expect("directory listing indices are unique");
+        *self.collection_cache.borrow_mut() = Some(FileCollectionCache {
+            indices,
+            source: source.clone(),
+        });
+        source
+    }
+
+    pub(crate) fn sidebar_collection_source(&self) -> CollectionSource<layout::SidebarRow, String> {
+        if let Some(cache) = self.sidebar_collection_cache.borrow().as_ref()
+            && cache.sidebar_revision == self.sidebar.revision()
+            && cache.location_groups_revision == self.location_groups_revision
+        {
+            return cache.source.clone();
+        }
+        let source = CollectionSource::try_new(layout::sidebar_rows(self), layout::SidebarRow::key)
+            .expect("sidebar group and folder identities are unique");
+        *self.sidebar_collection_cache.borrow_mut() = Some(SidebarCollectionCache {
+            sidebar_revision: self.sidebar.revision(),
+            location_groups_revision: self.location_groups_revision,
+            source: source.clone(),
+        });
+        source
+    }
+
     pub fn take_context_popup_request(
         &mut self,
         width: u32,
@@ -478,6 +648,7 @@ impl FileApp {
     pub fn request_close(&mut self) {
         self.exit_requested = true;
         self.sidebar = crate::sidebar::Sidebar::default();
+        self.sidebar_collection_cache.borrow_mut().take();
     }
 
     pub(crate) fn selected_index(&self) -> Option<usize> {
@@ -716,6 +887,7 @@ impl FileApp {
             #[cfg(target_os = "linux")]
             launches: Default::default(),
             icons: icons::ArtworkCache::default(),
+            shared_nickel_icons: HashMap::new(),
             icon_rx: None,
             icon_poll_delay: std::time::Duration::from_millis(16),
             icon_generation: 0,
@@ -749,6 +921,13 @@ impl FileApp {
             places_open: false,
             command_surface_open: false,
             command_query: String::new(),
+            filter_query: String::new(),
+            applied_filter_query: String::new(),
+            filter_deadline: None,
+            filter_cache: RefCell::new(None),
+            collection_cache: RefCell::new(None),
+            sidebar_collection_cache: RefCell::new(None),
+            location_groups_revision: 0,
             command_scroll_offset: 0.0,
             pending_focus: None,
             address_editing: false,
@@ -756,6 +935,11 @@ impl FileApp {
             tile_width: DEFAULT_TILE_WIDTH,
             file_scroll_offset: 0.0,
             sidebar_scroll_offset: 0.0,
+            viewport_size: Cell::new((960.0, 720.0)),
+            viewport_changed_at: Cell::new(Instant::now()),
+            icons_viewport_size: (960.0, 720.0),
+            icons_visible_range: 0..0,
+            scroll_icon_deadline: None,
             view_mode: FileViewMode::Grid,
             sort_key: EntrySortKey::Name,
             sort_direction: SortDirection::Ascending,
@@ -819,6 +1003,9 @@ impl FileApp {
         let Some(mut target) = self.tabs[index].take() else {
             return;
         };
+        self.filter_query.clear();
+        self.applied_filter_query.clear();
+        self.filter_deadline = None;
         std::mem::swap(&mut self.browser, &mut target.browser);
         std::mem::swap(&mut self.selected, &mut target.selected);
         std::mem::swap(&mut self.selected_entries, &mut target.selected_entries);
@@ -954,6 +1141,9 @@ impl FileApp {
         layout::build_view(self, _width, height, palette, light_mode)
     }
     pub(crate) fn activate_selected(&mut self) {
+        if self.filter_deadline.is_some() {
+            self.apply_filter_now();
+        }
         let entry = self
             .selected_index()
             .and_then(|index| self.browser.entries().get(index))
@@ -1195,6 +1385,7 @@ impl FileApp {
                     return false;
                 }
                 self.location_groups = groups;
+                self.location_groups_revision = self.location_groups_revision.wrapping_add(1);
                 self.sidebar.retain_visible_roots(
                     self.location_groups
                         .iter()
@@ -1223,31 +1414,31 @@ impl FileApp {
                 match result {
                     Ok(Some(browser)) => {
                         let changed_icon_paths = if self.navigation_invalidates_icons {
-                            self.browser
+                            let old_entries = self
+                                .browser
                                 .entries()
                                 .iter()
-                                .filter(|old| {
-                                    browser
-                                        .entries()
-                                        .iter()
-                                        .find(|new| new.path == old.path)
-                                        .is_none_or(|new| new != *old)
+                                .map(|entry| (entry.path.as_path(), entry))
+                                .collect::<HashMap<_, _>>();
+                            let new_entries = browser
+                                .entries()
+                                .iter()
+                                .map(|entry| (entry.path.as_path(), entry))
+                                .collect::<HashMap<_, _>>();
+                            let mut changed = old_entries
+                                .iter()
+                                .filter(|(path, old)| {
+                                    new_entries.get(*path).is_none_or(|new| *new != **old)
                                 })
-                                .map(|entry| entry.path.clone())
-                                .chain(
-                                    browser
-                                        .entries()
-                                        .iter()
-                                        .filter(|new| {
-                                            !self
-                                                .browser
-                                                .entries()
-                                                .iter()
-                                                .any(|old| old.path == new.path)
-                                        })
-                                        .map(|new| new.path.clone()),
-                                )
-                                .collect::<HashSet<_>>()
+                                .map(|(path, _)| (*path).to_path_buf())
+                                .collect::<HashSet<_>>();
+                            changed.extend(
+                                new_entries
+                                    .keys()
+                                    .filter(|path| !old_entries.contains_key(*path))
+                                    .map(|path| (*path).to_path_buf()),
+                            );
+                            changed
                         } else {
                             HashSet::new()
                         };
@@ -1338,6 +1529,9 @@ impl FileApp {
     }
 
     fn navigation_changed(&mut self) {
+        self.filter_query.clear();
+        self.applied_filter_query.clear();
+        self.filter_deadline = None;
         self.browser.sort(self.sort_key, self.sort_direction);
         self.selected = None;
         self.selected_entries.clear();
@@ -1520,6 +1714,23 @@ impl FileApp {
         self.refresh_icons_for_theme(preference, None, appearance);
     }
 
+    pub(crate) fn shared_icon_for(&self, entry: &FileEntry) -> Option<&IconBitmap> {
+        if icons::is_platform_launcher(&entry.path) {
+            return None;
+        }
+        let appearance = if self.icon_appearance == ThemeMode::Light {
+            icons::ArtworkAppearance::Light
+        } else {
+            icons::ArtworkAppearance::Dark
+        };
+        self.shared_nickel_icons.get(&(
+            icons::semantic_kind(&entry.path, entry.is_directory),
+            96,
+            self.artwork_scale_milli,
+            appearance,
+        ))
+    }
+
     fn refresh_icons_for_theme(
         &mut self,
         preference: FileIconPreference,
@@ -1537,22 +1748,32 @@ impl FileApp {
             self.icon_provider_revision = provider_revision;
             self.icon_appearance = appearance;
             self.icons.clear();
+            self.shared_nickel_icons.clear();
             self.tab_icon = None;
             for tab in self.tabs.iter_mut().flatten() {
                 tab.tab_icon = None;
             }
         }
         self.icon_generation = self.icon_generation.wrapping_add(1);
+        self.scroll_icon_deadline = None;
         let generation = self.icon_generation;
         let artwork_appearance = if appearance == ThemeMode::Light {
             icons::ArtworkAppearance::Light
         } else {
             icons::ArtworkAppearance::Dark
         };
-        let mut entries = self
-            .browser
-            .entries()
+        let viewport_size = self.viewport_size.get();
+        self.icons_viewport_size = viewport_size;
+        let filtered = self.filtered_indices();
+        let visible = if filtered.len() <= 256 {
+            0..filtered.len()
+        } else {
+            visible_file_range(self, viewport_size.0, viewport_size.1)
+        };
+        self.icons_visible_range = visible.clone();
+        let mut entries = filtered[visible]
             .iter()
+            .filter_map(|&index| self.browser.entries().get(index))
             .map(|entry| {
                 let request = icons::ArtworkRequest {
                     path: &entry.path,
@@ -1630,11 +1851,6 @@ impl FileApp {
                 entries.push((path, true, key));
             }
         }
-        let retained_paths = entries
-            .iter()
-            .map(|(path, _, _)| path.clone())
-            .collect::<HashSet<_>>();
-        self.icons.retain(|path| retained_paths.contains(path));
         let mut paths = entries
             .into_iter()
             .filter(|(_, _, key)| !self.icons.matches(key))
@@ -1661,25 +1877,37 @@ impl FileApp {
         // provider may replace it asynchronously, but native lookup must never
         // leave an invisible entry or tab target while it is pending.
         for (path, is_directory, key) in &paths {
-            let artwork = icons::resolve_artwork(
-                FileIconPreference::Nickel,
-                &icons::ArtworkRequest {
-                    path,
-                    kind: icons::semantic_kind(path, *is_directory),
-                    logical_size: 96,
-                    scale_milli: self.artwork_scale_milli,
-                    appearance: artwork_appearance,
-                },
-            );
-            let id = self.next_icon_id;
-            self.next_icon_id = self.next_icon_id.checked_add(1).unwrap_or(1);
-            self.assign_tab_icon(path, (id, artwork.pixels.clone()));
-            if needs_async(path, *is_directory) {
-                self.icons
-                    .insert_pending(path.clone(), (id, artwork.pixels));
+            let kind = icons::semantic_kind(path, *is_directory);
+            let shared_key = (kind, 96, self.artwork_scale_milli, artwork_appearance);
+            let icon = if !icons::is_platform_launcher(path) {
+                self.shared_nickel_icons.get(&shared_key).cloned()
             } else {
-                self.icons
-                    .insert_resolved(key.clone(), (id, artwork.pixels));
+                None
+            }
+            .unwrap_or_else(|| {
+                let artwork = icons::resolve_artwork(
+                    FileIconPreference::Nickel,
+                    &icons::ArtworkRequest {
+                        path,
+                        kind,
+                        logical_size: 96,
+                        scale_milli: self.artwork_scale_milli,
+                        appearance: artwork_appearance,
+                    },
+                );
+                let id = self.next_icon_id;
+                self.next_icon_id = self.next_icon_id.checked_add(1).unwrap_or(1);
+                let icon = (id, artwork.pixels);
+                if !icons::is_platform_launcher(path) {
+                    self.shared_nickel_icons.insert(shared_key, icon.clone());
+                }
+                icon
+            });
+            self.assign_tab_icon(path, icon.clone());
+            if needs_async(path, *is_directory) {
+                self.icons.insert_pending(path.clone(), icon);
+            } else {
+                self.icons.insert_resolved(key.clone(), icon);
             }
         }
         paths.retain(|(path, is_directory, _)| needs_async(path, *is_directory));
@@ -1762,7 +1990,8 @@ impl FileApp {
     }
 
     fn poll_icons(&mut self) {
-        loop {
+        // Applying a full worker batch in one poll can starve the compositor.
+        for _ in 0..32 {
             let result = match self.icon_rx.as_ref() {
                 Some(rx) => rx.try_recv(),
                 None => return,
@@ -1792,7 +2021,11 @@ impl FileApp {
     }
 
     pub(crate) fn select_relative(&mut self, delta: isize) {
-        let len = self.browser.entries().len();
+        if self.filter_deadline.is_some() {
+            self.apply_filter_now();
+        }
+        let visible = self.filtered_indices();
+        let len = visible.len();
         if len == 0 {
             self.selected = None;
             self.selected_entries.clear();
@@ -1800,11 +2033,15 @@ impl FileApp {
             return;
         }
         let Some(current) = self.selected_index() else {
-            self.select_only(0);
+            self.select_only(visible[0]);
             self.ensure_selection_visible();
             return;
         };
-        let next = (current as isize + delta).clamp(0, len as isize - 1) as usize;
+        let position = visible
+            .iter()
+            .position(|index| *index == current)
+            .unwrap_or(0);
+        let next = visible[(position as isize + delta).clamp(0, len as isize - 1) as usize];
         self.selected = self.identity_at(next);
         if self.shift_down {
             self.select_range(next, self.control_down);
@@ -1868,13 +2105,23 @@ impl FileApp {
     }
 
     pub(crate) fn select_all(&mut self) {
-        self.selected_entries = (0..self.browser.entries().len())
+        if self.filter_deadline.is_some() {
+            self.apply_filter_now();
+        }
+        let visible = self.filtered_indices();
+        self.selected_entries = visible
+            .iter()
+            .copied()
             .filter_map(|index| self.identity_at(index))
             .collect();
         self.selected = self
             .selected
-            .filter(|identity| self.browser.index_of_identity(*identity).is_some())
-            .or_else(|| self.identity_at(0));
+            .filter(|identity| {
+                visible
+                    .iter()
+                    .any(|index| self.identity_at(*index) == Some(*identity))
+            })
+            .or_else(|| visible.first().and_then(|index| self.identity_at(*index)));
         self.selection_anchor = self.selected;
     }
 
@@ -1891,11 +2138,11 @@ impl FileApp {
 
     pub(crate) fn selection_summary(&self) -> crate::selection_summary::SelectionSummary {
         crate::selection_summary::SelectionSummary::from_entries(
-            self.browser
-                .entries()
-                .iter()
-                .enumerate()
-                .filter_map(|(index, entry)| self.is_index_selected(index).then_some(entry)),
+            self.selected_entries.iter().filter_map(|identity| {
+                self.browser
+                    .index_of_identity(*identity)
+                    .and_then(|index| self.browser.entries().get(index))
+            }),
         )
     }
 
@@ -2326,6 +2573,16 @@ impl FileApp {
                 self.command_query = query;
                 self.command_scroll_offset = 0.0;
             }
+            FileMessage::FilterQueryChanged(query) => {
+                self.filter_query = query;
+                if self.filter_query.is_empty() {
+                    self.apply_filter_now();
+                } else {
+                    self.filter_deadline = Some(Instant::now() + FILTER_DEBOUNCE);
+                }
+                self.file_scroll_offset = 0.0;
+                self.clear_selection();
+            }
             FileMessage::CommandScroll(offset) => self.command_scroll_offset = offset.max(0.0),
             FileMessage::ToggleAddressEditing => {
                 self.address_editing = !self.address_editing;
@@ -2363,6 +2620,7 @@ impl FileApp {
                 self.begin_details_column_resize(column);
             }
             FileMessage::ToggleLocationGroup(group) => {
+                self.location_groups_revision = self.location_groups_revision.wrapping_add(1);
                 if !self.collapsed_location_groups.remove(&group) {
                     if let Some(location_group) =
                         self.location_groups.iter().find(|entry| entry.id == group)
@@ -2535,7 +2793,13 @@ impl FileApp {
                     DragPhase::Ended | DragPhase::Cancelled => self.selection_drag = None,
                 }
             }
-            FileMessage::FileScroll(offset) => self.file_scroll_offset = offset.max(0.0),
+            FileMessage::FileScroll(offset) => {
+                let offset = offset.max(0.0);
+                if self.file_scroll_offset != offset {
+                    self.file_scroll_offset = offset;
+                    self.scroll_icon_deadline = Some(Instant::now() + SCROLL_ICON_DEBOUNCE);
+                }
+            }
             FileMessage::SidebarScroll(offset) => self.sidebar_scroll_offset = offset.max(0.0),
         }
     }
@@ -3108,6 +3372,11 @@ impl Application for FileApp {
     }
 
     fn view(&self, context: ViewContext) -> impl nickel_ui::View<Self::Message> {
+        let viewport_size = (context.viewport.size.width, context.viewport.size.height);
+        if self.viewport_size.get() != viewport_size {
+            self.viewport_size.set(viewport_size);
+            self.viewport_changed_at.set(Instant::now());
+        }
         #[cfg(any(test, feature = "workbench-fixtures"))]
         let appearance = self.fixture_appearance.unwrap_or_else(|| {
             ShellSettings::load_default().resolve_appearance(nickel_platform::appearance())
@@ -3219,11 +3488,17 @@ impl Application for FileApp {
             context.viewport.size.height,
         );
         let mut overlays = self
-            .browser
-            .entries()
+            .filtered_indices()
             .iter()
-            .enumerate()
-            .filter(|(index, _)| visible_entries.contains(index))
+            .copied()
+            .skip(visible_entries.start)
+            .take(visible_entries.len())
+            .filter_map(|index| {
+                self.browser
+                    .entries()
+                    .get(index)
+                    .map(|entry| (index, entry))
+            })
             .map(|(index, entry)| {
                 let menu = OverlayMenu::new(
                     entry_context_menu_id(&entry.path),
@@ -3465,6 +3740,34 @@ impl Application for FileApp {
     }
 
     fn poll(&mut self) -> bool {
+        let now = Instant::now();
+        let filter_changed = self.settle_filter(now);
+        let scroll_settled = self
+            .scroll_icon_deadline
+            .is_none_or(|deadline| now >= deadline);
+        if scroll_settled {
+            self.scroll_icon_deadline = None;
+        }
+        let viewport_size = self.viewport_size.get();
+        let filtered_count = self.filtered_indices().len();
+        let visible = if filtered_count <= 256 {
+            0..filtered_count
+        } else {
+            visible_file_range(self, viewport_size.0, viewport_size.1)
+        };
+        let resize_settled = self.viewport_changed_at.get().elapsed() >= Duration::from_millis(50);
+        if filter_changed
+            || (scroll_settled
+                && ((viewport_size == self.icons_viewport_size
+                    && visible != self.icons_visible_range)
+                    || (viewport_size != self.icons_viewport_size && resize_settled)))
+        {
+            self.refresh_icons_for_theme(
+                self.icon_preference,
+                self.icon_theme.clone().as_deref(),
+                self.icon_appearance,
+            );
+        }
         let settings_changed = self.sync_icon_settings();
         let before = self.next_icon_id;
         self.poll_icons();
@@ -3531,7 +3834,8 @@ impl Application for FileApp {
         } else {
             false
         };
-        settings_changed
+        filter_changed
+            || settings_changed
             || properties_changed
             || association_changed
             || self.poll_activation()
@@ -3589,6 +3893,10 @@ impl Application for FileApp {
             #[cfg(target_os = "windows")]
             self.trash_rx.as_ref().map(|_| Duration::from_millis(16)),
             self.native_drop_deadline
+                .map(|deadline| deadline.saturating_duration_since(Instant::now())),
+            self.filter_deadline
+                .map(|deadline| deadline.saturating_duration_since(Instant::now())),
+            self.scroll_icon_deadline
                 .map(|deadline| deadline.saturating_duration_since(Instant::now())),
             self.native_drop_hover_started.as_ref().map(|(_, started)| {
                 (*started + Duration::from_millis(700)).saturating_duration_since(Instant::now())
@@ -3661,7 +3969,59 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 mod launch_tests {
     use std::{ffi::OsString, path::PathBuf};
 
-    use super::{FileApp, FileLaunch};
+    use super::{
+        FILTER_DEBOUNCE, FileApp, FileIconPreference, FileLaunch, FileMessage, Instant, ThemeMode,
+    };
+    use crate::{EntrySortKey, SortDirection};
+    use std::sync::Arc;
+
+    #[test]
+    fn filter_matches_are_reused_until_directory_order_changes() {
+        let mut app = FileApp::fixture();
+        app.update_message(FileMessage::FilterQueryChanged("rep".into()));
+        app.apply_filter_now();
+        let first = app.filtered_indices();
+        assert!(Arc::ptr_eq(&first, &app.filtered_indices()));
+        app.browser
+            .sort(EntrySortKey::Name, SortDirection::Descending);
+        let next = app.filtered_indices();
+        assert!(!Arc::ptr_eq(&first, &next));
+        assert_eq!(next.len(), 1);
+    }
+
+    #[test]
+    fn filter_is_scoped_to_listed_children_and_tolerates_one_typo() {
+        let mut app = FileApp::fixture();
+        app.update_message(FileMessage::FilterQueryChanged("reprot".into()));
+        assert_eq!(app.filtered_indices().as_ref(), &vec![0, 1, 2]);
+        app.settle_filter(Instant::now() + FILTER_DEBOUNCE);
+        assert_eq!(app.filtered_indices().as_ref(), &vec![1]);
+        app.refresh_icons_for(FileIconPreference::Nickel, ThemeMode::Dark);
+        assert!(app.icons.get(&app.browser.entries()[1].path).is_some());
+        app.select_all();
+        assert_eq!(app.selected_index(), Some(1));
+        assert_eq!(app.selected_entries.len(), 1);
+
+        app.update_message(FileMessage::FilterQueryChanged("fixture".into()));
+        app.settle_filter(Instant::now() + FILTER_DEBOUNCE);
+        assert!(app.filtered_indices().is_empty());
+    }
+
+    #[test]
+    fn filter_waits_for_latest_typing_and_clears_immediately() {
+        let mut app = FileApp::fixture();
+        app.update_message(FileMessage::FilterQueryChanged("rep".into()));
+        let first_deadline = app.filter_deadline.unwrap();
+        app.update_message(FileMessage::FilterQueryChanged("reprot".into()));
+        assert!(!app.settle_filter(first_deadline));
+        assert_eq!(app.filtered_indices().len(), 3);
+        assert!(app.settle_filter(app.filter_deadline.unwrap()));
+        assert_eq!(app.filtered_indices().as_ref(), &vec![1]);
+
+        app.update_message(FileMessage::FilterQueryChanged(String::new()));
+        assert!(app.filter_deadline.is_none());
+        assert_eq!(app.filtered_indices().len(), 3);
+    }
 
     #[test]
     fn parses_standalone_launch_modes_for_an_external_host() {

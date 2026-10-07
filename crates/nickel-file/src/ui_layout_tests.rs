@@ -51,6 +51,50 @@ fn one_photo_does_not_queue_every_entry_in_a_large_folder() {
 }
 
 #[test]
+fn opening_a_huge_folder_only_prepares_visible_icons() {
+    let entries = (0..2_000)
+        .map(|index| FileEntry {
+            display_name_override: None,
+            name: format!("file-{index:04}.txt").into(),
+            path: PathBuf::from(format!("/fixture/file-{index:04}.txt")),
+            is_directory: false,
+            size: Some(1),
+            modified: None,
+        })
+        .collect();
+    let mut app = FileApp::with_browser(DirectoryBrowser::fixture(entries), String::new());
+    app.refresh_icons_for(FileIconPreference::Nickel, ThemeMode::Dark);
+
+    assert!(app.icons.len() < 100, "offscreen files must not load icons");
+    assert!(app.icons.get(&app.browser.entries()[0].path).is_some());
+    assert!(app.icons.get(&app.browser.entries()[1_999].path).is_none());
+    let first = app
+        .icons
+        .get(&app.browser.entries()[0].path)
+        .unwrap()
+        .clone();
+    let second = app.icons.get(&app.browser.entries()[1].path).unwrap();
+    assert_eq!(first.0, second.0, "matching files share a texture ID");
+    assert!(Arc::ptr_eq(&first.1, &second.1));
+
+    app.file_scroll_offset = 40_000.0;
+    app.refresh_icons_for(FileIconPreference::Nickel, ThemeMode::Dark);
+    let visible = visible_file_range(&app, 960.0, 720.0);
+    assert!(visible.start > 100);
+    assert!(
+        app.icons
+            .get(&app.browser.entries()[visible.start].path)
+            .is_some()
+    );
+    let scrolled = app
+        .icons
+        .get(&app.browser.entries()[visible.start].path)
+        .unwrap();
+    assert_eq!(first.0, scrolled.0);
+    assert!(Arc::ptr_eq(&first.1, &scrolled.1));
+}
+
+#[test]
 fn first_press_drag_uses_shared_file_plane_capture_without_a_prior_click() {
     let (_directory, app) = selection_app(2);
     let expected = app.browser.entries()[0].path.clone();
@@ -1275,6 +1319,51 @@ fn sidebar_expansion_enumerates_children_asynchronously() {
         app.icons.get(&child).is_some(),
         "published sidebar children must receive immediate fallback artwork"
     );
+}
+
+#[test]
+fn sidebar_only_mounts_visible_folders_and_scrolls_to_later_children() {
+    let mut app = FileApp::fixture();
+    let root = std::path::PathBuf::from("/virtual/sidebar-root");
+    app.location_groups = vec![crate::platform::LocationGroup {
+        id: "nickel-home",
+        title: "Home",
+        entries: vec![("Root".into(), root.clone())],
+    }];
+    app.sidebar.expanded.insert(root.clone());
+    let children = (0..256)
+        .map(|index| {
+            let label = format!("Child {index:03}");
+            (label.clone(), root.join(label))
+        })
+        .collect::<Vec<_>>();
+    let last = children.last().unwrap().1.clone();
+    app.sidebar.children.insert(root, children);
+    let palette = ThemePalette::from_appearance(
+        ShellSettings::load_default().resolve_appearance(nickel_platform::appearance()),
+    );
+    let render = |app: &FileApp| {
+        nickel_ui::UiFrame::layout(
+            app.build_view(960.0, 640.0, palette, false),
+            Rect::new(0.0, 0.0, 960.0, 640.0),
+        )
+    };
+    let first = render(&app);
+    assert!(
+        first
+            .semantic_targets_for_message(&FileMessage::OpenFolder(last.clone()))
+            .is_empty()
+    );
+    assert!(first.semantic_nodes().len() < 300);
+
+    app.update_message(FileMessage::SidebarScroll(29.0 * 250.0));
+    let last_frame = render(&app);
+    assert!(
+        !last_frame
+            .semantic_targets_for_message(&FileMessage::OpenFolder(last))
+            .is_empty()
+    );
+    assert!(last_frame.semantic_nodes().len() < 300);
 }
 
 #[test]
@@ -3223,14 +3312,14 @@ fn internal_resize_layout_benchmark() {
         std::hint::black_box(warm);
         let before = nickel_ui::text_layout_cache_diagnostics();
         let mut samples = Vec::new();
+        let mut build_samples = Vec::new();
         for index in 0..120 {
             let width = 800.0 + index as f32 * 2.0;
             let height = 600.0 + (index % 30) as f32;
             let started = std::time::Instant::now();
-            let frame = nickel_ui::UiFrame::layout(
-                app.build_view(width, height, palette, false),
-                Rect::new(0.0, 0.0, width, height),
-            );
+            let view = app.build_view(width, height, palette, false);
+            build_samples.push(started.elapsed().as_secs_f64() * 1000.0);
+            let frame = nickel_ui::UiFrame::layout(view, Rect::new(0.0, 0.0, width, height));
             samples.push(started.elapsed().as_secs_f64() * 1000.0);
             let mounted = frame
                 .semantic_nodes()
@@ -3244,14 +3333,48 @@ fn internal_resize_layout_benchmark() {
             std::hint::black_box(frame);
         }
         samples.sort_by(f64::total_cmp);
+        build_samples.sort_by(f64::total_cmp);
         let after = nickel_ui::text_layout_cache_diagnostics();
         println!(
-            "file resize layout: median={:.3}ms p95={:.3}ms text_hits={} text_misses={} evictions={}",
+            "file resize layout: median={:.3}ms p95={:.3}ms build_median={:.3}ms build_p95={:.3}ms text_hits={} text_misses={} evictions={}",
             samples[60],
             samples[114],
+            build_samples[60],
+            build_samples[114],
             after.hits - before.hits,
             after.misses - before.misses,
             after.evictions - before.evictions
         );
     });
+    let mut host = UiHost::new(app, 1600, 1000);
+    let mut retained_samples = Vec::new();
+    for index in 0..120 {
+        let width = 1500 + index * 2;
+        let height = 920 + index % 30;
+        let started = std::time::Instant::now();
+        host.resize(width, height);
+        retained_samples.push(started.elapsed().as_secs_f64() * 1000.0);
+    }
+    retained_samples.sort_by(f64::total_cmp);
+    println!(
+        "file retained large resize: median={:.3}ms p95={:.3}ms",
+        retained_samples[60], retained_samples[114]
+    );
+    let mut very_large_samples = Vec::new();
+    for index in 0..120 {
+        let width = 3000 + index * 2;
+        let height = 1800 + index % 30;
+        let started = std::time::Instant::now();
+        host.resize(width, height);
+        very_large_samples.push(started.elapsed().as_secs_f64() * 1000.0);
+    }
+    very_large_samples.sort_by(f64::total_cmp);
+    println!(
+        "file retained very large resize: median={:.3}ms p95={:.3}ms",
+        very_large_samples[60], very_large_samples[114]
+    );
+    println!(
+        "file very large paint commands: {}",
+        host.render_frame().commands.len()
+    );
 }

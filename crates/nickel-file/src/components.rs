@@ -529,7 +529,11 @@ pub(crate) fn status_text(app: &FileApp) -> String {
         return app.status.clone();
     }
     let total = app.browser.entries().len();
-    let total_label = format!("{total} item{}", if total == 1 { "" } else { "s" });
+    let total_label = if app.filter_query.is_empty() {
+        format!("{total} item{}", if total == 1 { "" } else { "s" })
+    } else {
+        format!("{} of {total} items", app.filtered_indices().len())
+    };
     let location = app
         .browser
         .current()
@@ -618,17 +622,15 @@ pub(crate) fn places_sidebar(
     })
 }
 
-pub(crate) fn location_group(
+pub(crate) fn location_group_header(
     id: &str,
     title: &str,
-    rows: Vec<AnyView<FileMessage>>,
     collapsed: bool,
     palette: ThemePalette,
 ) -> AnyView<FileMessage> {
     let group_id = id.to_owned();
     AnyView::new(ui! {
-        <Column id={format!("location-group-{id}")} gap={1.0}>
-            <Container height={25.0} on_press={FileMessage::ToggleLocationGroup(group_id)}
+            <Container id={format!("location-group-{id}")} height={28.0} on_press={FileMessage::ToggleLocationGroup(group_id)}
                 focus_background_tint={palette.accent} controller_focus_background_tint={palette.complement}
                 accessibility_label={format!("{} {title}", if collapsed { "Expand" } else { "Collapse" })}
                 padding={Insets { top: 4.0, right: 4.0, bottom: 3.0, left: 4.0 }}>
@@ -637,21 +639,26 @@ pub(crate) fn location_group(
                     <Text color={palette.muted}>{title}</Text>
                 </Row>
             </Container>
-            {if collapsed { ui! { <></> } } else { ui! { <Column gap={1.0} children={rows} /> } }}
-        </Column>
     })
 }
 
 pub(crate) fn status_bar(
+    app: &FileApp,
     text: String,
     accessibility_text: String,
     palette: ThemePalette,
 ) -> AnyView<FileMessage> {
     AnyView::new(ui! {
-        <Container id={"file-footer"} accessibility_label={accessibility_text} height={30.0} shrink={0.0} background={palette.surface} padding={Insets {
-            top: 7.0, right: 14.0, bottom: 5.0, left: 14.0,
+        <Container id={"file-footer"} accessibility_label={accessibility_text} height={36.0} shrink={0.0} background={palette.surface} padding={Insets {
+            top: 3.0, right: 14.0, bottom: 3.0, left: 14.0,
         }}>
-            <Text scale={1.0} color={palette.muted}>{text}</Text>
+            <Row gap={12.0}>
+                <Text scale={1.0} color={palette.muted} grow={1.0}>{text}</Text>
+                <Container width={220.0} height={30.0} background={palette.background} border={(palette.muted, 1.0)} padding={Insets { top: 4.0, right: 8.0, bottom: 3.0, left: 8.0 }}>
+                    {TextField::on_change_with_placeholder(&app.filter_query, "Filter this folder…", FileMessage::FilterQueryChanged)
+                        .id("file-filter-query").color(palette.text).background(palette.background)}
+                </Container>
+            </Row>
         </Container>
     })
 }
@@ -713,11 +720,11 @@ fn file_entry_drag_message(seed: FileMessage, gesture: nickel_ui::DragGesture) -
 pub(crate) fn grid_item(
     index: usize,
     entry: &FileEntry,
+    content_revision: u64,
     selected: bool,
     icon: Option<(u16, Arc<image::RgbaImage>)>,
     palette: ThemePalette,
     icon_size: f32,
-    _light_mode: bool,
 ) -> impl Component<FileMessage> + use<> {
     let (icon_id, icon_image) = icon.unwrap_or_else(empty_artwork);
     FileGridItem::new_with_generation(
@@ -730,6 +737,7 @@ pub(crate) fn grid_item(
     .selected_background(selected, palette.accent_soft)
     .interaction_backgrounds(palette.surface_hover, palette.accent_soft)
     .foreground(palette.text)
+    .label_content_revision(content_revision)
     .icon_size(icon_size)
     .focus_background_tint(palette.accent)
     .controller_focus_background_tint(palette.complement)

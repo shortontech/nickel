@@ -494,8 +494,9 @@ enum GpuPrimitive {
 // gradient geometry into thousands of individual elements makes importing and
 // submitting one frame slower than the bounded software fallback. Keep the GPU
 // path as the default and fail over before a complex scene can monopolize the
-// compositor event loop.
-const MAX_GPU_ELEMENTS_PER_SURFACE: usize = 1_024;
+// compositor event loop. A dense, visible file grid can exceed 1,024 cheap
+// image/text elements; rasterizing the entire resizing surface is costlier.
+const MAX_GPU_ELEMENTS_PER_SURFACE: usize = 2_048;
 const IMAGE_CACHE_ENTRY_LIMIT: usize = 256;
 const IMAGE_CACHE_BYTE_LIMIT: usize = 32 * 1024 * 1024;
 const TEXT_CACHE_ENTRY_LIMIT: usize = 1_024;
@@ -4717,6 +4718,29 @@ mod tests {
                 .all(|primitive| matches!(primitive, GpuPrimitive::Texture { .. }))
         );
         assert_eq!(renderer.shape_cache.insertions, 12);
+    }
+
+    #[test]
+    fn dense_icon_plane_uses_gpu_without_full_surface_rasterization() {
+        let commands = (0..1_536)
+            .map(|index| PaintCommand::Fill {
+                rect: nickel_ui::Rect::new((index % 48) as f32, (index / 48) as f32, 1.0, 1.0),
+                color: 0xff336699,
+            })
+            .collect::<Vec<_>>();
+        let mut renderer = SmithayFrameRenderer::new(48, 32, 1.0, InternalUiRendererMode::Gpu);
+        renderer
+            .render_frame(RenderFrame {
+                commands: &commands,
+                logical_size: (48, 32),
+                scale_factor: 1.0,
+                generation: 1,
+            })
+            .unwrap();
+
+        assert_eq!(renderer.mode(), InternalUiPresentationMode::GpuSolid);
+        assert_eq!(renderer.diagnostics().fallback_reason, None);
+        assert_eq!(renderer.primitives.len(), commands.len());
     }
 
     #[test]

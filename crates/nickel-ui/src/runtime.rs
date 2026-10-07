@@ -1300,8 +1300,16 @@ pub trait Application: Sized {
     /// Opt in only when `view` depends exclusively on application state and its
     /// ViewContext, not unreported external/interior-mutability inputs. The host
     /// may reuse its declaration for native-state-only layout invalidation.
-    /// Application updates, polling, completions and context changes still rebuild.
+    /// Application updates, polling, completions and context changes still rebuild,
+    /// except viewport changes when `retain_view_on_resize` also opts in.
     fn retain_view_for_native_layout(&self) -> bool {
+        false
+    }
+
+    /// Opt in alongside `retain_view_for_native_layout` when the declared view
+    /// does not read `ViewContext::viewport`.
+    /// The host still resolves layout and overlays at the new size.
+    fn retain_view_on_resize(&self) -> bool {
         false
     }
 
@@ -3338,29 +3346,44 @@ impl<A: Application> UiHost<A> {
     }
 
     pub fn step(&mut self, batch: HostBatch) -> HostEventOutcome {
-        let may_retain_view = self.application.retain_view_for_native_layout()
-            && !batch.application_changed
-            && batch.completions.is_empty()
-            && batch.surface_size.is_none_or(|(width, height)| {
-                Rect::new(0.0, 0.0, width as f32, height as f32) == self.bounds
+        let pure_resize = self.application.retain_view_on_resize()
+            && batch.surface_size.is_some_and(|(width, height)| {
+                Rect::new(0.0, 0.0, width as f32, height as f32) != self.bounds
             })
             && batch.scale_factor.is_none_or(|scale| {
                 !scale.is_finite() || scale <= 0.0 || scale == self.scale_factor
             })
             && batch.window_focused.is_none()
-            && !batch.events.is_empty()
-            && batch.events.iter().all(|event| match event {
-                HostEvent::Ui(UiEvent::Scroll { .. }) => true,
-                HostEvent::Normalized { input, .. } => matches!(
-                    input,
-                    nickel_input::InputEvent::Pointer(nickel_input::PointerEvent::Axis { .. })
-                ),
-                HostEvent::NormalizedIngress(envelope) => matches!(
-                    &envelope.input,
-                    nickel_input::InputEvent::Pointer(nickel_input::PointerEvent::Axis { .. })
-                ),
-                _ => false,
-            });
+            && batch.events.is_empty();
+        let may_retain_view = self.application.retain_view_for_native_layout()
+            && !batch.application_changed
+            && batch.completions.is_empty()
+            && (pure_resize
+                || batch.surface_size.is_none_or(|(width, height)| {
+                    Rect::new(0.0, 0.0, width as f32, height as f32) == self.bounds
+                }))
+            && batch.scale_factor.is_none_or(|scale| {
+                !scale.is_finite() || scale <= 0.0 || scale == self.scale_factor
+            })
+            && batch.window_focused.is_none()
+            && (pure_resize
+                || (!batch.events.is_empty()
+                    && batch.events.iter().all(|event| match event {
+                        HostEvent::Ui(UiEvent::Scroll { .. }) => true,
+                        HostEvent::Normalized { input, .. } => matches!(
+                            input,
+                            nickel_input::InputEvent::Pointer(
+                                nickel_input::PointerEvent::Axis { .. }
+                            )
+                        ),
+                        HostEvent::NormalizedIngress(envelope) => matches!(
+                            &envelope.input,
+                            nickel_input::InputEvent::Pointer(
+                                nickel_input::PointerEvent::Axis { .. }
+                            )
+                        ),
+                        _ => false,
+                    })));
         let prior_view_context = ViewContext::from_host(self.bounds, &self.state, Some(&self.tree));
         let prior_transient = self.state.open_overlay_id().cloned();
         self.state.clipboard_text_limit = batch.clipboard_text_limit;
@@ -3729,8 +3752,14 @@ impl<A: Application> UiHost<A> {
         }
         combined.telemetry.input_to_message_us = elapsed_us(step_started);
         if combined.changed {
-            let view_context_unchanged = prior_view_context
-                == ViewContext::from_host(self.bounds, &self.state, Some(&self.tree));
+            let current_view_context =
+                ViewContext::from_host(self.bounds, &self.state, Some(&self.tree));
+            let view_context_unchanged = prior_view_context == current_view_context
+                || (pure_resize && {
+                    let mut prior = prior_view_context.clone();
+                    prior.viewport = current_view_context.viewport;
+                    prior == current_view_context
+                });
             let retained_paint = (combined.invalidation == Invalidation::Paint
                 && combined.messages.is_empty()
                 && view_context_unchanged)
@@ -10383,6 +10412,41 @@ mod tests {
         assert_eq!(host.inspect().modality, crate::InputModality::Pointer);
         assert_eq!(host.semantic_nodes()[0].name.as_deref(), Some("Narrow"));
         assert!(!host.adopt_input_modality(crate::InputModality::Pointer));
+    }
+
+    #[test]
+    fn viewport_independent_view_is_reused_during_resize() {
+        struct InvariantView(Cell<usize>);
+        impl Application for InvariantView {
+            type Message = ();
+
+            fn update(&mut self, (): Self::Message) {}
+
+            fn view(&self, _: ViewContext) -> impl crate::View<Self::Message> {
+                self.0.set(self.0.get() + 1);
+                crate::Container::new()
+                    .fill_width()
+                    .child(crate::Button::new((), "Resize"))
+            }
+
+            fn retain_view_for_native_layout(&self) -> bool {
+                true
+            }
+            fn retain_view_on_resize(&self) -> bool {
+                true
+            }
+        }
+
+        let mut host = UiHost::new(InvariantView(Cell::new(0)), 320, 80);
+        assert_eq!(host.application().0.get(), 1);
+        let outcome = host.step(HostBatch {
+            surface_size: Some((420, 80)),
+            ..HostBatch::default()
+        });
+        assert!(outcome.changed);
+        assert_eq!(outcome.telemetry.view_calls, 0);
+        assert!(outcome.telemetry.nodes_placed > 0);
+        assert_eq!(host.application().0.get(), 1);
     }
 
     #[test]

@@ -59,6 +59,7 @@ impl Drop for Job {
 
 #[derive(Default)]
 pub(crate) struct Sidebar {
+    revision: u64,
     pub(crate) expanded: HashSet<PathBuf>,
     pub(crate) children: HashMap<PathBuf, Children>,
     folders: HashMap<PathBuf, Folder>,
@@ -69,6 +70,10 @@ pub(crate) struct Sidebar {
 }
 
 impl Sidebar {
+    pub(crate) fn revision(&self) -> u64 {
+        self.revision
+    }
+
     pub(crate) fn toggle(&mut self, path: PathBuf) {
         if self.expanded.contains(&path) {
             self.collapse(&path);
@@ -81,6 +86,7 @@ impl Sidebar {
         self.admission_warning = None;
         self.generation = self.generation.wrapping_add(1);
         self.expanded.insert(path.clone());
+        self.revision = self.revision.wrapping_add(1);
         self.folders.insert(
             path.clone(),
             Folder {
@@ -96,6 +102,7 @@ impl Sidebar {
     }
 
     pub(crate) fn collapse(&mut self, path: &Path) {
+        self.revision = self.revision.wrapping_add(1);
         self.expanded
             .retain(|candidate| !candidate.starts_with(path));
         self.children
@@ -169,6 +176,7 @@ impl Sidebar {
             // Retire the individual unreachable row. A separately listed place
             // can still expose one of its descendants as an independent root.
             self.expanded.remove(&path);
+            self.revision = self.revision.wrapping_add(1);
             self.children.remove(&path);
             self.folders.remove(&path);
             self.pending.retain(|pending| pending != &path);
@@ -266,6 +274,7 @@ impl Sidebar {
                             self.collapse(&path);
                         }
                         self.children.insert(job.path.clone(), listing.children);
+                        self.revision = self.revision.wrapping_add(1);
                     }
                     Err(error) => {
                         folder.warning = Some(format!(

@@ -702,6 +702,7 @@ where
             _ => None,
         };
         let virtual_row_height = match self.presentation {
+            CollectionPresentation::VirtualList { item_height, .. } => Some(item_height.max(1.0)),
             CollectionPresentation::VirtualGrid { row_height, .. } => Some(row_height.max(1.0)),
             _ => None,
         };
@@ -741,6 +742,9 @@ where
                         .child(AnyView::new((self.render)(item)));
                     if let Some(row_height) = virtual_row_height {
                         item_container = item_container.height(row_height);
+                    }
+                    if let Some(width) = virtual_grid_item_width {
+                        item_container = item_container.width(width);
                     }
                     if let Some(color) = self.item_focus_background_tint {
                         item_container = item_container.focus_background_tint(color);

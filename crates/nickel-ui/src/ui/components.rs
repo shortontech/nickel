@@ -1152,49 +1152,49 @@ impl<Message> FilePlaneItem<Message> {
 
     fn from_image(message: Message, label: impl Into<String>, image: Image<Message>) -> Self {
         let label = label.into();
-        Self {
-            container: Container::new()
-                .padding(Insets {
-                    top: 8.0,
-                    right: 6.0,
-                    bottom: 4.0,
-                    left: 6.0,
-                })
-                .message(message)
-                .semantic_role(SemanticRole::Button)
-                .accessibility_label(label.clone())
-                .child(
-                    Column::new()
-                        .fill_width()
-                        .align_items(Align::Center)
-                        .gap(5.0)
-                        .child(image.height(62.0).fit(ImageFit::Contain))
-                        .child(
-                            Container::new()
-                                .height(36.0)
-                                .fill_width()
-                                .overflow_x(Overflow::Clip)
-                                .overflow_y(Overflow::Clip)
-                                .child(
-                                    Text::new(label)
-                                        .height(36.0)
-                                        .wrap(true)
-                                        .max_lines(2)
-                                        .ellipsis(true)
-                                        .align(TextAlign::Center)
-                                        .fill_width(),
-                                ),
-                        ),
-                ),
-        }
+        let mut text = Text::new(label.clone())
+            .height(36.0)
+            .wrap(true)
+            .max_lines(2)
+            .ellipsis(true)
+            .align(TextAlign::Center)
+            .fill_width();
+        text.style.overflow_x = Overflow::Clip;
+        text.style.overflow_y = Overflow::Clip;
+        let mut container = Container::new()
+            .fill_width()
+            .gap(5.0)
+            .padding(Insets {
+                top: 8.0,
+                right: 6.0,
+                bottom: 4.0,
+                left: 6.0,
+            })
+            .message(message)
+            .semantic_role(SemanticRole::Button)
+            .accessibility_label(label)
+            .child(image.height(62.0).fit(ImageFit::Contain))
+            .child(text);
+        container.0.style.align_items = Align::Center;
+        Self { container }
     }
 
     fn content_mut(&mut self) -> Option<&mut Element<Message>> {
-        self.container.0.children.first_mut()
+        Some(&mut self.container.0)
     }
 
     fn label_box_mut(&mut self) -> Option<&mut Element<Message>> {
         self.content_mut()?.children.get_mut(1)
+    }
+
+    /// Marks stable file labels so retained layout can reuse text measurements
+    /// until the owning listing changes.
+    pub fn label_content_revision(mut self, revision: u64) -> Self {
+        self.container.0.content_revision = Some(revision);
+        if let Some(text) = self.label_box_mut() {
+            text.content_revision = Some(revision);
+        }
+        self
     }
 
     pub fn icon_size(mut self, size: f32) -> Self {
@@ -1210,17 +1210,13 @@ impl<Message> FilePlaneItem<Message> {
     pub fn label_height(mut self, height: f32) -> Self {
         if let Some(label) = self.label_box_mut() {
             label.style.height = Length::Px(height.max(1.0));
-            if let Some(text) = label.children.first_mut() {
-                text.style.height = Length::Px(height.max(1.0));
-            }
         }
         self
     }
 
     pub fn label_scale(mut self, scale: f32) -> Self {
         if let Some(label) = self.label_box_mut()
-            && let Some(text) = label.children.first_mut()
-            && let Kind::Text { scale: value, .. } = &mut text.kind
+            && let Kind::Text { scale: value, .. } = &mut label.kind
         {
             *value = scale.max(0.1);
         }
@@ -1228,18 +1224,15 @@ impl<Message> FilePlaneItem<Message> {
     }
 
     pub fn foreground(mut self, color: Color) -> Self {
-        if let Some(label) = self.label_box_mut()
-            && let Some(text) = label.children.first_mut()
-        {
-            text.style.foreground = Some(color);
+        if let Some(label) = self.label_box_mut() {
+            label.style.foreground = Some(color);
         }
         self
     }
 
     pub fn label_outline(mut self, color: Color, width: f32) -> Self {
         if let Some(label) = self.label_box_mut()
-            && let Some(text) = label.children.first_mut()
-            && let Kind::Text { outline, .. } = &mut text.kind
+            && let Kind::Text { outline, .. } = &mut label.kind
         {
             *outline = (width > 0.0).then_some((color, width.max(0.5)));
         }

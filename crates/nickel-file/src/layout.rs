@@ -5,15 +5,14 @@ use std::{
 
 use nickel_core::theme::ThemePalette;
 use nickel_ui::{
-    AnyView, Collection, CollectionPresentation, CollectionState, Insets, LinearGradient,
-    NavigationScope, Point, Rect, SemanticNodeSnapshot, SemanticRole, SidebarFolder,
-    VerticalScroll, VirtualWindow, ui,
+    AnyView, CollectionPresentation, Insets, LinearGradient, NavigationScope, Point, Rect,
+    SemanticNodeSnapshot, SemanticRole, SidebarFolder, VerticalScroll, VirtualWindow, ui,
 };
 
 use super::{FileMessage, FileViewMode};
 use crate::{
     app::{FileApp, NARROW_WORKSPACE_BREAKPOINT, SIDEBAR_RESIZE_WIDTH, TOOLBAR_HEIGHT},
-    components, icons,
+    components,
 };
 
 fn selection_surface_drag_message(
@@ -31,7 +30,7 @@ pub(crate) fn build_view(
     light_mode: bool,
 ) -> AnyView<FileMessage> {
     let narrow = _width < NARROW_WORKSPACE_BREAKPOINT;
-    let content_height = (height - TOOLBAR_HEIGHT - 30.0).max(0.0);
+    let content_height = (height - TOOLBAR_HEIGHT - 36.0).max(0.0);
     let breadcrumb_width = (_width - if narrow { 390.0 } else { 320.0 }).max(90.0);
     let known_places = app
         .location_groups
@@ -52,29 +51,18 @@ pub(crate) fn build_view(
             <Column>{tab_strip}{navigation}</Column>
         </Container>
     };
-    let location_groups = app
-        .location_groups
-        .iter()
-        .map(|group| {
-            let rows = sidebar_folder_elements(
-                &group.entries,
-                &app.sidebar.expanded,
-                app.browser.current(),
-                None,
-                &app.icons,
-                &app.sidebar.children,
-                palette,
-            );
-            components::location_group(
-                group.id,
-                group.title,
-                rows,
-                app.collapsed_location_groups.contains(group.id),
-                palette,
-            )
-        })
-        .collect();
     let resolved_sidebar_width = if narrow { _width } else { app.sidebar_width };
+    let sidebar_source = app.sidebar_collection_source();
+    let sidebar_collection = sidebar_source
+        .collection(|row| sidebar_row_view(row, app, palette))
+        .id("file-sidebar-rows")
+        .accessibility_label("Places")
+        .presentation(CollectionPresentation::VirtualList {
+            item_height: 29.0,
+            offset: app.sidebar_scroll_offset,
+            viewport_height: (content_height - 20.0).max(1.0),
+            overscan: 58.0,
+        });
     let sidebar = VerticalScroll::new(
         FileMessage::SidebarScroll(app.sidebar_scroll_offset),
         app.sidebar_scroll_offset,
@@ -86,37 +74,26 @@ pub(crate) fn build_view(
     .id("file-sidebar-scroll")
     .child(components::places_sidebar(
         resolved_sidebar_width,
-        location_groups,
+        vec![AnyView::new(sidebar_collection)],
         palette,
     ));
     let icon_size = (app.tile_width * 0.42).clamp(42.0, 96.0);
-    let tile_rows = app
-        .browser
-        .entries()
-        .iter()
-        .enumerate()
-        .map(|(index, entry)| {
-            (
-                index,
-                entry.clone(),
-                app.is_index_selected(index)
-                    || app.native_drop_destination.as_ref() == Some(&entry.path),
-                app.icons.get(&entry.path).cloned(),
-            )
-        })
-        .collect::<Vec<_>>();
+    let file_content_revision = app.active_tab_id.rotate_left(32) ^ app.browser.revision();
+    let filtered_indices = app.filtered_indices();
     let empty_message = if app.navigation_pending() {
         if app.status.is_empty() {
             "Loading location…".to_owned()
         } else {
             app.status.clone()
         }
+    } else if !app.filter_query.is_empty() && filtered_indices.is_empty() {
+        "No files match this filter.".to_owned()
     } else if app.status.is_empty() {
         "This folder is empty.".to_owned()
     } else {
         app.status.clone()
     };
-    let files = if app.browser.entries().is_empty() {
+    let files = if filtered_indices.is_empty() {
         ui! {
             <Container id={"file-content"} grow={1.0} padding={Insets::all(28.0)}
                 on_press={FileMessage::SelectionSurface} context_message={FileMessage::ContextBackground}
@@ -132,61 +109,76 @@ pub(crate) fn build_view(
         } else {
             (_width - app.sidebar_width - SIDEBAR_RESIZE_WIDTH - 32.0).max(1.0)
         };
-        let viewport_height = (height - TOOLBAR_HEIGHT - 30.0 - 28.0 - 1.0).max(1.0);
+        let viewport_height = (height - TOOLBAR_HEIGHT - 36.0 - 28.0 - 1.0).max(1.0);
+        let source = app.file_collection_source();
+        // Entry buttons already use listing indices for their UI ids; selection
+        // and actions resolve those indices through the browser's stable identities.
         let collection = match app.view_mode {
             FileViewMode::Grid => AnyView::new(
-                Collection::try_new(
-                    CollectionState::Ready(tile_rows),
-                    |(_, entry, _, _)| entry.path.to_string_lossy().into_owned(),
-                    move |(index, entry, selected, icon)| {
+                source
+                    .collection(move |index| {
+                        let index = *index;
+                        let entry = &app.browser.entries()[index];
                         components::grid_item(
-                            index, &entry, selected, icon, palette, icon_size, light_mode,
+                            index,
+                            entry,
+                            file_content_revision,
+                            app.is_index_selected(index)
+                                || app.native_drop_destination.as_ref() == Some(&entry.path),
+                            app.icons
+                                .get(&entry.path)
+                                .or_else(|| app.shared_icon_for(entry))
+                                .cloned(),
+                            palette,
+                            icon_size,
                         )
-                    },
-                )
-                .expect("directory entries have unique paths")
-                .id("file-grid")
-                .accessibility_label("Files")
-                .gap(10.0)
-                .navigation_scope(NavigationScope::group().direction(app.reading_direction))
-                .direction(app.reading_direction)
-                .presentation(CollectionPresentation::VirtualGrid {
-                    minimum_item_width: app.tile_width,
-                    row_height: 54.0 + icon_size,
-                    offset: app.file_scroll_offset,
-                    viewport_width,
-                    viewport_height,
-                    overscan: (54.0 + icon_size) * 2.0,
-                }),
+                    })
+                    .id("file-grid")
+                    .accessibility_label("Files")
+                    .item_revision(move |_| file_content_revision)
+                    .gap(10.0)
+                    .navigation_scope(NavigationScope::group().direction(app.reading_direction))
+                    .direction(app.reading_direction)
+                    .presentation(CollectionPresentation::VirtualGrid {
+                        minimum_item_width: app.tile_width,
+                        row_height: 54.0 + icon_size,
+                        offset: app.file_scroll_offset,
+                        viewport_width,
+                        viewport_height,
+                        overscan: (54.0 + icon_size) * 2.0,
+                    }),
             ),
             FileViewMode::Details => AnyView::new(
-                Collection::try_new(
-                    CollectionState::Ready(tile_rows),
-                    |(_, entry, _, _)| entry.path.to_string_lossy().into_owned(),
-                    move |(index, entry, selected, icon)| {
+                source
+                    .collection(move |index| {
+                        let index = *index;
+                        let entry = &app.browser.entries()[index];
                         components::details_row(
                             index,
-                            &entry,
-                            selected,
-                            icon,
+                            entry,
+                            app.is_index_selected(index)
+                                || app.native_drop_destination.as_ref() == Some(&entry.path),
+                            app.icons
+                                .get(&entry.path)
+                                .or_else(|| app.shared_icon_for(entry))
+                                .cloned(),
                             palette,
                             light_mode,
                             app.details_column_widths,
                         )
-                    },
-                )
-                .expect("directory entries have unique paths")
-                .id("file-details")
-                .accessibility_label("Files")
-                .gap(1.0)
-                .navigation_scope(NavigationScope::group().direction(app.reading_direction))
-                .direction(app.reading_direction)
-                .presentation(CollectionPresentation::VirtualList {
-                    item_height: 40.0,
-                    offset: app.file_scroll_offset,
-                    viewport_height,
-                    overscan: 80.0,
-                }),
+                    })
+                    .id("file-details")
+                    .accessibility_label("Files")
+                    .item_revision(move |_| file_content_revision)
+                    .gap(1.0)
+                    .navigation_scope(NavigationScope::group().direction(app.reading_direction))
+                    .direction(app.reading_direction)
+                    .presentation(CollectionPresentation::VirtualList {
+                        item_height: 40.0,
+                        offset: app.file_scroll_offset,
+                        viewport_height,
+                        overscan: 80.0,
+                    }),
             ),
         };
         let scroll = VerticalScroll::new(
@@ -230,7 +222,7 @@ pub(crate) fn build_view(
     };
     let footer_text = components::status_text(app);
     let footer_accessibility_text = components::status_accessibility_text(app);
-    let footer = components::status_bar(footer_text, footer_accessibility_text, palette);
+    let footer = components::status_bar(app, footer_text, footer_accessibility_text, palette);
     let resize_handle = ui! {
         <Container id={"sidebar-resize"} width={SIDEBAR_RESIZE_WIDTH} shrink={0.0}
             background={if app.is_resizing_sidebar() { palette.accent } else { palette.surface_hover }}
@@ -287,27 +279,36 @@ pub(crate) fn build_view(
 }
 
 pub(crate) fn visible_file_range(app: &FileApp, width: f32, height: f32) -> std::ops::Range<usize> {
-    let count = app.browser.entries().len();
+    let count = app.filtered_indices().len();
+    if count == 0 {
+        return 0..0;
+    }
     let viewport_width = if width < NARROW_WORKSPACE_BREAKPOINT {
         (width - 32.0).max(1.0)
     } else {
         (width - app.sidebar_width - SIDEBAR_RESIZE_WIDTH - 32.0).max(1.0)
     };
-    let viewport_height = (height - TOOLBAR_HEIGHT - 30.0 - 28.0 - 1.0).max(1.0);
+    let viewport_height = (height - TOOLBAR_HEIGHT - 36.0 - 28.0 - 1.0).max(1.0);
+    if app.view_mode == FileViewMode::Details {
+        let first = (app.file_scroll_offset / 41.0).floor().max(0.0) as usize;
+        let last = ((app.file_scroll_offset + viewport_height) / 41.0).ceil() as usize;
+        return first.saturating_sub(2).min(count)..last.saturating_add(2).min(count);
+    }
     let gap = 10.0;
     let columns = (((viewport_width + gap) / (app.tile_width.max(1.0) + gap)).floor() as usize)
         .max(1)
         .min(count.max(1));
     let row_height = 54.0 + (app.tile_width * 0.42).clamp(42.0, 96.0);
     let rows = count.div_ceil(columns);
-    let window = VirtualWindow::from_heights(
-        &vec![row_height; rows],
+    let window = VirtualWindow::from_uniform(
+        rows,
+        row_height,
         gap,
         app.file_scroll_offset,
         viewport_height,
         row_height * 2.0,
     );
-    (window.range.start * columns)..(window.range.end * columns).min(count)
+    (window.range.start * columns).min(count)..(window.range.end * columns).min(count)
 }
 
 pub(crate) fn breadcrumb_paths(
@@ -374,99 +375,136 @@ pub(crate) fn collapse_breadcrumbs(
     collapsed
 }
 
-pub(crate) fn sidebar_folder_elements(
-    roots: &[(String, PathBuf)],
-    expanded: &HashSet<PathBuf>,
-    current: &Path,
-    hovered_message: Option<&FileMessage>,
-    icons: &icons::ArtworkCache,
-    children_by_path: &HashMap<PathBuf, Vec<(String, PathBuf)>>,
-    palette: ThemePalette,
-) -> Vec<AnyView<FileMessage>> {
-    #[allow(clippy::too_many_arguments)]
-    fn append_folder(
-        rows: &mut Vec<AnyView<FileMessage>>,
+pub(crate) enum SidebarRow {
+    Header {
+        key: String,
+        id: String,
+        title: String,
+        collapsed: bool,
+    },
+    Folder {
+        key: String,
         label: String,
         path: PathBuf,
         depth: usize,
+    },
+}
+
+impl SidebarRow {
+    pub(crate) fn key(&self) -> String {
+        match self {
+            Self::Header { key, .. } | Self::Folder { key, .. } => key.clone(),
+        }
+    }
+}
+
+pub(crate) fn sidebar_rows(app: &FileApp) -> Vec<SidebarRow> {
+    fn append_folder(
+        rows: &mut Vec<SidebarRow>,
+        key_prefix: &str,
+        label: &str,
+        path: &Path,
+        depth: usize,
         expanded: &HashSet<PathBuf>,
-        current: &Path,
-        hovered_message: Option<&FileMessage>,
-        icons: &icons::ArtworkCache,
         children_by_path: &HashMap<PathBuf, Vec<(String, PathBuf)>>,
-        palette: ThemePalette,
     ) {
-        let is_expanded = expanded.contains(&path);
-        let is_active = current == path;
-        let toggle_message = FileMessage::ToggleFolder(path.clone());
-        let open_message = FileMessage::OpenFolder(path.clone());
-        let is_hovered =
-            hovered_message == Some(&toggle_message) || hovered_message == Some(&open_message);
-        let mut row = SidebarFolder::new(
-            toggle_message,
-            open_message,
-            label.clone(),
-            is_expanded,
-            if is_active {
-                palette.text
-            } else {
-                palette.muted
-            },
-        )
-        .open_id(crate::app::drop_target_id("sidebar", &path))
-        .row_height(28.0)
-        .accessibility_labels((format!("Toggle {label}"), format!("Open {label}")))
-        .focus_background_tints((palette.accent, palette.complement))
-        .indent(depth)
-        .background(if is_active {
-            palette.accent_soft
-        } else if is_hovered {
-            palette.surface_hover
-        } else {
-            palette.panel
+        rows.push(SidebarRow::Folder {
+            key: format!("folder/{key_prefix}/{path:?}"),
+            label: label.to_owned(),
+            path: path.to_path_buf(),
+            depth,
         });
-        if let Some((id, image)) = icons.get(&path) {
-            row = row.artwork(*id, image.clone(), u64::from(*id));
-        }
-        rows.push(AnyView::new(row));
-        if !is_expanded || depth >= 6 {
+        if !expanded.contains(path) || depth >= 6 {
             return;
         }
-        let Some(children) = children_by_path.get(&path) else {
-            return;
-        };
-        for (label, child) in children {
-            append_folder(
-                rows,
-                label.clone(),
-                child.clone(),
-                depth + 1,
-                expanded,
-                current,
-                hovered_message,
-                icons,
-                children_by_path,
-                palette,
-            );
+        if let Some(children) = children_by_path.get(path) {
+            for (label, child) in children {
+                append_folder(
+                    rows,
+                    key_prefix,
+                    label,
+                    child,
+                    depth + 1,
+                    expanded,
+                    children_by_path,
+                );
+            }
         }
     }
 
     let mut rows = Vec::new();
-    for (label, path) in roots {
-        append_folder(
-            &mut rows,
-            label.clone(),
-            path.clone(),
-            0,
-            expanded,
-            current,
-            hovered_message,
-            icons,
-            children_by_path,
-            palette,
-        );
+    for group in &app.location_groups {
+        let collapsed = app.collapsed_location_groups.contains(group.id);
+        rows.push(SidebarRow::Header {
+            key: format!("header/{}", group.id),
+            id: group.id.to_owned(),
+            title: group.title.to_owned(),
+            collapsed,
+        });
+        if !collapsed {
+            for (root_index, (label, path)) in group.entries.iter().enumerate() {
+                let key_prefix = format!("{}/{root_index}", group.id);
+                append_folder(
+                    &mut rows,
+                    &key_prefix,
+                    label,
+                    path,
+                    0,
+                    &app.sidebar.expanded,
+                    &app.sidebar.children,
+                );
+            }
+        }
     }
     rows
+}
+
+fn sidebar_row_view(
+    row: &SidebarRow,
+    app: &FileApp,
+    palette: ThemePalette,
+) -> AnyView<FileMessage> {
+    match row {
+        SidebarRow::Header {
+            id,
+            title,
+            collapsed,
+            ..
+        } => AnyView::new(components::location_group_header(
+            id, title, *collapsed, palette,
+        )),
+        SidebarRow::Folder {
+            label, path, depth, ..
+        } => {
+            let is_expanded = app.sidebar.expanded.contains(path);
+            let is_active = app.browser.current() == path;
+            let mut row = SidebarFolder::new(
+                FileMessage::ToggleFolder(path.clone()),
+                FileMessage::OpenFolder(path.clone()),
+                label.clone(),
+                is_expanded,
+                if is_active {
+                    palette.text
+                } else {
+                    palette.muted
+                },
+            )
+            .open_id(crate::app::drop_target_id("sidebar", path))
+            .row_height(28.0)
+            .accessibility_labels((format!("Toggle {label}"), format!("Open {label}")))
+            .focus_background_tints((palette.accent, palette.complement))
+            .indent(*depth)
+            .background(if is_active {
+                palette.accent_soft
+            } else {
+                palette.panel
+            });
+            if let Some((id, image)) = app.icons.get(path) {
+                row = row.artwork(*id, image.clone(), u64::from(*id));
+            }
+            AnyView::new(row)
+        }
+    }
 }
 
 pub(crate) fn rect_between(start: Point, end: Point) -> Rect {

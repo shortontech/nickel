@@ -282,6 +282,7 @@ impl FileApp {
         let disposition = EventDisposition::Unhandled;
         match event.clone() {
             InputEvent::Key(key) => {
+                let text_focused = host.input_context().text_focused;
                 let app = host.application_mut();
                 app.control_down = selection_command_modifier(&key.modifiers);
                 app.shift_down = key.modifiers.aggregate(AggregateModifier::Shift);
@@ -289,9 +290,88 @@ impl FileApp {
                 if key.edge != KeyEdge::Pressed || key.repeat {
                     return AdapterOutcome::default();
                 }
+                let logical = key.logical.clone();
                 let PhysicalKey::Code(key) = key.physical else {
                     return AdapterOutcome::default();
                 };
+                if text_focused
+                    && !app.address_editing
+                    && app.rename_editor.is_none()
+                    && !app.command_surface_open
+                    && app.control_down
+                    && matches!(
+                        key,
+                        KeyCode::KeyA
+                            | KeyCode::KeyC
+                            | KeyCode::KeyV
+                            | KeyCode::KeyX
+                            | KeyCode::Backspace
+                    )
+                {
+                    return AdapterOutcome::default();
+                }
+                if text_focused
+                    && !app.address_editing
+                    && app.rename_editor.is_none()
+                    && !app.command_surface_open
+                    && !app.control_down
+                    && !alt_down
+                {
+                    if key == KeyCode::Enter {
+                        app.apply_filter_now();
+                        if app
+                            .selected_index()
+                            .is_none_or(|index| !app.filtered_indices().contains(&index))
+                            && let Some(index) = app.filtered_indices().first().copied()
+                        {
+                            app.selected = app.browser.identity_at(index);
+                        }
+                        app.activate_selected();
+                        return AdapterOutcome {
+                            changed: true,
+                            disposition: EventDisposition::Handled,
+                            ..AdapterOutcome::default()
+                        };
+                    }
+                    if key == KeyCode::ArrowDown || key == KeyCode::ArrowUp {
+                        app.apply_filter_now();
+                        app.select_relative(if key == KeyCode::ArrowDown { 1 } else { -1 });
+                        return AdapterOutcome {
+                            changed: true,
+                            disposition: EventDisposition::Handled,
+                            ..AdapterOutcome::default()
+                        };
+                    }
+                    if key == KeyCode::Escape && !app.filter_query.is_empty() {
+                        app.update(FileMessage::FilterQueryChanged(String::new()));
+                        return AdapterOutcome {
+                            changed: true,
+                            disposition: EventDisposition::Handled,
+                            ..AdapterOutcome::default()
+                        };
+                    }
+                    return AdapterOutcome::default();
+                }
+                if !text_focused
+                    && !app.control_down
+                    && !alt_down
+                    && !app.command_surface_open
+                    && !app.address_editing
+                    && app.rename_editor.is_none()
+                    && !app.places_open
+                    && let nickel_input::LogicalKey::Character(character) = &logical
+                    && !character.is_empty()
+                    && character.chars().all(|c| !c.is_control())
+                {
+                    let query = format!("{}{character}", app.filter_query);
+                    app.update(FileMessage::FilterQueryChanged(query));
+                    app.pending_focus = Some(nickel_ui::UiId::from("file-filter-query"));
+                    return AdapterOutcome {
+                        changed: true,
+                        disposition: EventDisposition::Handled,
+                        ..AdapterOutcome::default()
+                    };
+                }
                 if let Some(shortcut) = navigation_shortcut(key, alt_down) {
                     let outcome = perform_navigation_shortcut(app, shortcut);
                     return AdapterOutcome {
@@ -309,6 +389,17 @@ impl FileApp {
                     };
                 }
                 if key == KeyCode::Backspace {
+                    if !app.filter_query.is_empty() {
+                        app.filter_query.pop();
+                        let query = app.filter_query.clone();
+                        app.update(FileMessage::FilterQueryChanged(query));
+                        app.pending_focus = Some(nickel_ui::UiId::from("file-filter-query"));
+                        return AdapterOutcome {
+                            changed: true,
+                            disposition: EventDisposition::Handled,
+                            ..AdapterOutcome::default()
+                        };
+                    }
                     let outcome = perform_navigation_shortcut(app, NavigationShortcut::Back);
                     return AdapterOutcome {
                         changed: outcome.changed,
@@ -378,7 +469,9 @@ impl FileApp {
                         ShortcutOutcome::handled(true)
                     }
                     KeyCode::Escape => {
-                        if app.pending_transfer_conflict.is_some() {
+                        if !app.filter_query.is_empty() {
+                            app.update(FileMessage::FilterQueryChanged(String::new()));
+                        } else if app.pending_transfer_conflict.is_some() {
                             app.update(FileMessage::TransferCancelConflicts);
                         } else if app.rename_editor.is_some() {
                             app.update(FileMessage::CancelRename);
@@ -752,10 +845,17 @@ impl HostAdapter<FileApp> for FileHostAdapter {
             .native_drop_hover_started
             .as_ref()
             .map(|(_, started)| *started + DROP_HOVER_OPEN_DELAY);
-        if pending_ensure && let Some(selected) = selected {
+        if pending_ensure
+            && let Some(selected) = selected
+            && let Some(position) = host
+                .application()
+                .filtered_indices()
+                .iter()
+                .position(|index| *index == selected)
+        {
             let columns = host.application().resolved_grid_columns();
             let row_height = 54.0 + (host.application().tile_width * 0.42).clamp(42.0, 96.0);
-            let row_top = (selected / columns) as f32 * (row_height + 10.0);
+            let row_top = (position / columns) as f32 * (row_height + 10.0);
             let target_offset = host
                 .semantic_nodes()
                 .into_iter()
@@ -947,6 +1047,28 @@ mod tests {
         );
         assert!(!unmatched.changed);
         assert_eq!(unmatched.disposition, EventDisposition::Unhandled);
+    }
+
+    #[test]
+    fn typing_in_files_starts_folder_filter_and_requests_focus() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut host =
+            nickel_ui::UiHost::new(FileApp::new(directory.path().to_path_buf()), 860, 620);
+        let mut input = key_event(KeyCode::KeyR, ModifierState::default());
+        let InputEvent::Key(ref mut key) = input else {
+            unreachable!()
+        };
+        key.logical = LogicalKey::Character("r".into());
+        let outcome = FileApp::application_input(&mut host, &input);
+        assert_eq!(outcome.disposition, EventDisposition::Handled);
+        assert_eq!(host.application().filter_query, "r");
+        assert_eq!(
+            host.application()
+                .pending_focus
+                .as_ref()
+                .map(|id| id.as_str()),
+            Some("file-filter-query")
+        );
     }
 
     #[test]

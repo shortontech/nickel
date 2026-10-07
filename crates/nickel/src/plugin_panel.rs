@@ -4221,6 +4221,10 @@ impl nickel_ui::Application for PluginPanelApplication {
         true
     }
 
+    fn retain_view_on_resize(&self) -> bool {
+        matches!(self.accepted.node(), PanelNode::Surface { .. })
+    }
+
     fn frame_overlays(&self, _context: ViewContext) -> Vec<FrameOverlay<Self::Message>> {
         let mut overlays = Vec::new();
         let mut transients = Vec::new();
@@ -11103,6 +11107,37 @@ mod tests {
             host.clone(),
         )?;
         Ok((application, host))
+    }
+
+    #[test]
+    #[ignore = "headless Settings resize timing"]
+    fn production_settings_resize_benchmark() {
+        with_package_runtime_stack(|| {
+            let (application, _composition) =
+                settings_admission_application("nickel-default/appearance").unwrap();
+            let mut host = nickel_ui::UiHost::new(application, 1100, 800);
+            let mut samples = Vec::new();
+            let mut view_samples = Vec::new();
+            let mut layout_samples = Vec::new();
+            for index in 0..60 {
+                let started = std::time::Instant::now();
+                let outcome = host.step(nickel_ui::HostBatch {
+                    surface_size: Some((1000 + index * 2, 740 + index % 20)),
+                    ..Default::default()
+                });
+                assert_eq!(outcome.telemetry.view_calls, 0);
+                samples.push(started.elapsed().as_secs_f64() * 1000.0);
+                view_samples.push(outcome.telemetry.paint_list_us as f64 / 1000.0);
+                layout_samples.push(outcome.telemetry.layout_us as f64 / 1000.0);
+            }
+            samples.sort_by(f64::total_cmp);
+            view_samples.sort_by(f64::total_cmp);
+            layout_samples.sort_by(f64::total_cmp);
+            println!(
+                "settings resize: median={:.3}ms p95={:.3}ms view={:.3}ms layout={:.3}ms",
+                samples[30], samples[57], view_samples[30], layout_samples[30]
+            );
+        });
     }
 
     #[test]

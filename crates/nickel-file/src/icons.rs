@@ -144,18 +144,6 @@ impl ArtworkCache {
         self.retained_bytes = 0;
     }
 
-    pub(crate) fn retain(&mut self, mut keep: impl FnMut(&Path) -> bool) {
-        let removed = self
-            .entries
-            .keys()
-            .filter(|path| !keep(path))
-            .cloned()
-            .collect::<Vec<_>>();
-        for path in removed {
-            self.remove(&path);
-        }
-    }
-
     #[cfg(test)]
     pub(crate) fn insert(&mut self, path: PathBuf, value: (u16, Arc<RgbaImage>)) {
         self.insert_keyed(path, value, None);
@@ -418,7 +406,7 @@ fn effective_preference(preference: FileIconPreference, path: &Path) -> FileIcon
     }
 }
 
-fn is_platform_launcher(path: &Path) -> bool {
+pub(crate) fn is_platform_launcher(path: &Path) -> bool {
     let Some(extension) = path.extension().and_then(|extension| extension.to_str()) else {
         return false;
     };

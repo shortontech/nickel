@@ -430,6 +430,7 @@ pub struct DirectoryBrowser {
     entries: Vec<FileEntry>,
     identities: HashMap<PathBuf, FileIdentity>,
     show_hidden: bool,
+    revision: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -450,6 +451,7 @@ impl DirectoryBrowser {
             entries,
             identities,
             show_hidden: true,
+            revision: 0,
         }
     }
 
@@ -462,6 +464,7 @@ impl DirectoryBrowser {
             entries: Vec::new(),
             identities: HashMap::new(),
             show_hidden,
+            revision: 0,
         }
     }
     pub fn open(path: impl Into<PathBuf>) -> io::Result<Self> {
@@ -478,6 +481,7 @@ impl DirectoryBrowser {
             entries,
             identities,
             show_hidden,
+            revision: 0,
         })
     }
 
@@ -487,6 +491,10 @@ impl DirectoryBrowser {
 
     pub fn entries(&self) -> &[FileEntry] {
         &self.entries
+    }
+
+    pub(crate) fn revision(&self) -> u64 {
+        self.revision
     }
 
     pub fn identity_at(&self, index: usize) -> Option<FileIdentity> {
@@ -525,6 +533,7 @@ impl DirectoryBrowser {
         self.current = next;
         self.entries = entries;
         self.identities = identities;
+        self.revision = self.revision.wrapping_add(1);
         Ok(())
     }
 
@@ -538,6 +547,7 @@ impl DirectoryBrowser {
         self.current = previous;
         self.entries = entries;
         self.identities = identities;
+        self.revision = self.revision.wrapping_add(1);
         Ok(true)
     }
 
@@ -551,6 +561,7 @@ impl DirectoryBrowser {
         self.current = next;
         self.entries = entries;
         self.identities = identities;
+        self.revision = self.revision.wrapping_add(1);
         Ok(true)
     }
 
@@ -565,6 +576,7 @@ impl DirectoryBrowser {
     pub fn refresh(&mut self) -> io::Result<()> {
         (self.entries, self.identities) =
             read_entries_with_identities(&self.current, self.show_hidden)?;
+        self.revision = self.revision.wrapping_add(1);
         Ok(())
     }
 
@@ -572,10 +584,12 @@ impl DirectoryBrowser {
         self.show_hidden = show_hidden;
         (self.entries, self.identities) =
             read_entries_with_identities(&self.current, self.show_hidden)?;
+        self.revision = self.revision.wrapping_add(1);
         Ok(())
     }
 
     pub fn sort(&mut self, key: EntrySortKey, direction: SortDirection) {
+        self.revision = self.revision.wrapping_add(1);
         self.entries.sort_by(|left, right| {
             right.is_directory.cmp(&left.is_directory).then_with(|| {
                 let order = match key {
