@@ -198,3 +198,32 @@ Nickel is dual-licensed under the [MIT License](LICENSE-MIT) or the
 
 - [Cairo Shell](https://github.com/cairoshell/cairoshell) - the most popular alternative shell
 - [GyroShell](https://github.com/Pdawg-bytes/GyroShell)
+
+
+## Help wanted
+
+Nickel is a large project built mostly by one person, and I could genuinely use help.
+
+You do **not** need to understand the whole desktop to contribute.
+
+If you're a systems or operations engineer, you'll probably feel more at home here than you expect. Nickel has services, lifecycle management, capabilities, resources, platform adapters, health and failure states, packaging, hardware integration, and plenty of problems that look suspiciously like the problems you already debug in Kubernetes, Linux, or production infrastructure.
+
+If you're good at frontend work, I especially want you. Nickel's shell is written in JSX specifically so people can build things without becoming Windows-shell or Wayland experts. We need more themes, more shell layouts, more components, more animation, and generally more strange ideas. I want Nickel desktops to be able to look unique, opinionated, and occasionally ridiculous.
+
+There is also plenty of work for people interested in:
+
+- Windows internals, COM, UWP, and native shell integration
+- Wayland, Linux sessions, input, DRM/udev, and hardware support
+- accessibility and keyboard/controller navigation
+- multi-monitor, DPI, suspend/resume, and hardware compatibility
+- testing, diagnostics, crash reproduction, and generally breaking things
+- documentation, examples, screenshots, and developer onboarding
+- plugins and small applications that make the desktop more useful or more weird
+
+You don't need to be a Rust expert. You don't need to be a frontend expert. You don't need to understand every crate in the workspace.
+
+If an issue is marked **help wanted**, I actually want someone else to take it.
+
+If an issue is marked **good first issue**, it should be reasonably self-contained and should not require understanding Nickel's whole architecture.
+
+And if you have an idea that doesn't fit the current desktop at all, that may be even better. Nickel is supposed to be hackable.
