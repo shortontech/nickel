@@ -95,7 +95,16 @@ impl FileWindowHost for InProcessFileWindowHost {
                 let adapter = nickel_file::FileHostAdapter::default()
                     .with_focused_shortcut_handler(|key, edge| {
                         crate::platform::handle_focused_shortcut(key, edge);
-                    });
+                    })
+                    .with_window_lifecycle_handlers(
+                        |window| {
+                            crate::platform::register_native_application_window(
+                                window,
+                                "nickel-file",
+                            );
+                        },
+                        crate::platform::unregister_native_application_window,
+                    );
                 if let Err(error) =
                     nickel_ui::run_with_adapter_on_any_thread(launch.into_app(), adapter)
                 {

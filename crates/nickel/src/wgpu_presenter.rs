@@ -463,7 +463,7 @@ fn physical_scissor(
     let bottom = ((rect.origin.y + rect.size.height) * scale)
         .ceil()
         .clamp(0.0, height as f32) as u32;
-    (right > left && bottom > top).then_some((left, top, right - left, bottom - top))
+    (right > left && bottom > top).then(|| (left, top, right - left, bottom - top))
 }
 
 fn intersect_scissor(
@@ -480,7 +480,7 @@ fn intersect_scissor(
         .1
         .saturating_add(left.3)
         .min(right.1.saturating_add(right.3));
-    (right_edge > x && bottom > y).then_some((x, y, right_edge - x, bottom - y))
+    (right_edge > x && bottom > y).then(|| (x, y, right_edge - x, bottom - y))
 }
 
 impl GpuPresenter {
@@ -1237,10 +1237,25 @@ fn mix(start: u32, end: u32, at: f32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_RETAINED_FRAMEBUFFER_BYTES, OffscreenRedraw, fullscreen_vertices, offscreen_redraw,
-        retained_framebuffer_bytes, retained_framebuffer_configuration,
+        MAX_RETAINED_FRAMEBUFFER_BYTES, OffscreenRedraw, fullscreen_vertices, intersect_scissor,
+        offscreen_redraw, physical_scissor, retained_framebuffer_bytes,
+        retained_framebuffer_configuration,
     };
     use nickel_ui::{Rect, backend::PaintCommand};
+
+    #[test]
+    fn disjoint_scissors_are_rejected_without_unsigned_underflow() {
+        assert_eq!(intersect_scissor((0, 0, 10, 10), (20, 20, 5, 5)), None);
+        assert_eq!(intersect_scissor((20, 20, 5, 5), (0, 0, 10, 10)), None);
+    }
+
+    #[test]
+    fn rectangles_outside_the_surface_produce_no_physical_scissor() {
+        assert_eq!(
+            physical_scissor(Rect::new(20.0, 20.0, 5.0, 5.0), 10, 10, 1.0),
+            None
+        );
+    }
 
     #[cfg(target_os = "windows")]
     use {

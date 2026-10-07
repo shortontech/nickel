@@ -48,6 +48,10 @@ pub struct FileHostAdapter {
     context_popup_poll_at: Option<Instant>,
     #[cfg(target_os = "windows")]
     focused_shortcut: Option<std::sync::Arc<dyn Fn(KeyCode, KeyEdge) + Send + Sync>>,
+    #[cfg(target_os = "windows")]
+    window_started: Option<std::sync::Arc<dyn Fn(&Window) + Send + Sync>>,
+    #[cfg(target_os = "windows")]
+    window_stopped: Option<std::sync::Arc<dyn Fn(&Window) + Send + Sync>>,
 }
 
 #[cfg(target_os = "windows")]
@@ -57,6 +61,16 @@ impl FileHostAdapter {
         shortcut: impl Fn(KeyCode, KeyEdge) + Send + Sync + 'static,
     ) -> Self {
         self.focused_shortcut = Some(std::sync::Arc::new(shortcut));
+        self
+    }
+
+    pub fn with_window_lifecycle_handlers(
+        mut self,
+        started: impl Fn(&Window) + Send + Sync + 'static,
+        stopped: impl Fn(&Window) + Send + Sync + 'static,
+    ) -> Self {
+        self.window_started = Some(std::sync::Arc::new(started));
+        self.window_stopped = Some(std::sync::Arc::new(stopped));
         self
     }
 }
@@ -694,6 +708,10 @@ impl Default for FileHostAdapter {
             context_popup_poll_at: None,
             #[cfg(target_os = "windows")]
             focused_shortcut: None,
+            #[cfg(target_os = "windows")]
+            window_started: None,
+            #[cfg(target_os = "windows")]
+            window_stopped: None,
         }
     }
 }
@@ -779,7 +797,23 @@ impl HostAdapter<FileApp> for FileHostAdapter {
             .window()
             .set_min_inner_size(Some(LogicalSize::new(560, 360)));
         set_nickel_file_icon(services.window());
+        #[cfg(target_os = "windows")]
+        if let Some(started) = &self.window_started {
+            started(services.window());
+        }
         Ok(AdapterOutcome::default())
+    }
+
+    fn stopped(
+        &mut self,
+        _host: &mut UiHost<FileApp>,
+        services: HostServices<'_>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[cfg(target_os = "windows")]
+        if let Some(stopped) = &self.window_stopped {
+            stopped(services.window());
+        }
+        Ok(())
     }
 
     fn poll(
