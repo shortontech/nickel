@@ -12,6 +12,7 @@ use nickel_ui::{
     Application, DamageRegion, GradientAxis, HostBatch, HostEvent, HostEventOutcome,
     InternalSurfaceId, InternalSurfaceSet, LinearGradient, Point as UiPoint, SoftwareRenderer,
     Text, UiEvent, View, ViewContext,
+    async_raster::{AsyncRasterWorker, RasterRequest, RasterResult},
     backend::{FrameRenderer, PaintCommand, RenderFrame},
 };
 
@@ -99,6 +100,7 @@ struct PresentedSurface {
     z_order: u64,
     decoration: Option<InternalWindowDecoration>,
     backdrop_materials: Vec<BackdropMaterial>,
+    raster_revision: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -530,6 +532,104 @@ impl Default for SharedTextureCaches {
 }
 
 impl SmithayFrameRenderer {
+    fn fallback_reason(&self, commands: &[PaintCommand]) -> Option<InternalUiFallbackReason> {
+        if self.renderer_mode == InternalUiRendererMode::Software {
+            Some(InternalUiFallbackReason::RequestedSoftware)
+        } else if !Self::supports_gpu(commands) {
+            Some(InternalUiFallbackReason::UnsupportedCommands)
+        } else if Self::estimated_gpu_elements(commands) > MAX_GPU_ELEMENTS_PER_SURFACE {
+            Some(InternalUiFallbackReason::ElementBudget)
+        } else {
+            None
+        }
+    }
+
+    fn prepare_async_fallback(&mut self, result: RasterResult, scale: f32) {
+        self.mode = InternalUiPresentationMode::RasterFallback;
+        self.diagnostics.fallback_frames = self.diagnostics.fallback_frames.saturating_add(1);
+        self.primitives.clear();
+        self.import_fallback = None;
+        if let Some(mut software) = self.software.take() {
+            software.suspend();
+        }
+        let width = result.width;
+        let height = result.height;
+        let configuration = (width, height, scale.to_bits());
+        let full_repaint =
+            self.raster.is_none() || self.raster_configuration != Some(configuration);
+        let mut damage = result.damage;
+        if full_repaint {
+            self.raster = Some(MemoryRenderBuffer::new(
+                Fourcc::Abgr8888,
+                (width as i32, height as i32),
+                1,
+                Transform::Normal,
+                None,
+            ));
+            self.raster_configuration = Some(configuration);
+            self.diagnostics.fallback_buffer_creations =
+                self.diagnostics.fallback_buffer_creations.saturating_add(1);
+            damage.rects.clear();
+            damage
+                .rects
+                .push(nickel_ui::Rect::new(0.0, 0.0, width as f32, height as f32));
+        }
+        self.diagnostics.software_frame_bytes =
+            result.pixels.capacity() * std::mem::size_of::<nickel_ui::Pixel>();
+        self.diagnostics.fallback_raster_bytes = texture_bytes(width, height);
+        if damage.is_empty() {
+            return;
+        }
+        let regions = fallback_damage_regions(&damage, width, height);
+        let full = Rectangle::from_size((width as i32, height as i32).into());
+        if regions.contains(&full) {
+            self.diagnostics.fallback_full_repaints =
+                self.diagnostics.fallback_full_repaints.saturating_add(1);
+        } else {
+            self.diagnostics.fallback_partial_repaints =
+                self.diagnostics.fallback_partial_repaints.saturating_add(1);
+        }
+        if !full_repaint {
+            self.diagnostics.fallback_buffer_reuses =
+                self.diagnostics.fallback_buffer_reuses.saturating_add(1);
+        }
+        self.diagnostics.fallback_converted_bytes =
+            self.diagnostics.fallback_converted_bytes.saturating_add(
+                regions
+                    .iter()
+                    .map(|rect| rect.size.w as u64 * rect.size.h as u64 * 4)
+                    .sum::<u64>(),
+            );
+        let upload_damage = regions.iter().copied().reduce(|a, b| a.merge(b));
+        self.diagnostics.fallback_upload_damage_bytes = self
+            .diagnostics
+            .fallback_upload_damage_bytes
+            .saturating_add(
+                upload_damage.map_or(0, |rect| rect.size.w as u64 * rect.size.h as u64 * 4),
+            );
+        self.raster
+            .as_mut()
+            .expect("fallback buffer initialized")
+            .render()
+            .draw(|bytes| {
+                for region in &regions {
+                    for y in region.loc.y..region.loc.y + region.size.h {
+                        let start = y as usize * width as usize + region.loc.x as usize;
+                        let end = start + region.size.w as usize;
+                        for (target, pixel) in bytes[start * 4..end * 4]
+                            .as_chunks_mut::<4>()
+                            .0
+                            .iter_mut()
+                            .zip(&result.pixels[start..end])
+                        {
+                            target.copy_from_slice(&[pixel.r, pixel.g, pixel.b, pixel.a]);
+                        }
+                    }
+                }
+                Ok::<_, std::convert::Infallible>(regions)
+            })
+            .unwrap();
+    }
     #[cfg(test)]
     fn new(_width: u32, _height: u32, scale: f32, renderer_mode: InternalUiRendererMode) -> Self {
         Self::with_caches(scale, renderer_mode, &SharedTextureCaches::default())
@@ -1412,15 +1512,7 @@ impl FrameRenderer for SmithayFrameRenderer {
 
     fn render_frame(&mut self, frame: RenderFrame<'_>) -> Result<DamageRegion, Self::Error> {
         let estimated_gpu_elements = Self::estimated_gpu_elements(frame.commands);
-        let fallback_reason = if self.renderer_mode == InternalUiRendererMode::Software {
-            Some(InternalUiFallbackReason::RequestedSoftware)
-        } else if !Self::supports_gpu(frame.commands) {
-            Some(InternalUiFallbackReason::UnsupportedCommands)
-        } else if estimated_gpu_elements > MAX_GPU_ELEMENTS_PER_SURFACE {
-            Some(InternalUiFallbackReason::ElementBudget)
-        } else {
-            None
-        };
+        let fallback_reason = self.fallback_reason(frame.commands);
         self.diagnostics.fallback_reason = fallback_reason;
         let damage = if fallback_reason.is_none() {
             self.mode = InternalUiPresentationMode::GpuSolid;
@@ -1740,6 +1832,7 @@ pub struct InternalUiRuntime {
     next_z_order: u64,
     texture_caches: SharedTextureCaches,
     frame_icons: Option<crate::session::window_frame::FrameIcons>,
+    raster_worker: Option<AsyncRasterWorker>,
 }
 
 impl Default for InternalUiRuntime {
@@ -1762,11 +1855,103 @@ impl Default for InternalUiRuntime {
             next_z_order: 0,
             texture_caches: SharedTextureCaches::default(),
             frame_icons: crate::session::window_frame::FrameIcons::load(),
+            raster_worker: None,
         }
     }
 }
 
+fn prepare_surface_frame(
+    presentation: &mut PresentedSurface,
+    id: InternalSurfaceId,
+    raster_worker: Option<&AsyncRasterWorker>,
+    frame: RenderFrame<'_>,
+) {
+    presentation.backdrop_materials = backdrop_materials(frame.commands);
+    if let (Some(worker), Some(reason)) = (
+        raster_worker,
+        presentation.renderer.fallback_reason(frame.commands),
+    ) {
+        presentation.renderer.diagnostics.fallback_reason = Some(reason);
+        presentation.renderer.diagnostics.fallback_text_count = frame
+            .commands
+            .iter()
+            .filter(|command| {
+                matches!(
+                    command,
+                    PaintCommand::Text { .. } | PaintCommand::StyledText { .. }
+                )
+            })
+            .count();
+        presentation.renderer.diagnostics.fallback_image_count = frame
+            .commands
+            .iter()
+            .filter(|command| matches!(command, PaintCommand::Image { .. }))
+            .count();
+        presentation.renderer.diagnostics.fallback_primitive_count =
+            SmithayFrameRenderer::estimated_gpu_elements(frame.commands);
+        presentation.raster_revision = presentation.raster_revision.wrapping_add(1).max(1);
+        let width = ((frame.logical_size.0 as f32) * frame.scale_factor)
+            .round()
+            .max(1.0) as u32;
+        let height = ((frame.logical_size.1 as f32) * frame.scale_factor)
+            .round()
+            .max(1.0) as u32;
+        worker.submit(RasterRequest {
+            surface: id.snapshot_token(),
+            revision: presentation.raster_revision,
+            width,
+            height,
+            scale: frame.scale_factor,
+            commands: frame.commands.to_vec(),
+            damage: None,
+        });
+    } else {
+        let _ = presentation.renderer.render_frame(frame);
+    }
+}
+
 impl InternalUiRuntime {
+    pub(crate) fn start_raster_worker(
+        &mut self,
+        wake: impl Fn() + Send + 'static,
+    ) -> std::io::Result<()> {
+        self.raster_worker = Some(AsyncRasterWorker::new("nickel-surface-raster", wake)?);
+        Ok(())
+    }
+
+    /// Upload only the latest completed raster for each surface. Smithay buffers
+    /// and graphics imports remain owned by the compositor event loop.
+    pub(crate) fn process_completed_rasters(&mut self) -> bool {
+        let Some(worker) = &self.raster_worker else {
+            return false;
+        };
+        let mut changed = false;
+        for (id, surface) in &mut self.presentation {
+            let Some(result) = worker.take_completed(id.snapshot_token()) else {
+                continue;
+            };
+            let width = ((surface.placement.geometry.2 as f32) * surface.scale_factor)
+                .round()
+                .max(1.0) as u32;
+            let height = ((surface.placement.geometry.3 as f32) * surface.scale_factor)
+                .round()
+                .max(1.0) as u32;
+            if surface.dirty
+                || result.revision != surface.raster_revision
+                || result.width != width
+                || result.height != height
+            {
+                continue;
+            }
+            let revision = result.revision;
+            surface
+                .renderer
+                .prepare_async_fallback(result, surface.scale_factor);
+            worker.acknowledge(id.snapshot_token(), revision);
+            changed = true;
+        }
+        changed
+    }
     /// Return explicit compositor material requests emitted by styled elements.
     pub(crate) fn backdrop_blur_regions(
         &self,
@@ -1919,6 +2104,7 @@ impl InternalUiRuntime {
                 z_order: self.next_z_order,
                 decoration: None,
                 backdrop_materials: Vec::new(),
+                raster_revision: 0,
             },
         );
         id
@@ -2201,6 +2387,7 @@ impl InternalUiRuntime {
                 z_order: self.next_z_order,
                 decoration: None,
                 backdrop_materials: Vec::new(),
+                raster_revision: 0,
             },
         );
         id
@@ -2226,6 +2413,9 @@ impl InternalUiRuntime {
         let removed = self.surfaces.remove(id).is_some();
         self.surfaces_retired |= removed;
         self.presentation.remove(&id);
+        if let Some(worker) = &self.raster_worker {
+            worker.retire(id.snapshot_token());
+        }
         self.routed_recipients.remove(&id);
         if self.hovered == Some(id) {
             self.hovered = None;
@@ -3449,25 +3639,30 @@ impl InternalUiRuntime {
         R::TextureId: Send + Clone + 'static,
     {
         let frame_icons = self.frame_icons.clone();
+        let raster_worker = self.raster_worker.as_ref();
         ids.into_iter()
             .filter_map(|id| {
                 let placement = self.presentation.get(&id)?.placement.clone();
                 if self.presentation.get(&id)?.dirty {
                     let presentation = self.presentation.get_mut(&id)?;
-                    if let Some(commands) = &presentation.external_scene {
-                        presentation.backdrop_materials = backdrop_materials(commands);
+                    if let Some(commands) = presentation.external_scene.clone() {
                         let (_, _, width, height) = placement.geometry;
-                        let _ = presentation.renderer.render_frame(RenderFrame {
-                            commands,
-                            logical_size: (width, height),
-                            scale_factor: presentation.scale_factor,
-                            generation: 0,
-                        });
+                        let scale_factor = presentation.scale_factor;
+                        prepare_surface_frame(
+                            presentation,
+                            id,
+                            raster_worker,
+                            RenderFrame {
+                                commands: &commands,
+                                logical_size: (width, height),
+                                scale_factor,
+                                generation: 0,
+                            },
+                        );
                     } else {
                         let surface = self.surfaces.get(id)?;
                         let frame = surface.render_frame();
-                        presentation.backdrop_materials = backdrop_materials(frame.commands);
-                        let _ = presentation.renderer.render_frame(frame);
+                        prepare_surface_frame(presentation, id, raster_worker, frame);
                     }
                     presentation.dirty = false;
                 }
@@ -3608,6 +3803,55 @@ pub enum TouchPhase {
 mod tests {
     use super::*;
     use nickel_ui::{Button, Text, View, ViewContext};
+
+    #[test]
+    fn software_surface_rasters_off_thread_and_uploads_latest_frame() {
+        use std::{sync::mpsc, time::Duration};
+
+        let (wake_tx, wake_rx) = mpsc::channel();
+        let mut runtime = InternalUiRuntime::default();
+        runtime.set_renderer_mode(InternalUiRendererMode::Software);
+        runtime
+            .start_raster_worker(move || {
+                let _ = wake_tx.send(());
+            })
+            .unwrap();
+        let id = runtime.insert_scene(
+            vec![PaintCommand::Fill {
+                rect: nickel_ui::Rect::new(0.0, 0.0, 8.0, 6.0),
+                color: 0x123456,
+            }],
+            InternalSurfacePlacement {
+                role: InternalSurfaceRole::Taskbar,
+                geometry: (0, 0, 8, 6),
+                output: None,
+            },
+            1.0,
+        );
+        let presentation = runtime.presentation.get_mut(&id).unwrap();
+        let commands = presentation.external_scene.clone().unwrap();
+        prepare_surface_frame(
+            presentation,
+            id,
+            runtime.raster_worker.as_ref(),
+            RenderFrame {
+                commands: &commands,
+                logical_size: (8, 6),
+                scale_factor: 1.0,
+                generation: 0,
+            },
+        );
+        presentation.dirty = false;
+        wake_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(runtime.process_completed_rasters());
+        let presentation = runtime.presentation.get(&id).unwrap();
+        assert_eq!(
+            presentation.renderer.mode,
+            InternalUiPresentationMode::RasterFallback
+        );
+        assert!(presentation.renderer.raster.is_some());
+        assert!(!runtime.process_completed_rasters());
+    }
 
     #[test]
     fn immutable_image_hash_reuse_skips_pixels_without_retaining_them() {

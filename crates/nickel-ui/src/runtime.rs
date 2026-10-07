@@ -80,6 +80,7 @@ use winit::{
     window::{CursorIcon, Window, WindowAttributes, WindowId},
 };
 
+use crate::async_raster::{AsyncRasterWorker, RasterRequest};
 use crate::{
     AccessibilityNode, ActionKind, Color, ControllerAction, ControllerExecutionAuthority,
     ControllerExecutionBinding, ControllerFamily, ControllerFence, ControllerInput, DamageRegion,
@@ -4528,7 +4529,11 @@ fn run_with_event_loop<A: Application>(
     event_loop: EventLoop<()>,
 ) -> Result<(), Box<dyn Error>> {
     let display = event_loop.owned_display_handle();
-    let mut runtime = ApplicationRuntime::new(application, adapter, display);
+    let proxy = event_loop.create_proxy();
+    let raster = AsyncRasterWorker::new("nickel-ui-raster", move || {
+        let _ = proxy.send_event(());
+    })?;
+    let mut runtime = ApplicationRuntime::new(application, adapter, display, raster);
     event_loop.run_app(&mut runtime)?;
     if let Some(error) = runtime.error {
         Err(error)
@@ -4544,7 +4549,8 @@ struct ApplicationRuntime<A: Application, H: HostAdapter<A>> {
     display: OwnedDisplayHandle,
     window: Option<Arc<Window>>,
     surface: Option<softbuffer::Surface<OwnedDisplayHandle, Arc<Window>>>,
-    renderer: Option<SoftwareRenderer>,
+    raster: AsyncRasterWorker,
+    raster_revision: u64,
     input: nickel_input::winit::Adapter,
     clipboard: Option<arboard::Clipboard>,
     controller: Option<ControllerInput>,
@@ -4634,7 +4640,12 @@ impl<A: Application, H: HostAdapter<A>> ApplicationRuntime<A, H> {
         self.native_stream_reset_pending = true;
     }
 
-    fn new(application: A, adapter: H, display: OwnedDisplayHandle) -> Self {
+    fn new(
+        application: A,
+        adapter: H,
+        display: OwnedDisplayHandle,
+        raster: AsyncRasterWorker,
+    ) -> Self {
         let now = Instant::now();
         let native_host_generation = NEXT_NATIVE_HOST_GENERATION
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
@@ -4656,7 +4667,8 @@ impl<A: Application, H: HostAdapter<A>> ApplicationRuntime<A, H> {
             display,
             window: None,
             surface: None,
-            renderer: None,
+            raster,
+            raster_revision: 0,
             input: nickel_input::winit::Adapter::default(),
             clipboard: arboard::Clipboard::new().ok(),
             controller,
@@ -4995,28 +5007,53 @@ impl<A: Application, H: HostAdapter<A>> ApplicationRuntime<A, H> {
         }
     }
 
-    fn present(&mut self) -> Result<(), Box<dyn Error>> {
-        let (Some(host), Some(surface), Some(renderer), Some(window)) = (
-            self.host.as_ref(),
-            self.surface.as_mut(),
-            self.renderer.as_mut(),
-            self.window.as_ref(),
-        ) else {
+    fn queue_raster(&mut self) {
+        let (Some(host), Some(window)) = (self.host.as_ref(), self.window.as_ref()) else {
+            return;
+        };
+        let size = window.inner_size();
+        self.raster_revision = self.raster_revision.wrapping_add(1).max(1);
+        self.raster.submit(RasterRequest {
+            surface: self.native_host_generation,
+            revision: self.raster_revision,
+            width: size.width.max(1),
+            height: size.height.max(1),
+            scale: self.scale,
+            commands: host.commands().to_vec(),
+            damage: None,
+        });
+    }
+
+    fn present_completed_raster(&mut self) -> Result<(), Box<dyn Error>> {
+        let Some(result) = self.raster.take_completed(self.native_host_generation) else {
+            return Ok(());
+        };
+        let (Some(surface), Some(window)) = (self.surface.as_mut(), self.window.as_ref()) else {
             return Ok(());
         };
         let size = window.inner_size();
-        let width = NonZeroU32::new(size.width.max(1)).expect("clamped non-zero width");
-        let height = NonZeroU32::new(size.height.max(1)).expect("clamped non-zero height");
-        surface.resize(width, height)?;
-        renderer.resize(width.get(), height.get(), self.scale);
-        if renderer.render(host.commands()).is_empty() {
+        if self.scheduler.dirty
+            || result.revision != self.raster_revision
+            || result.width != size.width.max(1)
+            || result.height != size.height.max(1)
+        {
             return Ok(());
         }
+        if result.damage.is_empty() {
+            self.raster
+                .acknowledge(self.native_host_generation, result.revision);
+            return Ok(());
+        }
+        let width = NonZeroU32::new(result.width).expect("clamped non-zero width");
+        let height = NonZeroU32::new(result.height).expect("clamped non-zero height");
+        surface.resize(width, height)?;
         let mut buffer = surface.buffer_mut()?;
-        for (target, pixel) in buffer.iter_mut().zip(renderer.pixels()) {
+        for (target, pixel) in buffer.iter_mut().zip(&result.pixels) {
             *target = u32::from(pixel.r) << 16 | u32::from(pixel.g) << 8 | u32::from(pixel.b);
         }
         buffer.present()?;
+        self.raster
+            .acknowledge(self.native_host_generation, result.revision);
         Ok(())
     }
 
@@ -5217,6 +5254,7 @@ impl<A: Application, H: HostAdapter<A>> ApplicationRuntime<A, H> {
         }
         self.surface = None;
         self.window = None;
+        self.raster.retire(self.native_host_generation);
     }
 }
 
@@ -5283,12 +5321,6 @@ impl<A: Application, H: HostAdapter<A>> ApplicationHandler for ApplicationRuntim
                 return;
             }
         };
-        let size = window.inner_size();
-        self.renderer = Some(SoftwareRenderer::new_pixel_buffer(
-            size.width,
-            size.height,
-            self.scale,
-        ));
         self.surface = Some(surface);
         self.host = Some(host);
         self.window = Some(window.clone());
@@ -5336,10 +5368,8 @@ impl<A: Application, H: HostAdapter<A>> ApplicationHandler for ApplicationRuntim
             }
             WindowEvent::RedrawRequested => {
                 self.flush_pending_continuous_input(event_loop, &window);
-                if self.scheduler.begin_present()
-                    && let Err(error) = self.present()
-                {
-                    self.fail(event_loop, error);
+                if self.scheduler.begin_present() {
+                    self.queue_raster();
                 }
                 return;
             }
@@ -5365,9 +5395,6 @@ impl<A: Application, H: HostAdapter<A>> ApplicationHandler for ApplicationRuntim
             WindowEvent::Occluded(true) => {
                 if let Some(host) = &mut self.host {
                     host.handle_event(UiEvent::Suspended);
-                }
-                if let Some(renderer) = &mut self.renderer {
-                    renderer.suspend();
                 }
                 return;
             }
@@ -5464,6 +5491,11 @@ impl<A: Application, H: HostAdapter<A>> ApplicationHandler for ApplicationRuntim
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         self.tick(event_loop);
+    }
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, _event: ()) {
+        if let Err(error) = self.present_completed_raster() {
+            self.fail(event_loop, error);
+        }
     }
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
         #[cfg(any(unix, windows))]

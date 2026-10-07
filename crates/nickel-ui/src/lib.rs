@@ -3,6 +3,7 @@
 extern crate self as nickel_ui;
 
 pub mod approval;
+pub mod async_raster;
 pub mod controller;
 pub mod document_selection;
 pub mod gpu;

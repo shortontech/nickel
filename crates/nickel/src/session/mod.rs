@@ -176,6 +176,19 @@ fn run_with_arguments(
     let controller_neutral_probe_requested = state.controller_neutral_probe();
     let controller_routing_epoch = state.controller_routing_epoch_handle();
     state.internal_ui.set_renderer_mode(arguments.ui_renderer);
+    let (raster_ready, raster_results) = smithay::reexports::calloop::channel::channel();
+    state.internal_ui.start_raster_worker(move || {
+        let _ = raster_ready.send(());
+    })?;
+    event_loop
+        .handle()
+        .insert_source(raster_results, |event, _, state| {
+            if let smithay::reexports::calloop::channel::Event::Msg(()) = event
+                && state.internal_ui.process_completed_rasters()
+            {
+                state.schedule_internal_ui_frame();
+            }
+        })?;
     tracing::info!(
         renderer = ?arguments.ui_renderer,
         "compositor-owned UI renderer selected"
