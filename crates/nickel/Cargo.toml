@@ -1,6 +1,6 @@
 [package]
 name = "nickel"
-version = "0.1.0"
+version = "0.2.0"
 default-run = "nickel"
 autobins = false
 edition.workspace = true
