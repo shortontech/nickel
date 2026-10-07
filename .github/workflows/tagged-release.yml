@@ -49,8 +49,8 @@ jobs:
       - name: Install the pinned Rust toolchain
         shell: pwsh
         run: |
-          rustup toolchain install 1.94.1 --profile minimal
-          rustup default 1.94.1
+          rustup toolchain install 1.96 --profile minimal
+          rustup default 1.96
 
       - name: Build the Windows release binaries
         shell: pwsh
