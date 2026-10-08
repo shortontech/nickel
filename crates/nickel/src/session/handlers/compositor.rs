@@ -13,7 +13,8 @@ use smithay::{
         buffer::BufferHandler,
         compositor::{
             BufferAssignment, CompositorClientState, CompositorHandler, CompositorState,
-            SurfaceAttributes, get_parent, is_sync_subsurface, with_states,
+            SurfaceAttributes, add_blocker, add_pre_commit_hook, get_parent, is_sync_subsurface,
+            with_states,
         },
         seat::WaylandFocus,
         shm::{ShmHandler, ShmState},
@@ -62,6 +63,60 @@ fn buffer_transition(surface: &WlSurface) -> BufferTransition {
 impl CompositorHandler for NickelSession {
     fn compositor_state(&mut self) -> &mut CompositorState {
         &mut self.compositor_state
+    }
+
+    fn new_surface(&mut self, surface: &WlSurface) {
+        add_pre_commit_hook::<Self, _>(surface, |state, dh, surface| {
+            let dmabuf = with_states(surface, |states| {
+                let mut attributes = states.cached_state.get::<SurfaceAttributes>();
+                let Some(BufferAssignment::NewBuffer(buffer)) =
+                    attributes.pending().buffer.as_ref()
+                else {
+                    return None;
+                };
+                smithay::wayland::dmabuf::get_dmabuf(buffer).ok().cloned()
+            });
+            let Some(dmabuf) = dmabuf else { return };
+            let Ok((blocker, source)) =
+                dmabuf.generate_blocker(smithay::reexports::calloop::Interest::READ)
+            else {
+                // The client's write fence has already signalled.
+                return;
+            };
+            let Some(client) = surface.client() else {
+                return;
+            };
+            let pending_client = client.clone();
+            let registered = state
+                .event_loop_handle
+                .insert_source(source, move |_, _, state| {
+                    let dh = state.display_handle.clone();
+                    state
+                        .client_compositor_state(&pending_client)
+                        .blocker_cleared(state, &dh);
+                    Ok(())
+                });
+            match registered {
+                Ok(_) => {
+                    // Keep the old committed surface tree visible until the
+                    // producer finishes writing. Waiting after our own draw
+                    // only synchronizes compositor output, not client input.
+                    add_blocker(surface, blocker);
+                }
+                Err(error) => {
+                    tracing::error!(?error, "could not monitor client DMA-BUF readiness");
+                    client.kill(
+                        dh,
+                        smithay::reexports::wayland_server::backend::protocol::ProtocolError {
+                            code: 3, // wl_display.error.implementation
+                            object_id: 1,
+                            object_interface: "wl_display".into(),
+                            message: "could not monitor DMA-BUF readiness".into(),
+                        },
+                    );
+                }
+            }
+        });
     }
 
     fn client_compositor_state<'a>(&self, client: &'a Client) -> &'a CompositorClientState {
@@ -174,6 +229,211 @@ impl ShmHandler for NickelSession {
 #[cfg(test)]
 mod tests {
     use super::{BufferTransition, MappingWork, commit_is_render_visible, mapping_work};
+
+    // A socket supplies deterministic poll readiness in place of a GPU write
+    // fence. It is never imported into a renderer. The real DMA-BUF protocol,
+    // pre-commit hook, transaction queue, and calloop wakeup are exercised.
+    fn dma_buf_commit_readiness(ready_before_commit: bool, synchronized_child: bool) {
+        use crate::session::{NickelSession, state::ClientState};
+        use smithay::{
+            backend::allocator::{Format, Fourcc, Modifier},
+            reexports::{
+                calloop::{EventLoop, channel},
+                wayland_protocols::wp::linux_dmabuf::zv1::client::{
+                    zwp_linux_buffer_params_v1, zwp_linux_dmabuf_v1,
+                },
+                wayland_server::{Display, protocol::wl_surface::WlSurface},
+            },
+        };
+        use smithay_client_toolkit::reexports::client::{
+            Connection, Dispatch, Proxy, QueueHandle, delegate_noop,
+            protocol::{
+                wl_buffer, wl_compositor, wl_registry, wl_subcompositor, wl_subsurface, wl_surface,
+            },
+        };
+        use std::{
+            io::Write,
+            os::{fd::AsFd, unix::net::UnixStream},
+            sync::{Arc, mpsc},
+            time::{Duration, Instant},
+        };
+
+        #[derive(Default)]
+        struct Client {
+            compositor: Option<wl_compositor::WlCompositor>,
+            subcompositor: Option<wl_subcompositor::WlSubcompositor>,
+            dmabuf: Option<zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1>,
+        }
+        impl Dispatch<wl_registry::WlRegistry, ()> for Client {
+            fn event(
+                state: &mut Self,
+                registry: &wl_registry::WlRegistry,
+                event: wl_registry::Event,
+                _: &(),
+                _: &Connection,
+                qh: &QueueHandle<Self>,
+            ) {
+                if let wl_registry::Event::Global {
+                    name,
+                    interface,
+                    version,
+                } = event
+                {
+                    match interface.as_str() {
+                        "wl_compositor" => {
+                            state.compositor = Some(registry.bind(name, version.min(6), qh, ()))
+                        }
+                        "zwp_linux_dmabuf_v1" => {
+                            state.dmabuf = Some(registry.bind(name, version.min(3), qh, ()))
+                        }
+                        "wl_subcompositor" => {
+                            state.subcompositor = Some(registry.bind(name, 1, qh, ()))
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        delegate_noop!(Client: ignore wl_compositor::WlCompositor);
+        delegate_noop!(Client: ignore wl_surface::WlSurface);
+        delegate_noop!(Client: ignore wl_buffer::WlBuffer);
+        delegate_noop!(Client: ignore wl_subcompositor::WlSubcompositor);
+        delegate_noop!(Client: ignore wl_subsurface::WlSubsurface);
+        delegate_noop!(Client: ignore zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1);
+        delegate_noop!(Client: ignore zwp_linux_buffer_params_v1::ZwpLinuxBufferParamsV1);
+
+        let mut event_loop = EventLoop::try_new().unwrap();
+        let display = Display::new().unwrap();
+        let mut dh = display.handle();
+        let (server, peer) = UnixStream::pair().unwrap();
+        let server_client = dh
+            .insert_client(server, Arc::new(ClientState::default()))
+            .unwrap();
+        let mut session = NickelSession::new(&mut event_loop, display, false);
+        session.dmabuf_state.create_global::<NickelSession>(
+            &dh,
+            [Format {
+                code: Fourcc::Abgr8888,
+                modifier: Modifier::Linear,
+            }],
+        );
+        let (commit_tx, commit_rx) = channel::channel();
+        session.buffer_commit_tx = Some(commit_tx);
+        let (buffer_fd, mut producer) = UnixStream::pair().unwrap();
+        if ready_before_commit {
+            producer.write_all(&[1]).unwrap();
+        }
+        let (surface_tx, surface_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let client_thread = std::thread::spawn(move || {
+            let connection = Connection::from_socket(peer).unwrap();
+            let mut queue = connection.new_event_queue::<Client>();
+            let qh = queue.handle();
+            connection.display().get_registry(&qh, ());
+            let mut client = Client::default();
+            queue.roundtrip(&mut client).unwrap();
+            let surface = client.compositor.as_ref().unwrap().create_surface(&qh, ());
+            let parent = synchronized_child
+                .then(|| client.compositor.as_ref().unwrap().create_surface(&qh, ()));
+            let _subsurface = parent.as_ref().map(|parent| {
+                client
+                    .subcompositor
+                    .as_ref()
+                    .unwrap()
+                    .get_subsurface(&surface, parent, &qh, ())
+            });
+            let params = client.dmabuf.as_ref().unwrap().create_params(&qh, ());
+            params.add(buffer_fd.as_fd(), 0, 0, 4, 0, 0);
+            let buffer = params.create_immed(
+                1,
+                1,
+                Fourcc::Abgr8888 as u32,
+                zwp_linux_buffer_params_v1::Flags::empty(),
+                &qh,
+                (),
+            );
+            surface.attach(Some(&buffer), 0, 0);
+            surface.commit();
+            if let Some(parent) = &parent {
+                parent.commit();
+            }
+            queue.roundtrip(&mut client).unwrap();
+            surface_tx
+                .send(parent.as_ref().unwrap_or(&surface).id().protocol_id())
+                .unwrap();
+            let _ = done_rx.recv_timeout(Duration::from_secs(5));
+        });
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let surface_id = loop {
+            if let Ok(id) = surface_rx.try_recv() {
+                break id;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "client commit was not dispatched"
+            );
+            event_loop
+                .dispatch(Duration::from_millis(5), &mut session)
+                .unwrap();
+        };
+        let surface = server_client
+            .object_from_protocol_id::<WlSurface>(&dh, surface_id)
+            .unwrap();
+        if !ready_before_commit {
+            assert!(
+                commit_rx.try_recv().is_err(),
+                "unready client buffer reached the renderer"
+            );
+            for _ in 0..3 {
+                event_loop
+                    .dispatch(Duration::from_millis(5), &mut session)
+                    .unwrap();
+                assert!(commit_rx.try_recv().is_err());
+            }
+            producer.write_all(&[1]).unwrap();
+        }
+        let mut child_commits = 0;
+        let commit = loop {
+            if let Ok(commit) = commit_rx.try_recv() {
+                if commit.render_visible {
+                    break commit;
+                }
+                child_commits += 1;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "ready client commit did not resume"
+            );
+            event_loop
+                .dispatch(Duration::from_millis(5), &mut session)
+                .unwrap();
+        };
+        assert_eq!(commit.surface, surface);
+        assert!(commit.render_visible);
+        assert_eq!(child_commits, usize::from(synchronized_child));
+        event_loop.dispatch(Duration::ZERO, &mut session).unwrap();
+        assert!(
+            commit_rx.try_recv().is_err(),
+            "readiness dispatched the commit twice"
+        );
+        done_tx.send(()).unwrap();
+        client_thread.join().unwrap();
+    }
+
+    #[test]
+    fn dma_buf_commit_waits_for_producer_readiness_without_blocking_dispatch() {
+        dma_buf_commit_readiness(false, false);
+    }
+
+    #[test]
+    fn ready_dma_buf_commit_does_not_wait_for_another_event() {
+        dma_buf_commit_readiness(true, false);
+    }
+
+    #[test]
+    fn dma_buf_commit_readiness_holds_the_synchronized_parent_transaction() {
+        dma_buf_commit_readiness(false, true);
+    }
 
     #[test]
     fn commit_visibility_matches_subsurface_synchronization() {
