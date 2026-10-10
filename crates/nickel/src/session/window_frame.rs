@@ -628,13 +628,13 @@ fn render_titlebar_pixels(
     let asset = title_text_cache()
         .lock()
         .ok()?
-        .get(nickel_render_assets::TextRequest {
+        .get(twinkle_render_assets::TextRequest {
             text: title,
             size: 14.0,
             line_height: 19.0,
             max_width: None,
             color,
-            weight: nickel_render_assets::TextWeight::Normal,
+            weight: twinkle_render_assets::TextWeight::Normal,
         });
     let text_y = ((TITLEBAR_HEIGHT - i32::try_from(asset.height()).ok()?) / 2 - 1).max(0);
     composite_text_asset(
@@ -650,11 +650,11 @@ fn render_titlebar_pixels(
     Some((pixels, width))
 }
 
-fn title_text_cache() -> &'static Mutex<nickel_render_assets::TextAssetCache> {
-    static CACHE: OnceLock<Mutex<nickel_render_assets::TextAssetCache>> = OnceLock::new();
+fn title_text_cache() -> &'static Mutex<twinkle_render_assets::TextAssetCache> {
+    static CACHE: OnceLock<Mutex<twinkle_render_assets::TextAssetCache>> = OnceLock::new();
     CACHE.get_or_init(|| {
         TITLEBAR_FONT_DATABASE_LOADS.fetch_add(1, Ordering::Relaxed);
-        Mutex::new(nickel_render_assets::TextAssetCache::new())
+        Mutex::new(twinkle_render_assets::TextAssetCache::new())
     })
 }
 
@@ -749,7 +749,7 @@ fn inside_top_rounded_rect(
 fn composite_text_asset(
     destination: &mut [u8],
     destination_width: u32,
-    asset: &nickel_render_assets::RgbaAsset,
+    asset: &twinkle_render_assets::RgbaAsset,
     destination_x: i32,
     destination_y: i32,
     clip_width: u32,

@@ -1,0 +1,703 @@
+#![doc = include_str!("../README.md")]
+
+mod controller_host;
+pub use controller_host::{ControllerSource, HostedControllerDelivery, HostedControllerSource};
+
+extern crate self as twinkle;
+
+pub mod approval;
+pub mod async_raster;
+pub mod controller;
+pub mod document_selection;
+pub mod gpu;
+pub mod input;
+mod internal_surface;
+pub mod layout;
+pub mod on_screen_keyboard;
+pub mod overlay;
+pub mod primitives;
+#[cfg(test)]
+mod release_admission;
+pub mod retained_surface;
+mod runtime;
+pub mod state;
+pub mod text_context_menu;
+pub mod text_editor;
+pub mod theme;
+mod ui;
+
+#[cfg(target_os = "linux")]
+pub use controller::NativeControllerDevice;
+pub use controller::{
+    ControllerAction, ControllerEnvelope, ControllerExecutionAuthority, ControllerExecutionBinding,
+    ControllerFamily, ControllerFence, ControllerInput, ControllerObservation,
+    ControllerPhysicalControl, ControllerSourceEvidence,
+};
+pub use document_selection::{
+    DocumentSelection, SelectionAffinity, SelectionDocument, SelectionEndpoint, SelectionRun,
+    TextBoundary,
+};
+pub use gpu::{
+    AggregatePresenterCacheDiagnostics, DamageRegion, Pixel, PresenterCacheDiagnostics,
+    SoftwareRenderer,
+};
+pub use input::{FocusedInputDispatcher, InputCommand, InputContext};
+pub use internal_surface::{
+    HostedApplication, InternalSurfaceId, InternalSurfaceSet, InternalUiSurface,
+};
+pub use layout::{
+    Align, Axis, Constraints, FlexItem, Insets, Justify, Length, Overflow, Point, Rect, Size,
+    Track, layout_flex,
+};
+pub use overlay::{
+    CollisionPolicy, DismissPolicy, DismissReason, FocusReturn, OverlayAnchor, OverlayFocusPolicy,
+    OverlayId, OverlayMenu, OverlayMenuItem, OverlayMenuPresentation, OverlayPlacement,
+    OverlayStyle, TransientKind, TransientSurface, TransientTone, place_transient,
+};
+pub use primitives::{
+    ActionRegion, ArtworkPresentation, ItemPresentation, StatusRegion, SurfaceScaffold, ToolRegion,
+};
+pub use retained_surface::{
+    RetainedSurfaceChanges, RetainedSurfaceDiagnostics, RetainedSurfaceHost, RetainedSurfaceInput,
+    RetainedSurfaceInteraction, RetainedSurfaceLifecycle, RetainedSurfaceLimits,
+    RetainedSurfaceModel, RetainedSurfaceOutput, RetainedSurfaceRevisions, RetainedSurfaceSemantic,
+    RetainedSurfaceSnapshot,
+};
+pub use runtime::{
+    AdapterOutcome, Application, BoundedSemanticActionError, Completion, CompletionFailure,
+    CompletionFailureKind, ControllerExecutionDisposition, ControllerExecutionEvidence,
+    ControllerPollSchedule, DefaultHostAdapter, EffectEvidence, FileDragAction, FileDragEvent,
+    FrameOverlay, GlobalAction, HostAdapter, HostBatch, HostChangeToken, HostEvent,
+    HostEventOutcome, HostFailure, HostFailureStage, HostInputLease, HostInspection, HostServices,
+    HostTelemetry, MessageEvidence, NativeFrameCorrelation, NormalizedAdmissionBinding,
+    NormalizedIngressAuthority, NormalizedInputEnvelope, NormalizedRecipientBinding,
+    NormalizedSourceBinding, OutboundFileDrag, OverlayDeclarationFailure, Popover, ScrollAnchor,
+    SemanticActionFailure, Shortcut, ShortcutOutcome, Tooltip, UiHost, UiHostViewport, ViewContext,
+    run, run_with_adapter, run_with_controller_source,
+};
+#[cfg(target_os = "windows")]
+pub use runtime::{run_with_adapter_on_any_thread, run_with_controller_source_on_any_thread};
+pub use state::{
+    InputModality, Invalidation, NavigationState, TransientState, UiId, UiStateStore,
+    WidgetTargetMode,
+};
+pub use text_context_menu::{
+    TextCommandEffect, TextContextAction, TextContextPolicy, TextEditCommand, execute_text_command,
+    text_context_actions, text_context_menu,
+};
+pub use text_editor::TextEditor;
+pub use theme::{
+    AccentColors, AccessibilityPreferences, AppearancePreference, BorderColors, ContrastPreference,
+    DesktopDensity, EasingCurve, FontWeight, MotionPreference, MotionScale,
+    PlatformThemePreferences, RadiusScale, ResolvedAppearance, ResolvedThemePreferences,
+    ScrollbarPalette, ScrollbarStateColors, SemanticTheme, SemanticTokenSet, SizingScale,
+    SpacingScale, SurfaceColors, TextColors, TextStyle, ThemePreferences, TransparencyPreference,
+    TypographyScale, focused_surface, focused_surface_with_foreground,
+};
+pub use twinkle_macros::{component, id, ui};
+pub use twinkle_render_assets::{
+    DependencyOwnerDiagnostics, DependencyOwnerKind, dependency_owner_diagnostics,
+};
+pub use ui::{
+    ACTION_LEGEND_COMPACT_BREAKPOINT, AccessibilityNode, AccountSummaryRow, ActionKind,
+    ActionLegend, ActionLegendActions, ActionLegendDensity, ActionLegendEntry,
+    ActionLegendLocalizer, AnyView, Background, Border, BoundedSemanticError, BoxShadow, Button,
+    ButtonLabel, ButtonPresentation, ChoiceCard, ChoiceCardGroup, Collection, CollectionError,
+    CollectionPresentation, CollectionSource, CollectionState, Color, ColorSwatch, Column,
+    CompactIconTile, Component, ComponentBuilderExt, Container, ContentPane,
+    ControllerControlPresentation, ControllerGlyphSource, CustomPaint, DiagnosticKind,
+    DiagnosticMode, DragGesture, DragPhase, DropGesture, Dropdown, DropdownPartStyle,
+    EffectiveHitRoute, EventDisposition, EventOutcome, FallbackAvatar, FieldGroup, FileGrid,
+    FileGridItem, FilePlaneItem, FrameRequest, FrameResourceDiagnostics, GradientAxis, Grid,
+    GridColumnSpec, Header, HorizontalRule, Icon, Image, ImageAlignment, ImageFit,
+    ImagePresentation, InlineButtonGroup, InputSource, InteractionIntent, InteractionPaint,
+    InteractionState, LauncherSearchField, Layer, LayoutDiagnostic, LinearGradient, Menu, MenuBar,
+    MenuItem, NavigationDirection, NavigationEntry, NavigationExit, NavigationItem,
+    NavigationNeighbors, NavigationScope, NavigationSectionLabel, NavigationTraversal, PageHeader,
+    PointerIcon, PreviewState, PreviewTile, ProjectStatusRow, ProximityMagnification,
+    RESPONSIVE_NAVIGATION_BREAKPOINT, RadioButton, RadioGroup, RadioOption, ReadingDirection,
+    ResolvedGrid, ResolvedLayout, ResolvedNode, ResponsiveNavigation,
+    ResponsiveNavigationDestination, ResponsiveNavigationError, ResponsiveNavigationPresentation,
+    Row, SETTINGS_SHELL_NARROW_BREAKPOINT, START_MENU_SINGLE_PANE_BREAKPOINT, ScrollExtent,
+    SectionHeader, SelectField, SelectionIndicator, SelectionRegion, SemanticAction,
+    SemanticActionError, SemanticControllerAction, SemanticNodeSnapshot, SemanticQueryError,
+    SemanticRole, SemanticSelector, SemanticTarget, SemanticValueInput, SemanticValueSnapshot,
+    SessionActionRow, SettingsCard, SettingsListCard, SettingsNavigation, SettingsRow,
+    SettingsSearchEntry, SettingsSearchField, SettingsSection, SettingsShell, SettingsStatus,
+    SettingsStatusKind, ShortcutRow, ShortcutState, ShoulderHints, Sidebar, SidebarFolder,
+    SidebarItem, SidebarSection, Slider, SliderField, SourceLocation, Spacer, StartMenuNarrowPane,
+    StartMenuShell, StyledText, StyledTextSpan, Surface, SurfaceRole, Switch, SwitchState, TabList,
+    Text, TextAlign, TextField, TextLayoutCacheDiagnostics, TextMeasureCacheMode,
+    TextUnderlineStyle, Tone, UiEvent, UiFrame, VerticalScroll, VirtualColumn, VirtualHeightIndex,
+    VirtualNavigation, VirtualWindow, intrinsic_text_width, search_settings,
+    text_layout_cache_diagnostics, with_text_measure_cache_mode,
+};
+
+// Internal implementation shorthand. The application-facing root deliberately
+// does not export this type; graphical exceptions and presenters use `backend`.
+pub(crate) use ui::PaintCommand;
+
+/// Renderer-facing command stream. Application UI should use declarative
+/// components or [`CustomPaint`]; platform presenters consume this module.
+pub mod backend {
+    pub use crate::ui::{PaintCommand, rounded_border_spans, rounded_coverage_spans};
+
+    use std::{convert::Infallible, sync::Arc};
+
+    use image::RgbaImage;
+
+    use crate::{DamageRegion, Rect, SoftwareRenderer};
+
+    /// The storage guarantee a presenter provides when consuming retained
+    /// damage. Swapchain images and newly rebuilt compositor elements must use
+    /// [`Self::FullFrameOnly`] unless the presenter owns a preserved backing
+    /// store containing the complete prior frame.
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+    pub enum DamageHintSupport {
+        #[default]
+        FullFrameOnly,
+        PreservedFramebuffer,
+    }
+
+    /// Borrowed display list and presentation metadata for one resolved UI frame.
+    ///
+    /// Presenters may consume this directly (for example by translating fills to
+    /// GPU quads and caching image resources) without involving the software
+    /// renderer or taking ownership of application resources.
+    #[derive(Clone, Copy, Debug)]
+    pub struct RenderFrame<'frame> {
+        pub commands: &'frame [PaintCommand],
+        pub logical_size: (u32, u32),
+        pub scale_factor: f32,
+        pub generation: u64,
+    }
+
+    impl<'frame> RenderFrame<'frame> {
+        pub fn image_resources(&self) -> impl Iterator<Item = ImageResource<'frame>> {
+            self.commands.iter().filter_map(|command| match command {
+                PaintCommand::Image {
+                    id,
+                    generation,
+                    image,
+                    high_density,
+                    ..
+                } => Some(ImageResource {
+                    key: ImageResourceKey {
+                        id: *id,
+                        generation: *generation,
+                    },
+                    image,
+                    high_density: high_density.as_ref(),
+                }),
+                _ => None,
+            })
+        }
+    }
+
+    /// Cache identity assigned by Twinkle to an image resource.
+    #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+    pub struct ImageResourceKey {
+        pub id: u16,
+        pub generation: u64,
+    }
+
+    /// Borrowed image payload advertised by a [`RenderFrame`].
+    #[derive(Clone, Copy, Debug)]
+    pub struct ImageResource<'frame> {
+        pub key: ImageResourceKey,
+        pub image: &'frame Arc<RgbaImage>,
+        pub high_density: Option<&'frame Arc<RgbaImage>>,
+    }
+
+    /// Renderer-neutral presentation boundary for Twinkle display lists.
+    pub trait FrameRenderer {
+        type Error;
+
+        fn damage_hint_support(&self) -> DamageHintSupport {
+            DamageHintSupport::FullFrameOnly
+        }
+
+        fn render_frame(&mut self, frame: RenderFrame<'_>) -> Result<DamageRegion, Self::Error>;
+
+        /// Present a frame with authoritative logical damage from a retained
+        /// paint update. Renderers that cannot safely consume partial damage
+        /// retain the conservative full/display-list-derived behavior.
+        fn render_frame_with_damage(
+            &mut self,
+            frame: RenderFrame<'_>,
+            _damage: Option<&[Rect]>,
+        ) -> Result<DamageRegion, Self::Error> {
+            self.render_frame(frame)
+        }
+    }
+
+    impl FrameRenderer for SoftwareRenderer {
+        type Error = Infallible;
+
+        fn damage_hint_support(&self) -> DamageHintSupport {
+            DamageHintSupport::PreservedFramebuffer
+        }
+
+        fn render_frame(&mut self, frame: RenderFrame<'_>) -> Result<DamageRegion, Self::Error> {
+            Ok(self.render(frame.commands))
+        }
+
+        fn render_frame_with_damage(
+            &mut self,
+            frame: RenderFrame<'_>,
+            damage: Option<&[Rect]>,
+        ) -> Result<DamageRegion, Self::Error> {
+            Ok(self.render_frame_with_damage_hint(frame.commands, frame.generation, damage))
+        }
+    }
+
+    /// Test/diagnostic inspection kept beside the renderer command authority so
+    /// application crates never need to pattern-match the display list.
+    #[doc(hidden)]
+    pub fn contains_image_pixels(
+        commands: &[PaintCommand],
+        pixels: &std::sync::Arc<image::RgbaImage>,
+    ) -> bool {
+        commands.iter().any(|command| {
+            matches!(command, PaintCommand::Image { image, .. } if image.as_raw() == pixels.as_raw())
+        })
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use std::sync::Arc;
+
+        use image::RgbaImage;
+
+        use super::{
+            DamageHintSupport, FrameRenderer, ImageResourceKey, PaintCommand, RenderFrame,
+        };
+        use crate::{DamageRegion, Rect, SoftwareRenderer};
+
+        struct FullFrameOnlyRenderer;
+
+        impl FrameRenderer for FullFrameOnlyRenderer {
+            type Error = std::convert::Infallible;
+
+            fn render_frame(
+                &mut self,
+                frame: RenderFrame<'_>,
+            ) -> Result<DamageRegion, Self::Error> {
+                Ok(DamageRegion {
+                    rects: [Rect::new(
+                        0.0,
+                        0.0,
+                        frame.logical_size.0 as f32,
+                        frame.logical_size.1 as f32,
+                    )]
+                    .into_iter()
+                    .collect(),
+                })
+            }
+        }
+
+        #[test]
+        fn damage_support_defaults_to_full_frame_and_requires_preserved_storage() {
+            assert_eq!(
+                FullFrameOnlyRenderer.damage_hint_support(),
+                DamageHintSupport::FullFrameOnly
+            );
+            assert_eq!(
+                SoftwareRenderer::new(4, 4, 1.0).damage_hint_support(),
+                DamageHintSupport::PreservedFramebuffer
+            );
+        }
+
+        #[test]
+        fn frame_exposes_borrowed_image_resources_with_cache_identity() {
+            let image = Arc::new(RgbaImage::new(8, 4));
+            let high_density = Arc::new(RgbaImage::new(16, 8));
+            let commands = [PaintCommand::Image {
+                bounds: Rect::new(0.0, 0.0, 8.0, 4.0),
+                id: 7,
+                generation: 12,
+                image: Arc::clone(&image),
+                high_density: Some(Arc::clone(&high_density)),
+            }];
+            let frame = RenderFrame {
+                commands: &commands,
+                logical_size: (8, 4),
+                scale_factor: 2.0,
+                generation: 31,
+            };
+
+            let resources = frame.image_resources().collect::<Vec<_>>();
+            assert_eq!(resources.len(), 1);
+            assert_eq!(
+                resources[0].key,
+                ImageResourceKey {
+                    id: 7,
+                    generation: 12
+                }
+            );
+            assert!(Arc::ptr_eq(resources[0].image, &image));
+            assert!(Arc::ptr_eq(
+                resources[0].high_density.unwrap(),
+                &high_density
+            ));
+        }
+
+        #[test]
+        fn software_fallback_consumes_the_same_render_frame() {
+            let commands = [PaintCommand::Fill {
+                rect: Rect::new(0.0, 0.0, 2.0, 2.0),
+                color: 0xff0000,
+            }];
+            let frame = RenderFrame {
+                commands: &commands,
+                logical_size: (2, 2),
+                scale_factor: 1.0,
+                generation: 1,
+            };
+            let mut renderer = SoftwareRenderer::new_pixel_buffer(2, 2, 1.0);
+
+            let damage = renderer.render_frame(frame).unwrap();
+
+            assert!(!damage.is_empty());
+            assert!(renderer.pixels().iter().any(|pixel| pixel.a != 0));
+        }
+
+        #[test]
+        fn software_damage_telemetry_distinguishes_partial_use_from_full_fallback() {
+            let initial = [PaintCommand::Fill {
+                rect: Rect::new(0.0, 0.0, 2.0, 2.0),
+                color: 0xff0000,
+            }];
+            let changed = [PaintCommand::Fill {
+                rect: Rect::new(0.0, 0.0, 2.0, 2.0),
+                color: 0x00ff00,
+            }];
+            let frame = |commands, generation| RenderFrame {
+                commands,
+                logical_size: (4, 4),
+                scale_factor: 1.0,
+                generation,
+            };
+            let hint = [Rect::new(0.0, 0.0, 2.0, 2.0)];
+            let mut renderer = SoftwareRenderer::new(4, 4, 1.0);
+
+            renderer.render_frame(frame(&initial, 1)).unwrap();
+            renderer
+                .render_frame_with_damage(frame(&changed, 2), Some(&hint))
+                .unwrap();
+            renderer.invalidate();
+            let fallback = renderer
+                .render_frame_with_damage(frame(&initial, 3), Some(&hint))
+                .unwrap();
+
+            let diagnostics = renderer.software_raster_diagnostics();
+            assert_eq!(diagnostics.damage_hints_accepted, 1);
+            assert_eq!(diagnostics.damage_hints_fell_back, 1);
+            assert_eq!(diagnostics.partial_repaints, 1);
+            assert_eq!(diagnostics.full_repaints, 2);
+            assert_eq!(fallback.rects.as_slice(), &[Rect::new(0.0, 0.0, 4.0, 4.0)]);
+            let mut cold = SoftwareRenderer::new(4, 4, 1.0);
+            cold.render(&initial);
+            assert_eq!(renderer.pixels(), cold.pixels());
+        }
+    }
+}
+
+pub type Fragment<Message = String> = Column<Message>;
+
+pub trait View<Message>: Component<Message> {}
+
+impl<Message, T: Component<Message>> View<Message> for T {}
+
+pub mod prelude {
+    pub use crate::{
+        AccentColors, AccessibilityPreferences, AccountSummaryRow, ActionRegion, Align, AnyView,
+        AppearancePreference, Application, ArtworkPresentation, Background, Border, BorderColors,
+        Button, ButtonPresentation, ChoiceCard, ChoiceCardGroup, Collection, CollectionError,
+        CollectionPresentation, CollectionSource, CollectionState, CollisionPolicy, Color,
+        ColorSwatch, Column, CompactIconTile, Component, ComponentBuilderExt, Container,
+        ContrastPreference, CustomPaint, DesktopDensity, DiagnosticKind, DismissPolicy,
+        DismissReason, Dropdown, DropdownPartStyle, EasingCurve, FallbackAvatar, FieldGroup,
+        FontWeight, Fragment, Grid, GridColumnSpec, Icon, Image, ImageAlignment, ImageFit,
+        ImagePresentation, InlineButtonGroup, Insets, ItemPresentation, Justify,
+        LauncherSearchField, Length, Menu, MenuBar, MenuItem, MotionPreference, MotionScale,
+        NavigationDirection, NavigationEntry, NavigationExit, NavigationItem, NavigationNeighbors,
+        NavigationScope, NavigationSectionLabel, NavigationTraversal, Overflow, OverlayAnchor,
+        OverlayFocusPolicy, OverlayId, OverlayMenu, OverlayMenuItem, OverlayMenuPresentation,
+        OverlayPlacement, OverlayStyle, PageHeader, PlatformThemePreferences, PointerIcon, Popover,
+        PreviewState, PreviewTile, ProjectStatusRow, RESPONSIVE_NAVIGATION_BREAKPOINT, RadioButton,
+        RadioGroup, RadioOption, RadiusScale, ReadingDirection, ResolvedAppearance,
+        ResolvedThemePreferences, ResponsiveNavigation, ResponsiveNavigationDestination,
+        ResponsiveNavigationError, ResponsiveNavigationPresentation, Row,
+        SETTINGS_SHELL_NARROW_BREAKPOINT, START_MENU_SINGLE_PANE_BREAKPOINT, SectionHeader,
+        SelectField, SelectionIndicator, SelectionRegion, SemanticTheme, SemanticTokenSet,
+        SessionActionRow, SettingsCard, SettingsListCard, SettingsNavigation, SettingsRow,
+        SettingsSearchEntry, SettingsSection, SettingsShell, SettingsStatus, SettingsStatusKind,
+        Shortcut, ShortcutRow, ShortcutState, SizingScale, Slider, SliderField, Spacer,
+        SpacingScale, StartMenuNarrowPane, StartMenuShell, StatusRegion, Surface, SurfaceColors,
+        SurfaceRole, SurfaceScaffold, Switch, SwitchState, TabList, Text, TextAlign, TextBoundary,
+        TextColors, TextField, TextStyle, ThemePreferences, Tone, ToolRegion, Tooltip, Track,
+        TransientKind, TransientSurface, TransientTone, TransparencyPreference, TypographyScale,
+        UiEvent, UiId, UiStateStore, View, VirtualColumn, VirtualWindow, component, id,
+        place_transient, run, search_settings, ui,
+    };
+}
+
+#[cfg(test)]
+mod declarative_tests {
+    use super::prelude::*;
+    use super::{Rect, UiFrame};
+
+    #[derive(Clone, Debug, PartialEq)]
+    enum Message {
+        Save,
+        ToggleMenu,
+        Select(u32),
+        Volume(f32),
+        Query(String),
+    }
+
+    #[test]
+    fn declarative_menu_preserves_typed_item_messages() {
+        let tree = UiFrame::layout(
+            ui! {
+                <MenuBar>
+                    <Menu id={id!(file_menu)} on_toggle={Message::ToggleMenu} label={"File"}>
+                        <MenuItem label={"Save"} on_press={Message::Save} />
+                        <MenuItem label={"Unavailable"} disabled />
+                    </Menu>
+                </MenuBar>
+            },
+            Rect::new(0.0, 0.0, 240.0, 120.0),
+        );
+        assert!(
+            !tree
+                .semantic_targets_for_message(&Message::ToggleMenu)
+                .is_empty()
+        );
+    }
+
+    fn volume(value: f32) -> Message {
+        Message::Volume(value)
+    }
+
+    fn query(value: String) -> Message {
+        Message::Query(value)
+    }
+
+    #[test]
+    fn declarative_controller_panes_groups_and_adjustment_share_one_state_machine() {
+        let view = ui! {
+            <Row>
+                <Container id={"sidebar"} navigation_scope={NavigationScope::pane(false)}
+                    controller_scope_background={0x24203a}>
+                    <Button on_press={Message::Save}>{"Save"}</Button>
+                </Container>
+                <Container id={"content"} navigation_scope={NavigationScope::pane(true)}
+                    controller_scope_background={0x24203a}>
+                    <Container id={"audio"} navigation_scope={NavigationScope::group()}
+                        controller_focus_background_tint={0x55d98b}>
+                        <Slider id={"volume"} value={0.5} on_change={volume}
+                            adjustment_step={0.1} controller_focus_background_tint={0x55d98b} />
+                    </Container>
+                </Container>
+            </Row>
+        };
+        let mut state = UiStateStore::default();
+        let tree = UiFrame::layout_with_state(view, Rect::new(0.0, 0.0, 480.0, 240.0), &mut state);
+
+        tree.handle_event(&mut state, UiEvent::ControllerNext);
+        assert!(
+            state
+                .navigation()
+                .controller_selected()
+                .is_some_and(|id| id.as_str().ends_with("/audio"))
+        );
+        tree.handle_event(&mut state, UiEvent::ControllerActivate);
+        assert!(state.navigation().controller_scope().is_some());
+        tree.handle_event(&mut state, UiEvent::ControllerActivate);
+        assert!(state.navigation().controller_editing());
+        let adjusted = tree.handle_event(&mut state, UiEvent::ControllerAdjust(1.0));
+        assert_eq!(adjusted.messages, vec![Message::Volume(0.6)]);
+        tree.handle_event(&mut state, UiEvent::ControllerBack);
+        assert!(!state.navigation().controller_editing());
+
+        tree.handle_event(&mut state, UiEvent::ControllerPreviousPane);
+        assert!(
+            state
+                .navigation()
+                .controller_selected()
+                .is_some_and(|id| id.as_str().contains("sidebar"))
+        );
+
+        tree.handle_event(&mut state, UiEvent::FocusLost);
+        assert!(!state.window_focused());
+        assert!(state.navigation().controller_selected().is_none());
+        tree.handle_event(&mut state, UiEvent::ControllerNext);
+        assert!(state.navigation().controller_selected().is_none());
+
+        tree.handle_event(&mut state, UiEvent::FocusGained);
+        tree.handle_event(&mut state, UiEvent::ControllerNext);
+        assert!(state.navigation().controller_selected().is_some());
+    }
+
+    #[component]
+    fn ItemCard(label: &str, message: Message, tone: Option<Color>) -> impl View<Message> {
+        ui! {
+            <Button on_press={message} color={tone.unwrap_or(0xffffff)}>{label}</Button>
+        }
+    }
+
+    #[component]
+    fn Frame(child: impl Component<Message>, tone: Color) -> impl View<Message> {
+        ui! { <Container background={tone}>{child}</Container> }
+    }
+
+    #[component]
+    fn Stack(
+        children: impl IntoIterator<Item = impl Component<Message>>,
+        gap: f32,
+    ) -> impl View<Message> {
+        ui! { <Column gap={gap}>{children.into_iter()}</Column> }
+    }
+
+    #[test]
+    fn declarative_components_expressions_lists_keys_and_messages_share_the_ui_tree() {
+        let title = String::from("Nickel");
+        let items = [(7_u32, "Seven"), (9, "Nine")];
+        let show_slider = true;
+        let view = ui! {
+            <Column id={id!(settings_root)} gap={8.0} padding={Insets::all(12.0)}
+                background={0x101010} border={Border::new(0x334455, 1.0)} radius={6.0} fill_width>
+                <Text>{&title}</Text>
+                <Row align_items={Align::Center}>
+                    <Button id={id!(save)} on_press={Message::Save}>{"Save"}</Button>
+                    <Spacer fill />
+                </Row>
+                {if show_slider {
+                    ui! { <Slider id={id!(volume)} value={0.5} on_change={volume} /> }
+                } else {
+                    ui! { <Text>{"Volume unavailable"}</Text> }
+                }}
+                <TextField id={id!(query)} value={"nickel"} on_change={query} />
+                <Grid>
+                    {items.iter().map(|(key, label)| ui! {
+                        <ItemCard key={*key} message={Message::Select(*key)} label={label} />
+                    })}
+                </Grid>
+            </Column>
+        };
+        let tree = UiFrame::layout(view, Rect::new(0.0, 0.0, 480.0, 320.0));
+        let save_id = tree
+            .semantic_targets_for_message(&Message::Save)
+            .into_iter()
+            .next()
+            .expect("declarative save target")
+            .id;
+        assert!(save_id.as_str().ends_with("/save"));
+        let save = tree
+            .resolved_layout()
+            .find(&save_id)
+            .expect("resolved save");
+        assert_eq!(save.source.expect("declarative source").component, "Button");
+        assert!(tree.commands().iter().any(|command| matches!(
+            command,
+            super::backend::PaintCommand::Text { text, .. } if text == "Nickel"
+        )));
+        assert!(tree.commands().iter().any(|command| matches!(
+            command,
+            super::backend::PaintCommand::RoundedFill { radius, .. } if *radius == 6.0
+        )));
+        let query_id = tree
+            .resolved_layout()
+            .nodes()
+            .iter()
+            .find(|node| node.id.as_str().ends_with("/query"))
+            .expect("query field")
+            .id
+            .clone();
+        let mut state = UiStateStore::default();
+        state.set_focus(Some(query_id));
+        assert_eq!(
+            tree.handle_event(&mut state, UiEvent::TextInput("!".into()))
+                .messages,
+            vec![Message::Query("nickel!".into())]
+        );
+    }
+
+    #[test]
+    fn fragments_and_match_are_ordinary_rust_values() {
+        let value = 2;
+        let view = ui! {
+            <>
+                <Text>{"First"}</Text>
+                {match value {
+                    2 => ui! { <Text>{"Second"}</Text> },
+                    _ => ui! { <Text>{"Other"}</Text> },
+                }}
+            </>
+        };
+        let tree: UiFrame<Message> = UiFrame::layout(view, Rect::new(0.0, 0.0, 200.0, 80.0));
+        assert_eq!(
+            tree.commands()
+                .iter()
+                .filter(|command| matches!(command, super::backend::PaintCommand::Text { .. }))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn function_components_accept_declared_child_and_children_slots() {
+        let view = ui! {
+            <Stack gap={3.0}>
+                <Frame tone={0x101010}><Text>{"one"}</Text></Frame>
+                <Frame tone={0x202020}><Text>{"two"}</Text></Frame>
+            </Stack>
+        };
+        let tree: UiFrame<Message> = UiFrame::layout(view, Rect::new(0.0, 0.0, 200.0, 80.0));
+        assert_eq!(
+            tree.commands()
+                .iter()
+                .filter(|command| matches!(command, super::backend::PaintCommand::Text { .. }))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn public_react_style_contract_accepts_header_alignment_tone_and_typed_style_values() {
+        let title = String::from("Settings");
+        let view = ui! {
+            <Container fill_width min_width={320.0} padding={16.0} gap={8.0}
+                background={0x101820} border={Border::new(0x334455, 1.0)} radius={8.0}
+                overflow_y={Overflow::Auto}>
+                <Header title={&title} />
+                <Row align={Align::Center}>
+                    <Text tone={Tone::Muted}>{"Declarative"}</Text>
+                    <Spacer fill />
+                </Row>
+            </Container>
+        };
+        let tree: UiFrame<Message> = UiFrame::layout(view, Rect::new(0.0, 0.0, 480.0, 160.0));
+        assert!(tree.commands().iter().any(
+            |command| matches!(command, super::backend::PaintCommand::Text { text, .. } if text == "Settings")
+        ));
+    }
+
+    #[test]
+    fn declarative_source_locations_flow_into_layout_diagnostics() {
+        let tree = UiFrame::<Message>::layout_with_diagnostics(
+            ui! { <Column id={id!(broken)} min_width={200.0} max_width={10.0} /> },
+            Rect::new(0.0, 0.0, 100.0, 40.0),
+        );
+        let diagnostic = tree
+            .diagnostics()
+            .iter()
+            .find(|diagnostic| diagnostic.kind == DiagnosticKind::ContradictoryConstraints)
+            .expect("contradictory diagnostic");
+        let source = diagnostic.source.expect("declarative diagnostic source");
+        assert_eq!(source.component, "Column");
+        assert!(source.file.ends_with("lib.rs"));
+    }
+}

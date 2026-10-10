@@ -1,0 +1,4874 @@
+use super::*;
+use crate::SemanticTheme;
+
+pub struct Layer<Message = String>(Element<Message>);
+
+impl<Message> Default for Layer<Message> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<Message> Layer<Message> {
+    pub fn new() -> Self {
+        Self(Element::layer())
+    }
+    pub fn child(mut self, child: impl Component<Message>) -> Self {
+        self.0 = self.0.child(child);
+        self
+    }
+    pub fn children(mut self, children: impl IntoIterator<Item = impl Component<Message>>) -> Self {
+        self.0 = self.0.children(children);
+        self
+    }
+
+    pub fn width(mut self, width: f32) -> Self {
+        self.0 = self.0.width(width);
+        self
+    }
+
+    pub fn width_length(mut self, width: Length) -> Self {
+        self.0 = self.0.width_length(width);
+        self
+    }
+
+    pub fn height(mut self, height: f32) -> Self {
+        self.0 = self.0.height(height);
+        self
+    }
+    pub fn height_length(mut self, height: Length) -> Self {
+        self.0 = self.0.height_length(height);
+        self
+    }
+    pub fn id(mut self, id: impl Into<UiId>) -> Self {
+        self.0 = self.0.id(id);
+        self
+    }
+}
+
+impl<Message> Component<Message> for Layer<Message> {
+    fn into_element(self) -> Element<Message> {
+        self.0
+    }
+}
+
+pub struct Spacer<Message = String>(Element<Message>);
+
+impl<Message> Default for Spacer<Message> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<Message> Spacer<Message> {
+    pub fn new() -> Self {
+        Self::flex()
+    }
+
+    pub fn flex() -> Self {
+        Self(Element::flex(Axis::Horizontal).grow(1.0))
+    }
+
+    pub fn fixed(size: f32) -> Self {
+        Self(Element::flex(Axis::Horizontal).width(size).height(size))
+    }
+
+    pub fn vertical(height: f32) -> Self {
+        Self(Element::flex(Axis::Horizontal).height(height).grow(0.0))
+    }
+
+    pub fn grow(mut self, grow: f32) -> Self {
+        self.0 = self.0.grow(grow);
+        self
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct VirtualWindow {
+    pub range: Range<usize>,
+    pub leading: f32,
+    pub trailing: f32,
+    pub total: f32,
+}
+
+/// Reusable variable-height geometry for a logical collection. Build when the
+/// source/estimates change; viewport queries neither rebuild nor scan the source.
+#[derive(Debug, PartialEq)]
+pub struct VirtualHeightIndex {
+    starts: Vec<f32>,
+    ends: Vec<f32>,
+    total: f32,
+    uniform: Option<(usize, f32, f32)>,
+    base: Option<Arc<VirtualHeightIndex>>,
+    corrections: Option<Arc<HeightCorrection>>,
+}
+
+/// Sparse persistent prefix-sum tree. Intervals are implicit in the logical
+/// row count; snapshots share every branch outside the changed row's path.
+#[derive(Debug, PartialEq)]
+struct HeightCorrection {
+    delta: f64,
+    nodes: usize,
+    left: Option<Arc<Self>>,
+    right: Option<Arc<Self>>,
+}
+
+impl HeightCorrection {
+    fn row_delta(root: &Option<Arc<Self>>, range: Range<usize>, row: usize) -> f64 {
+        let Some(node) = root else {
+            return 0.0;
+        };
+        if range.end - range.start == 1 {
+            return node.delta;
+        }
+        let middle = range.start + (range.end - range.start) / 2;
+        if row < middle {
+            Self::row_delta(&node.left, range.start..middle, row)
+        } else {
+            Self::row_delta(&node.right, middle..range.end, row)
+        }
+    }
+
+    fn update(
+        previous: &Option<Arc<Self>>,
+        range: Range<usize>,
+        row: usize,
+        delta: f64,
+        allocations: &mut usize,
+    ) -> Option<Arc<Self>> {
+        if range.end - range.start == 1 {
+            if delta == 0.0 {
+                return None;
+            }
+            *allocations += 1;
+            return Some(Arc::new(Self {
+                delta,
+                nodes: 1,
+                left: None,
+                right: None,
+            }));
+        }
+        let middle = range.start + (range.end - range.start) / 2;
+        let mut left = previous.as_ref().and_then(|node| node.left.clone());
+        let mut right = previous.as_ref().and_then(|node| node.right.clone());
+        if row < middle {
+            left = Self::update(&left, range.start..middle, row, delta, allocations);
+        } else {
+            right = Self::update(&right, middle..range.end, row, delta, allocations);
+        }
+        if left.is_none() && right.is_none() {
+            return None;
+        }
+        *allocations += 1;
+        Some(Arc::new(Self {
+            delta: left.as_ref().map_or(0.0, |node| node.delta)
+                + right.as_ref().map_or(0.0, |node| node.delta),
+            nodes: 1
+                + left.as_ref().map_or(0, |node| node.nodes)
+                + right.as_ref().map_or(0, |node| node.nodes),
+            left,
+            right,
+        }))
+    }
+
+    fn prefix(root: &Option<Arc<Self>>, range: Range<usize>, end: usize, work: &mut usize) -> f64 {
+        let Some(node) = root else {
+            return 0.0;
+        };
+        *work += 1;
+        if end <= range.start {
+            return 0.0;
+        }
+        if end >= range.end {
+            return node.delta;
+        }
+        let middle = range.start + (range.end - range.start) / 2;
+        if end <= middle {
+            Self::prefix(&node.left, range.start..middle, end, work)
+        } else {
+            node.left.as_ref().map_or(0.0, |node| node.delta)
+                + Self::prefix(&node.right, middle..range.end, end, work)
+        }
+    }
+}
+
+impl VirtualHeightIndex {
+    pub fn new(heights: &[f32], gap: f32) -> Self {
+        let gap = gap.max(0.0);
+        let mut starts = Vec::with_capacity(heights.len());
+        let mut ends = Vec::with_capacity(heights.len());
+        let mut cursor = 0.0;
+        for (index, height) in heights.iter().enumerate() {
+            if index > 0 {
+                cursor += gap;
+            }
+            starts.push(cursor);
+            cursor += height.max(0.0);
+            ends.push(cursor);
+        }
+        Self {
+            starts,
+            ends,
+            total: cursor,
+            uniform: None,
+            base: None,
+            corrections: None,
+        }
+    }
+
+    /// Retain fixed row geometry without allocating one extent per item.
+    pub fn uniform(count: usize, height: f32, gap: f32) -> Self {
+        let height = height.max(0.0);
+        let gap = gap.max(0.0);
+        let total = if count == 0 {
+            0.0
+        } else {
+            height + (height + gap) * count.saturating_sub(1) as f32
+        };
+        Self {
+            starts: Vec::new(),
+            ends: Vec::new(),
+            total,
+            uniform: Some((count, height, gap)),
+            base: None,
+            corrections: None,
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        if let Some(base) = &self.base {
+            return base.len();
+        }
+        self.uniform
+            .map_or(self.starts.len(), |(count, _, _)| count)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    fn row_start(&self, row: usize, work: &mut usize) -> f32 {
+        if row >= self.len() {
+            return self.total;
+        }
+        if let Some(base) = &self.base {
+            return (f64::from(base.row_start(row, work))
+                + HeightCorrection::prefix(&self.corrections, 0..self.len(), row, work))
+                as f32;
+        }
+        self.uniform.map_or_else(
+            || self.starts[row],
+            |(_, height, gap)| row as f32 * (height + gap),
+        )
+    }
+
+    fn row_end(&self, row: usize, work: &mut usize) -> f32 {
+        if let Some(base) = &self.base {
+            return (f64::from(base.row_end(row, work))
+                + HeightCorrection::prefix(&self.corrections, 0..self.len(), row + 1, work))
+                as f32;
+        }
+        self.uniform.map_or_else(
+            || self.ends[row],
+            |(_, height, gap)| row as f32 * (height + gap) + height,
+        )
+    }
+
+    pub fn height(&self, row: usize) -> Option<f32> {
+        if row >= self.len() {
+            return None;
+        }
+        if let Some(base) = &self.base {
+            return Some(
+                (f64::from(base.height(row)?)
+                    + HeightCorrection::row_delta(&self.corrections, 0..self.len(), row))
+                    as f32,
+            );
+        }
+        if let Some((_, height, _)) = self.uniform {
+            return Some(height);
+        }
+        Some(self.row_end(row, &mut 0) - self.row_start(row, &mut 0))
+    }
+
+    /// Refine a measured row without copying base extents or previous correction
+    /// branches. Returns actual new correction-node allocations for admission.
+    /// Callers own viewport/scale invalidation and scroll-anchor adjustment.
+    pub fn with_measured_height(
+        self: &Arc<Self>,
+        row: usize,
+        height: f32,
+    ) -> Option<(Arc<Self>, usize)> {
+        if !height.is_finite() || !self.total.is_finite() || height < 0.0 || row >= self.len() {
+            return None;
+        }
+        if self.height(row) == Some(height) {
+            return Some((Arc::clone(self), 0));
+        }
+        let base = self.base.as_ref().unwrap_or(self);
+        let delta = f64::from(height) - f64::from(base.height(row)?);
+        let mut allocations = 0;
+        let corrections = HeightCorrection::update(
+            &self.corrections,
+            0..self.len(),
+            row,
+            delta,
+            &mut allocations,
+        );
+        if corrections.is_none() {
+            return Some((Arc::clone(base), allocations));
+        }
+        let total = (f64::from(base.total) + corrections.as_ref().map_or(0.0, |node| node.delta))
+            .max(0.0) as f32;
+        if !total.is_finite() {
+            return None;
+        }
+        Some((
+            Arc::new(Self {
+                starts: Vec::new(),
+                ends: Vec::new(),
+                total,
+                uniform: None,
+                base: Some(Arc::clone(base)),
+                corrections,
+            }),
+            allocations,
+        ))
+    }
+
+    /// Geometry for an already selected logical range, without re-reading rows.
+    pub fn window_for_range(&self, range: Range<usize>) -> Option<VirtualWindow> {
+        if range.start > range.end || range.end > self.len() {
+            return None;
+        }
+        if self.base.is_some() {
+            let leading = self.row_start(range.start, &mut 0);
+            let visible_end = if range.is_empty() {
+                leading
+            } else {
+                self.row_end(range.end - 1, &mut 0)
+            };
+            return Some(VirtualWindow {
+                range,
+                leading,
+                trailing: (self.total - visible_end).max(0.0),
+                total: self.total,
+            });
+        }
+        if let Some((count, height, gap)) = self.uniform {
+            let leading = if range.start < count {
+                range.start as f32 * (height + gap)
+            } else {
+                self.total
+            };
+            let visible_end = if range.is_empty() {
+                leading
+            } else {
+                (range.end - 1) as f32 * (height + gap) + height
+            };
+            return Some(VirtualWindow {
+                range,
+                leading,
+                trailing: (self.total - visible_end).max(0.0),
+                total: self.total,
+            });
+        }
+        let leading = self.starts.get(range.start).copied().unwrap_or(self.total);
+        let visible_end = if range.is_empty() {
+            leading
+        } else {
+            self.ends[range.end - 1]
+        };
+        Some(VirtualWindow {
+            range,
+            leading,
+            trailing: (self.total - visible_end).max(0.0),
+            total: self.total,
+        })
+    }
+
+    /// Retained extent payload, excluding allocator overhead.
+    pub fn retained_bytes(&self) -> usize {
+        if let Some(base) = &self.base {
+            return base.retained_bytes()
+                + self.corrections.as_ref().map_or(0, |node| {
+                    node.nodes * std::mem::size_of::<HeightCorrection>()
+                });
+        }
+        (self.starts.capacity() + self.ends.capacity()) * std::mem::size_of::<f32>()
+    }
+
+    pub fn window(&self, offset: f32, viewport: f32, overscan: f32) -> VirtualWindow {
+        self.window_with_work(offset, viewport, overscan).0
+    }
+
+    /// Resolve an embedded collection against its actual ancestor clip. `bounds`
+    /// is in the same coordinate space as `clip`, including scroll translation.
+    /// Unlike a standalone scroller, a wholly offscreen collection builds no rows.
+    pub fn window_in_clip(&self, bounds: Rect, clip: Rect, overscan: f32) -> VirtualWindow {
+        let overscan = overscan.max(0.0);
+        let left = bounds.origin.x.max(clip.origin.x);
+        let right = (bounds.origin.x + bounds.size.width).min(clip.origin.x + clip.size.width);
+        let top = bounds.origin.y.max(clip.origin.y - overscan);
+        let bottom =
+            (bounds.origin.y + self.total).min(clip.origin.y + clip.size.height + overscan);
+        if right <= left || bottom <= top || clip.size.height <= 0.0 {
+            return VirtualWindow {
+                range: 0..0,
+                leading: 0.0,
+                trailing: self.total,
+                total: self.total,
+            };
+        }
+        self.window(top - bounds.origin.y, bottom - top, 0.0)
+    }
+
+    /// Returns actual boundary comparisons plus correction-tree nodes visited.
+    pub fn window_with_work(
+        &self,
+        offset: f32,
+        viewport: f32,
+        overscan: f32,
+    ) -> (VirtualWindow, usize) {
+        if self.base.is_some() {
+            let viewport = viewport.max(0.0);
+            let overscan = overscan.max(0.0);
+            let offset = offset.clamp(0.0, (self.total - viewport).max(0.0));
+            let minimum = (offset - overscan).max(0.0);
+            let maximum = (offset + viewport + overscan).min(self.total);
+            let mut work = 0;
+            let (mut first, mut high) = (0, self.len());
+            while first < high {
+                work += 1;
+                let middle = first + (high - first) / 2;
+                if self.row_end(middle, &mut work) < minimum {
+                    first = middle + 1;
+                } else {
+                    high = middle;
+                }
+            }
+            let (mut end, mut high) = (first, self.len());
+            while end < high {
+                work += 1;
+                let middle = end + (high - end) / 2;
+                if self.row_start(middle, &mut work) <= maximum {
+                    end = middle + 1;
+                } else {
+                    high = middle;
+                }
+            }
+            let leading = self.row_start(first, &mut work);
+            let visible_end = if end > first {
+                self.row_end(end - 1, &mut work)
+            } else {
+                leading
+            };
+            return (
+                VirtualWindow {
+                    range: first..end,
+                    leading,
+                    trailing: (self.total - visible_end).max(0.0),
+                    total: self.total,
+                },
+                work,
+            );
+        }
+        if let Some((count, height, gap)) = self.uniform {
+            return VirtualWindow::from_uniform_with_work(
+                count, height, gap, offset, viewport, overscan,
+            );
+        }
+        let viewport = viewport.max(0.0);
+        let overscan = overscan.max(0.0);
+        let offset = offset.clamp(0.0, (self.total - viewport).max(0.0));
+        let minimum = (offset - overscan).max(0.0);
+        let maximum = (offset + viewport + overscan).min(self.total);
+        let mut comparisons = 0;
+        let first = self.ends.partition_point(|end| {
+            comparisons += 1;
+            *end < minimum
+        });
+        let end = self
+            .starts
+            .partition_point(|start| {
+                comparisons += 1;
+                *start <= maximum
+            })
+            .max(first);
+        let leading = self.starts.get(first).copied().unwrap_or(self.total);
+        let visible_end = end
+            .checked_sub(1)
+            .and_then(|index| self.ends.get(index))
+            .copied()
+            .unwrap_or(leading);
+        (
+            VirtualWindow {
+                range: first..end,
+                leading,
+                trailing: (self.total - visible_end).max(0.0),
+                total: self.total,
+            },
+            comparisons,
+        )
+    }
+}
+
+impl VirtualWindow {
+    /// Resolves a fixed-extent window without allocating or walking one entry
+    /// per logical item.
+    pub fn from_uniform(
+        count: usize,
+        height: f32,
+        gap: f32,
+        offset: f32,
+        viewport: f32,
+        overscan: f32,
+    ) -> Self {
+        Self::from_uniform_with_work(count, height, gap, offset, viewport, overscan).0
+    }
+
+    fn from_uniform_with_work(
+        count: usize,
+        height: f32,
+        gap: f32,
+        offset: f32,
+        viewport: f32,
+        overscan: f32,
+    ) -> (Self, usize) {
+        let height = height.max(0.0);
+        let gap = gap.max(0.0);
+        let viewport = viewport.max(0.0);
+        let overscan = overscan.max(0.0);
+        let stride = height + gap;
+        let total = if count == 0 {
+            0.0
+        } else {
+            height + stride * count.saturating_sub(1) as f32
+        };
+        let offset = offset.clamp(0.0, (total - viewport).max(0.0));
+        let minimum = (offset - overscan).max(0.0);
+        let maximum = (offset + viewport + overscan).min(total);
+
+        let mut low = 0usize;
+        let mut high = count;
+        let mut comparisons = 0;
+        while low < high {
+            comparisons += 1;
+            let middle = low + (high - low) / 2;
+            let end = middle as f32 * stride + height;
+            if end < minimum {
+                low = middle + 1;
+            } else {
+                high = middle;
+            }
+        }
+        let first = low;
+
+        let mut end_low = first;
+        high = count;
+        while end_low < high {
+            comparisons += 1;
+            let middle = end_low + (high - end_low) / 2;
+            let start = middle as f32 * stride;
+            if start <= maximum {
+                end_low = middle + 1;
+            } else {
+                high = middle;
+            }
+        }
+        let end = end_low.max(first);
+        let leading = if first < count {
+            first as f32 * stride
+        } else {
+            total
+        };
+        let visible_end = if end > first {
+            (end - 1) as f32 * stride + height
+        } else {
+            leading
+        };
+        (
+            Self {
+                range: first..end,
+                leading,
+                trailing: (total - visible_end).max(0.0),
+                total,
+            },
+            comparisons,
+        )
+    }
+
+    pub fn from_heights(
+        heights: &[f32],
+        gap: f32,
+        offset: f32,
+        viewport: f32,
+        overscan: f32,
+    ) -> Self {
+        VirtualHeightIndex::new(heights, gap).window(offset, viewport, overscan)
+    }
+}
+
+/// Native logical extent and admitted rows. Change revision when the source
+/// changes so deferred navigation cannot cross source generations.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct VirtualNavigation {
+    pub revision: u64,
+    pub count: usize,
+    pub range: Range<usize>,
+}
+
+pub struct VirtualColumn<Message = String> {
+    window: VirtualWindow,
+    visible: Column<Message>,
+    navigation: Option<(usize, u64)>,
+}
+
+impl<Message> VirtualColumn<Message> {
+    pub fn new() -> Self {
+        Self {
+            window: VirtualWindow::from_heights(&[], 0.0, 0.0, 0.0, 0.0),
+            visible: Column::new().fill_width(),
+            navigation: None,
+        }
+    }
+
+    pub fn window(mut self, window: VirtualWindow) -> Self {
+        self.window = window;
+        self
+    }
+
+    /// Enable logical Home/End navigation without building omitted rows.
+    pub fn logical_navigation(mut self, count: usize, revision: u64) -> Self {
+        self.navigation = Some((count, revision));
+        self
+    }
+
+    pub fn gap(mut self, gap: f32) -> Self {
+        self.visible = self.visible.gap(gap);
+        self
+    }
+
+    pub fn children(mut self, children: impl IntoIterator<Item = impl Component<Message>>) -> Self {
+        self.visible = self.visible.children(children);
+        self
+    }
+
+    pub fn max_width(mut self, width: f32) -> Self {
+        self.visible = self.visible.max_width(width);
+        self
+    }
+
+    pub fn align_self(mut self, align: Align) -> Self {
+        self.visible = self.visible.align_self(align);
+        self
+    }
+}
+
+impl<Message> Default for VirtualColumn<Message> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<Message> Component<Message> for VirtualColumn<Message> {
+    fn into_element(self) -> Element<Message> {
+        let navigation = self.navigation.map(|(count, revision)| VirtualNavigation {
+            revision,
+            count,
+            range: self.window.range.clone(),
+        });
+        let mut element = Column::new()
+            .fill_width()
+            .child(Spacer::vertical(self.window.leading))
+            .child(self.visible)
+            .child(Spacer::vertical(self.window.trailing))
+            .into_element();
+        element.virtual_navigation = navigation;
+        element
+    }
+}
+
+impl<Message> Component<Message> for Spacer<Message> {
+    fn into_element(self) -> Element<Message> {
+        self.0
+    }
+}
+
+pub struct VerticalScroll<Message = String>(Element<Message>);
+
+impl<Message> VerticalScroll<Message> {
+    pub fn new(message: Message, offset: f32) -> Self {
+        Self(Element {
+            id: None,
+            source: None,
+            content_revision: None,
+            virtual_navigation: None,
+            kind: Kind::VerticalScroll {
+                offset: offset.max(0.0),
+                controlled: false,
+            },
+            style: Style::default(),
+            message: Some(message),
+            context_message: None,
+            focus_message: None,
+            blur_message: None,
+            message_mapper: None,
+            seeded_value_mapper: None,
+            scroll_extent_mapper: None,
+            drag_seed: None,
+            drag_mapper: None,
+            drop_message: None,
+            drop_mapper: None,
+            text_mapper: None,
+            option_messages: Vec::new(),
+            inline_messages: Vec::new(),
+            children: Vec::new(),
+            navigation_scope: None,
+            adjustment_step: 0.05,
+        })
+    }
+
+    pub fn child(mut self, child: impl Component<Message>) -> Self {
+        self.0 = self.0.child(child);
+        self
+    }
+
+    pub fn children(mut self, children: impl IntoIterator<Item = impl Component<Message>>) -> Self {
+        self.0 = self.0.children(children);
+        self
+    }
+
+    pub fn id(mut self, id: impl Into<UiId>) -> Self {
+        self.0 = self.0.id(id);
+        self
+    }
+
+    pub fn navigation_scope(mut self, scope: crate::NavigationScope) -> Self {
+        self.0 = self.0.navigation_scope(scope);
+        self
+    }
+
+    pub fn on_scroll(mut self, map: fn(f32) -> Message) -> Self {
+        self.0 = self.0.on_scroll(map);
+        self
+    }
+
+    /// Keep the supplied offset authoritative across reconstruction.
+    pub fn controlled(mut self, controlled: bool) -> Self {
+        if let Kind::VerticalScroll {
+            controlled: value, ..
+        } = &mut self.0.kind
+        {
+            *value = controlled;
+        }
+        self
+    }
+
+    /// Supply CSS track and thumb without replacing native scrolling behavior.
+    pub fn scrollbar_parts(mut self, track: DropdownPartStyle, thumb: DropdownPartStyle) -> Self {
+        self.0.style.scrollbar_parts = Some(Box::new([track.bounded(), thumb.bounded()]));
+        self
+    }
+
+    /// Paint this shared scrollbar from the application's live semantic theme.
+    pub fn theme(mut self, theme: crate::SemanticTheme) -> Self {
+        self.0.style.scrollbar_palette = theme.scrollbar_palette();
+        self
+    }
+
+    pub fn background(mut self, background: impl Into<Background>) -> Self {
+        self.0 = self.0.background(background);
+        self
+    }
+
+    pub fn height(mut self, height: f32) -> Self {
+        self.0 = self.0.height(height);
+        self
+    }
+
+    pub fn grow(mut self, grow: f32) -> Self {
+        self.0 = self.0.grow(grow);
+        self
+    }
+}
+
+impl<Message> Component<Message> for VerticalScroll<Message> {
+    fn into_element(self) -> Element<Message> {
+        self.0
+    }
+}
+
+pub struct Grid<Message = String>(Element<Message>);
+
+impl<Message> Grid<Message> {
+    pub fn new() -> Self {
+        Self(Element {
+            id: None,
+            source: None,
+            content_revision: None,
+            virtual_navigation: None,
+            kind: Kind::Grid {
+                columns: GridColumnSpec::Count(2),
+            },
+            style: Style::default(),
+            message: None,
+            context_message: None,
+            focus_message: None,
+            blur_message: None,
+            message_mapper: None,
+            seeded_value_mapper: None,
+            scroll_extent_mapper: None,
+            drag_seed: None,
+            drag_mapper: None,
+            drop_message: None,
+            drop_mapper: None,
+            text_mapper: None,
+            option_messages: Vec::new(),
+            inline_messages: Vec::new(),
+            children: Vec::new(),
+            navigation_scope: None,
+            adjustment_step: 0.05,
+        })
+    }
+
+    pub fn fixed(columns: usize) -> Self {
+        Self::new().columns(columns)
+    }
+
+    pub fn columns(mut self, columns: impl Into<GridColumnSpec>) -> Self {
+        if let Kind::Grid {
+            columns: definition,
+        } = &mut self.0.kind
+        {
+            *definition = columns.into();
+        }
+        self
+    }
+
+    pub fn tracks(tracks: impl IntoIterator<Item = Track>) -> Self {
+        let tracks = tracks.into_iter().collect::<Vec<_>>();
+        Self(Element {
+            id: None,
+            source: None,
+            content_revision: None,
+            virtual_navigation: None,
+            kind: Kind::Grid {
+                columns: GridColumnSpec::Tracks(tracks),
+            },
+            style: Style::default(),
+            message: None,
+            context_message: None,
+            focus_message: None,
+            blur_message: None,
+            message_mapper: None,
+            seeded_value_mapper: None,
+            scroll_extent_mapper: None,
+            drag_seed: None,
+            drag_mapper: None,
+            drop_message: None,
+            drop_mapper: None,
+            text_mapper: None,
+            option_messages: Vec::new(),
+            inline_messages: Vec::new(),
+            children: Vec::new(),
+            navigation_scope: None,
+            adjustment_step: 0.05,
+        })
+    }
+
+    pub fn auto_fit(track: Track) -> Self {
+        Self(Element {
+            id: None,
+            source: None,
+            content_revision: None,
+            virtual_navigation: None,
+            kind: Kind::Grid {
+                columns: GridColumnSpec::AutoFit(track),
+            },
+            style: Style::default(),
+            message: None,
+            context_message: None,
+            focus_message: None,
+            blur_message: None,
+            message_mapper: None,
+            seeded_value_mapper: None,
+            scroll_extent_mapper: None,
+            drag_seed: None,
+            drag_mapper: None,
+            drop_message: None,
+            drop_mapper: None,
+            text_mapper: None,
+            option_messages: Vec::new(),
+            inline_messages: Vec::new(),
+            children: Vec::new(),
+            navigation_scope: None,
+            adjustment_step: 0.05,
+        })
+    }
+
+    pub fn children(mut self, children: impl IntoIterator<Item = impl Component<Message>>) -> Self {
+        self.0 = self.0.children(children);
+        self
+    }
+
+    pub fn child(mut self, child: impl Component<Message>) -> Self {
+        self.0 = self.0.child(child);
+        self
+    }
+
+    pub fn direction(mut self, direction: ReadingDirection) -> Self {
+        if direction == ReadingDirection::RightToLeft {
+            self.0.children.reverse();
+        }
+        self
+    }
+
+    pub fn id(mut self, id: impl Into<UiId>) -> Self {
+        self.0 = self.0.id(id);
+        self
+    }
+
+    pub fn semantic_role(mut self, role: SemanticRole) -> Self {
+        self.0 = self.0.semantic_role(role);
+        self
+    }
+
+    pub fn gap(mut self, gap: f32) -> Self {
+        self.0 = self.0.gap(gap);
+        self
+    }
+
+    pub fn align_items(mut self, align: Align) -> Self {
+        self.0 = self.0.align_items(align);
+        self
+    }
+
+    pub fn justify_content(mut self, justify: Justify) -> Self {
+        self.0 = self.0.justify_content(justify);
+        self
+    }
+
+    pub fn padding(mut self, padding: impl Into<Insets>) -> Self {
+        self.0 = self.0.padding(padding);
+        self
+    }
+
+    pub fn background(mut self, background: impl Into<Background>) -> Self {
+        self.0 = self.0.background(background);
+        self
+    }
+
+    pub fn border_value(mut self, border: impl Into<Border>) -> Self {
+        self.0 = self.0.border_value(border);
+        self
+    }
+
+    pub fn radius(mut self, radius: f32) -> Self {
+        self.0 = self.0.radius(radius);
+        self
+    }
+
+    pub fn width(mut self, width: f32) -> Self {
+        self.0 = self.0.width(width);
+        self
+    }
+
+    pub fn min_width(mut self, width: f32) -> Self {
+        self.0 = self.0.min_width(width);
+        self
+    }
+
+    pub fn max_width(mut self, width: f32) -> Self {
+        self.0 = self.0.max_width(width);
+        self
+    }
+
+    pub fn fill_width(mut self) -> Self {
+        self.0 = self.0.fill_width();
+        self
+    }
+
+    pub fn overflow_x(mut self, overflow: Overflow) -> Self {
+        self.0 = self.0.overflow_x(overflow);
+        self
+    }
+
+    pub fn overflow_y(mut self, overflow: Overflow) -> Self {
+        self.0 = self.0.overflow_y(overflow);
+        self
+    }
+
+    pub fn scrollbar_theme(mut self, theme: crate::SemanticTheme) -> Self {
+        self.0 = self.0.scrollbar_theme(theme);
+        self
+    }
+
+    pub fn grow(mut self, grow: f32) -> Self {
+        self.0 = self.0.grow(grow);
+        self
+    }
+
+    pub fn height(mut self, height: f32) -> Self {
+        self.0 = self.0.height(height);
+        self
+    }
+}
+
+impl<Message> Default for Grid<Message> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<Message> Component<Message> for Grid<Message> {
+    fn into_element(self) -> Element<Message> {
+        self.0
+    }
+}
+
+pub struct FileGrid<Message = String> {
+    grid: Grid<Message>,
+}
+
+impl<Message> FileGrid<Message> {
+    pub fn columns(columns: usize) -> Self {
+        let mut grid = Grid::fixed(columns);
+        grid.0.navigation_scope =
+            Some(crate::NavigationScope::group().traversal(crate::NavigationTraversal::Grid));
+        Self { grid }
+    }
+
+    pub fn auto_fit(minimum_width: f32) -> Self {
+        let mut grid = Grid::auto_fit(Track::minmax(
+            Track::px(minimum_width.max(1.0)),
+            Track::fr(1.0),
+        ));
+        grid.0.navigation_scope =
+            Some(crate::NavigationScope::group().traversal(crate::NavigationTraversal::Grid));
+        Self { grid }
+    }
+
+    pub fn items<C>(mut self, items: impl IntoIterator<Item = C>) -> Self
+    where
+        C: Component<Message>,
+    {
+        self.grid = self.grid.children(items);
+        self
+    }
+
+    pub fn children<C>(self, items: impl IntoIterator<Item = C>) -> Self
+    where
+        C: Component<Message>,
+    {
+        self.items(items)
+    }
+
+    pub fn gap(mut self, gap: f32) -> Self {
+        self.grid = self.grid.gap(gap);
+        self
+    }
+
+    pub fn width(mut self, width: f32) -> Self {
+        self.grid = self.grid.width(width);
+        self
+    }
+
+    pub fn height(mut self, height: f32) -> Self {
+        self.grid = self.grid.height(height);
+        self
+    }
+
+    pub fn grow(mut self, grow: f32) -> Self {
+        self.grid = self.grid.grow(grow);
+        self
+    }
+
+    pub fn id(mut self, id: impl Into<UiId>) -> Self {
+        self.grid.0.id = Some(id.into());
+        self
+    }
+
+    pub fn accessibility_label(mut self, label: impl Into<String>) -> Self {
+        self.grid.0 = self
+            .grid
+            .0
+            .semantic_role(SemanticRole::Grid)
+            .accessibility_label(label);
+        self
+    }
+
+    pub fn scroll_owner(mut self, owner: impl Into<UiId>) -> Self {
+        self.grid.0.navigation_scope = Some(
+            self.grid
+                .0
+                .navigation_scope
+                .take()
+                .unwrap_or_else(crate::NavigationScope::group)
+                .scroll_owner(owner.into()),
+        );
+        self
+    }
+}
+
+impl<Message> Component<Message> for FileGrid<Message> {
+    fn into_element(self) -> Element<Message> {
+        self.grid.into_element()
+    }
+}
+
+/// Complete shared entry surface for a file-like plane.
+///
+/// Hosts supply policy (messages, dimensions, colors, and selection state), while
+/// this component owns the hit region, semantics, interaction visuals, icon
+/// containment, and bounded label layout.
+pub struct FilePlaneItem<Message = String> {
+    container: Container<Message>,
+}
+
+impl<Message> FilePlaneItem<Message> {
+    pub fn new(
+        message: Message,
+        label: impl Into<String>,
+        icon_id: u16,
+        icon: Arc<RgbaImage>,
+    ) -> Self {
+        Self::from_image(message, label, Image::new(icon_id, icon))
+    }
+
+    pub fn new_with_generation(
+        message: Message,
+        label: impl Into<String>,
+        icon_id: u16,
+        icon: Arc<RgbaImage>,
+        generation: u64,
+    ) -> Self {
+        Self::from_image(
+            message,
+            label,
+            Image::new_with_generation(icon_id, icon, generation),
+        )
+    }
+
+    fn from_image(message: Message, label: impl Into<String>, image: Image<Message>) -> Self {
+        let label = label.into();
+        let mut text = Text::new(label.clone())
+            .height(36.0)
+            .wrap(true)
+            .max_lines(2)
+            .ellipsis(true)
+            .align(TextAlign::Center)
+            .fill_width();
+        text.style.overflow_x = Overflow::Clip;
+        text.style.overflow_y = Overflow::Clip;
+        let mut container = Container::new()
+            .fill_width()
+            .gap(5.0)
+            .padding(Insets {
+                top: 8.0,
+                right: 6.0,
+                bottom: 4.0,
+                left: 6.0,
+            })
+            .message(message)
+            .semantic_role(SemanticRole::Button)
+            .accessibility_label(label)
+            .child(image.height(62.0).fit(ImageFit::Contain))
+            .child(text);
+        container.0.style.align_items = Align::Center;
+        Self { container }
+    }
+
+    fn content_mut(&mut self) -> Option<&mut Element<Message>> {
+        Some(&mut self.container.0)
+    }
+
+    fn label_box_mut(&mut self) -> Option<&mut Element<Message>> {
+        self.content_mut()?.children.get_mut(1)
+    }
+
+    /// Marks stable file labels so retained layout can reuse text measurements
+    /// until the owning listing changes.
+    pub fn label_content_revision(mut self, revision: u64) -> Self {
+        self.container.0.content_revision = Some(revision);
+        if let Some(text) = self.label_box_mut() {
+            text.content_revision = Some(revision);
+        }
+        self
+    }
+
+    pub fn icon_size(mut self, size: f32) -> Self {
+        if let Some(icon) = self
+            .content_mut()
+            .and_then(|content| content.children.first_mut())
+        {
+            icon.style.height = Length::Px(size.max(1.0));
+        }
+        self
+    }
+
+    pub fn label_height(mut self, height: f32) -> Self {
+        if let Some(label) = self.label_box_mut() {
+            label.style.height = Length::Px(height.max(1.0));
+        }
+        self
+    }
+
+    pub fn label_scale(mut self, scale: f32) -> Self {
+        if let Some(label) = self.label_box_mut()
+            && let Kind::Text { scale: value, .. } = &mut label.kind
+        {
+            *value = scale.max(0.1);
+        }
+        self
+    }
+
+    pub fn foreground(mut self, color: Color) -> Self {
+        if let Some(label) = self.label_box_mut() {
+            label.style.foreground = Some(color);
+        }
+        self
+    }
+
+    pub fn label_outline(mut self, color: Color, width: f32) -> Self {
+        if let Some(label) = self.label_box_mut()
+            && let Kind::Text { outline, .. } = &mut label.kind
+        {
+            *outline = (width > 0.0).then_some((color, width.max(0.5)));
+        }
+        self
+    }
+
+    pub fn label_background(mut self, color: Color, radius: f32) -> Self {
+        if let Some(label) = self.label_box_mut() {
+            label.style.background = Some(Background::Solid(color));
+            label.style.corner_radius = radius.max(0.0);
+        }
+        self
+    }
+
+    pub fn gap(mut self, gap: f32) -> Self {
+        if let Some(content) = self.content_mut() {
+            content.style.gap = gap.max(0.0);
+        }
+        self
+    }
+
+    pub fn center_content(mut self) -> Self {
+        if let Some(content) = self.content_mut() {
+            content.style.height = Length::Fill;
+            content.style.justify_content = Justify::Center;
+        }
+        self
+    }
+
+    pub fn padding(mut self, padding: Insets) -> Self {
+        self.container = self.container.padding(padding);
+        self
+    }
+
+    pub fn width(mut self, width: f32) -> Self {
+        self.container = self.container.width(width);
+        self
+    }
+
+    pub fn height(mut self, height: f32) -> Self {
+        self.container = self.container.height(height);
+        self
+    }
+
+    pub fn min_height(mut self, height: f32) -> Self {
+        self.container = self.container.min_height(height);
+        self
+    }
+
+    pub fn radius(mut self, radius: f32) -> Self {
+        self.container = self.container.radius(radius);
+        self
+    }
+
+    pub fn position(mut self, position: Point) -> Self {
+        self.container = self.container.position(position);
+        self
+    }
+
+    pub fn id(mut self, id: impl Into<UiId>) -> Self {
+        self.container = self.container.id(id);
+        self
+    }
+
+    pub fn context_message(mut self, message: Message) -> Self {
+        self.container = self.container.context_message(message);
+        self
+    }
+
+    /// Use the shared captured-pointer lifecycle, including first-press drags.
+    pub fn on_drag(mut self, gesture: (Message, fn(Message, DragGesture) -> Message)) -> Self {
+        self.container = self.container.on_drag(gesture);
+        self
+    }
+
+    pub fn on_drop(mut self, event: (Message, fn(Message, DropGesture) -> Message)) -> Self {
+        self.container = self.container.on_drop(event);
+        self
+    }
+
+    pub fn focus_background_tint(mut self, color: Color) -> Self {
+        self.container = self.container.focus_background_tint(color);
+        self
+    }
+
+    pub fn controller_focus_background_tint(mut self, color: Color) -> Self {
+        self.container = self.container.controller_focus_background_tint(color);
+        self
+    }
+
+    pub fn interaction_backgrounds(mut self, hover: Color, pressed: Color) -> Self {
+        self.container = self.container.interaction_backgrounds(hover, pressed);
+        self
+    }
+
+    pub fn selected_background(mut self, selected: bool, color: Color) -> Self {
+        if selected {
+            self.container = self.container.background(color);
+        }
+        self
+    }
+
+    pub fn hovered_background(self, hovered: bool, color: Color) -> Self {
+        self.selected_background(hovered, color)
+    }
+
+    pub fn border(mut self, color: Color, width: f32) -> Self {
+        self.container = self.container.border(color, width);
+        self
+    }
+
+    pub fn semantic_role(mut self, role: SemanticRole) -> Self {
+        self.container = self.container.semantic_role(role);
+        self
+    }
+
+    pub fn accessibility_label(mut self, label: impl Into<String>) -> Self {
+        self.container = self.container.accessibility_label(label);
+        self
+    }
+
+    // Compatibility policy adapters for existing declarative file-grid call sites.
+    pub fn colors(self, background: Color, border: Color, foreground: Color) -> Self {
+        self.selected_background(true, background)
+            .border(border, 1.0)
+            .foreground(foreground)
+    }
+
+    pub fn borderless_colors(self, background: Color, foreground: Color) -> Self {
+        self.selected_background(true, background)
+            .foreground(foreground)
+    }
+
+    pub fn borderless_palette(self, colors: (Color, Color)) -> Self {
+        self.borderless_colors(colors.0, colors.1)
+    }
+
+    pub fn file_grid_defaults(self) -> Self {
+        self.padding(Insets {
+            top: 8.0,
+            right: 6.0,
+            bottom: 4.0,
+            left: 6.0,
+        })
+    }
+}
+
+impl<Message> Component<Message> for FilePlaneItem<Message> {
+    fn into_element(self) -> Element<Message> {
+        self.container.into_element()
+    }
+}
+
+/// Compatibility name for the shared file-plane authority.
+pub type FileGridItem<Message = String> = FilePlaneItem<Message>;
+
+pub struct StyledText<Message = String>(Element<Message>);
+
+impl<Message> StyledText<Message> {
+    pub fn new(value: impl Into<String>, spans: Vec<StyledTextSpan>) -> Self {
+        let value = value.into();
+        Self(Element {
+            kind: Kind::StyledText {
+                value: value.clone(),
+                spans,
+                scale: 2.0,
+                wrap: false,
+                line_height: None,
+            },
+            id: None,
+            source: None,
+            content_revision: None,
+            virtual_navigation: None,
+            style: Style {
+                accessibility_label: Some(value),
+                ..Style::default()
+            },
+            message: None,
+            context_message: None,
+            focus_message: None,
+            blur_message: None,
+            message_mapper: None,
+            seeded_value_mapper: None,
+            scroll_extent_mapper: None,
+            drag_seed: None,
+            drag_mapper: None,
+            drop_message: None,
+            drop_mapper: None,
+            text_mapper: None,
+            option_messages: Vec::new(),
+            inline_messages: Vec::new(),
+            children: Vec::new(),
+            navigation_scope: None,
+            adjustment_step: 0.05,
+        })
+    }
+
+    pub fn inline_message(mut self, range: Range<usize>, message: Message) -> Self {
+        self.0.inline_messages.push((range, message));
+        self
+    }
+
+    pub fn scale(mut self, value: f32) -> Self {
+        if let Kind::StyledText { scale, .. } = &mut self.0.kind {
+            *scale = value;
+        }
+        self
+    }
+
+    pub fn color(mut self, color: Color) -> Self {
+        self.0 = self.0.foreground(color);
+        self
+    }
+
+    pub fn wrap(mut self, enabled: bool) -> Self {
+        if let Kind::StyledText { wrap, .. } = &mut self.0.kind {
+            *wrap = enabled;
+        }
+        self
+    }
+
+    pub fn width_length(mut self, width: Length) -> Self {
+        self.0 = self.0.width_length(width);
+        self
+    }
+
+    pub fn selection_run_id(mut self, id: impl Into<String>) -> Self {
+        self.0.style.selection_run_id = Some(id.into());
+        self
+    }
+
+    pub fn selection_boundary(mut self, boundary: TextBoundary) -> Self {
+        self.0.style.selection_boundary = boundary;
+        self
+    }
+}
+
+impl<Message> Component<Message> for StyledText<Message> {
+    fn into_element(self) -> Element<Message> {
+        self.0
+    }
+}
+
+pub struct Text<Message = String>(Element<Message>);
+
+impl<Message> Text<Message> {
+    pub fn part_interaction_text(mut self, paints: [InteractionPaint; 3]) -> Self {
+        self.0.style.parent_interaction = true;
+        self.0.style.interaction_paints = Some(Box::new(paints.map(|paint| InteractionPaint {
+            foreground: paint.foreground,
+            font_size: paint.font_size,
+            line_height: paint.line_height,
+            ..InteractionPaint::default()
+        })));
+        self
+    }
+
+    pub fn inherited_state_text(mut self, inherited: [bool; 3]) -> Self {
+        self.0.style.inherited_state_text = inherited;
+        self
+    }
+
+    pub fn css_paint(mut self, enabled: bool) -> Self {
+        self.0.style.css_paint = enabled;
+        self
+    }
+
+    pub fn new(value: impl Into<String>) -> Self {
+        let value = value.into();
+        Self(Element::text(value.clone(), 2.0).accessibility_label(value))
+    }
+
+    pub fn id(mut self, id: impl Into<UiId>) -> Self {
+        self.0 = self.0.id(id);
+        self
+    }
+
+    pub fn scale(mut self, scale: f32) -> Self {
+        if let Kind::Text {
+            scale: text_scale, ..
+        } = &mut self.0.kind
+        {
+            *text_scale = scale;
+        }
+        self
+    }
+
+    /// Set an exact pixel font size, independent of the legacy discrete text scale.
+    pub fn font_size(mut self, pixels: f32) -> Self {
+        if let Kind::Text { scale, .. } = &mut self.0.kind {
+            *scale = -pixels.max(1.0);
+        }
+        self
+    }
+
+    pub fn color(mut self, color: Color) -> Self {
+        self.0 = self.0.foreground(color);
+        self
+    }
+
+    /// Paint a glyph outline behind this text without introducing a label
+    /// backplate. This is intended for text over photographic/mixed imagery.
+    pub fn outline(mut self, color: Color, width: f32) -> Self {
+        if let Kind::Text { outline, .. } = &mut self.0.kind {
+            *outline = (width > 0.0).then_some((color, width.max(0.5)));
+        }
+        self
+    }
+
+    pub fn tone(mut self, tone: Tone) -> Self {
+        if let Some(color) = tone.color() {
+            self.0 = self.0.foreground(color);
+        }
+        self
+    }
+
+    pub fn bold(mut self, bold: bool) -> Self {
+        if let Kind::Text {
+            bold: text_bold, ..
+        } = &mut self.0.kind
+        {
+            *text_bold = bold;
+        }
+        self
+    }
+
+    pub fn wrap(mut self, wrap: bool) -> Self {
+        if let Kind::Text { wrap: value, .. } = &mut self.0.kind {
+            *value = wrap;
+        }
+        self
+    }
+
+    pub fn line_height(mut self, height: f32) -> Self {
+        if let Kind::Text { line_height, .. } = &mut self.0.kind {
+            *line_height = Some(height.max(1.0));
+        }
+        self
+    }
+
+    pub fn max_lines(mut self, lines: usize) -> Self {
+        if let Kind::Text { max_lines, .. } = &mut self.0.kind {
+            *max_lines = Some(lines.max(1));
+        }
+        self
+    }
+
+    pub fn ellipsis(mut self, ellipsis: bool) -> Self {
+        if let Kind::Text {
+            ellipsis: value, ..
+        } = &mut self.0.kind
+        {
+            *value = ellipsis;
+        }
+        self
+    }
+
+    pub fn width(mut self, width: f32) -> Self {
+        self.0 = self.0.width(width);
+        self
+    }
+
+    pub fn width_length(mut self, width: Length) -> Self {
+        self.0 = self.0.width_length(width);
+        self
+    }
+
+    pub fn height(mut self, height: f32) -> Self {
+        self.0 = self.0.height(height);
+        self
+    }
+
+    pub fn align(mut self, align: TextAlign) -> Self {
+        self.0 = self.0.text_align(align);
+        self
+    }
+
+    pub fn selectable(mut self, selectable: bool) -> Self {
+        self.0.style.selectable = Some(selectable);
+        self
+    }
+
+    pub fn selection_run_id(mut self, id: impl Into<String>) -> Self {
+        self.0.style.selection_run_id = Some(id.into());
+        self
+    }
+
+    pub fn selection_boundary(mut self, boundary: TextBoundary) -> Self {
+        self.0.style.selection_boundary = boundary;
+        self
+    }
+}
+
+impl<Message> Component<Message> for Text<Message> {
+    fn into_element(self) -> Element<Message> {
+        self.0
+    }
+}
+
+pub struct SelectionRegion<Message = String>(Element<Message>);
+
+impl<Message> SelectionRegion<Message> {
+    pub fn new(document: impl Into<Arc<SelectionDocument>>) -> Self {
+        let mut element = Element::flex(Axis::Vertical);
+        element.style.selection_region = true;
+        element.style.selection_document = Some(document.into());
+        Self(element)
+    }
+
+    pub fn automatic() -> Self {
+        let mut element = Element::flex(Axis::Vertical);
+        element.style.selection_region = true;
+        Self(element)
+    }
+
+    pub fn id(mut self, id: impl Into<UiId>) -> Self {
+        self.0 = self.0.id(id);
+        self
+    }
+
+    pub fn child(mut self, child: impl Component<Message>) -> Self {
+        self.0 = self.0.child(child);
+        self
+    }
+
+    pub fn children(mut self, children: impl IntoIterator<Item = impl Component<Message>>) -> Self {
+        self.0 = self.0.children(children);
+        self
+    }
+
+    pub fn fill_width(mut self) -> Self {
+        self.0 = self.0.fill_width();
+        self
+    }
+
+    pub fn fill_height(mut self) -> Self {
+        self.0 = self.0.fill_height();
+        self
+    }
+
+    pub fn grow(mut self, grow: f32) -> Self {
+        self.0 = self.0.grow(grow);
+        self
+    }
+}
+
+impl<Message> Component<Message> for SelectionRegion<Message> {
+    fn into_element(self) -> Element<Message> {
+        self.0
+    }
+}
+
+pub struct Image<Message = String>(Element<Message>);
+
+/// A bounded custom painter for exceptional visuals that cannot be expressed
+/// by semantic primitives. The callback receives only its allocated rectangle;
+/// commands outside it and clip-stack commands are discarded by resolution.
+pub struct CustomPaint<Message = String>(Element<Message>);
+
+impl<Message> CustomPaint<Message> {
+    pub fn new(paint: fn(Rect) -> Vec<PaintCommand>) -> Self {
+        Self(Element {
+            id: None,
+            source: None,
+            content_revision: None,
+            virtual_navigation: None,
+            kind: Kind::CustomPaint { paint },
+            style: Style::default(),
+            message: None,
+            context_message: None,
+            focus_message: None,
+            blur_message: None,
+            message_mapper: None,
+            seeded_value_mapper: None,
+            scroll_extent_mapper: None,
+            drag_seed: None,
+            drag_mapper: None,
+            drop_message: None,
+            drop_mapper: None,
+            text_mapper: None,
+            option_messages: Vec::new(),
+            inline_messages: Vec::new(),
+            children: Vec::new(),
+            navigation_scope: None,
+            adjustment_step: 0.05,
+        })
+    }
+
+    /// Paint precomputed renderer primitives expressed relative to this component's origin.
+    pub fn commands(commands: Vec<PaintCommand>) -> Self {
+        Self(Element {
+            id: None,
+            source: None,
+            content_revision: None,
+            virtual_navigation: None,
+            kind: Kind::CustomPaintCommands { commands },
+            style: Style::default(),
+            message: None,
+            context_message: None,
+            focus_message: None,
+            blur_message: None,
+            message_mapper: None,
+            seeded_value_mapper: None,
+            scroll_extent_mapper: None,
+            drag_seed: None,
+            drag_mapper: None,
+            drop_message: None,
+            drop_mapper: None,
+            text_mapper: None,
+            option_messages: Vec::new(),
+            inline_messages: Vec::new(),
+            children: Vec::new(),
+            navigation_scope: None,
+            adjustment_step: 0.05,
+        })
+    }
+
+    pub fn id(mut self, id: impl Into<UiId>) -> Self {
+        self.0 = self.0.id(id);
+        self
+    }
+
+    pub fn width(mut self, width: f32) -> Self {
+        self.0 = self.0.width(width);
+        self
+    }
+
+    pub fn height(mut self, height: f32) -> Self {
+        self.0 = self.0.height(height);
+        self
+    }
+
+    pub fn message(mut self, message: Message) -> Self {
+        self.0 = self.0.message(message);
+        self
+    }
+
+    pub fn on_drag(mut self, (seed, map): (Message, fn(Message, DragGesture) -> Message)) -> Self {
+        self.0 = self.0.on_drag(seed, map);
+        self
+    }
+
+    pub fn on_drop(mut self, (seed, map): (Message, fn(Message, DropGesture) -> Message)) -> Self {
+        self.0 = self.0.on_drop(seed, map);
+        self
+    }
+
+    pub fn context_message(mut self, message: Message) -> Self {
+        self.0 = self.0.context_message(message);
+        self
+    }
+
+    pub fn semantic_role(mut self, role: SemanticRole) -> Self {
+        self.0 = self.0.semantic_role(role);
+        self
+    }
+
+    pub fn accessibility_label(mut self, label: impl Into<String>) -> Self {
+        self.0 = self.0.accessibility_label(label);
+        self
+    }
+
+    pub fn accessibility_description(mut self, description: impl Into<String>) -> Self {
+        self.0 = self.0.accessibility_description(description);
+        self
+    }
+
+    pub fn accessibility_state(mut self, state: impl Into<String>) -> Self {
+        self.0 = self.0.accessibility_state(state);
+        self
+    }
+}
+
+impl<Message> Component<Message> for CustomPaint<Message> {
+    fn into_element(self) -> Element<Message> {
+        self.0
+    }
+}
+
+impl<Message> Image<Message> {
+    pub fn new(id: u16, image: Arc<RgbaImage>) -> Self {
+        use std::hash::{Hash, Hasher};
+        #[cfg(debug_assertions)]
+        let profile_started = std::time::Instant::now();
+        let mut fingerprint = std::collections::hash_map::DefaultHasher::new();
+        image.width().hash(&mut fingerprint);
+        image.height().hash(&mut fingerprint);
+        image.as_raw().hash(&mut fingerprint);
+        let generation = fingerprint.finish();
+        #[cfg(debug_assertions)]
+        crate::gpu::record_image_fingerprint(image.as_raw().len(), profile_started.elapsed());
+        Self::new_with_generation(id, image, generation)
+    }
+
+    /// Creates an image with a source-owned content generation.
+    ///
+    /// The caller must change `generation` whenever the pixels associated with
+    /// `id` change. This avoids hashing the complete image on repeated builds.
+    pub fn new_with_generation(id: u16, image: Arc<RgbaImage>, generation: u64) -> Self {
+        Self(Element {
+            id: None,
+            source: None,
+            content_revision: None,
+            virtual_navigation: None,
+            kind: Kind::Image {
+                id,
+                generation,
+                image,
+                high_density: None,
+                presentation: ImagePresentation::default(),
+            },
+            style: Style {
+                overflow_x: Overflow::Clip,
+                overflow_y: Overflow::Clip,
+                ..Style::default()
+            },
+            message: None,
+            context_message: None,
+            focus_message: None,
+            blur_message: None,
+            message_mapper: None,
+            seeded_value_mapper: None,
+            scroll_extent_mapper: None,
+            drag_seed: None,
+            drag_mapper: None,
+            drop_message: None,
+            drop_mapper: None,
+            text_mapper: None,
+            option_messages: Vec::new(),
+            inline_messages: Vec::new(),
+            children: Vec::new(),
+            navigation_scope: None,
+            adjustment_step: 0.05,
+        })
+    }
+
+    /// Supplies the source-owned content generation used by presenter caches.
+    /// Increment it whenever pixels for the stable image id change.
+    pub fn generation(mut self, generation: u64) -> Self {
+        if let Kind::Image {
+            generation: value, ..
+        } = &mut self.0.kind
+        {
+            *value = generation;
+        }
+        self
+    }
+
+    pub fn width(mut self, width: f32) -> Self {
+        self.0 = self.0.width(width);
+        self
+    }
+
+    pub fn height(mut self, height: f32) -> Self {
+        self.0 = self.0.height(height);
+        self
+    }
+
+    pub fn fit(mut self, fit: ImageFit) -> Self {
+        if let Kind::Image { presentation, .. } = &mut self.0.kind {
+            presentation.fit = fit;
+        }
+        self
+    }
+
+    /// Supplies a 2x raster selected by the renderer on high-density outputs.
+    pub fn high_density(mut self, image: Arc<RgbaImage>) -> Self {
+        if let Kind::Image { high_density, .. } = &mut self.0.kind {
+            *high_density = Some(image);
+        }
+        self
+    }
+
+    pub fn alignment(mut self, horizontal: ImageAlignment, vertical: ImageAlignment) -> Self {
+        if let Kind::Image { presentation, .. } = &mut self.0.kind {
+            presentation.horizontal = horizontal;
+            presentation.vertical = vertical;
+        }
+        self
+    }
+
+    pub fn presentation(mut self, value: ImagePresentation) -> Self {
+        if let Kind::Image { presentation, .. } = &mut self.0.kind {
+            *presentation = value;
+        }
+        self
+    }
+
+    /// Marks an image as purely visual so it is omitted from semantic and
+    /// accessibility output while remaining in the paint list.
+    pub fn decorative(mut self) -> Self {
+        self.0 = self.0.decorative();
+        self
+    }
+}
+
+impl<Message> Component<Message> for Image<Message> {
+    fn into_element(self) -> Element<Message> {
+        self.0
+    }
+}
+
+/// A semantic-tint icon with explicit accessible or decorative semantics.
+pub struct Icon<Message = String>(Image<Message>);
+
+impl<Message> Icon<Message> {
+    pub fn new(id: u16, source: Arc<RgbaImage>, tint: Color, size: f32) -> Self {
+        let red = ((tint >> 16) & 0xff) as u8;
+        let green = ((tint >> 8) & 0xff) as u8;
+        let blue = (tint & 0xff) as u8;
+        let encoded_alpha = ((tint >> 24) & 0xff) as u8;
+        let tint_alpha = if tint <= 0x00ff_ffff {
+            255
+        } else {
+            encoded_alpha
+        };
+        let mut image = (*source).clone();
+        for pixel in image.pixels_mut() {
+            pixel.0 = [
+                red,
+                green,
+                blue,
+                ((u16::from(pixel[3]) * u16::from(tint_alpha)) / 255) as u8,
+            ];
+        }
+        Self(
+            Image::new(id, Arc::new(image))
+                .width(size.max(1.0))
+                .height(size.max(1.0)),
+        )
+    }
+
+    pub fn label(mut self, label: impl Into<String>) -> Self {
+        self.0.0 = self
+            .0
+            .0
+            .accessibility_hidden(false)
+            .accessibility_label(label);
+        self
+    }
+
+    pub fn decorative(mut self) -> Self {
+        self.0.0 = self.0.0.accessibility_hidden(true);
+        self
+    }
+}
+
+impl<Message> Component<Message> for Icon<Message> {
+    fn into_element(self) -> Element<Message> {
+        self.0.into_element()
+    }
+}
+
+pub struct Header<Message = String>(Text<Message>);
+
+impl<Message> Header<Message> {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(Text::new(value).scale(4.0))
+    }
+
+    pub fn color(mut self, color: Color) -> Self {
+        self.0 = self.0.color(color);
+        self
+    }
+}
+
+pub struct TextField<Message = String> {
+    text: Text<Message>,
+    displayed: String,
+    single_line_height: Option<f32>,
+}
+
+impl<Message> TextField<Message> {
+    pub fn new(editor: &TextEditor) -> Self {
+        let displayed = editor.display_text_with_caret("▏");
+        Self {
+            text: Text::new(&displayed),
+            displayed,
+            single_line_height: None,
+        }
+    }
+
+    pub fn placeholder(editor: &TextEditor, placeholder: impl Into<String>) -> Self {
+        if editor.text().is_empty() && editor.preedit().is_empty() {
+            let displayed = placeholder.into();
+            Self {
+                text: Text::new(&displayed),
+                displayed,
+                single_line_height: None,
+            }
+        } else {
+            Self::new(editor)
+        }
+    }
+
+    pub fn on_change(value: &str, map: fn(String) -> Message) -> Self {
+        let mut field = Self {
+            text: Text::new(value),
+            displayed: value.to_owned(),
+            single_line_height: None,
+        };
+        if let Kind::Text { input_value, .. } = &mut field.text.0.kind {
+            *input_value = Some(value.to_owned());
+        }
+        field.text.0.text_mapper = Some(TextMessageMapper::Function(map));
+        field
+    }
+
+    pub fn on_change_with_placeholder(
+        value: &str,
+        placeholder: impl Into<String>,
+        map: fn(String) -> Message,
+    ) -> Self {
+        let mut field = Self::on_change_with_placeholder_mapped_internal(value, placeholder);
+        field.text.0.text_mapper = Some(TextMessageMapper::Function(map));
+        field
+    }
+
+    /// Map edits with a field-specific callback, useful for dynamic component trees.
+    pub fn on_change_with_placeholder_mapped(
+        value: &str,
+        placeholder: impl Into<String>,
+        map: impl Fn(String) -> Message + 'static,
+    ) -> Self
+    where
+        Message: 'static,
+    {
+        let mut field = Self::on_change_with_placeholder_mapped_internal(value, placeholder);
+        field.text.0.text_mapper = Some(TextMessageMapper::new(map));
+        field
+    }
+
+    fn on_change_with_placeholder_mapped_internal(
+        value: &str,
+        placeholder: impl Into<String>,
+    ) -> Self {
+        let placeholder = placeholder.into();
+        let displayed = if value.is_empty() {
+            placeholder.clone()
+        } else {
+            value.to_owned()
+        };
+        let mut field = Self {
+            text: Text::new(&displayed),
+            displayed,
+            single_line_height: None,
+        };
+        if let Kind::Text {
+            input_value,
+            input_placeholder,
+            ..
+        } = &mut field.text.0.kind
+        {
+            *input_value = Some(value.to_owned());
+            *input_placeholder = Some(placeholder);
+        }
+        field
+    }
+
+    /// Creates an editable field whose painted value is masked while edits are
+    /// still applied to the unmasked application-owned value.
+    pub fn on_change_masked(value: &str, mask: char, map: fn(String) -> Message) -> Self {
+        let displayed = std::iter::repeat_n(mask, value.chars().count()).collect::<String>();
+        let mut field = Self {
+            text: Text::new(&displayed),
+            displayed,
+            single_line_height: None,
+        };
+        if let Kind::Text {
+            input_value,
+            input_mask,
+            ..
+        } = &mut field.text.0.kind
+        {
+            *input_value = Some(value.to_owned());
+            *input_mask = Some(mask);
+        }
+        field.text.0.text_mapper = Some(TextMessageMapper::Function(map));
+        field
+    }
+
+    pub fn on_change_masked_with_placeholder(
+        value: &str,
+        placeholder: impl Into<String>,
+        mask: char,
+        map: fn(String) -> Message,
+    ) -> Self {
+        let mut field = Self::on_change_masked_with_placeholder_internal(value, placeholder, mask);
+        field.text.0.text_mapper = Some(TextMessageMapper::Function(map));
+        field
+    }
+
+    fn on_change_masked_with_placeholder_internal(
+        value: &str,
+        placeholder: impl Into<String>,
+        mask: char,
+    ) -> Self {
+        let placeholder = placeholder.into();
+        let displayed = if value.is_empty() {
+            placeholder.clone()
+        } else {
+            std::iter::repeat_n(mask, value.chars().count()).collect()
+        };
+        let mut field = Self {
+            text: Text::new(&displayed),
+            displayed,
+            single_line_height: None,
+        };
+        if let Kind::Text {
+            input_value,
+            input_placeholder,
+            input_mask,
+            ..
+        } = &mut field.text.0.kind
+        {
+            *input_value = Some(value.to_owned());
+            *input_placeholder = Some(placeholder);
+            *input_mask = Some(mask);
+        }
+        field
+    }
+
+    /// Map edits from a masked field with a field-specific callback.
+    pub fn on_change_masked_with_placeholder_mapped(
+        value: &str,
+        placeholder: impl Into<String>,
+        mask: char,
+        map: impl Fn(String) -> Message + 'static,
+    ) -> Self
+    where
+        Message: 'static,
+    {
+        let mut field = Self::on_change_masked_with_placeholder_internal(value, placeholder, mask);
+        field.text.0.text_mapper = Some(TextMessageMapper::new(map));
+        field
+    }
+
+    /// Apply typed compiler-owned editor frame, caret and selection styles.
+    pub fn presentation(
+        mut self,
+        frame: DropdownPartStyle,
+        caret: DropdownPartStyle,
+        selection: DropdownPartStyle,
+    ) -> Self {
+        let frame = frame.bounded();
+        self.text.0.style.background = frame
+            .background
+            .filter(|color| *color != 0)
+            .map(Background::Solid);
+        self.text.0.style.foreground = Some(frame.foreground.unwrap_or(0));
+        self.text.0.style.border = frame.border_color.filter(|color| *color != 0);
+        self.text.0.style.border_width = frame.border_width;
+        self.text.0.style.corner_radius = frame.radius;
+        self.text.0.style.padding = frame.padding;
+        self.text.0.style.hover_background =
+            frame.interaction_backgrounds[0].map(Background::Solid);
+        self.text.0.style.pressed_background =
+            frame.interaction_backgrounds[1].map(Background::Solid);
+        self.text.0.style.focus_background =
+            frame.interaction_backgrounds[2].map(Background::Solid);
+        self.text.0.style.interaction_paints = Some(Box::new(frame.interaction_paints));
+        self.text.0.style.css_paint = true;
+        self.text.0.style.automatic_focus_tint = false;
+        self.text.0.style.editing_parts = Some(Box::new([caret.bounded(), selection.bounded()]));
+        self.text.0.style.overflow_x = Overflow::Clip;
+        self.text.0.style.overflow_y = Overflow::Clip;
+        if frame.font_size > 0.0 {
+            self.text = self.text.font_size(frame.font_size);
+        }
+        if frame.line_height > 0.0 {
+            self.text = self.text.line_height(frame.line_height);
+        }
+        self
+    }
+
+    pub fn context_menu_presentation(mut self, menu: crate::OverlayMenuPresentation) -> Self {
+        self.text.0.style.editing_menu = Some(Box::new(menu));
+        self
+    }
+
+    pub fn auto_focus(mut self, auto_focus: bool) -> Self {
+        self.text.0.style.auto_focus = auto_focus;
+        self
+    }
+
+    pub fn width_length(mut self, width: Length) -> Self {
+        self.text.0.style.width = width;
+        self
+    }
+    pub fn height_length(mut self, height: Length) -> Self {
+        self.text.0.style.height = height;
+        self
+    }
+    pub fn min_width(mut self, width: f32) -> Self {
+        self.text.0.style.min_width = width;
+        self
+    }
+    pub fn max_width(mut self, width: f32) -> Self {
+        self.text.0.style.max_width = width;
+        self
+    }
+    pub fn min_height(mut self, height: f32) -> Self {
+        self.text.0.style.min_height = height;
+        self
+    }
+    pub fn max_height(mut self, height: f32) -> Self {
+        self.text.0.style.max_height = height;
+        self
+    }
+    pub fn shrink(mut self, shrink: f32) -> Self {
+        self.text.0.style.shrink = shrink;
+        self
+    }
+
+    pub fn display_text(&self) -> &str {
+        &self.displayed
+    }
+
+    pub fn id(mut self, id: impl Into<UiId>) -> Self {
+        self.text = self.text.id(id);
+        self
+    }
+
+    pub fn accessibility_label(mut self, label: impl Into<String>) -> Self {
+        self.text.0 = self.text.0.accessibility_label(label);
+        self
+    }
+
+    pub fn focus_message(mut self, message: Message) -> Self {
+        self.text.0 = self.text.0.focus_message(message);
+        self
+    }
+
+    pub fn blur_message(mut self, message: Message) -> Self {
+        self.text.0 = self.text.0.blur_message(message);
+        self
+    }
+
+    pub fn scale(mut self, scale: f32) -> Self {
+        self.text = self.text.scale(scale);
+        self
+    }
+
+    pub fn font_size(mut self, pixels: f32) -> Self {
+        self.text = self.text.font_size(pixels);
+        self
+    }
+
+    pub fn line_height(mut self, pixels: f32) -> Self {
+        self.text = self.text.line_height(pixels);
+        self
+    }
+
+    pub fn color(mut self, color: Color) -> Self {
+        self.text = self.text.color(color);
+        self
+    }
+
+    pub fn background(mut self, background: impl Into<Background>) -> Self {
+        self.text.0 = self.text.0.background(background);
+        self
+    }
+
+    pub fn focus_background_tint(mut self, color: Color) -> Self {
+        self.text.0 = self.text.0.focus_background_tint(color);
+        self
+    }
+
+    pub fn focus_background(mut self, background: impl Into<Background>) -> Self {
+        self.text.0 = self.text.0.focus_background(background);
+        self
+    }
+
+    pub fn controller_focus_background_tint(mut self, color: Color) -> Self {
+        self.text.0 = self.text.0.controller_focus_background_tint(color);
+        self
+    }
+
+    pub fn wrap(mut self, wrap: bool) -> Self {
+        self.text = self.text.wrap(wrap);
+        self
+    }
+
+    pub fn grow(mut self, grow: f32) -> Self {
+        self.text.0 = self.text.0.grow(grow);
+        self
+    }
+
+    /// Keeps a single-line editor vertically centered in a taller field.
+    ///
+    /// The wrapper uses the measured text line rather than a font-specific
+    /// pixel offset, so placeholder, masked, selected, caret, and IME paint
+    /// all share the same origin. Multiline fields remain unaffected unless
+    /// they explicitly opt into this single-line presentation.
+    pub fn single_line_height(mut self, height: f32) -> Self {
+        self.text = self.text.wrap(false).max_lines(1);
+        self.single_line_height = Some(height.max(0.0));
+        self
+    }
+}
+
+impl<Message> Component<Message> for TextField<Message> {
+    fn into_element(self) -> Element<Message> {
+        let text = self
+            .text
+            .into_element()
+            .semantic_role(SemanticRole::TextField);
+        match self.single_line_height {
+            Some(height) => Element::flex(Axis::Vertical)
+                .height(height)
+                .justify_content(Justify::Center)
+                .child(text),
+            None => text,
+        }
+    }
+}
+
+impl<Message> Component<Message> for Header<Message> {
+    fn into_element(self) -> Element<Message> {
+        self.0.into_element()
+    }
+}
+
+pub struct Container<Message = String>(Element<Message>);
+
+impl<Message> Container<Message> {
+    pub fn part_interaction_paints(mut self, paints: [InteractionPaint; 3]) -> Self {
+        self.0.style.parent_interaction = true;
+        self.0.style.interaction_paints = Some(Box::new(paints));
+        self
+    }
+
+    pub fn css_paint(mut self, enabled: bool) -> Self {
+        self.0.style.css_paint = enabled;
+        self
+    }
+
+    pub fn interaction_paints(mut self, paints: [InteractionPaint; 3]) -> Self {
+        self.0.style.interaction_paints = Some(Box::new(paints));
+        self
+    }
+
+    pub fn automatic_focus_tint(mut self, enabled: bool) -> Self {
+        self.0.style.automatic_focus_tint = enabled;
+        self
+    }
+
+    pub fn new() -> Self {
+        Self(Element::flex(Axis::Vertical))
+    }
+
+    pub fn child(mut self, child: impl Component<Message>) -> Self {
+        self.0 = self.0.child(child);
+        self
+    }
+
+    pub fn children(mut self, children: impl IntoIterator<Item = impl Component<Message>>) -> Self {
+        self.0 = self.0.children(children);
+        self
+    }
+
+    pub fn id(mut self, id: impl Into<UiId>) -> Self {
+        self.0 = self.0.id(id);
+        self
+    }
+
+    pub fn background(mut self, background: impl Into<Background>) -> Self {
+        self.0 = self.0.background(background);
+        self
+    }
+
+    pub fn clear_background(mut self) -> Self {
+        self.0.style.background = None;
+        self
+    }
+
+    pub fn clear_border(mut self) -> Self {
+        self.0.style.border = None;
+        self
+    }
+
+    pub fn interaction_backgrounds(
+        mut self,
+        hover: impl Into<Background>,
+        pressed: impl Into<Background>,
+    ) -> Self {
+        self.0 = self.0.interaction_backgrounds(hover, pressed);
+        self
+    }
+
+    pub fn hover_background(mut self, background: impl Into<Background>) -> Self {
+        self.0.style.hover_background = Some(background.into());
+        self
+    }
+
+    pub fn pressed_background(mut self, background: impl Into<Background>) -> Self {
+        self.0.style.pressed_background = Some(background.into());
+        self
+    }
+
+    pub fn focus_background_tint(mut self, color: Color) -> Self {
+        self.0 = self.0.focus_background_tint(color);
+        self
+    }
+
+    pub fn focus_background(mut self, background: impl Into<Background>) -> Self {
+        self.0 = self.0.focus_background(background);
+        self
+    }
+
+    pub fn controller_focus_background_tint(mut self, color: Color) -> Self {
+        self.0 = self.0.controller_focus_background_tint(color);
+        self
+    }
+
+    pub fn navigation_scope(mut self, scope: crate::NavigationScope) -> Self {
+        self.0 = self.0.navigation_scope(scope);
+        self
+    }
+
+    pub fn controller_scope_background(mut self, background: impl Into<Background>) -> Self {
+        self.0 = self.0.controller_scope_background(background);
+        self
+    }
+
+    pub fn border(mut self, color: Color, width: f32) -> Self {
+        self.0 = self.0.border(color, width);
+        self
+    }
+
+    pub fn border_value(mut self, border: impl Into<Border>) -> Self {
+        self.0 = self.0.border_value(border);
+        self
+    }
+
+    pub fn top_corner_radius(mut self, radius: f32) -> Self {
+        self.0 = self.0.top_corner_radius(radius);
+        self
+    }
+
+    pub fn radius(mut self, radius: f32) -> Self {
+        self.0 = self.0.radius(radius);
+        self
+    }
+
+    pub fn box_shadow(mut self, shadow: BoxShadow) -> Self {
+        self.0 = self.0.box_shadow(shadow);
+        self
+    }
+
+    pub fn backdrop_blur(mut self, radius: f32) -> Self {
+        self.0 = self.0.backdrop_blur(radius);
+        self
+    }
+
+    pub fn proximity_magnification(mut self, magnification: crate::ProximityMagnification) -> Self {
+        self.0 = self.0.proximity_magnification(magnification);
+        self
+    }
+
+    pub fn transition_duration_ms(mut self, duration: f32) -> Self {
+        self.0 = self.0.transition_duration_ms(duration);
+        self
+    }
+
+    pub fn padding(mut self, padding: impl Into<Insets>) -> Self {
+        self.0 = self.0.padding(padding);
+        self
+    }
+
+    pub fn gap(mut self, gap: f32) -> Self {
+        self.0 = self.0.gap(gap);
+        self
+    }
+
+    pub fn position(mut self, position: Point) -> Self {
+        self.0 = self.0.position(position);
+        self
+    }
+
+    pub fn width(mut self, width: f32) -> Self {
+        self.0 = self.0.width(width);
+        self
+    }
+
+    pub fn width_length(mut self, width: Length) -> Self {
+        self.0 = self.0.width_length(width);
+        self
+    }
+
+    pub fn height(mut self, height: f32) -> Self {
+        self.0 = self.0.height(height);
+        self
+    }
+
+    pub fn height_length(mut self, height: Length) -> Self {
+        self.0 = self.0.height_length(height);
+        self
+    }
+
+    pub fn grow(mut self, grow: f32) -> Self {
+        self.0 = self.0.grow(grow);
+        self
+    }
+
+    pub fn shrink(mut self, shrink: f32) -> Self {
+        self.0 = self.0.shrink(shrink);
+        self
+    }
+
+    pub fn min_width(mut self, width: f32) -> Self {
+        self.0 = self.0.min_width(width);
+        self
+    }
+
+    pub fn max_width(mut self, width: f32) -> Self {
+        self.0 = self.0.max_width(width);
+        self
+    }
+
+    pub fn min_height(mut self, height: f32) -> Self {
+        self.0 = self.0.min_height(height);
+        self
+    }
+
+    pub fn max_height(mut self, height: f32) -> Self {
+        self.0 = self.0.max_height(height);
+        self
+    }
+
+    pub fn fill_width(mut self) -> Self {
+        self.0 = self.0.fill_width();
+        self
+    }
+
+    pub fn fill_height(mut self) -> Self {
+        self.0 = self.0.fill_height();
+        self
+    }
+
+    pub fn basis(mut self, basis: impl Into<Length>) -> Self {
+        self.0 = self.0.basis(basis);
+        self
+    }
+
+    pub fn align_self(mut self, align: Align) -> Self {
+        self.0 = self.0.align_self(align);
+        self
+    }
+
+    pub fn align_items(mut self, align: Align) -> Self {
+        self.0 = self.0.align_items(align);
+        self
+    }
+
+    pub fn justify_content(mut self, justify: Justify) -> Self {
+        self.0 = self.0.justify_content(justify);
+        self
+    }
+
+    pub fn overflow(mut self, x: Overflow, y: Overflow) -> Self {
+        self.0 = self.0.overflow(x, y);
+        self
+    }
+
+    pub fn overflow_x(mut self, overflow: Overflow) -> Self {
+        self.0 = self.0.overflow_x(overflow);
+        self
+    }
+
+    pub fn overflow_y(mut self, overflow: Overflow) -> Self {
+        self.0 = self.0.overflow_y(overflow);
+        self
+    }
+
+    pub fn scrollbar_theme(mut self, theme: crate::SemanticTheme) -> Self {
+        self.0 = self.0.scrollbar_theme(theme);
+        self
+    }
+
+    pub fn message(mut self, message: Message) -> Self {
+        self.0 = self.0.message(message);
+        self
+    }
+
+    pub fn on_drag(mut self, (seed, map): (Message, fn(Message, DragGesture) -> Message)) -> Self {
+        self.0 = self.0.on_drag(seed, map);
+        self
+    }
+
+    pub fn on_drop(mut self, (seed, map): (Message, fn(Message, DropGesture) -> Message)) -> Self {
+        self.0 = self.0.on_drop(seed, map);
+        self
+    }
+
+    pub fn context_message(mut self, message: Message) -> Self {
+        self.0 = self.0.context_message(message);
+        self
+    }
+
+    pub fn focus_message(mut self, message: Message) -> Self {
+        self.0 = self.0.focus_message(message);
+        self
+    }
+
+    pub fn blur_message(mut self, message: Message) -> Self {
+        self.0 = self.0.blur_message(message);
+        self
+    }
+
+    pub fn enabled(mut self, enabled: bool) -> Self {
+        if !enabled {
+            self.0.message = None;
+        }
+        self
+    }
+
+    pub fn accessibility_label(mut self, label: impl Into<String>) -> Self {
+        self.0 = self.0.accessibility_label(label);
+        self
+    }
+
+    pub fn semantic_role(mut self, role: SemanticRole) -> Self {
+        self.0 = self.0.semantic_role(role);
+        self
+    }
+
+    pub fn accessibility_description(mut self, description: impl Into<String>) -> Self {
+        self.0 = self.0.accessibility_description(description);
+        self
+    }
+
+    pub fn accessibility_state(mut self, state: impl Into<String>) -> Self {
+        self.0 = self.0.accessibility_state(state);
+        self
+    }
+}
+
+impl<Message> Default for Container<Message> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<Message> Component<Message> for Container<Message> {
+    fn into_element(self) -> Element<Message> {
+        self.0
+    }
+}
+
+pub struct Sidebar<Message = String>(Column<Message>);
+
+impl<Message> Sidebar<Message> {
+    pub fn new(width: f32) -> Self {
+        Self(Column::new().width(width).shrink(0.0))
+    }
+
+    pub fn background(mut self, background: impl Into<Background>) -> Self {
+        self.0 = self.0.background(background);
+        self
+    }
+
+    pub fn padding(mut self, padding: impl Into<Insets>) -> Self {
+        self.0 = self.0.padding(padding);
+        self
+    }
+
+    pub fn gap(mut self, gap: f32) -> Self {
+        self.0 = self.0.gap(gap);
+        self
+    }
+
+    pub fn min_width(mut self, width: f32) -> Self {
+        self.0 = self.0.min_width(width);
+        self
+    }
+
+    pub fn max_width(mut self, width: f32) -> Self {
+        self.0 = self.0.max_width(width);
+        self
+    }
+
+    pub fn child(mut self, child: impl Component<Message>) -> Self {
+        self.0 = self.0.child(child);
+        self
+    }
+
+    pub fn children(mut self, children: impl IntoIterator<Item = impl Component<Message>>) -> Self {
+        self.0 = self.0.children(children);
+        self
+    }
+}
+
+impl<Message> Component<Message> for Sidebar<Message> {
+    fn into_element(self) -> Element<Message> {
+        self.0.into_element()
+    }
+}
+
+/// A thematic break with configurable space above and below its one-pixel line.
+pub struct HorizontalRule<Message = String>(Container<Message>);
+
+impl<Message> HorizontalRule<Message> {
+    pub fn new(color: Color) -> Self {
+        Self(
+            Container::new()
+                .height(17.0)
+                .padding(Insets {
+                    top: 8.0,
+                    right: 0.0,
+                    bottom: 8.0,
+                    left: 0.0,
+                })
+                .child(Container::new().height(1.0).background(color)),
+        )
+    }
+
+    pub fn spacing(mut self, top: f32, bottom: f32) -> Self {
+        self.0 = Container(self.0.0.height(top + 1.0 + bottom).padding(Insets {
+            top,
+            right: 0.0,
+            bottom,
+            left: 0.0,
+        }));
+        self
+    }
+
+    pub fn spacing_pair(self, spacing: (f32, f32)) -> Self {
+        self.spacing(spacing.0, spacing.1)
+    }
+}
+
+impl<Message> Component<Message> for HorizontalRule<Message> {
+    fn into_element(self) -> Element<Message> {
+        self.0.into_element()
+    }
+}
+
+pub struct SidebarSection<Message = String>(Column<Message>);
+
+impl<Message> SidebarSection<Message> {
+    pub fn new(label: impl Into<String>, color: Color) -> Self {
+        Self(
+            Column::new()
+                .gap(3.0)
+                .child(Text::new(label).height(26.0).scale(0.95).color(color)),
+        )
+    }
+
+    pub fn child(mut self, child: impl Component<Message>) -> Self {
+        self.0 = self.0.child(child);
+        self
+    }
+
+    pub fn children(mut self, children: impl IntoIterator<Item = impl Component<Message>>) -> Self {
+        self.0 = self.0.children(children);
+        self
+    }
+}
+
+impl<Message> Component<Message> for SidebarSection<Message> {
+    fn into_element(self) -> Element<Message> {
+        self.0.into_element()
+    }
+}
+
+pub struct SidebarItem<Message = String>(Container<Message>);
+
+impl<Message> SidebarItem<Message> {
+    pub fn new(message: Message, label: impl Into<String>, foreground: Color) -> Self {
+        Self(
+            Container::new()
+                .height(36.0)
+                .message(message)
+                .padding(Insets {
+                    top: 8.0,
+                    right: 8.0,
+                    bottom: 6.0,
+                    left: 10.0,
+                })
+                .child(Text::new(label).scale(1.05).color(foreground)),
+        )
+    }
+
+    pub fn background(mut self, background: impl Into<Background>) -> Self {
+        self.0 = self.0.background(background);
+        self
+    }
+
+    pub fn indent(mut self, depth: usize) -> Self {
+        self.0.0.style.padding.left += depth as f32 * 16.0;
+        self
+    }
+}
+
+impl<Message> Component<Message> for SidebarItem<Message> {
+    fn into_element(self) -> Element<Message> {
+        self.0.into_element()
+    }
+}
+
+pub struct SidebarFolder<Message = String>(Container<Message>);
+
+impl<Message> SidebarFolder<Message> {
+    pub fn new(
+        toggle_message: Message,
+        open_message: Message,
+        label: impl Into<String>,
+        expanded: bool,
+        foreground: Color,
+    ) -> Self {
+        let label = label.into();
+        let toggle_label = format!("Toggle {label}");
+        Self(
+            Container::new().height(36.0).child(
+                Row::new()
+                    .child(
+                        Container::new()
+                            .width(28.0)
+                            .height(36.0)
+                            .message(toggle_message)
+                            .accessibility_label(toggle_label)
+                            .padding(Insets {
+                                top: 8.0,
+                                right: 3.0,
+                                bottom: 6.0,
+                                left: 8.0,
+                            })
+                            .child(
+                                Text::new(if expanded { "⌄" } else { "›" })
+                                    .scale(1.05)
+                                    .color(foreground),
+                            ),
+                    )
+                    .child(
+                        Container::new()
+                            .grow(1.0)
+                            .height(36.0)
+                            .message(open_message)
+                            .accessibility_label(label.clone())
+                            .padding(Insets {
+                                top: 8.0,
+                                right: 8.0,
+                                bottom: 6.0,
+                                left: 2.0,
+                            })
+                            .child(Text::new(label).scale(1.05).color(foreground)),
+                    ),
+            ),
+        )
+    }
+
+    pub fn background(mut self, background: impl Into<Background>) -> Self {
+        self.0 = self.0.background(background);
+        self
+    }
+
+    pub fn row_height(mut self, height: f32) -> Self {
+        self.0.0.style.height = Length::Px(height);
+        if let Some(row) = self.0.0.children.first_mut() {
+            for action in &mut row.children {
+                action.style.height = Length::Px(height);
+                action.style.padding.top = 4.0;
+                action.style.padding.bottom = 3.0;
+            }
+        }
+        self
+    }
+
+    /// Assigns a stable semantic identity to the folder-opening action. This
+    /// lets native drag adapters resolve a drop destination without coupling
+    /// provider paths to painted row geometry.
+    pub fn open_id(mut self, id: impl Into<UiId>) -> Self {
+        if let Some(open) = self
+            .0
+            .0
+            .children
+            .first_mut()
+            .and_then(|row| row.children.get_mut(1))
+        {
+            open.id = Some(id.into());
+        }
+        self
+    }
+
+    pub fn indent(mut self, depth: usize) -> Self {
+        self.0.0.style.padding.left = depth as f32 * 16.0;
+        self
+    }
+
+    /// Applies modality-specific focus rings to both semantic actions in the
+    /// folder row without turning the noninteractive wrapper into a target.
+    pub fn focus_background_tints(mut self, colors: (Color, Color)) -> Self {
+        if let Some(row) = self.0.0.children.first_mut() {
+            for action in &mut row.children {
+                action.style.focus_background_tint = Some(colors.0);
+                action.style.controller_focus_background_tint = Some(colors.1);
+            }
+        }
+        self
+    }
+
+    pub fn accessibility_labels<T: Into<String>, O: Into<String>>(
+        mut self,
+        labels: (T, O),
+    ) -> Self {
+        let (toggle, open) = labels;
+        if let Some(row) = self.0.0.children.first_mut() {
+            if let Some(action) = row.children.first_mut() {
+                action.style.accessibility_label = Some(toggle.into());
+            }
+            if let Some(action) = row.children.get_mut(1) {
+                action.style.accessibility_label = Some(open.into());
+            }
+        }
+        self
+    }
+
+    /// Adds provider-resolved artwork to the open action while preserving the
+    /// disclosure action as an independent semantic target.
+    pub fn artwork(
+        mut self,
+        asset_id: u16,
+        image: std::sync::Arc<image::RgbaImage>,
+        generation: u64,
+    ) -> Self {
+        if let Some(open) = self
+            .0
+            .0
+            .children
+            .first_mut()
+            .and_then(|row| row.children.get_mut(1))
+        {
+            let label = open.children.pop();
+            let mut row = Row::new().gap(7.0).child(
+                Image::new_with_generation(asset_id, image, generation)
+                    .fit(ImageFit::Contain)
+                    .width(18.0)
+                    .height(18.0),
+            );
+            if let Some(label) = label {
+                row = row.child(label);
+            }
+            open.children.push(row.into_element());
+        }
+        self
+    }
+}
+
+impl<Message> Component<Message> for SidebarFolder<Message> {
+    fn into_element(self) -> Element<Message> {
+        self.0.into_element()
+    }
+}
+
+pub struct ContentPane<Message = String>(Container<Message>);
+
+impl<Message> ContentPane<Message> {
+    pub fn new(content: impl Component<Message>) -> Self {
+        Self(Container::new().grow(1.0).child(content))
+    }
+
+    pub fn background(mut self, background: impl Into<Background>) -> Self {
+        self.0 = self.0.background(background);
+        self
+    }
+
+    pub fn min_width(mut self, width: f32) -> Self {
+        self.0 = self.0.min_width(width);
+        self
+    }
+
+    pub fn fill_width(mut self) -> Self {
+        self.0 = self.0.fill_width();
+        self
+    }
+}
+
+impl<Message> Component<Message> for ContentPane<Message> {
+    fn into_element(self) -> Element<Message> {
+        self.0.into_element()
+    }
+}
+
+pub struct ShoulderHints<Message = String>(Row<Message>);
+
+impl<Message> ShoulderHints<Message> {
+    pub fn new(color: Color, muted: Color) -> Self {
+        Self::with_labels(color, muted, "LB", "RB")
+    }
+
+    pub fn with_labels(color: Color, muted: Color, left: &str, right: &str) -> Self {
+        fn keycap<Message>(label: &str, color: Color, muted: Color) -> Container<Message> {
+            Container::new()
+                .width(34.0)
+                .height(24.0)
+                .border(muted, 1.0)
+                .padding(Insets {
+                    top: 2.0,
+                    right: 5.0,
+                    bottom: 2.0,
+                    left: 5.0,
+                })
+                .child(
+                    Text::new(label)
+                        .scale(1.0)
+                        .color(color)
+                        .align(TextAlign::Center),
+                )
+        }
+        Self(
+            Row::new()
+                .gap(8.0)
+                .child(keycap(left, color, muted))
+                .child(keycap(right, color, muted)),
+        )
+    }
+}
+
+impl<Message> Component<Message> for ShoulderHints<Message> {
+    fn into_element(self) -> Element<Message> {
+        self.0.into_element()
+    }
+}
+
+pub struct Button<Message = String>(Container<Message>);
+
+/// The semantic visual role of a button.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ButtonPresentation {
+    Primary,
+    Secondary,
+    Quiet,
+    Destructive,
+    Disabled,
+}
+
+impl<Message> Button<Message> {
+    pub fn new(message: Message, label: impl Into<String>) -> Self {
+        let label = label.into();
+        let mut button = Self::with_label(message, ButtonLabel::new(&label));
+        button.0 = button.0.accessibility_label(label);
+        button
+    }
+
+    /// Creates a button whose appearance is resolved entirely from semantic
+    /// theme roles. A disabled presentation deliberately has no activation
+    /// message.
+    pub fn semantic(
+        theme: SemanticTheme,
+        message: Message,
+        label: impl Into<String>,
+        presentation: ButtonPresentation,
+    ) -> Self {
+        Self::new(message, label).presentation(theme, presentation)
+    }
+
+    /// Applies a semantic presentation without changing the existing button
+    /// construction API.
+    pub fn presentation(mut self, theme: SemanticTheme, presentation: ButtonPresentation) -> Self {
+        let (background, border, foreground) = match presentation {
+            ButtonPresentation::Primary => (
+                Some(theme.accent.ordinary),
+                theme.accent.ordinary,
+                theme.accent.on_accent,
+            ),
+            ButtonPresentation::Secondary => (
+                Some(theme.surfaces.raised),
+                theme.borders.ordinary,
+                theme.text.primary,
+            ),
+            ButtonPresentation::Quiet => (None, theme.borders.subtle, theme.text.primary),
+            ButtonPresentation::Destructive => (
+                Some(theme.text.danger),
+                theme.text.danger,
+                theme.accent.on_accent,
+            ),
+            ButtonPresentation::Disabled => (
+                Some(theme.surfaces.raised),
+                theme.borders.subtle,
+                theme.text.disabled,
+            ),
+        };
+        self.0.0.style.background = background.map(Background::Solid);
+        self.0.0.style.border = (presentation != ButtonPresentation::Quiet).then_some(border);
+        self.0.0.style.border_width = theme.sizing.border;
+        self.0.0.style.corner_radius = theme.radii.control;
+        self.0.0.style.height = Length::Px(theme.sizing.control_height);
+        self.0.0.style.padding = Insets {
+            top: 8.0,
+            right: 12.0,
+            bottom: 7.0,
+            left: 12.0,
+        };
+        self.0.0.style.hover_background = Some(Background::Solid(theme.surfaces.hover));
+        self.0.0.style.pressed_background = Some(Background::Solid(theme.surfaces.pressed));
+        self.0.0.style.focus_background_tint = Some(theme.borders.focus);
+        self.0.0.style.controller_focus_background_tint = Some(theme.borders.controller_focus);
+        if presentation == ButtonPresentation::Disabled {
+            self.0.0.message = None;
+        }
+        if let Some(label) = self.0.0.children.first_mut() {
+            label.style.foreground = Some(foreground);
+        }
+        self
+    }
+
+    pub fn id(mut self, id: impl Into<UiId>) -> Self {
+        self.0 = self.0.id(id);
+        self
+    }
+
+    /// Declares one source-owned revision for both the semantic button label
+    /// and its nested text payload, allowing retained phases to prove that
+    /// unchanged sibling labels are reusable.
+    pub fn content_revision(mut self, revision: u64) -> Self {
+        self.0.0.content_revision = Some(revision);
+        if let Some(label) = self.0.0.children.first_mut() {
+            label.content_revision = Some(revision);
+        }
+        self
+    }
+
+    pub fn accessibility_label(mut self, label: impl Into<String>) -> Self {
+        self.0 = self.0.accessibility_label(label);
+        self
+    }
+
+    pub fn accessibility_state(mut self, state: impl Into<String>) -> Self {
+        self.0 = self.0.accessibility_state(state);
+        self
+    }
+
+    pub fn focus_background_tint(mut self, color: Color) -> Self {
+        self.0 = self.0.focus_background_tint(color);
+        self
+    }
+
+    pub fn controller_focus_background_tint(mut self, color: Color) -> Self {
+        self.0 = self.0.controller_focus_background_tint(color);
+        self
+    }
+
+    pub fn with_label(message: Message, label: ButtonLabel<Message>) -> Self {
+        Self(
+            Container::new()
+                .padding(Insets {
+                    top: 11.0,
+                    right: 12.0,
+                    bottom: 8.0,
+                    left: 12.0,
+                })
+                .height(42.0)
+                .semantic_role(SemanticRole::Button)
+                .message(message)
+                .child(label),
+        )
+    }
+
+    pub fn background(mut self, background: impl Into<Background>) -> Self {
+        self.0 = self.0.background(background);
+        self
+    }
+
+    pub fn border(mut self, color: Color, width: f32) -> Self {
+        self.0 = self.0.border(color, width);
+        self
+    }
+
+    pub fn border_value(mut self, border: impl Into<Border>) -> Self {
+        self.0 = self.0.border_value(border);
+        self
+    }
+
+    pub fn width(mut self, width: f32) -> Self {
+        self.0 = self.0.width(width);
+        self
+    }
+
+    pub fn height(mut self, height: f32) -> Self {
+        self.0 = self.0.height(height);
+        self
+    }
+
+    /// Keeps a button visible while removing its activation route when unavailable.
+    pub fn enabled(mut self, enabled: bool) -> Self {
+        self.0 = self.0.enabled(enabled);
+        self
+    }
+
+    /// Allows a button label to wrap while keeping the ordinary one-line
+    /// button height as its minimum.
+    pub fn max_lines(mut self, lines: usize) -> Self {
+        self.0 = self.0.height_length(Length::Auto).min_height(42.0);
+        if let Some(label) = self.0.0.children.first_mut()
+            && let Kind::Text {
+                wrap,
+                max_lines,
+                ellipsis,
+                ..
+            } = &mut label.kind
+        {
+            *wrap = true;
+            *max_lines = Some(lines.max(1));
+            *ellipsis = false;
+        }
+        self
+    }
+
+    pub fn label_align(mut self, align: TextAlign) -> Self {
+        if let Some(label) = self.0.0.children.first_mut()
+            && let Kind::Text { .. } = label.kind
+        {
+            label.style.text_align = align;
+        }
+        self
+    }
+
+    /// Center the measured label in a taller button without font-specific padding offsets.
+    pub fn center_label_vertically(mut self) -> Self {
+        self.0 = self.0.justify_content(Justify::Center);
+        self
+    }
+
+    /// Keeps a button label on one line and truncates it to the available width.
+    pub fn ellipsis(mut self, ellipsis: bool) -> Self {
+        if let Some(label) = self.0.0.children.first_mut()
+            && let Kind::Text {
+                wrap,
+                max_lines,
+                ellipsis: value,
+                ..
+            } = &mut label.kind
+        {
+            *wrap = !ellipsis;
+            *max_lines = ellipsis.then_some(1);
+            *value = ellipsis;
+        }
+        self
+    }
+
+    pub fn radius(mut self, radius: f32) -> Self {
+        self.0 = self.0.radius(radius);
+        self
+    }
+
+    pub fn padding(mut self, padding: impl Into<Insets>) -> Self {
+        self.0 = self.0.padding(padding);
+        self
+    }
+
+    pub fn min_width(mut self, width: f32) -> Self {
+        self.0 = self.0.min_width(width);
+        self
+    }
+
+    pub fn max_width(mut self, width: f32) -> Self {
+        self.0 = self.0.max_width(width);
+        self
+    }
+
+    pub fn shrink(mut self, shrink: f32) -> Self {
+        self.0 = self.0.shrink(shrink);
+        self
+    }
+
+    pub fn color(mut self, color: Color) -> Self {
+        if let Some(label) = self.0.0.children.first_mut() {
+            label.style.foreground = Some(color);
+        }
+        self
+    }
+}
+
+impl<Message> Component<Message> for Button<Message> {
+    fn into_element(self) -> Element<Message> {
+        self.0.into_element()
+    }
+}
+
+pub struct ButtonLabel<Message = String>(Text<Message>);
+
+impl<Message> ButtonLabel<Message> {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(Text::new(value).wrap(false).align(TextAlign::Center))
+    }
+
+    pub fn scale(mut self, scale: f32) -> Self {
+        self.0 = self.0.scale(scale);
+        self
+    }
+
+    pub fn color(mut self, color: Color) -> Self {
+        self.0 = self.0.color(color);
+        self
+    }
+
+    pub fn align(mut self, align: TextAlign) -> Self {
+        self.0 = self.0.align(align);
+        self
+    }
+
+    pub fn max_lines(mut self, lines: usize) -> Self {
+        self.0 = self.0.wrap(true).max_lines(lines);
+        self
+    }
+}
+
+impl<Message> Component<Message> for ButtonLabel<Message> {
+    fn into_element(self) -> Element<Message> {
+        self.0.into_element()
+    }
+}
+
+pub struct RadioButton<Message = String>(Container<Message>);
+
+/// A full-row, single-selection option suitable for devices and settings lists.
+pub struct RadioOption<Message = String> {
+    theme: SemanticTheme,
+    message: Message,
+    label: String,
+    description: Option<String>,
+    selected: bool,
+    enabled: bool,
+    id: Option<UiId>,
+    leading: Option<Element<Message>>,
+    trailing: Option<Element<Message>>,
+    compact: bool,
+}
+
+impl<Message> RadioOption<Message> {
+    pub fn new(
+        theme: SemanticTheme,
+        message: Message,
+        label: impl Into<String>,
+        selected: bool,
+    ) -> Self {
+        Self {
+            theme,
+            message,
+            label: label.into(),
+            description: None,
+            selected,
+            enabled: true,
+            id: None,
+            leading: None,
+            trailing: None,
+            compact: false,
+        }
+    }
+
+    pub fn description(mut self, description: impl Into<String>) -> Self {
+        self.description = Some(description.into());
+        self
+    }
+
+    pub fn enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+
+    pub fn id(mut self, id: impl Into<UiId>) -> Self {
+        self.id = Some(id.into());
+        self
+    }
+
+    pub fn leading(mut self, leading: impl Component<Message>) -> Self {
+        self.leading = Some(leading.into_element());
+        self
+    }
+
+    pub fn trailing(mut self, trailing: impl Component<Message>) -> Self {
+        self.trailing = Some(trailing.into_element());
+        self
+    }
+
+    pub fn compact(mut self) -> Self {
+        self.compact = true;
+        self
+    }
+}
+
+impl<Message> Component<Message> for RadioOption<Message> {
+    fn into_element(self) -> Element<Message> {
+        let text_color = if self.enabled {
+            self.theme.text.primary
+        } else {
+            self.theme.text.disabled
+        };
+        let mut labels = Column::new()
+            .gap(self.theme.spacing.compact)
+            .grow(1.0)
+            .child(Text::new(self.label.clone()).color(text_color).wrap(true));
+        if let Some(description) = self.description.as_ref() {
+            labels = labels.child(
+                Text::new(description)
+                    .scale(0.9)
+                    .color(if self.enabled {
+                        self.theme.text.secondary
+                    } else {
+                        self.theme.text.disabled
+                    })
+                    .wrap(true),
+            );
+        }
+        let mut row = Row::new()
+            .gap(self.theme.spacing.control)
+            .align_items(Align::Center)
+            .child(SelectionIndicator::semantic(self.theme, self.selected));
+        if let Some(leading) = self.leading {
+            row = row.child(leading);
+        }
+        row = row.child(labels);
+        if let Some(trailing) = self.trailing {
+            row = row.child(trailing);
+        }
+        let state = match (self.enabled, self.selected) {
+            (false, _) => "disabled",
+            (true, true) => "selected",
+            (true, false) => "unselected",
+        };
+        let mut option = Container::new()
+            .min_height(if self.compact { 40.0 } else { 48.0 })
+            .fill_width()
+            .padding(if self.compact {
+                Insets {
+                    top: 4.0,
+                    right: 12.0,
+                    bottom: 4.0,
+                    left: 12.0,
+                }
+            } else {
+                Insets {
+                    top: 6.0,
+                    right: self.theme.spacing.content,
+                    bottom: 6.0,
+                    left: self.theme.spacing.content,
+                }
+            })
+            .radius(self.theme.radii.control)
+            .background(self.theme.surfaces.card)
+            .border(
+                if self.selected {
+                    self.theme.accent.ordinary
+                } else {
+                    self.theme.borders.subtle
+                },
+                if self.selected { 2.0 } else { 1.0 },
+            )
+            .interaction_backgrounds(self.theme.surfaces.hover, self.theme.surfaces.pressed)
+            .focus_background_tint(self.theme.borders.focus)
+            .controller_focus_background_tint(self.theme.borders.controller_focus)
+            .message(self.message)
+            .enabled(self.enabled)
+            .semantic_role(SemanticRole::Radio)
+            .accessibility_label(self.label)
+            .accessibility_description(self.description.unwrap_or_default())
+            .accessibility_state(state)
+            .child(row);
+        if let Some(id) = self.id {
+            option = option.id(id);
+        }
+        option.into_element()
+    }
+}
+
+/// A semantic group of full-row radio options.
+pub struct RadioGroup<Message = String>(Container<Message>);
+
+impl<Message> RadioGroup<Message> {
+    pub fn new(options: impl IntoIterator<Item = RadioOption<Message>>) -> Self {
+        Self(
+            Container::new()
+                .fill_width()
+                .semantic_role(SemanticRole::RadioGroup)
+                .navigation_scope(crate::NavigationScope::group())
+                .child(Column::new().fill_width().gap(6.0).children(options)),
+        )
+    }
+
+    pub fn id(mut self, id: impl Into<UiId>) -> Self {
+        self.0 = self.0.id(id);
+        self
+    }
+}
+
+impl<Message> Component<Message> for RadioGroup<Message> {
+    fn into_element(self) -> Element<Message> {
+        self.0.into_element()
+    }
+}
+
+/// A renderer-owned radio/selection mark that never depends on a font glyph.
+pub struct SelectionIndicator<Message = String>(Container<Message>);
+
+impl<Message> SelectionIndicator<Message> {
+    pub fn new(selected: bool, indicator: Color, background: Color) -> Self {
+        let mut inner = Container::new()
+            .width(14.0)
+            .height(14.0)
+            .radius(7.0)
+            .background(background);
+        if selected {
+            inner = inner.padding(3.0).child(
+                Container::new()
+                    .width(8.0)
+                    .height(8.0)
+                    .radius(4.0)
+                    .background(indicator),
+            );
+        }
+        Self(
+            Container::new()
+                .width(18.0)
+                .height(18.0)
+                .radius(9.0)
+                .background(indicator)
+                .padding(2.0)
+                .child(inner),
+        )
+    }
+
+    pub fn semantic(theme: SemanticTheme, selected: bool) -> Self {
+        Self::new(
+            selected,
+            if selected {
+                theme.accent.ordinary
+            } else {
+                theme.borders.strong
+            },
+            theme.surfaces.card,
+        )
+    }
+}
+
+impl<Message> Component<Message> for SelectionIndicator<Message> {
+    fn into_element(self) -> Element<Message> {
+        self.0.into_element()
+    }
+}
+
+impl<Message> RadioButton<Message> {
+    pub fn new(message: Message, label: impl Into<String>, selected: bool) -> Self {
+        Self::with_colors(
+            message,
+            label,
+            selected,
+            if selected { 0x68b8ff } else { 0x8792a8 },
+            0xf4f7ff,
+            0x10151e,
+            0x202936,
+            0x293545,
+            0x68b8ff,
+            0x63d69a,
+        )
+    }
+
+    pub fn semantic(
+        theme: SemanticTheme,
+        message: Message,
+        label: impl Into<String>,
+        selected: bool,
+    ) -> Self {
+        Self::with_colors(
+            message,
+            label,
+            selected,
+            if selected {
+                theme.accent.ordinary
+            } else {
+                theme.borders.strong
+            },
+            theme.text.primary,
+            theme.surfaces.card,
+            theme.surfaces.hover,
+            theme.surfaces.pressed,
+            theme.borders.focus,
+            theme.borders.controller_focus,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn with_colors(
+        message: Message,
+        label: impl Into<String>,
+        selected: bool,
+        indicator: Color,
+        label_color: Color,
+        background: Color,
+        hover: Color,
+        pressed: Color,
+        focus: Color,
+        controller_focus: Color,
+    ) -> Self {
+        Self(
+            Container::new()
+                .height(34.0)
+                .message(message)
+                .interaction_backgrounds(hover, pressed)
+                .focus_background_tint(focus)
+                .controller_focus_background_tint(controller_focus)
+                .child(
+                    Row::new()
+                        .gap(10.0)
+                        .align_items(Align::Center)
+                        .child(SelectionIndicator::new(selected, indicator, background))
+                        .child(Text::new(label).scale(1.15).color(label_color)),
+                ),
+        )
+    }
+
+    pub fn width(mut self, width: f32) -> Self {
+        self.0 = self.0.width(width);
+        self
+    }
+
+    pub fn id(mut self, id: impl Into<UiId>) -> Self {
+        self.0 = self.0.id(id);
+        self
+    }
+
+    pub fn colors(mut self, indicator: Color, label: Color) -> Self {
+        if let Some(row) = self.0.0.children.first_mut() {
+            if let Some(indicator_element) = row.children.first_mut() {
+                indicator_element.style.background = Some(Background::Solid(indicator));
+                if let Some(inner) = indicator_element.children.first_mut()
+                    && let Some(dot) = inner.children.first_mut()
+                {
+                    dot.style.background = Some(Background::Solid(indicator));
+                }
+            }
+            if let Some(label_text) = row.children.get_mut(1) {
+                label_text.style.foreground = Some(label);
+            }
+        }
+        self
+    }
+
+    pub fn colors_pair(self, colors: (Color, Color)) -> Self {
+        self.colors(colors.0, colors.1)
+    }
+}
+
+impl<Message> Component<Message> for RadioButton<Message> {
+    fn into_element(self) -> Element<Message> {
+        self.0.into_element()
+    }
+}
+
+pub struct Slider<Message = String>(Element<Message>);
+
+impl<Message> Slider<Message> {
+    pub fn new(message: Message, value: f32) -> Self {
+        let mut element = Element {
+            id: None,
+            source: None,
+            content_revision: None,
+            virtual_navigation: None,
+            kind: Kind::Slider {
+                value: value.clamp(0.0, 1.0),
+                track: 0x354158,
+                fill: 0x68b8ff,
+                thumb: 0xf4f7ff,
+                thumb_border: 0x8868b8ff,
+                geometry: [6.0, 3.0, 20.0, 20.0, 10.0, 1.0],
+                presentation: None,
+            },
+            style: Style::default(),
+            message: Some(message),
+            context_message: None,
+            focus_message: None,
+            blur_message: None,
+            message_mapper: None,
+            seeded_value_mapper: None,
+            scroll_extent_mapper: None,
+            drag_seed: None,
+            drag_mapper: None,
+            drop_message: None,
+            drop_mapper: None,
+            text_mapper: None,
+            option_messages: Vec::new(),
+            inline_messages: Vec::new(),
+            children: Vec::new(),
+            navigation_scope: None,
+            adjustment_step: 0.05,
+        };
+        element.style.height = Length::Px(24.0);
+        element.style.semantic_role = Some(SemanticRole::Slider);
+        Self(element)
+    }
+
+    pub fn on_change(map: fn(f32) -> Message, value: f32) -> Self {
+        let mut slider = Self::new(map(value.clamp(0.0, 1.0)), value);
+        slider.0.message_mapper = Some(map);
+        slider
+    }
+
+    pub fn on_change_with(seed: Message, map: fn(Message, f32) -> Message, value: f32) -> Self {
+        let mut slider = Self::new(seed, value);
+        slider.0.seeded_value_mapper = Some(map);
+        slider
+    }
+
+    pub fn on_drag(mut self, (seed, map): (Message, fn(Message, DragGesture) -> Message)) -> Self {
+        self.0 = self.0.on_drag(seed, map);
+        self
+    }
+
+    pub fn parts(
+        mut self,
+        track: DropdownPartStyle,
+        fill: DropdownPartStyle,
+        thumb: DropdownPartStyle,
+    ) -> Self {
+        if let Kind::Slider { presentation, .. } = &mut self.0.kind {
+            *presentation = Some(Box::new([track.bounded(), fill.bounded(), thumb.bounded()]));
+        }
+        self.0.style.automatic_focus_tint = false;
+        self
+    }
+
+    pub fn colors(mut self, track: Color, fill: Color, thumb: Color) -> Self {
+        if let Kind::Slider {
+            track: slider_track,
+            fill: slider_fill,
+            thumb: slider_thumb,
+            ..
+        } = &mut self.0.kind
+        {
+            *slider_track = track;
+            *slider_fill = fill;
+            *slider_thumb = thumb;
+        }
+        self
+    }
+
+    /// Explicit native slider part geometry, supplied by a presentation compiler.
+    pub fn geometry(
+        mut self,
+        track_height: f32,
+        track_radius: f32,
+        thumb_width: f32,
+        thumb_height: f32,
+        thumb_radius: f32,
+        border_width: f32,
+    ) -> Self {
+        if let Kind::Slider { geometry, .. } = &mut self.0.kind {
+            *geometry = [
+                track_height,
+                track_radius,
+                thumb_width,
+                thumb_height,
+                thumb_radius,
+                border_width,
+            ]
+            .map(|value| {
+                if value.is_finite() {
+                    value.clamp(0.0, 4096.0)
+                } else {
+                    0.0
+                }
+            });
+        }
+        self
+    }
+
+    pub fn thumb_border(mut self, color: Color) -> Self {
+        if let Kind::Slider { thumb_border, .. } = &mut self.0.kind {
+            *thumb_border = color;
+        }
+        self
+    }
+
+    pub fn colors_triplet(self, colors: (Color, Color, Color)) -> Self {
+        self.colors(colors.0, colors.1, colors.2)
+    }
+
+    pub fn id(mut self, id: impl Into<UiId>) -> Self {
+        self.0 = self.0.id(id);
+        self
+    }
+
+    pub fn automatic_focus_tint(mut self, enabled: bool) -> Self {
+        self.0.style.automatic_focus_tint = enabled;
+        self
+    }
+    pub fn width_length(mut self, width: Length) -> Self {
+        self.0.style.width = width;
+        self
+    }
+
+    pub fn width(mut self, width: f32) -> Self {
+        self.0 = self.0.width(width);
+        self
+    }
+
+    pub fn height_length(mut self, height: Length) -> Self {
+        self.0.style.height = height;
+        self
+    }
+
+    pub fn grow(mut self, grow: f32) -> Self {
+        self.0 = self.0.grow(grow);
+        self
+    }
+
+    pub fn adjustment_step(mut self, step: f32) -> Self {
+        self.0 = self.0.adjustment_step(step);
+        self
+    }
+
+    pub fn focus_background_tint(mut self, color: Color) -> Self {
+        self.0 = self.0.focus_background_tint(color);
+        self
+    }
+
+    pub fn controller_focus_background_tint(mut self, color: Color) -> Self {
+        self.0 = self.0.controller_focus_background_tint(color);
+        self
+    }
+}
+
+impl<Message> Component<Message> for Slider<Message> {
+    fn into_element(self) -> Element<Message> {
+        self.0
+    }
+}
+
+/// Typed presentation for a native compound-control part. Geometry is shared by paint,
+/// hit testing and accessibility; a CSS compiler can leave every paint absent.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct DropdownPartStyle {
+    pub width: f32,
+    pub height: f32,
+    pub padding: Insets,
+    pub margin: Insets,
+    pub background: Option<Color>,
+    /// Hover, pressed and focused backgrounds supplied by CSS.
+    pub interaction_backgrounds: [Option<Color>; 3],
+    pub interaction_paints: [InteractionPaint; 3],
+    /// Foreground, font size and line height inheritance from the owning control.
+    pub inherited_text: [bool; 3],
+    pub foreground: Option<Color>,
+    pub border_color: Option<Color>,
+    pub border_width: f32,
+    pub radius: f32,
+    pub font_size: f32,
+    pub line_height: f32,
+}
+
+impl DropdownPartStyle {
+    pub(crate) fn inherited_paint(mut self, paint: InteractionPaint) -> Self {
+        if self.inherited_text[0] {
+            self.foreground = paint.foreground.or(self.foreground);
+        }
+        if self.inherited_text[1] {
+            self.font_size = paint.font_size.unwrap_or(self.font_size);
+        }
+        if self.inherited_text[2] {
+            self.line_height = paint.line_height.unwrap_or(self.line_height);
+        }
+        self
+    }
+
+    pub(crate) fn with_interaction(mut self, index: usize) -> Self {
+        let paint = self.interaction_paints[index];
+        self.background = paint
+            .background
+            .or(self.interaction_backgrounds[index])
+            .or(self.background);
+        self.foreground = paint.foreground.or(self.foreground);
+        self.border_color = paint.border_color.or(self.border_color);
+        self.border_width = paint.border_width.unwrap_or(self.border_width);
+        self.radius = paint.radius.unwrap_or(self.radius);
+        self.font_size = paint.font_size.unwrap_or(self.font_size);
+        self.line_height = paint.line_height.unwrap_or(self.line_height);
+        self
+    }
+
+    pub(crate) fn bounded(mut self) -> Self {
+        let bound = |value: f32| {
+            if value.is_finite() {
+                value.clamp(0.0, 4096.0)
+            } else {
+                0.0
+            }
+        };
+        self.width = bound(self.width);
+        self.height = bound(self.height);
+        self.padding = Insets {
+            top: bound(self.padding.top),
+            right: bound(self.padding.right),
+            bottom: bound(self.padding.bottom),
+            left: bound(self.padding.left),
+        };
+        self.margin = Insets {
+            top: bound(self.margin.top),
+            right: bound(self.margin.right),
+            bottom: bound(self.margin.bottom),
+            left: bound(self.margin.left),
+        };
+        self.border_width = bound(self.border_width);
+        self.radius = bound(self.radius);
+        self.font_size = bound(self.font_size);
+        self.line_height = bound(self.line_height);
+        self
+    }
+}
+
+pub struct Dropdown<Message = String>(Element<Message>);
+
+impl<Message> Dropdown<Message> {
+    pub fn new(
+        toggle_message: Message,
+        selected: impl Into<String>,
+        options: impl IntoIterator<Item = (impl Into<String>, Message)>,
+    ) -> Self {
+        let (options, option_messages): (Vec<_>, Vec<_>) = options
+            .into_iter()
+            .map(|(label, message)| (label.into(), Some(message)))
+            .unzip();
+        let mut element = Element {
+            id: None,
+            source: None,
+            content_revision: None,
+            virtual_navigation: None,
+            kind: Kind::Dropdown {
+                selected: selected.into(),
+                options,
+                expanded: false,
+                open_generation: 0,
+                overlay: false,
+                background: 0x27344c,
+                option_background: 0x34445f,
+                foreground: 0xf4f7ff,
+                presentation: None,
+                option_presentations: Vec::new(),
+                resolved_options: Vec::new(),
+                selected_icon: None,
+                option_icons: Vec::new(),
+            },
+            style: Style::default(),
+            message: Some(toggle_message),
+            context_message: None,
+            focus_message: None,
+            blur_message: None,
+            message_mapper: None,
+            seeded_value_mapper: None,
+            scroll_extent_mapper: None,
+            drag_seed: None,
+            drag_mapper: None,
+            drop_message: None,
+            drop_mapper: None,
+            text_mapper: None,
+            option_messages,
+            inline_messages: Vec::new(),
+            children: Vec::new(),
+            navigation_scope: Some(
+                crate::NavigationScope::group().traversal(crate::NavigationTraversal::Vertical),
+            ),
+            adjustment_step: 0.05,
+        };
+        element.style.height = Length::Px(42.0);
+        Self(element)
+    }
+
+    /// Optional artwork for the selected value and each native option row.
+    pub fn icons(
+        mut self,
+        selected: Option<(u16, Arc<RgbaImage>)>,
+        options: impl IntoIterator<Item = Option<(u16, Arc<RgbaImage>)>>,
+    ) -> Self {
+        if let Kind::Dropdown {
+            selected_icon,
+            option_icons,
+            ..
+        } = &mut self.0.kind
+        {
+            let artwork = |(id, image): (u16, Arc<RgbaImage>)| {
+                use std::hash::{Hash, Hasher};
+                let mut fingerprint = std::collections::hash_map::DefaultHasher::new();
+                image.width().hash(&mut fingerprint);
+                image.height().hash(&mut fingerprint);
+                image.as_raw().hash(&mut fingerprint);
+                (id, image, fingerprint.finish())
+            };
+            *selected_icon = selected.map(artwork);
+            *option_icons = options.into_iter().map(|icon| icon.map(artwork)).collect();
+        }
+        self
+    }
+
+    pub fn option_parts(mut self, styles: impl IntoIterator<Item = DropdownPartStyle>) -> Self {
+        if let Kind::Dropdown {
+            option_presentations,
+            ..
+        } = &mut self.0.kind
+        {
+            *option_presentations = styles.into_iter().map(DropdownPartStyle::bounded).collect();
+        }
+        self
+    }
+
+    /// Replace the native stock appearance with compiler-owned part styles.
+    /// Header and option heights also drive input and overlay placement.
+    pub fn parts(
+        mut self,
+        header: DropdownPartStyle,
+        option: DropdownPartStyle,
+        indicator: DropdownPartStyle,
+    ) -> Self {
+        let parts = [header.bounded(), option.bounded(), indicator.bounded()];
+        self.0.style.height = Length::Px(parts[0].height + parts[0].margin.height());
+        if let Kind::Dropdown { presentation, .. } = &mut self.0.kind {
+            *presentation = Some(Box::new(parts));
+        }
+        self
+    }
+
+    pub fn id(mut self, id: impl Into<UiId>) -> Self {
+        self.0 = self.0.id(id);
+        self
+    }
+
+    pub fn accessibility_label(mut self, label: impl Into<String>) -> Self {
+        self.0.style.accessibility_label = Some(label.into());
+        self
+    }
+
+    pub fn semantic_role(mut self, role: SemanticRole) -> Self {
+        self.0.style.semantic_role = Some(role);
+        self
+    }
+
+    /// Paint options in the transient overlay layer instead of growing the
+    /// surrounding layout when the choice list opens.
+    pub fn overlay(mut self, overlay: bool) -> Self {
+        if let Kind::Dropdown {
+            overlay: is_overlay,
+            ..
+        } = &mut self.0.kind
+        {
+            *is_overlay = overlay;
+            self.0.style.height = Length::Px(if overlay { 30.0 } else { 42.0 });
+        }
+        self
+    }
+
+    /// Requests one opening transition for a new application-owned generation.
+    pub fn open_generation(mut self, generation: u64) -> Self {
+        if let Kind::Dropdown {
+            open_generation, ..
+        } = &mut self.0.kind
+        {
+            *open_generation = generation;
+        }
+        self
+    }
+
+    pub fn expanded(mut self, expanded: bool) -> Self {
+        if let Kind::Dropdown {
+            expanded: is_expanded,
+            options,
+            ..
+        } = &mut self.0.kind
+        {
+            *is_expanded = expanded;
+            self.0.style.height = Length::Px(
+                42.0 + if expanded {
+                    options.len() as f32 * 36.0
+                } else {
+                    0.0
+                },
+            );
+        }
+        self
+    }
+
+    pub fn colors(
+        mut self,
+        background: Color,
+        option_background: Color,
+        foreground: Color,
+    ) -> Self {
+        if let Kind::Dropdown {
+            background: dropdown_background,
+            option_background: dropdown_option_background,
+            foreground: dropdown_foreground,
+            ..
+        } = &mut self.0.kind
+        {
+            *dropdown_background = background;
+            *dropdown_option_background = option_background;
+            *dropdown_foreground = foreground;
+        }
+        self
+    }
+
+    pub fn colors_triplet(self, colors: (Color, Color, Color)) -> Self {
+        self.colors(colors.0, colors.1, colors.2)
+    }
+
+    pub fn focus_background_tint(mut self, color: Color) -> Self {
+        self.0.style.focus_background_tint = Some(color);
+        self
+    }
+
+    pub fn controller_focus_background_tint(mut self, color: Color) -> Self {
+        self.0.style.controller_focus_background_tint = Some(color);
+        self
+    }
+}
+
+impl<Message> Component<Message> for Dropdown<Message> {
+    fn into_element(self) -> Element<Message> {
+        self.0
+    }
+}
+
+pub struct MenuItem<Message = String> {
+    label: String,
+    message: Option<Message>,
+}
+
+impl<Message> MenuItem<Message> {
+    pub fn new(label: impl Into<String>, message: Message) -> Self {
+        Self {
+            label: label.into(),
+            message: Some(message),
+        }
+    }
+
+    pub fn disabled(label: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+            message: None,
+        }
+    }
+}
+
+pub struct Menu<Message = String>(Element<Message>);
+
+impl<Message: Clone> Menu<Message> {
+    pub fn new(
+        toggle_message: Message,
+        label: impl Into<String>,
+        items: impl IntoIterator<Item = MenuItem<Message>>,
+    ) -> Self {
+        let items = items.into_iter().collect::<Vec<_>>();
+        let mut element = Element {
+            id: None,
+            source: None,
+            content_revision: None,
+            virtual_navigation: None,
+            kind: Kind::Dropdown {
+                selected: label.into(),
+                options: items.iter().map(|item| item.label.clone()).collect(),
+                expanded: false,
+                open_generation: 0,
+                overlay: true,
+                background: 0x171b22,
+                option_background: 0x202630,
+                foreground: 0xe8edf4,
+                presentation: None,
+                option_presentations: Vec::new(),
+                resolved_options: Vec::new(),
+                selected_icon: None,
+                option_icons: Vec::new(),
+            },
+            style: Style::default(),
+            message: Some(toggle_message.clone()),
+            // A menu header is itself a valid context-menu affordance. Keep
+            // secondary-click, Shift+F10, controller menu, and accessibility
+            // invocation on the same typed transition as ordinary activation.
+            context_message: Some(toggle_message),
+            focus_message: None,
+            blur_message: None,
+            message_mapper: None,
+            seeded_value_mapper: None,
+            scroll_extent_mapper: None,
+            drag_seed: None,
+            drag_mapper: None,
+            drop_message: None,
+            drop_mapper: None,
+            text_mapper: None,
+            option_messages: items.into_iter().map(|item| item.message).collect(),
+            inline_messages: Vec::new(),
+            children: Vec::new(),
+            navigation_scope: Some(crate::NavigationScope::group()),
+            adjustment_step: 0.05,
+        };
+        element.style.height = Length::Px(30.0);
+        element.style.semantic_role = Some(SemanticRole::Menu);
+        Self(element)
+    }
+
+    pub fn id(mut self, id: impl Into<UiId>) -> Self {
+        self.0 = self.0.id(id);
+        self
+    }
+
+    pub fn width(mut self, width: f32) -> Self {
+        self.0 = self.0.width(width);
+        self
+    }
+
+    pub fn accessibility_label(mut self, label: impl Into<String>) -> Self {
+        self.0.style.accessibility_label = Some(label.into());
+        self
+    }
+
+    pub fn expanded(mut self, expanded: bool) -> Self {
+        if let Kind::Dropdown {
+            expanded: is_expanded,
+            options,
+            ..
+        } = &mut self.0.kind
+        {
+            *is_expanded = expanded;
+            self.0.style.height = Length::Px(
+                30.0 + if expanded {
+                    options.len() as f32 * 36.0
+                } else {
+                    0.0
+                },
+            );
+        }
+        self
+    }
+
+    pub fn colors(
+        mut self,
+        background: Color,
+        option_background: Color,
+        foreground: Color,
+    ) -> Self {
+        if let Kind::Dropdown {
+            background: header,
+            option_background: options,
+            foreground: text,
+            ..
+        } = &mut self.0.kind
+        {
+            *header = background;
+            *options = option_background;
+            *text = foreground;
+        }
+        self
+    }
+}
+
+impl<Message> Component<Message> for Menu<Message> {
+    fn into_element(self) -> Element<Message> {
+        self.0
+    }
+}
+
+pub struct MenuBar<Message = String>(Row<Message>);
+
+impl<Message> MenuBar<Message> {
+    pub fn new() -> Self {
+        Self(Row::new().height(30.0).shrink(0.0).background(0x171b22))
+    }
+    pub fn child(mut self, child: impl Component<Message>) -> Self {
+        self.0 = self.0.child(child);
+        self
+    }
+    pub fn id(mut self, id: impl Into<UiId>) -> Self {
+        self.0 = self.0.id(id);
+        self
+    }
+    pub fn background(mut self, background: impl Into<Background>) -> Self {
+        self.0 = self.0.background(background);
+        self
+    }
+}
+
+impl<Message> Default for MenuBar<Message> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+impl<Message> Component<Message> for MenuBar<Message> {
+    fn into_element(self) -> Element<Message> {
+        self.0.into_element()
+    }
+}
+
+#[cfg(test)]
+mod semantic_control_tests {
+    use super::*;
+    use crate::{UiEvent, UiFrame, UiStateStore};
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    enum Message {
+        Activate,
+        Select,
+        SelectOther,
+    }
+
+    fn theme() -> SemanticTheme {
+        SemanticTheme::from_tokens(crate::SemanticTokenSet::standard(
+            0x101010, 0x181818, 0x202020, 0x242424, 0x303030, 0xf0f0f0, 0xa0a0a0, 0x9050e0,
+            0x402060, 0x50c080, 0x50c080,
+        ))
+    }
+
+    fn light_theme() -> SemanticTheme {
+        SemanticTheme::from_tokens(crate::SemanticTokenSet::standard(
+            0xf4f5f7, 0xe7e9ed, 0xffffff, 0xdfe3e8, 0xd4d9e0, 0x17191d, 0x555b66, 0x7440bd,
+            0xe5d8f7, 0x207a4b, 0x207a4b,
+        ))
+    }
+
+    fn high_contrast_theme() -> SemanticTheme {
+        SemanticTheme::resolve(
+            light_theme().tokens(),
+            theme().tokens(),
+            crate::ResolvedThemePreferences {
+                appearance: crate::ResolvedAppearance::Dark,
+                high_contrast: true,
+                reduced_transparency: false,
+                reduced_motion: false,
+            },
+        )
+    }
+
+    fn state_sheet(theme: SemanticTheme) -> impl Component<Message> {
+        Column::new()
+            .id("semantic-state-sheet")
+            .gap(theme.spacing.content)
+            .padding(Insets::all(theme.spacing.section))
+            .background(theme.surfaces.window)
+            .child(
+                Text::new("Semantic controls")
+                    .scale(1.7)
+                    .color(theme.text.primary),
+            )
+            .child(
+                Row::new().gap(theme.spacing.control).children([
+                    Button::semantic(
+                        theme,
+                        Message::Activate,
+                        "Default",
+                        ButtonPresentation::Primary,
+                    )
+                    .id("button-default"),
+                    Button::semantic(
+                        theme,
+                        Message::Activate,
+                        "Hovered",
+                        ButtonPresentation::Secondary,
+                    )
+                    .id("button-hovered"),
+                    Button::semantic(
+                        theme,
+                        Message::Activate,
+                        "Pressed",
+                        ButtonPresentation::Secondary,
+                    )
+                    .id("button-pressed"),
+                    Button::semantic(
+                        theme,
+                        Message::Activate,
+                        "Focused",
+                        ButtonPresentation::Quiet,
+                    )
+                    .id("button-focused"),
+                    Button::semantic(
+                        theme,
+                        Message::Activate,
+                        "Disabled",
+                        ButtonPresentation::Disabled,
+                    )
+                    .id("button-disabled"),
+                ]),
+            )
+            .child(
+                Row::new().gap(theme.spacing.control).children([
+                    Button::semantic(
+                        theme,
+                        Message::Activate,
+                        "Destructive",
+                        ButtonPresentation::Destructive,
+                    )
+                    .id("button-destructive"),
+                    Button::semantic(
+                        theme,
+                        Message::Activate,
+                        "Controller focus",
+                        ButtonPresentation::Secondary,
+                    )
+                    .id("button-controller"),
+                ]),
+            )
+            .child(Row::new().gap(theme.spacing.section).children([
+                RadioButton::semantic(theme, Message::Select, "Selected", true),
+                RadioButton::semantic(theme, Message::Select, "Unselected", false),
+            ]))
+            .child(Row::new().gap(theme.spacing.section).children([
+                crate::Switch::with_state(
+                    crate::SwitchState::Off,
+                    Some(|_| Message::Activate),
+                    theme,
+                ),
+                crate::Switch::with_state(
+                    crate::SwitchState::On,
+                    Some(|_| Message::Activate),
+                    theme,
+                ),
+                crate::Switch::with_state(crate::SwitchState::MixedUnavailable, None, theme),
+                crate::Switch::with_state(crate::SwitchState::DisabledOn, None, theme),
+            ]))
+    }
+
+    #[test]
+    fn semantic_component_state_sheets_render_every_theme_and_scale() {
+        for (theme_name, theme) in [
+            ("dark", theme()),
+            ("light", light_theme()),
+            (
+                "automatic-dark",
+                SemanticTheme::resolve(
+                    light_theme().tokens(),
+                    theme().tokens(),
+                    crate::ResolvedThemePreferences {
+                        appearance: crate::ResolvedAppearance::Dark,
+                        high_contrast: false,
+                        reduced_transparency: false,
+                        reduced_motion: false,
+                    },
+                ),
+            ),
+            ("high-contrast", high_contrast_theme()),
+            (
+                "reduced-transparency",
+                SemanticTheme::resolve(
+                    light_theme().tokens(),
+                    theme().tokens(),
+                    crate::ResolvedThemePreferences {
+                        appearance: crate::ResolvedAppearance::Dark,
+                        high_contrast: false,
+                        reduced_transparency: true,
+                        reduced_motion: false,
+                    },
+                ),
+            ),
+            ("reduced-motion", theme().with_reduced_motion()),
+        ] {
+            let bounds = Rect::new(0.0, 0.0, 720.0, 360.0);
+            let mut state = UiStateStore::default();
+            let initial = UiFrame::layout_with_state(state_sheet(theme), bounds, &mut state);
+            let id = |suffix: &str| {
+                initial
+                    .resolved_layout()
+                    .nodes()
+                    .iter()
+                    .find(|node| node.id.as_str().ends_with(suffix))
+                    .map(|node| node.id.clone())
+                    .expect("state-sheet control identity")
+            };
+            let _ = state.set_hovered(Some(id("button-hovered")));
+            let _ = state.set_pressed(Some(id("button-pressed")));
+            let _ = state.set_focus(Some(id("button-focused")));
+            let _ = state
+                .navigation_mut()
+                .set_controller_selected(Some(id("button-controller")));
+            let tree = UiFrame::layout_with_state_and_diagnostics(
+                state_sheet(theme),
+                bounds,
+                &mut state,
+                true,
+            );
+            assert!(
+                tree.diagnostics().is_empty(),
+                "{theme_name} state sheet: {:#?}",
+                tree.diagnostics()
+            );
+
+            for scale in [1.0_f32, 1.25, 2.0] {
+                let width = (bounds.size.width * scale) as u32;
+                let height = (bounds.size.height * scale) as u32;
+                let mut renderer = crate::SoftwareRenderer::new_pixel_buffer(width, height, scale);
+                assert!(!renderer.render(tree.commands()).is_empty());
+                assert!(renderer.pixels().iter().any(|pixel| pixel.a > 0));
+                let image = image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_fn(
+                    width,
+                    height,
+                    |x, y| {
+                        let pixel = renderer.pixels()[(y * width + x) as usize];
+                        image::Rgba([pixel.r, pixel.g, pixel.b, pixel.a])
+                    },
+                );
+                let output = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../target/twinkle-snapshots")
+                    .join(format!("semantic-{theme_name}-{scale:.2}x.png"));
+                std::fs::create_dir_all(output.parent().expect("snapshot parent")).unwrap();
+                image.save(output).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn semantic_button_presentations_resolve_theme_roles() {
+        let theme = theme();
+        let cases = [
+            (
+                ButtonPresentation::Primary,
+                Some(Background::Solid(theme.accent.ordinary)),
+                Some(theme.accent.ordinary),
+                theme.accent.on_accent,
+            ),
+            (
+                ButtonPresentation::Secondary,
+                Some(Background::Solid(theme.surfaces.raised)),
+                Some(theme.borders.ordinary),
+                theme.text.primary,
+            ),
+            (ButtonPresentation::Quiet, None, None, theme.text.primary),
+            (
+                ButtonPresentation::Destructive,
+                Some(Background::Solid(theme.text.danger)),
+                Some(theme.text.danger),
+                theme.accent.on_accent,
+            ),
+        ];
+
+        for (presentation, background, border, foreground) in cases {
+            let button = Button::semantic(theme, Message::Activate, "Apply", presentation)
+                .0
+                .0;
+            assert_eq!(button.style.background, background);
+            assert_eq!(button.style.border, border);
+            assert_eq!(button.style.height, Length::Px(theme.sizing.control_height));
+            assert_eq!(button.style.corner_radius, theme.radii.control);
+            assert_eq!(button.children[0].style.foreground, Some(foreground));
+            assert_eq!(button.message, Some(Message::Activate));
+        }
+    }
+
+    #[test]
+    fn semantic_button_paints_hover_pressed_and_focus_from_transient_state() {
+        let theme = theme();
+        let view = || {
+            Button::semantic(
+                theme,
+                Message::Activate,
+                "Apply",
+                ButtonPresentation::Primary,
+            )
+            .id("apply")
+        };
+        let bounds = Rect::new(0.0, 0.0, 180.0, 60.0);
+        let mut state = UiStateStore::default();
+        let mut tree = UiFrame::layout_with_state(view(), bounds, &mut state);
+        let target = tree
+            .semantic_targets_for_message(&Message::Activate)
+            .into_iter()
+            .next()
+            .expect("semantic button has a target")
+            .bounds;
+        let point = Point {
+            x: target.origin.x + target.size.width / 2.0,
+            y: target.origin.y + target.size.height / 2.0,
+        };
+
+        let _ = tree.handle_event(&mut state, UiEvent::PointerMoved(point));
+        tree = UiFrame::layout_with_state(view(), bounds, &mut state);
+        assert!(tree.commands().iter().any(|command| matches!(
+            command,
+            PaintCommand::RoundedFill { color, .. } if *color == theme.surfaces.hover
+        )));
+
+        let _ = tree.handle_event(&mut state, UiEvent::PointerPressed(point));
+        tree = UiFrame::layout_with_state(view(), bounds, &mut state);
+        assert!(tree.commands().iter().any(|command| matches!(
+            command,
+            PaintCommand::RoundedFill { color, .. } if *color == theme.surfaces.pressed
+        )));
+
+        let _ = tree.handle_event(&mut state, UiEvent::PointerReleased(point));
+        let _ = tree.handle_event(&mut state, UiEvent::FocusNext);
+        tree = UiFrame::layout_with_state(view(), bounds, &mut state);
+        let focused = crate::focused_surface(theme.accent.ordinary, theme.borders.focus);
+        assert!(
+            tree.commands().iter().any(|command| matches!(
+                command,
+                PaintCommand::RoundedFill { color, .. } if *color == focused
+            )),
+            "expected {focused:06x} in {:?}",
+            tree.commands()
+        );
+        assert!(!tree.commands().iter().any(|command| matches!(
+            command,
+            PaintCommand::Stroke { color, .. } if *color == theme.borders.focus
+        )));
+    }
+
+    #[test]
+    fn disabled_button_has_no_hit_region_or_message() {
+        let theme = theme();
+        let tree = UiFrame::layout(
+            Button::semantic(
+                theme,
+                Message::Activate,
+                "Unavailable",
+                ButtonPresentation::Disabled,
+            )
+            .id("disabled"),
+            Rect::new(0.0, 0.0, 180.0, 60.0),
+        );
+
+        assert!(
+            tree.semantic_targets_for_message(&Message::Activate)
+                .is_empty()
+        );
+        let node = tree
+            .resolved_layout()
+            .nodes()
+            .first()
+            .expect("disabled button remains in layout");
+        assert!(!node.interaction.interactive);
+    }
+
+    #[test]
+    fn file_plane_labels_are_transparent_until_a_consumer_explicitly_styles_them() {
+        let mut item = FilePlaneItem::new(
+            Message::Activate,
+            "Wallpaper label",
+            17,
+            Arc::new(RgbaImage::from_pixel(1, 1, image::Rgba([0, 0, 0, 0]))),
+        );
+        let label = item.label_box_mut().expect("shared file-plane label box");
+        assert_eq!(label.style.background, None);
+        assert_eq!(label.style.corner_radius, 0.0);
+
+        let frame = UiFrame::layout(
+            FilePlaneItem::new(
+                Message::Activate,
+                "Mixed wallpaper",
+                18,
+                Arc::new(RgbaImage::from_pixel(1, 1, image::Rgba([0, 0, 0, 0]))),
+            )
+            .width(96.0)
+            .height(112.0)
+            .foreground(0xffffff)
+            .label_outline(0xcc111111, 1.0),
+            Rect::new(0.0, 0.0, 96.0, 112.0),
+        );
+        let glyph_commands = frame
+            .commands()
+            .iter()
+            .filter_map(|command| match command {
+                PaintCommand::Text { color, .. } => Some(*color),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(glyph_commands.len(), 9);
+        assert_eq!(glyph_commands.last(), Some(&0xffffff));
+        assert!(glyph_commands[..8].iter().all(|color| *color == 0xcc111111));
+        assert!(frame.commands().iter().all(|command| !matches!(
+            command,
+            PaintCommand::Fill { .. } | PaintCommand::RoundedFill { .. }
+        )));
+    }
+
+    #[test]
+    fn semantic_icon_tints_alpha_and_excludes_decorative_nodes() {
+        let source = Arc::new(RgbaImage::from_pixel(2, 2, image::Rgba([10, 20, 30, 128])));
+        let labeled = UiFrame::layout(
+            Icon::<Message>::new(7, Arc::clone(&source), 0x804020, 18.0).label("Settings"),
+            Rect::new(0.0, 0.0, 24.0, 24.0),
+        );
+        assert!(
+            labeled
+                .accessibility_nodes()
+                .iter()
+                .any(|node| { node.label.as_deref() == Some("Settings") })
+        );
+        assert!(labeled.commands().iter().any(|command| matches!(
+            command,
+            PaintCommand::Image { image, .. }
+                if image.get_pixel(0, 0).0 == [0x80, 0x40, 0x20, 128]
+        )));
+
+        let decorative = UiFrame::layout(
+            Icon::<Message>::new(8, source, 0xffffff, 18.0).decorative(),
+            Rect::new(0.0, 0.0, 24.0, 24.0),
+        );
+        assert!(decorative.accessibility_nodes().is_empty());
+
+        let decorative_image = UiFrame::layout(
+            Image::<Message>::new(
+                9,
+                Arc::new(RgbaImage::from_pixel(2, 2, image::Rgba([1, 2, 3, 255]))),
+            )
+            .decorative(),
+            Rect::new(0.0, 0.0, 24.0, 24.0),
+        );
+        assert!(decorative_image.semantic_nodes().is_empty());
+        assert!(decorative_image.accessibility_nodes().is_empty());
+        assert!(
+            decorative_image
+                .commands()
+                .iter()
+                .any(|command| matches!(command, PaintCommand::Image { .. }))
+        );
+    }
+
+    #[test]
+    fn radio_indicator_is_drawn_without_unicode_and_keeps_typed_activation() {
+        let theme = theme();
+        let tree = UiFrame::layout(
+            RadioButton::semantic(theme, Message::Select, "Dark", true).id("dark"),
+            Rect::new(0.0, 0.0, 180.0, 44.0),
+        );
+
+        let indicator_circles = tree
+            .commands()
+            .iter()
+            .filter(|command| matches!(command, PaintCommand::RoundedFill { radius, .. } if *radius == 9.0 || *radius == 4.0))
+            .count();
+        assert_eq!(indicator_circles, 2);
+        assert!(!tree.commands().iter().any(|command| {
+            matches!(command, PaintCommand::Text { text, .. } if text == "●" || text == "○")
+        }));
+        assert!(
+            !tree
+                .semantic_targets_for_message(&Message::Select)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn unselected_radio_has_no_inner_selection_mark() {
+        let tree = UiFrame::layout(
+            RadioButton::semantic(theme(), Message::Select, "Light", false),
+            Rect::new(0.0, 0.0, 180.0, 44.0),
+        );
+        let radii = tree
+            .commands()
+            .iter()
+            .filter_map(|command| match command {
+                PaintCommand::RoundedFill { radius, .. } => Some(*radius),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(radii.contains(&9.0));
+        assert!(!radii.contains(&4.0));
+    }
+
+    #[test]
+    fn radio_group_owns_semantics_rows_and_typed_selection() {
+        let theme = theme();
+        let tree = UiFrame::layout(
+            RadioGroup::new([
+                RadioOption::new(theme, Message::Select, "Headphones", true)
+                    .description("Active")
+                    .id("headphones"),
+                RadioOption::new(theme, Message::SelectOther, "Speakers", false)
+                    .description("Available")
+                    .id("speakers"),
+            ])
+            .id("outputs"),
+            Rect::new(0.0, 0.0, 360.0, 180.0),
+        );
+
+        assert_eq!(
+            tree.accessibility_nodes()
+                .iter()
+                .filter(|node| node.role.as_deref() == Some("radiogroup"))
+                .count(),
+            1
+        );
+        let radios = tree
+            .accessibility_nodes()
+            .iter()
+            .filter(|node| node.role.as_deref() == Some("radio"))
+            .collect::<Vec<_>>();
+        assert_eq!(radios.len(), 2);
+        assert_eq!(radios[0].state.as_deref(), Some("selected"));
+        assert_eq!(radios[1].state.as_deref(), Some("unselected"));
+        assert!(
+            !tree
+                .semantic_targets_for_message(&Message::SelectOther)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn radio_group_owns_controller_enter_operate_and_exit_depth() {
+        let theme = theme();
+        let mut state = UiStateStore::default();
+        let tree = UiFrame::layout_with_state(
+            RadioGroup::new([
+                RadioOption::new(theme, Message::Select, "Headphones", true).id("headphones"),
+                RadioOption::new(theme, Message::SelectOther, "Speakers", false).id("speakers"),
+            ])
+            .id("outputs"),
+            Rect::new(0.0, 0.0, 360.0, 180.0),
+            &mut state,
+        );
+
+        tree.handle_event(&mut state, UiEvent::ControllerDown);
+        assert_eq!(
+            state.navigation().controller_selected().map(UiId::as_str),
+            Some("root/outputs")
+        );
+
+        tree.handle_event(&mut state, UiEvent::ControllerActivate);
+        assert_eq!(
+            state.navigation().controller_scope().map(UiId::as_str),
+            Some("root/outputs")
+        );
+        assert!(
+            state
+                .navigation()
+                .controller_selected()
+                .is_some_and(|id| id.as_str().ends_with("/headphones"))
+        );
+
+        tree.handle_event(&mut state, UiEvent::ControllerDown);
+        assert!(
+            state
+                .navigation()
+                .controller_selected()
+                .is_some_and(|id| id.as_str().ends_with("/speakers"))
+        );
+        let activation = tree.handle_event(&mut state, UiEvent::ControllerActivate);
+        assert_eq!(activation.messages, vec![Message::SelectOther]);
+
+        tree.handle_event(&mut state, UiEvent::ControllerBack);
+        assert_eq!(state.navigation().controller_scope(), None);
+        assert_eq!(
+            state.navigation().controller_selected().map(UiId::as_str),
+            Some("root/outputs")
+        );
+    }
+}

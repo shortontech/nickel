@@ -6,8 +6,8 @@ claims that either native platform has passed.
 
 ## Verified in the current Linux checkout (2026-09-18)
 
-- `cargo clippy -p nickel-codex-ui -p nickel-codex -p nickel-ui --all-targets --all-features -- -D warnings`: passed.
-- `cargo test -p nickel-codex-ui -p nickel-codex -p nickel-ui --all-targets -q`: passed, including the asset-provenance and declarative-authority audits. The Codex UI unit suite reported 165 passed, 3 ignored; the UI unit suite reported 414 passed, 2 ignored.
+- `cargo clippy -p nickel-codex-ui -p nickel-codex -p twinkle --all-targets --all-features -- -D warnings`: passed.
+- `cargo test -p nickel-codex-ui -p nickel-codex -p twinkle --all-targets -q`: passed, including the asset-provenance and declarative-authority audits. The Codex UI unit suite reported 165 passed, 3 ignored; the UI unit suite reported 414 passed, 2 ignored.
 - `cargo check --target x86_64-pc-windows-gnu -p nickel -q`: passed with warnings; this is a cross-target compile check, not Windows runtime evidence.
 - Focused shell tests for Codex approval notification revision/overflow, simultaneous Codex and MCP requests, and persistent MCP notifications passed.
 - `cargo test -p nickel --lib -q`: 1,021 passed, 28 ignored, one failure in the unrelated `session::state::remote_settings::tests::prepared_settings_reject_changed_configuration_and_expiry_without_overwriting`. That test passed when run alone. The full shell result is **not** green; the cause of its full-suite-only failure has not been established.

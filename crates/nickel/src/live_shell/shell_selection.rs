@@ -6,7 +6,7 @@ type SurfaceHosts = BTreeMap<
     nickel_core::plugins::PluginSurfaceKey,
     (
         nickel_core::plugins::PluginSurface,
-        nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>,
+        twinkle::UiHost<crate::plugin_panel::PluginPanelApplication>,
     ),
 >;
 pub(super) struct ShellPreview {
@@ -501,7 +501,7 @@ mod tests {
                 for label in ["Restore previous shell", "Keep this shell"] {
                     let target = shell
                         .control_host
-                        .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                        .query_unique(&twinkle::SemanticSelector::RoleAndName {
                             role: SemanticRole::Button,
                             name: label.into(),
                         })
@@ -516,7 +516,7 @@ mod tests {
             }
             let button = shell
                 .control_host
-                .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                .query_unique(&twinkle::SemanticSelector::RoleAndName {
                     role: SemanticRole::Button,
                     name: "Restore previous shell".into(),
                 })

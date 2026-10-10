@@ -4,7 +4,7 @@ use std::{
 };
 
 use nickel_core::theme::ThemePalette;
-use nickel_ui::{
+use twinkle::{
     AnyView, CollectionPresentation, Insets, LinearGradient, NavigationScope, Point, Rect,
     SemanticNodeSnapshot, SemanticRole, SidebarFolder, VerticalScroll, VirtualWindow, ui,
 };
@@ -17,7 +17,7 @@ use crate::{
 
 fn selection_surface_drag_message(
     _seed: FileMessage,
-    gesture: nickel_ui::DragGesture,
+    gesture: twinkle::DragGesture,
 ) -> FileMessage {
     FileMessage::SelectionSurfaceDrag(gesture)
 }
@@ -46,7 +46,7 @@ pub(crate) fn build_view(
     let toolbar = ui! {
         <Container id={"toolbar-pane"} height={TOOLBAR_HEIGHT} shrink={0.0}
             navigation_scope={NavigationScope::pane(false).direction(app.reading_direction)}
-            controller_scope_background={nickel_ui::focused_surface(palette.panel, palette.complement)}
+            controller_scope_background={twinkle::focused_surface(palette.panel, palette.complement)}
             background={LinearGradient::vertical(palette.panel, palette.surface)}>
             <Column>{tab_strip}{navigation}</Column>
         </Container>
@@ -67,7 +67,7 @@ pub(crate) fn build_view(
         FileMessage::SidebarScroll(app.sidebar_scroll_offset),
         app.sidebar_scroll_offset,
     )
-    .theme(palette.into())
+    .theme(nickel_ui_host::semantic_theme(palette))
     .on_scroll(FileMessage::SidebarScroll)
     .controlled(true)
     .height(content_height)
@@ -185,7 +185,7 @@ pub(crate) fn build_view(
             FileMessage::FileScroll(app.file_scroll_offset),
             app.file_scroll_offset,
         )
-        .theme(palette.into())
+        .theme(nickel_ui_host::semantic_theme(palette))
         .on_scroll(FileMessage::FileScroll)
         .controlled(true)
         .height(viewport_height)
@@ -243,7 +243,7 @@ pub(crate) fn build_view(
                     ui! {
                         <Container id={"narrow-places-surface"} grow={1.0}
                             navigation_scope={NavigationScope::pane(true).direction(app.reading_direction)}
-                            controller_scope_background={nickel_ui::focused_surface(palette.surface, palette.complement)}>
+                            controller_scope_background={twinkle::focused_surface(palette.surface, palette.complement)}>
                             {sidebar}
                         </Container>
                     }
@@ -251,7 +251,7 @@ pub(crate) fn build_view(
                     ui! {
                         <Container id={"files-pane"} grow={1.0} min_width={0.0}
                             navigation_scope={NavigationScope::pane(true).direction(app.reading_direction)}
-                            controller_scope_background={nickel_ui::focused_surface(palette.background, palette.surface_hover)}>
+                            controller_scope_background={twinkle::focused_surface(palette.background, palette.surface_hover)}>
                             {files}
                         </Container>
                     }
@@ -263,12 +263,12 @@ pub(crate) fn build_view(
             <Container id={"file-layout"} height={content_height} shrink={0.0} accessibility_label={"Files"}>
                 <Row grow={1.0}><Container id={"sidebar-pane"} width={sidebar_pane_width} shrink={0.0}
                     navigation_scope={NavigationScope::pane(false).direction(app.reading_direction)}
-                    controller_scope_background={nickel_ui::focused_surface(palette.surface, palette.complement)}>
+                    controller_scope_background={twinkle::focused_surface(palette.surface, palette.complement)}>
                     <Row width={sidebar_pane_width} shrink={0.0}>{sidebar}{resize_handle}</Row>
                 </Container>
                 <Container id={"files-pane"} grow={1.0} min_width={0.0}
                     navigation_scope={NavigationScope::pane(true).direction(app.reading_direction)}
-                    controller_scope_background={nickel_ui::focused_surface(palette.background, palette.surface_hover)}>{files}</Container></Row>
+                    controller_scope_background={twinkle::focused_surface(palette.background, palette.surface_hover)}>{files}</Container></Row>
             </Container>
         }
     };

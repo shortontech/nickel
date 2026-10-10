@@ -188,7 +188,7 @@ acceptance dependency.
 ## Native Windows input and shell integration
 
 Automated native Windows evidence recorded on 2026-09-04: the cross-platform application/library
-set (`nickel-core`, `nickel-input`, `nickel-platform`, `nickel-ui`, `nickel-file`,
+set (`nickel-core`, `twinkle-input`, `nickel-platform`, `twinkle`, `nickel-file`,
 `nickel-settings`, `nickel-codex-ui`, and `nickel-shell`) passed `cargo check --all-targets` on the
 Windows MSVC host. Native tests then passed for core, input, platform, File, Settings, Codex UI,
 shared UI, and shell, including the Windows raw-input and filesystem-watcher paths. Those runs found
@@ -223,7 +223,7 @@ On 2026-09-05, an isolated native Windows checkout of `5a26957` plus the source-
 portability corrections integrated as `2f40bbf` and `f288fea` passed all 142 Nickel File tests, all
 239 Shell tests with two ignored live checks, the 20 shared overlay tests, the production-input
 desktop View Hide/Show regression, and the dedicated `Super+P` projection regression. Strict
-all-target/all-feature Clippy passed for Nickel UI, File, and Shell with warnings denied. The
+all-target/all-feature Clippy passed for Twinkle, File, and Shell with warnings denied. The
 Windows projection assertion confirms that unsupported native projection modes remain unavailable
 rather than being simulated. This is native build/contract evidence; attached-display visual and
 interactive acceptance below remains open. The disposable checkout and artifacts were removed, and

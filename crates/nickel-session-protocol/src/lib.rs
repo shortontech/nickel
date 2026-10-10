@@ -59,7 +59,7 @@ pub enum Query {
     Windows,
     Outputs,
     ShellSurfaces,
-    /// Test-only inventory of compositor-hosted Nickel UI trees.
+    /// Test-only inventory of compositor-hosted Twinkle trees.
     UiLayouts,
     /// Test-only computed layout page for one `internal:<id>` from UiLayouts.
     UiLayout {

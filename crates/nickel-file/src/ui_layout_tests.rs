@@ -3,9 +3,9 @@ use crate::{
     components::{format_modified, status_text as file_status_text},
     layout::{collapse_breadcrumbs, entries_in_selection},
 };
-use nickel_ui::{ActionKind, Rect, SemanticRole, UiHost};
-use nickel_ui_testkit::{Fixture, FocusDirection, Scenario, ScenarioBudget, Selector};
 use sha2::{Digest, Sha256};
+use twinkle::{ActionKind, Rect, SemanticRole, UiHost};
+use twinkle_testkit::{Fixture, FocusDirection, Scenario, ScenarioBudget, Selector};
 
 const MINIMUM_SELECTION_TEXT_CONTRAST: f32 = 4.5;
 
@@ -120,7 +120,7 @@ fn first_press_drag_uses_shared_file_plane_capture_without_a_prior_click() {
 
 #[test]
 fn embedded_normalized_input_shares_drag_and_focus_cleanup() {
-    use nickel_input::{DeviceId, EventOrder, InputEvent, KeyEdge, PointerButton, PointerEvent};
+    use twinkle_input::{DeviceId, EventOrder, InputEvent, KeyEdge, PointerButton, PointerEvent};
     let (_directory, app) = selection_app(2);
     let mut host = UiHost::new(app, 1100, 700);
     let target = host
@@ -129,7 +129,7 @@ fn embedded_normalized_input_shares_drag_and_focus_cleanup() {
     let route = host
         .resolve_effective_target(&target.id, ActionKind::Activate)
         .unwrap();
-    let position = nickel_input::Point {
+    let position = twinkle_input::Point {
         x: route.point.x as f64,
         y: route.point.y as f64,
     };
@@ -149,7 +149,7 @@ fn embedded_normalized_input_shares_drag_and_focus_cleanup() {
         &InputEvent::Pointer(PointerEvent::Motion {
             device: DeviceId(1),
             order: EventOrder(2),
-            position: nickel_input::Point {
+            position: twinkle_input::Point {
                 x: position.x + 10.0,
                 y: position.y,
             },
@@ -162,7 +162,7 @@ fn embedded_normalized_input_shares_drag_and_focus_cleanup() {
         &InputEvent::Pointer(PointerEvent::Motion {
             device: DeviceId(1),
             order: EventOrder(3),
-            position: nickel_input::Point {
+            position: twinkle_input::Point {
                 x: position.x + 20.0,
                 y: position.y,
             },
@@ -174,7 +174,7 @@ fn embedded_normalized_input_shares_drag_and_focus_cleanup() {
         host.application_mut().take_outbound_file_drag().is_none(),
         "one offer per gesture"
     );
-    host.step(nickel_ui::HostBatch {
+    host.step(twinkle::HostBatch {
         window_focused: Some(false),
         ..Default::default()
     });
@@ -185,7 +185,7 @@ fn embedded_normalized_input_shares_drag_and_focus_cleanup() {
 
 #[test]
 fn embedded_local_drop_enters_the_shared_native_transfer_queue() {
-    use nickel_input::{DeviceId, EventOrder, InputEvent, KeyEdge, PointerButton, PointerEvent};
+    use twinkle_input::{DeviceId, EventOrder, InputEvent, KeyEdge, PointerButton, PointerEvent};
     let directory = tempfile::tempdir().unwrap();
     let source = directory.path().join("source.txt");
     let destination = directory.path().join("destination");
@@ -212,7 +212,7 @@ fn embedded_local_drop_enters_the_shared_native_transfer_queue() {
         let route = host
             .resolve_effective_target(&target.id, ActionKind::Activate)
             .unwrap();
-        nickel_input::Point {
+        twinkle_input::Point {
             x: route.point.x as f64,
             y: route.point.y as f64,
         }
@@ -418,15 +418,15 @@ fn selection_snapshot_is_stable_visual_order_for_every_consumer() {
     app.primary_down = true;
     app.file_drag_origin = Some((
         app.browser.identity_at(3).unwrap(),
-        nickel_ui::Point { x: 0.0, y: 0.0 },
+        twinkle::Point { x: 0.0, y: 0.0 },
     ));
     app.last_click = Some(FileClick {
         path: expected[1].clone(),
         identity: app.browser.identity_at(3),
-        position: nickel_ui::Point { x: 0.0, y: 0.0 },
+        position: twinkle::Point { x: 0.0, y: 0.0 },
         when: std::time::Instant::now(),
     });
-    app.begin_file_drag_if_threshold(nickel_ui::Point { x: 10.0, y: 0.0 });
+    app.begin_file_drag_if_threshold(twinkle::Point { x: 10.0, y: 0.0 });
     assert_eq!(
         app.outbound_drag
             .as_ref()
@@ -644,7 +644,7 @@ fn slow_system_provider_keeps_nickel_fallback_visible_before_async_results() {
 fn sidebar_locations_render_from_the_shared_resolved_artwork_cache() {
     let app = FileApp::fixture();
     let palette = ThemePalette::from_appearance(Appearance::default());
-    let frame = nickel_ui::UiFrame::layout(
+    let frame = twinkle::UiFrame::layout(
         app.build_view(1_100.0, 700.0, palette, false),
         Rect::new(0.0, 0.0, 1_100.0, 700.0),
     );
@@ -983,7 +983,7 @@ fn details_view_exposes_shared_columns_and_entry_targets() {
     let palette = ThemePalette::from_appearance(
         ShellSettings::load_default().resolve_appearance(nickel_platform::appearance()),
     );
-    let frame = nickel_ui::UiFrame::layout(
+    let frame = twinkle::UiFrame::layout(
         app.build_view(960.0, 640.0, palette, false),
         Rect::new(0.0, 0.0, 960.0, 640.0),
     );
@@ -1029,7 +1029,7 @@ fn details_view_omits_file_only_metadata_for_directories() {
     let mut app = FileApp::with_browser(DirectoryBrowser::fixture(entries), String::new());
     app.view_mode = FileViewMode::Details;
     let palette = ThemePalette::from_appearance(Appearance::default());
-    let frame = nickel_ui::UiFrame::layout(
+    let frame = twinkle::UiFrame::layout(
         app.build_view(960.0, 640.0, palette, false),
         Rect::new(0.0, 0.0, 960.0, 640.0),
     );
@@ -1077,7 +1077,7 @@ fn file_views_contain_non_square_provider_artwork_without_stretching() {
             ),
         );
         let host = UiHost::new(app, 960, 640);
-        let raster = nickel_ui_testkit::render_host(&host, 960, 640, 1.0);
+        let raster = twinkle_testkit::render_host(&host, 960, 640, 1.0);
         let mut points = raster
             .rgba
             .as_chunks::<4>()
@@ -1133,7 +1133,7 @@ fn growing_details_name_column_contains_multiline_text_without_row_overlap() {
     let palette = ThemePalette::from_appearance(
         ShellSettings::load_default().resolve_appearance(nickel_platform::appearance()),
     );
-    let frame = nickel_ui::UiFrame::layout(
+    let frame = twinkle::UiFrame::layout(
         app.build_view(620.0, 420.0, palette, false),
         Rect::new(0.0, 0.0, 620.0, 420.0),
     );
@@ -1184,7 +1184,7 @@ fn compact_grid_contains_multiline_labels_inside_their_rows() {
     let palette = ThemePalette::from_appearance(
         ShellSettings::load_default().resolve_appearance(nickel_platform::appearance()),
     );
-    let frame = nickel_ui::UiFrame::layout(
+    let frame = twinkle::UiFrame::layout(
         app.build_view(660.0, 480.0, palette, false),
         Rect::new(0.0, 0.0, 660.0, 480.0),
     );
@@ -1215,7 +1215,7 @@ fn narrow_places_surface_replaces_squeezed_sidebar_without_losing_view_state() {
         ShellSettings::load_default().resolve_appearance(nickel_platform::appearance()),
     );
     let render = |app: &FileApp| {
-        nickel_ui::UiFrame::layout(
+        twinkle::UiFrame::layout(
             app.build_view(600.0, 420.0, palette, false),
             Rect::new(0.0, 0.0, 600.0, 420.0),
         )
@@ -1269,7 +1269,7 @@ fn location_groups_omit_empty_sections_and_collapse_without_reordering() {
         ShellSettings::load_default().resolve_appearance(nickel_platform::appearance()),
     );
     let render = |app: &FileApp| {
-        nickel_ui::UiFrame::layout(
+        twinkle::UiFrame::layout(
             app.build_view(960.0, 640.0, palette, false),
             Rect::new(0.0, 0.0, 960.0, 640.0),
         )
@@ -1343,7 +1343,7 @@ fn sidebar_only_mounts_visible_folders_and_scrolls_to_later_children() {
         ShellSettings::load_default().resolve_appearance(nickel_platform::appearance()),
     );
     let render = |app: &FileApp| {
-        nickel_ui::UiFrame::layout(
+        twinkle::UiFrame::layout(
             app.build_view(960.0, 640.0, palette, false),
             Rect::new(0.0, 0.0, 960.0, 640.0),
         )
@@ -1430,11 +1430,11 @@ fn synthetic_location_sources_use_shared_group_order_and_one_target_identity() {
 #[test]
 fn rtl_file_grid_mirrors_semantic_columns_without_changing_entry_identity() {
     let mut app = FileApp::fixture();
-    app.reading_direction = nickel_ui::ReadingDirection::RightToLeft;
+    app.reading_direction = twinkle::ReadingDirection::RightToLeft;
     let palette = ThemePalette::from_appearance(
         ShellSettings::load_default().resolve_appearance(nickel_platform::appearance()),
     );
-    let frame = nickel_ui::UiFrame::layout(
+    let frame = twinkle::UiFrame::layout(
         app.build_view(960.0, 640.0, palette, false),
         Rect::new(0.0, 0.0, 960.0, 640.0),
     );
@@ -1442,7 +1442,7 @@ fn rtl_file_grid_mirrors_semantic_columns_without_changing_entry_identity() {
     let first_cell = nodes
         .iter()
         .find(|node| {
-            node.role == Some(nickel_ui::SemanticRole::GridCell)
+            node.role == Some(twinkle::SemanticRole::GridCell)
                 && node
                     .description
                     .as_deref()
@@ -1474,7 +1474,7 @@ fn searchable_command_surface_filters_aliases_and_executes_enabled_actions() {
     let palette = ThemePalette::from_appearance(
         ShellSettings::load_default().resolve_appearance(nickel_platform::appearance()),
     );
-    let frame = nickel_ui::UiFrame::layout(
+    let frame = twinkle::UiFrame::layout(
         app.build_view(960.0, 640.0, palette, false),
         Rect::new(0.0, 0.0, 960.0, 640.0),
     );
@@ -1495,7 +1495,7 @@ fn searchable_command_surface_filters_aliases_and_executes_enabled_actions() {
     );
 
     app.update_message(FileMessage::CommandQueryChanged("columns".into()));
-    let alias_frame = nickel_ui::UiFrame::layout(
+    let alias_frame = twinkle::UiFrame::layout(
         app.build_view(960.0, 640.0, palette, false),
         Rect::new(0.0, 0.0, 960.0, 640.0),
     );
@@ -1521,7 +1521,7 @@ fn disabled_command_has_no_executable_semantic_target() {
     let palette = ThemePalette::from_appearance(
         ShellSettings::load_default().resolve_appearance(nickel_platform::appearance()),
     );
-    let frame = nickel_ui::UiFrame::layout(
+    let frame = twinkle::UiFrame::layout(
         app.build_view(960.0, 640.0, palette, false),
         Rect::new(0.0, 0.0, 960.0, 640.0),
     );
@@ -1545,7 +1545,7 @@ fn open_in_new_tab_is_enabled_only_for_browsable_containers() {
     let palette = ThemePalette::from_appearance(
         ShellSettings::load_default().resolve_appearance(nickel_platform::appearance()),
     );
-    let file_frame = nickel_ui::UiFrame::layout(
+    let file_frame = twinkle::UiFrame::layout(
         app.build_view(960.0, 640.0, palette, false),
         Rect::new(0.0, 0.0, 960.0, 640.0),
     );
@@ -1560,7 +1560,7 @@ fn open_in_new_tab_is_enabled_only_for_browsable_containers() {
     app.update_message(FileMessage::ToggleCommandSurface);
     app.selected = app.identity_at(0);
     set_selected_indices(&mut app, &[0]);
-    let directory_frame = nickel_ui::UiFrame::layout(
+    let directory_frame = twinkle::UiFrame::layout(
         app.build_view(960.0, 640.0, palette, false),
         Rect::new(0.0, 0.0, 960.0, 640.0),
     );
@@ -1583,7 +1583,7 @@ fn command_surface_exposes_open_and_complete_tab_management() {
     let palette = ThemePalette::from_appearance(
         ShellSettings::load_default().resolve_appearance(nickel_platform::appearance()),
     );
-    let frame = nickel_ui::UiFrame::layout(
+    let frame = twinkle::UiFrame::layout(
         app.build_view(960.0, 640.0, palette, false),
         Rect::new(0.0, 0.0, 960.0, 640.0),
     );
@@ -1804,8 +1804,8 @@ fn hidden_file_enumeration_is_published_asynchronously() {
 
 #[test]
 fn component_owned_fixture_registers_the_production_file_app() {
-    use nickel_ui_testkit::FixtureProvider;
-    let mut registry = nickel_ui_testkit::FixtureRegistry::new();
+    use twinkle_testkit::FixtureProvider;
+    let mut registry = twinkle_testkit::FixtureRegistry::new();
     FileFixtureProvider.register(&mut registry).unwrap();
     let entries = registry.finish();
     assert_eq!(entries.len(), 1);
@@ -1906,7 +1906,7 @@ fn every_file_fixture_passes_geometry_accessibility_and_selection_contrast_gates
                 );
             }
         }
-        let raster = nickel_ui_testkit::render_host(
+        let raster = twinkle_testkit::render_host(
             &host,
             variant.viewport.width,
             variant.viewport.height,
@@ -1957,7 +1957,7 @@ fn minimum_command_surface_keeps_search_fixed_and_all_results_scrollable() {
     let palette = ThemePalette::from_appearance(
         ShellSettings::load_default().resolve_appearance(nickel_platform::appearance()),
     );
-    let frame = nickel_ui::UiFrame::layout(
+    let frame = twinkle::UiFrame::layout(
         app.build_view(560.0, 360.0, palette, true),
         Rect::new(0.0, 0.0, 560.0, 360.0),
     );
@@ -1978,7 +1978,7 @@ fn minimum_command_surface_keeps_search_fixed_and_all_results_scrollable() {
     app.update_message(FileMessage::CommandScroll(
         (extent.content.height - extent.viewport.height).max(0.0),
     ));
-    let scrolled = nickel_ui::UiFrame::layout(
+    let scrolled = twinkle::UiFrame::layout(
         app.build_view(560.0, 360.0, palette, true),
         Rect::new(0.0, 0.0, 560.0, 360.0),
     );
@@ -2002,19 +2002,19 @@ fn command_results_scrollbar_is_controller_reachable_and_adjustable() {
         if host.inspect().controller_target.as_ref() == Some(&results) {
             break;
         }
-        host.handle_event(nickel_ui::UiEvent::ControllerNext);
+        host.handle_event(twinkle::UiEvent::ControllerNext);
     }
 
     assert_eq!(host.inspect().controller_target.as_ref(), Some(&results));
     assert_eq!(host.application().command_scroll_offset, 0.0);
-    host.handle_controller_action(nickel_ui::ControllerAction::Confirm);
+    host.handle_controller_action(twinkle::ControllerAction::Confirm);
     assert!(host.inspect().controller_editing);
-    let outcome = host.handle_event(nickel_ui::UiEvent::ControllerAdjust(1.0));
+    let outcome = host.handle_event(twinkle::UiEvent::ControllerAdjust(1.0));
     assert!(outcome.changed);
     assert!(host.application().command_scroll_offset > 0.0);
 
-    host.handle_controller_action(nickel_ui::ControllerAction::Cancel);
-    host.handle_controller_action(nickel_ui::ControllerAction::Right);
+    host.handle_controller_action(twinkle::ControllerAction::Cancel);
+    host.handle_controller_action(twinkle::ControllerAction::Right);
     assert!(
         host.inspect()
             .controller_scope
@@ -2076,8 +2076,8 @@ fn synthetic_windows_and_linux_adapters_share_semantics_geometry_and_commands() 
         linux.host().accessibility_nodes()
     );
     assert_eq!(
-        nickel_ui_testkit::render_host(windows.host(), 1100, 700, 1.0),
-        nickel_ui_testkit::render_host(linux.host(), 1100, 700, 1.0)
+        twinkle_testkit::render_host(windows.host(), 1100, 700, 1.0),
+        twinkle_testkit::render_host(linux.host(), 1100, 700, 1.0)
     );
 
     let script = |scenario: &mut Scenario<FileApp>| {
@@ -2086,7 +2086,7 @@ fn synthetic_windows_and_linux_adapters_share_semantics_geometry_and_commands() 
             .activate(&Selector::role_name(SemanticRole::Button, "Details view"))?
             .activate(&Selector::role_name(SemanticRole::Button, "Sort by size"))?
             .activate(&Selector::role_name(SemanticRole::Button, "Open commands"))?;
-        Ok::<_, nickel_ui_testkit::ScenarioError>(())
+        Ok::<_, twinkle_testkit::ScenarioError>(())
     };
     script(&mut windows).unwrap();
     script(&mut linux).unwrap();
@@ -2109,16 +2109,16 @@ fn synthetic_windows_and_linux_adapters_share_semantics_geometry_and_commands() 
     assert_eq!(state(&windows), state(&linux));
     assert_eq!(windows.semantic_nodes(), linux.semantic_nodes());
     assert_eq!(
-        nickel_ui_testkit::render_host(windows.host(), 1100, 700, 1.0),
-        nickel_ui_testkit::render_host(linux.host(), 1100, 700, 1.0)
+        twinkle_testkit::render_host(windows.host(), 1100, 700, 1.0),
+        twinkle_testkit::render_host(linux.host(), 1100, 700, 1.0)
     );
 }
 
 #[test]
 fn every_advertised_controller_action_has_a_bounded_production_path() {
-    use nickel_ui_testkit::{FixtureProvider, ReachabilityModality, ReachabilityPolicy};
+    use twinkle_testkit::{FixtureProvider, ReachabilityModality, ReachabilityPolicy};
 
-    let mut registry = nickel_ui_testkit::FixtureRegistry::new();
+    let mut registry = twinkle_testkit::FixtureRegistry::new();
     FileFixtureProvider.register(&mut registry).unwrap();
     let session = registry.finish().remove(0).open();
     let report = session.reachability_report(&ReachabilityPolicy {
@@ -2144,9 +2144,9 @@ fn every_advertised_controller_action_has_a_bounded_production_path() {
 
 #[test]
 fn command_surface_variants_have_complete_controller_routes() {
-    use nickel_ui_testkit::{FixtureProvider, ReachabilityModality, ReachabilityPolicy};
+    use twinkle_testkit::{FixtureProvider, ReachabilityModality, ReachabilityPolicy};
 
-    let mut registry = nickel_ui_testkit::FixtureRegistry::new();
+    let mut registry = twinkle_testkit::FixtureRegistry::new();
     FileFixtureProvider.register(&mut registry).unwrap();
     let entry = registry.finish().remove(0);
     for variant in ["command-surface", "minimum-command-surface"] {
@@ -2174,14 +2174,14 @@ fn command_surface_variants_have_complete_controller_routes() {
     }
 }
 
-fn pixel(raster: &nickel_ui_testkit::HeadlessRaster, x: u32, y: u32) -> [u8; 4] {
+fn pixel(raster: &twinkle_testkit::HeadlessRaster, x: u32, y: u32) -> [u8; 4] {
     let offset = ((y * raster.width + x) * 4) as usize;
     raster.rgba[offset..offset + 4].try_into().unwrap()
 }
 
 fn changed_pixels_in(
-    before: &nickel_ui_testkit::HeadlessRaster,
-    after: &nickel_ui_testkit::HeadlessRaster,
+    before: &twinkle_testkit::HeadlessRaster,
+    after: &twinkle_testkit::HeadlessRaster,
     rect: Rect,
 ) -> usize {
     let x0 = rect.origin.x.max(0.0) as u32;
@@ -2204,11 +2204,11 @@ fn file_grid_resolves_responsively_without_application_column_arithmetic() {
     let palette = ThemePalette::from_appearance(
         ShellSettings::load_default().resolve_appearance(nickel_platform::appearance()),
     );
-    let narrow = nickel_ui::UiFrame::layout(
+    let narrow = twinkle::UiFrame::layout(
         app.build_view(560.0, 420.0, palette, false),
         Rect::new(0.0, 0.0, 560.0, 420.0),
     );
-    let wide = nickel_ui::UiFrame::layout(
+    let wide = twinkle::UiFrame::layout(
         app.build_view(1280.0, 720.0, palette, false),
         Rect::new(0.0, 0.0, 1280.0, 720.0),
     );
@@ -2238,7 +2238,7 @@ fn sidebar_divider_and_file_pane_share_one_fixed_boundary() {
     );
 
     for (width, height) in [(760, 420), (1280, 720)] {
-        let frame = nickel_ui::UiFrame::layout(
+        let frame = twinkle::UiFrame::layout(
             app.build_view(width as f32, height as f32, palette, false),
             Rect::new(0.0, 0.0, width as f32, height as f32),
         );
@@ -2283,14 +2283,14 @@ fn directory_cardinality_does_not_change_shell_geometry_or_mounted_tile_bound() 
     );
     let resolve = |count| {
         let app = FileApp::with_browser(browser(count), String::new());
-        nickel_ui::UiFrame::layout(
+        twinkle::UiFrame::layout(
             app.build_view(860.0, 620.0, palette, false),
             Rect::new(0.0, 0.0, 860.0, 620.0),
         )
     };
     let small = resolve(8);
     let large = resolve(4_096);
-    let bounds = |frame: &nickel_ui::UiFrame<FileMessage>, suffix: &str| {
+    let bounds = |frame: &twinkle::UiFrame<FileMessage>, suffix: &str| {
         frame
             .resolved_layout()
             .nodes()
@@ -2358,7 +2358,7 @@ fn far_offscreen_selection_can_be_revealed_before_its_tile_is_mounted() {
     let palette = ThemePalette::from_appearance(
         ShellSettings::load_default().resolve_appearance(nickel_platform::appearance()),
     );
-    let frame = nickel_ui::UiFrame::layout(
+    let frame = twinkle::UiFrame::layout(
         app.build_view(860.0, 620.0, palette, false),
         Rect::new(0.0, 0.0, 860.0, 620.0),
     );
@@ -2416,15 +2416,15 @@ fn populated_file_view_exposes_full_height_background_selection_surface() {
 fn background_selection_drag_finishes_on_pointer_release() {
     let (_directory, mut app) = selection_app(3);
     let bounds = Rect::new(10.0, 20.0, 400.0, 300.0);
-    app.update_message(FileMessage::SelectionSurfaceDrag(nickel_ui::DragGesture {
-        phase: nickel_ui::DragPhase::Started,
+    app.update_message(FileMessage::SelectionSurfaceDrag(twinkle::DragGesture {
+        phase: twinkle::DragPhase::Started,
         position: Point { x: 40.0, y: 60.0 },
         bounds,
     }));
     assert_eq!(app.selection_drag, Some(Point { x: 40.0, y: 60.0 }));
 
-    app.update_message(FileMessage::SelectionSurfaceDrag(nickel_ui::DragGesture {
-        phase: nickel_ui::DragPhase::Ended,
+    app.update_message(FileMessage::SelectionSurfaceDrag(twinkle::DragGesture {
+        phase: twinkle::DragPhase::Ended,
         position: Point { x: 180.0, y: 220.0 },
         bounds,
     }));
@@ -2452,10 +2452,10 @@ fn context_menu_is_one_semantic_controller_and_accessibility_surface() {
         host.resolve_effective_target(&entry, ActionKind::ContextMenu)
             .is_ok()
     );
-    host.handle_event(nickel_ui::UiEvent::AccessibilityContextMenu(entry.clone()));
+    host.handle_event(twinkle::UiEvent::AccessibilityContextMenu(entry.clone()));
 
-    let menu_items = host.query(&nickel_ui::SemanticSelector::Role(
-        nickel_ui::SemanticRole::MenuItem,
+    let menu_items = host.query(&twinkle::SemanticSelector::Role(
+        twinkle::SemanticRole::MenuItem,
     ));
     assert_eq!(menu_items.len(), 9);
     assert!(menu_items.iter().any(|item| {
@@ -2467,9 +2467,9 @@ fn context_menu_is_one_semantic_controller_and_accessibility_surface() {
             .any(|node| node.id == item.id)
     }));
 
-    host.handle_event(nickel_ui::UiEvent::ControllerDown);
+    host.handle_event(twinkle::UiEvent::ControllerDown);
     assert!(host.inspect().controller_target.is_some());
-    host.handle_event(nickel_ui::UiEvent::ControllerBack);
+    host.handle_event(twinkle::UiEvent::ControllerBack);
     assert!(host.inspect().open_overlay.is_none());
 }
 
@@ -2606,15 +2606,15 @@ fn context_invocation_captures_anchor_and_target_identity() {
     );
     let overlays = Application::frame_overlays(
         &app,
-        nickel_ui::ViewContext::new(
+        twinkle::ViewContext::new(
             Rect::new(0.0, 0.0, 860.0, 620.0),
-            nickel_ui::InputModality::Pointer,
+            twinkle::InputModality::Pointer,
         ),
     );
     let menu = overlays
         .into_iter()
         .find_map(|overlay| match overlay {
-            nickel_ui::FrameOverlay::Menu(menu)
+            twinkle::FrameOverlay::Menu(menu)
                 if menu.id.as_ui_id().as_str()
                     == entry_context_menu_id(&directory.path().join("alpha.txt")) =>
             {
@@ -2625,7 +2625,7 @@ fn context_invocation_captures_anchor_and_target_identity() {
         .expect("entry context menu");
     assert!(matches!(
         menu.anchor,
-        nickel_ui::OverlayAnchor::Point { point, .. } if point == anchor
+        twinkle::OverlayAnchor::Point { point, .. } if point == anchor
     ));
 }
 
@@ -2636,7 +2636,7 @@ fn integrated_f2_begins_rename_for_the_selected_file() {
     app.selected = Some(identity);
     app.selected_entries.insert(identity);
     let mut host = UiHost::new(app, 860, 620);
-    assert!(host.shortcut(nickel_ui::Shortcut::Rename));
+    assert!(host.shortcut(twinkle::Shortcut::Rename));
     assert!(host.application().rename_editor.is_some());
 }
 
@@ -2646,24 +2646,24 @@ fn unclaimed_context_menu_anchor_does_not_follow_pointer_motion() {
     app.cursor = Point { x: 10.0, y: 20.0 };
     let first = Application::frame_overlays(
         &app,
-        nickel_ui::ViewContext::new(
+        twinkle::ViewContext::new(
             Rect::new(0.0, 0.0, 860.0, 620.0),
-            nickel_ui::InputModality::Pointer,
+            twinkle::InputModality::Pointer,
         ),
     );
     app.cursor = Point { x: 400.0, y: 500.0 };
     let second = Application::frame_overlays(
         &app,
-        nickel_ui::ViewContext::new(
+        twinkle::ViewContext::new(
             Rect::new(0.0, 0.0, 860.0, 620.0),
-            nickel_ui::InputModality::Pointer,
+            twinkle::InputModality::Pointer,
         ),
     );
-    let anchors = |overlays: Vec<nickel_ui::FrameOverlay<FileMessage>>| {
+    let anchors = |overlays: Vec<twinkle::FrameOverlay<FileMessage>>| {
         overlays
             .into_iter()
             .filter_map(|overlay| match overlay {
-                nickel_ui::FrameOverlay::Menu(menu) => Some(menu.anchor),
+                twinkle::FrameOverlay::Menu(menu) => Some(menu.anchor),
                 _ => None,
             })
             .collect::<Vec<_>>()
@@ -2713,7 +2713,7 @@ fn overflowing_places_sidebar_scrolls_independently_of_files() {
             .collect(),
     }];
     let mut host = UiHost::new(app, 860, 360);
-    let result = host.handle_event(nickel_ui::UiEvent::Scroll {
+    let result = host.handle_event(twinkle::UiEvent::Scroll {
         point: Point { x: 90.0, y: 200.0 },
         delta_y: 240.0,
     });
@@ -2786,13 +2786,13 @@ fn removed_context_target_cannot_reuse_a_neighbor_menu_identity() {
     assert!(app.context_target.is_none());
     assert!(Application::frame_overlays(
         &app,
-        nickel_ui::ViewContext::new(
+        twinkle::ViewContext::new(
             Rect::new(0.0, 0.0, 860.0, 620.0),
-            nickel_ui::InputModality::Pointer,
+            twinkle::InputModality::Pointer,
         ),
     )
     .into_iter()
-    .all(|overlay| !matches!(overlay, nickel_ui::FrameOverlay::Menu(menu) if menu.id.as_ui_id().as_str() == removed_menu)));
+    .all(|overlay| !matches!(overlay, twinkle::FrameOverlay::Menu(menu) if menu.id.as_ui_id().as_str() == removed_menu)));
 }
 
 #[test]
@@ -2806,10 +2806,10 @@ fn context_menu_discloses_unimplemented_common_capabilities() {
         .find(|node| node.id.as_str().ends_with("/file-entry-0"))
         .unwrap()
         .id;
-    host.handle_event(nickel_ui::UiEvent::AccessibilityContextMenu(entry));
+    host.handle_event(twinkle::UiEvent::AccessibilityContextMenu(entry));
     let labels = host
-        .query(&nickel_ui::SemanticSelector::Role(
-            nickel_ui::SemanticRole::MenuItem,
+        .query(&twinkle::SemanticSelector::Role(
+            twinkle::SemanticRole::MenuItem,
         ))
         .into_iter()
         .filter_map(|node| node.name)
@@ -2832,8 +2832,8 @@ fn context_menu_discloses_unimplemented_common_capabilities() {
         assert!(labels.contains(expected), "missing {expected}: {labels:?}");
     }
     let actionable = host
-        .query(&nickel_ui::SemanticSelector::Role(
-            nickel_ui::SemanticRole::MenuItem,
+        .query(&twinkle::SemanticSelector::Role(
+            twinkle::SemanticRole::MenuItem,
         ))
         .into_iter()
         .filter(|node| node.actions.contains(&ActionKind::Activate))
@@ -2907,11 +2907,11 @@ fn current_folder_properties_are_actionable_without_file_association_lookup() {
         .id;
     host.perform_semantic_action(
         background,
-        nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::ContextMenu),
+        twinkle::SemanticAction::Invoke(twinkle::ActionKind::ContextMenu),
     );
     let properties_item = host
-        .query(&nickel_ui::SemanticSelector::Role(
-            nickel_ui::SemanticRole::MenuItem,
+        .query(&twinkle::SemanticSelector::Role(
+            twinkle::SemanticRole::MenuItem,
         ))
         .into_iter()
         .find(|node| node.name.as_deref() == Some("Properties"))
@@ -2919,7 +2919,7 @@ fn current_folder_properties_are_actionable_without_file_association_lookup() {
     assert!(
         properties_item
             .actions
-            .contains(&nickel_ui::ActionKind::Activate)
+            .contains(&twinkle::ActionKind::Activate)
     );
 }
 
@@ -2943,12 +2943,9 @@ fn controller_context_uses_target_geometry_not_stale_pointer_position() {
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(directory.path().join("report.txt"), b"x").unwrap();
     let mut host = UiHost::new(FileApp::new(directory.path().to_path_buf()), 860, 620);
-    host.handle_event(nickel_ui::UiEvent::FocusGained);
-    host.handle_event(nickel_ui::UiEvent::ControllerDown);
-    assert_eq!(
-        host.inspect().modality,
-        nickel_ui::InputModality::Controller
-    );
+    host.handle_event(twinkle::UiEvent::FocusGained);
+    host.handle_event(twinkle::UiEvent::ControllerDown);
+    assert_eq!(host.inspect().modality, twinkle::InputModality::Controller);
     let background = host
         .semantic_nodes()
         .into_iter()
@@ -2957,18 +2954,18 @@ fn controller_context_uses_target_geometry_not_stale_pointer_position() {
         .id;
     host.perform_semantic_action(
         background,
-        nickel_ui::SemanticAction::Invoke(ActionKind::ContextMenu),
+        twinkle::SemanticAction::Invoke(ActionKind::ContextMenu),
     );
 
     let menu = host
-        .query(&nickel_ui::SemanticSelector::Role(
-            nickel_ui::SemanticRole::Menu,
+        .query(&twinkle::SemanticSelector::Role(
+            twinkle::SemanticRole::Menu,
         ))
         .pop()
         .unwrap();
     assert!(menu.bounds.origin.x > 100.0 && menu.bounds.origin.y > 100.0);
-    let items = host.query(&nickel_ui::SemanticSelector::Role(
-        nickel_ui::SemanticRole::MenuItem,
+    let items = host.query(&twinkle::SemanticSelector::Role(
+        twinkle::SemanticRole::MenuItem,
     ));
     let selected = items
         .iter()
@@ -2978,7 +2975,7 @@ fn controller_context_uses_target_geometry_not_stale_pointer_position() {
         .iter()
         .find(|item| !item.controller_selected)
         .expect("menu fixture has a second unselected action");
-    let raster = nickel_ui_testkit::render_host(&host, 860, 620, 1.0);
+    let raster = twinkle_testkit::render_host(&host, 860, 620, 1.0);
     let first_id = selected.id.clone();
     let second_id = unselected.id.clone();
     let first_point = (
@@ -2996,18 +2993,18 @@ fn controller_context_uses_target_geometry_not_stale_pointer_position() {
         "controller-selected menu row must have a distinct raster fill"
     );
 
-    host.handle_event(nickel_ui::UiEvent::ControllerDown);
+    host.handle_event(twinkle::UiEvent::ControllerDown);
     assert_eq!(
         host.inspect().controller_target,
         Some(second_id.clone()),
         "items after navigation: {:?}",
-        host.query(&nickel_ui::SemanticSelector::Role(
-            nickel_ui::SemanticRole::MenuItem
+        host.query(&twinkle::SemanticSelector::Role(
+            twinkle::SemanticRole::MenuItem
         ))
     );
     assert_ne!(host.inspect().controller_target, Some(first_id.clone()));
-    let moved_items = host.query(&nickel_ui::SemanticSelector::Role(
-        nickel_ui::SemanticRole::MenuItem,
+    let moved_items = host.query(&twinkle::SemanticSelector::Role(
+        twinkle::SemanticRole::MenuItem,
     ));
     assert!(
         moved_items
@@ -3019,7 +3016,7 @@ fn controller_context_uses_target_geometry_not_stale_pointer_position() {
             .iter()
             .any(|item| item.id == second_id && item.focused && item.controller_selected)
     );
-    let moved = nickel_ui_testkit::render_host(&host, 860, 620, 1.0);
+    let moved = twinkle_testkit::render_host(&host, 860, 620, 1.0);
     assert!(
         changed_pixels_in(&raster, &moved, selected.bounds) > 0,
         "the former menu target must visibly lose its selected treatment"
@@ -3035,11 +3032,11 @@ fn ordinary_controller_target_has_a_distinct_visible_focus_background() {
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(directory.path().join("report.txt"), b"x").unwrap();
     let mut host = UiHost::new(FileApp::new(directory.path().to_path_buf()), 860, 620);
-    host.handle_event(nickel_ui::UiEvent::FocusGained);
-    let before = nickel_ui_testkit::render_host(&host, 860, 620, 1.0);
+    host.handle_event(twinkle::UiEvent::FocusGained);
+    let before = twinkle_testkit::render_host(&host, 860, 620, 1.0);
     let selected = (0..8)
         .find_map(|_| {
-            host.handle_event(nickel_ui::UiEvent::ControllerDown);
+            host.handle_event(twinkle::UiEvent::ControllerDown);
             let target = host.inspect().controller_target?;
             if let Some(node) = host
                 .semantic_nodes()
@@ -3050,19 +3047,18 @@ fn ordinary_controller_target_has_a_distinct_visible_focus_background() {
                         && node.actions.iter().any(|action| {
                             matches!(
                                 action,
-                                nickel_ui::ActionKind::Activate
-                                    | nickel_ui::ActionKind::ContextMenu
+                                twinkle::ActionKind::Activate | twinkle::ActionKind::ContextMenu
                             )
                         })
                 })
             {
                 return Some(node);
             }
-            host.handle_event(nickel_ui::UiEvent::ControllerActivate);
+            host.handle_event(twinkle::UiEvent::ControllerActivate);
             None
         })
         .expect("controller must enter a pane and select an ordinary semantic target");
-    let after = nickel_ui_testkit::render_host(&host, 860, 620, 1.0);
+    let after = twinkle_testkit::render_host(&host, 860, 620, 1.0);
     assert!(
         changed_pixels_in(&before, &after, selected.bounds) > 0,
         "controller focus must visibly change pixels inside {selected:?}"
@@ -3103,7 +3099,7 @@ fn semantic_scenario_covers_context_routes_dismiss_scroll_and_resize() {
         .unwrap();
     assert!(scenario.host().inspect().open_overlay.is_some());
     scenario
-        .controller(nickel_ui::ControllerAction::Cancel)
+        .controller(twinkle::ControllerAction::Cancel)
         .unwrap();
     assert!(scenario.host().inspect().open_overlay.is_none());
 
@@ -3121,15 +3117,15 @@ fn semantic_scenario_covers_context_routes_dismiss_scroll_and_resize() {
     scenario.keyboard_context_focused().unwrap();
     assert!(scenario.host().inspect().open_overlay.is_some());
     scenario
-        .controller(nickel_ui::ControllerAction::Cancel)
+        .controller(twinkle::ControllerAction::Cancel)
         .unwrap();
 
     scenario
-        .controller(nickel_ui::ControllerAction::ContextMenu)
+        .controller(twinkle::ControllerAction::ContextMenu)
         .unwrap();
     assert!(scenario.host().inspect().open_overlay.is_some());
     scenario
-        .controller(nickel_ui::ControllerAction::Cancel)
+        .controller(twinkle::ControllerAction::Cancel)
         .unwrap();
 
     let content = entry_selector(&scenario, "/file-content");
@@ -3161,15 +3157,15 @@ fn semantic_scenario_covers_context_routes_dismiss_scroll_and_resize() {
     let operations = scenario.operation_trace();
     assert!(operations.iter().any(|step| matches!(
         step.operation,
-        nickel_ui_testkit::ScenarioOperation::KeyboardContext
+        twinkle_testkit::ScenarioOperation::KeyboardContext
     )));
     assert!(operations.iter().any(|step| matches!(
         step.operation,
-        nickel_ui_testkit::ScenarioOperation::Controller { .. }
+        twinkle_testkit::ScenarioOperation::Controller { .. }
     )));
     assert!(operations.iter().any(|step| matches!(
         step.operation,
-        nickel_ui_testkit::ScenarioOperation::Accessibility { .. }
+        twinkle_testkit::ScenarioOperation::Accessibility { .. }
     )));
 }
 
@@ -3274,14 +3270,14 @@ fn focused_selection_is_visually_distinct_and_survives_window_focus_loss() {
         selected_indices(scenario.host().application()),
         HashSet::from([0])
     );
-    let focused = nickel_ui_testkit::render_host(scenario.host(), 820, 620, 1.0);
+    let focused = twinkle_testkit::render_host(scenario.host(), 820, 620, 1.0);
 
     scenario.window_focus(false).unwrap();
     assert_eq!(
         selected_indices(scenario.host().application()),
         HashSet::from([0])
     );
-    let unfocused = nickel_ui_testkit::render_host(scenario.host(), 820, 620, 1.0);
+    let unfocused = twinkle_testkit::render_host(scenario.host(), 820, 620, 1.0);
     assert_ne!(focused, unfocused);
 }
 
@@ -3304,13 +3300,13 @@ fn internal_resize_layout_benchmark() {
     let palette = ThemePalette::from_appearance(
         ShellSettings::load_default().resolve_appearance(nickel_platform::appearance()),
     );
-    nickel_ui::with_text_measure_cache_mode(nickel_ui::TextMeasureCacheMode::Enabled, || {
-        let warm = nickel_ui::UiFrame::layout(
+    twinkle::with_text_measure_cache_mode(twinkle::TextMeasureCacheMode::Enabled, || {
+        let warm = twinkle::UiFrame::layout(
             app.build_view(860.0, 620.0, palette, false),
             Rect::new(0.0, 0.0, 860.0, 620.0),
         );
         std::hint::black_box(warm);
-        let before = nickel_ui::text_layout_cache_diagnostics();
+        let before = twinkle::text_layout_cache_diagnostics();
         let mut samples = Vec::new();
         let mut build_samples = Vec::new();
         for index in 0..120 {
@@ -3319,7 +3315,7 @@ fn internal_resize_layout_benchmark() {
             let started = std::time::Instant::now();
             let view = app.build_view(width, height, palette, false);
             build_samples.push(started.elapsed().as_secs_f64() * 1000.0);
-            let frame = nickel_ui::UiFrame::layout(view, Rect::new(0.0, 0.0, width, height));
+            let frame = twinkle::UiFrame::layout(view, Rect::new(0.0, 0.0, width, height));
             samples.push(started.elapsed().as_secs_f64() * 1000.0);
             let mounted = frame
                 .semantic_nodes()
@@ -3334,7 +3330,7 @@ fn internal_resize_layout_benchmark() {
         }
         samples.sort_by(f64::total_cmp);
         build_samples.sort_by(f64::total_cmp);
-        let after = nickel_ui::text_layout_cache_diagnostics();
+        let after = twinkle::text_layout_cache_diagnostics();
         println!(
             "file resize layout: median={:.3}ms p95={:.3}ms build_median={:.3}ms build_p95={:.3}ms text_hits={} text_misses={} evictions={}",
             samples[60],
@@ -3394,7 +3390,7 @@ fn headless_software_resize_pipeline_benchmark() {
         .collect();
     let app = FileApp::with_browser(DirectoryBrowser::fixture(entries), String::new());
     let mut host = UiHost::new(app, 1100, 800);
-    let mut renderer = nickel_ui::SoftwareRenderer::new_pixel_buffer(1100, 800, 1.0);
+    let mut renderer = twinkle::SoftwareRenderer::new_pixel_buffer(1100, 800, 1.0);
     let mut presented = Vec::<u32>::new();
     let mut layout_ms = Vec::with_capacity(120);
     let mut raster_ms = Vec::with_capacity(120);
@@ -3411,9 +3407,9 @@ fn headless_software_resize_pipeline_benchmark() {
         layout_ms.push(started.elapsed().as_secs_f64() * 1000.0);
         if index > 0 {
             for (old, new) in previous_commands.iter().zip(host.commands()) {
-                let text_bounds = |command: &nickel_ui::backend::PaintCommand| match command {
-                    nickel_ui::backend::PaintCommand::Text { bounds, .. }
-                    | nickel_ui::backend::PaintCommand::StyledText { bounds, .. } => Some(*bounds),
+                let text_bounds = |command: &twinkle::backend::PaintCommand| match command {
+                    twinkle::backend::PaintCommand::Text { bounds, .. }
+                    | twinkle::backend::PaintCommand::StyledText { bounds, .. } => Some(*bounds),
                     _ => None,
                 };
                 if let (Some(old_bounds), Some(new_bounds)) = (text_bounds(old), text_bounds(new)) {
@@ -3472,7 +3468,7 @@ fn headless_software_resize_pipeline_benchmark() {
         "text command changes: moved={moved_text} resized={resized_text} changed={changed_text}"
     );
     if std::env::var_os("NICKEL_FILE_RESIZE_BREAKDOWN").is_some() {
-        use nickel_ui::backend::PaintCommand;
+        use twinkle::backend::PaintCommand;
         let mut image_sizes = std::collections::BTreeMap::new();
         let mut image_pointers = std::collections::BTreeSet::new();
         let mut image_fractions = std::collections::BTreeSet::new();
@@ -3506,7 +3502,7 @@ fn headless_software_resize_pipeline_benchmark() {
             "image",
             "stroke",
         ] {
-            let mut isolated = nickel_ui::SoftwareRenderer::new_pixel_buffer(1100, 800, 1.0);
+            let mut isolated = twinkle::SoftwareRenderer::new_pixel_buffer(1100, 800, 1.0);
             let mut samples = Vec::with_capacity(120);
             let mut count = 0;
             for index in 0..120 {
@@ -3598,7 +3594,7 @@ fn offscreen_presented_software_resize_benchmark() {
 
     struct Benchmark {
         host: UiHost<FileApp>,
-        renderer: nickel_ui::SoftwareRenderer,
+        renderer: twinkle::SoftwareRenderer,
         display: OwnedDisplayHandle,
         window: Option<Arc<Window>>,
         surface: Option<softbuffer::Surface<OwnedDisplayHandle, Arc<Window>>>,
@@ -3713,7 +3709,7 @@ fn offscreen_presented_software_resize_benchmark() {
     ));
     let mut benchmark = Benchmark {
         host: UiHost::new(app, 900, 700),
-        renderer: nickel_ui::SoftwareRenderer::new_pixel_buffer(900, 700, 1.0),
+        renderer: twinkle::SoftwareRenderer::new_pixel_buffer(900, 700, 1.0),
         display: event_loop.owned_display_handle(),
         window: None,
         surface: None,

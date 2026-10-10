@@ -6,7 +6,7 @@
 
 use std::{num::NonZeroU32, rc::Rc};
 
-use nickel_input::{InputEvent, KeyCode, KeyEdge, PhysicalKey, PointerEvent, TextEvent};
+use twinkle_input::{InputEvent, KeyCode, KeyEdge, PhysicalKey, PointerEvent, TextEvent};
 use winit::{
     application::ApplicationHandler,
     dpi::{LogicalPosition, LogicalSize},
@@ -20,7 +20,7 @@ struct PointerConstraintProbe {
     window: Option<Rc<Window>>,
     surface: Option<softbuffer::Surface<OwnedDisplayHandle, Rc<Window>>>,
     constraint: ProbeConstraint,
-    input: nickel_input::winit::Adapter,
+    input: twinkle_input::winit::Adapter,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -38,7 +38,7 @@ impl PointerConstraintProbe {
             window: None,
             surface: None,
             constraint: ProbeConstraint::None,
-            input: nickel_input::winit::Adapter::default(),
+            input: twinkle_input::winit::Adapter::default(),
         }
     }
 
@@ -101,7 +101,7 @@ impl ApplicationHandler for PointerConstraintProbe {
         _window_id: WindowId,
         event: WindowEvent,
     ) {
-        for input in self.input.normalize(nickel_input::DeviceId(0), &event) {
+        for input in self.input.normalize(twinkle_input::DeviceId(0), &event) {
             match input {
                 InputEvent::Key(key) if key.edge == KeyEdge::Pressed && !key.repeat => {
                     match key.physical {

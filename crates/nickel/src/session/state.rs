@@ -1900,7 +1900,7 @@ use smithay::{
 };
 
 fn controller_envelope_payload(
-    event: nickel_ui::ControllerEnvelope,
+    event: twinkle::ControllerEnvelope,
     routing_epoch: u64,
     surface_generation: Option<u64>,
 ) -> ControllerEnvelopePayload {
@@ -1908,8 +1908,8 @@ fn controller_envelope_payload(
         device_generation: event.device.0,
         action: event.action.map(controller_action_message),
         edge: match event.edge {
-            nickel_input::KeyEdge::Pressed => nickel_session_protocol::InputState::Pressed,
-            nickel_input::KeyEdge::Released => nickel_session_protocol::InputState::Released,
+            twinkle_input::KeyEdge::Pressed => nickel_session_protocol::InputState::Pressed,
+            twinkle_input::KeyEdge::Released => nickel_session_protocol::InputState::Released,
         },
         repeat: event.repeat,
         family: controller_family_message(event.family),
@@ -1929,51 +1929,51 @@ fn controller_envelope_payload(
     }
 }
 
-fn controller_action_message(action: nickel_ui::ControllerAction) -> ControllerActionMessage {
+fn controller_action_message(action: twinkle::ControllerAction) -> ControllerActionMessage {
     match action {
-        nickel_ui::ControllerAction::Launcher => ControllerActionMessage::Launcher,
-        nickel_ui::ControllerAction::Up => ControllerActionMessage::Up,
-        nickel_ui::ControllerAction::Down => ControllerActionMessage::Down,
-        nickel_ui::ControllerAction::Left => ControllerActionMessage::Left,
-        nickel_ui::ControllerAction::Right => ControllerActionMessage::Right,
-        nickel_ui::ControllerAction::Confirm => ControllerActionMessage::Confirm,
-        nickel_ui::ControllerAction::Cancel => ControllerActionMessage::Cancel,
-        nickel_ui::ControllerAction::ContextMenu => ControllerActionMessage::ContextMenu,
-        nickel_ui::ControllerAction::PreviousPane => ControllerActionMessage::PreviousPane,
-        nickel_ui::ControllerAction::NextPane => ControllerActionMessage::NextPane,
+        twinkle::ControllerAction::Launcher => ControllerActionMessage::Launcher,
+        twinkle::ControllerAction::Up => ControllerActionMessage::Up,
+        twinkle::ControllerAction::Down => ControllerActionMessage::Down,
+        twinkle::ControllerAction::Left => ControllerActionMessage::Left,
+        twinkle::ControllerAction::Right => ControllerActionMessage::Right,
+        twinkle::ControllerAction::Confirm => ControllerActionMessage::Confirm,
+        twinkle::ControllerAction::Cancel => ControllerActionMessage::Cancel,
+        twinkle::ControllerAction::ContextMenu => ControllerActionMessage::ContextMenu,
+        twinkle::ControllerAction::PreviousPane => ControllerActionMessage::PreviousPane,
+        twinkle::ControllerAction::NextPane => ControllerActionMessage::NextPane,
     }
 }
 
-fn nickel_controller_action(action: ControllerActionMessage) -> nickel_ui::ControllerAction {
+fn nickel_controller_action(action: ControllerActionMessage) -> twinkle::ControllerAction {
     match action {
-        ControllerActionMessage::Launcher => nickel_ui::ControllerAction::Launcher,
-        ControllerActionMessage::Up => nickel_ui::ControllerAction::Up,
-        ControllerActionMessage::Down => nickel_ui::ControllerAction::Down,
-        ControllerActionMessage::Left => nickel_ui::ControllerAction::Left,
-        ControllerActionMessage::Right => nickel_ui::ControllerAction::Right,
-        ControllerActionMessage::Confirm => nickel_ui::ControllerAction::Confirm,
-        ControllerActionMessage::Cancel => nickel_ui::ControllerAction::Cancel,
-        ControllerActionMessage::ContextMenu => nickel_ui::ControllerAction::ContextMenu,
-        ControllerActionMessage::PreviousPane => nickel_ui::ControllerAction::PreviousPane,
-        ControllerActionMessage::NextPane => nickel_ui::ControllerAction::NextPane,
+        ControllerActionMessage::Launcher => twinkle::ControllerAction::Launcher,
+        ControllerActionMessage::Up => twinkle::ControllerAction::Up,
+        ControllerActionMessage::Down => twinkle::ControllerAction::Down,
+        ControllerActionMessage::Left => twinkle::ControllerAction::Left,
+        ControllerActionMessage::Right => twinkle::ControllerAction::Right,
+        ControllerActionMessage::Confirm => twinkle::ControllerAction::Confirm,
+        ControllerActionMessage::Cancel => twinkle::ControllerAction::Cancel,
+        ControllerActionMessage::ContextMenu => twinkle::ControllerAction::ContextMenu,
+        ControllerActionMessage::PreviousPane => twinkle::ControllerAction::PreviousPane,
+        ControllerActionMessage::NextPane => twinkle::ControllerAction::NextPane,
     }
 }
 
-fn controller_family_message(family: nickel_ui::ControllerFamily) -> ControllerFamilyMessage {
+fn controller_family_message(family: twinkle::ControllerFamily) -> ControllerFamilyMessage {
     match family {
-        nickel_ui::ControllerFamily::PlayStation => ControllerFamilyMessage::PlayStation,
-        nickel_ui::ControllerFamily::Xbox => ControllerFamilyMessage::Xbox,
-        nickel_ui::ControllerFamily::Switch => ControllerFamilyMessage::Switch,
-        nickel_ui::ControllerFamily::Generic => ControllerFamilyMessage::Generic,
+        twinkle::ControllerFamily::PlayStation => ControllerFamilyMessage::PlayStation,
+        twinkle::ControllerFamily::Xbox => ControllerFamilyMessage::Xbox,
+        twinkle::ControllerFamily::Switch => ControllerFamilyMessage::Switch,
+        twinkle::ControllerFamily::Generic => ControllerFamilyMessage::Generic,
     }
 }
 
-fn nickel_controller_family(family: ControllerFamilyMessage) -> nickel_ui::ControllerFamily {
+fn nickel_controller_family(family: ControllerFamilyMessage) -> twinkle::ControllerFamily {
     match family {
-        ControllerFamilyMessage::PlayStation => nickel_ui::ControllerFamily::PlayStation,
-        ControllerFamilyMessage::Xbox => nickel_ui::ControllerFamily::Xbox,
-        ControllerFamilyMessage::Switch => nickel_ui::ControllerFamily::Switch,
-        ControllerFamilyMessage::Generic => nickel_ui::ControllerFamily::Generic,
+        ControllerFamilyMessage::PlayStation => twinkle::ControllerFamily::PlayStation,
+        ControllerFamilyMessage::Xbox => twinkle::ControllerFamily::Xbox,
+        ControllerFamilyMessage::Switch => twinkle::ControllerFamily::Switch,
+        ControllerFamilyMessage::Generic => twinkle::ControllerFamily::Generic,
     }
 }
 
@@ -2494,7 +2494,7 @@ struct CompatibilityControlState {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ControllerRoute {
-    target: Option<nickel_ui::InternalSurfaceId>,
+    target: Option<twinkle::InternalSurfaceId>,
     external_surface: Option<WindowId>,
     launcher_intercepted: bool,
 }
@@ -2503,7 +2503,7 @@ struct ControllerRoute {
 struct ControllerRoleLease {
     role: crate::winit_shell::SurfaceRole,
     /// InternalSurfaceId is a generation-bearing runtime lifetime, not a reusable role label.
-    target: nickel_ui::InternalSurfaceId,
+    target: twinkle::InternalSurfaceId,
     security_epoch: u64,
 }
 
@@ -2673,7 +2673,7 @@ fn revisions_for_authorized_x11_request(
 
 #[derive(Clone)]
 pub(crate) enum OrdinarySceneWindow {
-    Internal(nickel_ui::InternalSurfaceId),
+    Internal(twinkle::InternalSurfaceId),
     Client(Window),
 }
 
@@ -2694,12 +2694,12 @@ pub struct NickelSession {
     /// Codex menu/chat applications hosted in `internal_ui` on Linux.
     pub(crate) internal_codex: Option<crate::internal_codex::InternalCodexHost>,
     pub(crate) internal_shell_surfaces:
-        HashMap<nickel_ui::InternalSurfaceId, nickel_ui::InternalSurfaceId>,
+        HashMap<twinkle::InternalSurfaceId, twinkle::InternalSurfaceId>,
     /// Last geometry declared by each retained shell surface. Application
     /// windows use this baseline to distinguish a new JSX geometry request
     /// from an unrelated scene refresh, preserving user-owned move/resize.
     internal_shell_declared_placements:
-        HashMap<nickel_ui::InternalSurfaceId, crate::session::InternalSurfacePlacement>,
+        HashMap<twinkle::InternalSurfaceId, crate::session::InternalSurfacePlacement>,
     controller_route: Option<ControllerRoute>,
     controller_routing_epoch: u64,
     controller_published_routing_epoch: Arc<AtomicU64>,
@@ -2709,20 +2709,19 @@ pub struct NickelSession {
     controller_recovery: Option<ControllerRecoveryIntent>,
     controller_neutral_probe_requested: Arc<AtomicBool>,
     /// Compositor-owned overlays shown above ordinary clients while remote authority exists.
-    pub(crate) remote_indicator_surfaces: HashMap<String, nickel_ui::InternalSurfaceId>,
+    pub(crate) remote_indicator_surfaces: HashMap<String, twinkle::InternalSurfaceId>,
     /// Local AT-SPI adapters for trusted indicators. These are keyed by the
     /// compositor's private surface identity and never enter remote inventory.
     pub(crate) remote_indicator_accessibility:
-        HashMap<nickel_ui::InternalSurfaceId, RemoteIndicatorAccessibility>,
+        HashMap<twinkle::InternalSurfaceId, RemoteIndicatorAccessibility>,
     remote_indicator_accessibility_wake: smithay::reexports::calloop::channel::Sender<()>,
     pub(crate) internal_file_surfaces:
-        HashMap<nickel_ui::InternalSurfaceId, nickel_ui::InternalSurfaceId>,
+        HashMap<twinkle::InternalSurfaceId, twinkle::InternalSurfaceId>,
     pub(crate) internal_file_drag_serial:
-        Option<(nickel_ui::InternalSurfaceId, smithay::utils::Serial)>,
-    internal_file_context_popup:
-        Option<(nickel_ui::InternalSurfaceId, nickel_ui::InternalSurfaceId)>,
+        Option<(twinkle::InternalSurfaceId, smithay::utils::Serial)>,
+    internal_file_context_popup: Option<(twinkle::InternalSurfaceId, twinkle::InternalSurfaceId)>,
     /// Latest motion is reduced immediately; scene work is bounded by frames.
-    pending_desktop_scenes: HashSet<nickel_ui::InternalSurfaceId>,
+    pending_desktop_scenes: HashSet<twinkle::InternalSurfaceId>,
     /// A reconciliation flush may itself observe a topology change. The outer
     /// reconciliation owns applying that change after its current pass.
     reconciling_internal_shell_outputs: bool,
@@ -2786,8 +2785,8 @@ pub struct NickelSession {
     pub windows: WindowRegistry,
     pub surface_windows: HashMap<ObjectId, WindowId>,
     /// Stable canonical identities for application surfaces hosted in-process.
-    internal_surface_windows: HashMap<nickel_ui::InternalSurfaceId, WindowId>,
-    internal_window_surfaces: HashMap<WindowId, nickel_ui::InternalSurfaceId>,
+    internal_surface_windows: HashMap<twinkle::InternalSurfaceId, WindowId>,
+    internal_window_surfaces: HashMap<WindowId, twinkle::InternalSurfaceId>,
     internal_minimized_windows: HashSet<WindowId>,
     internal_maximized_restore: HashMap<WindowId, RevisionedInternalRestore>,
     surface_effective_outputs: HashMap<ObjectId, String>,
@@ -2873,7 +2872,7 @@ pub struct NickelSession {
     pub hotkeys: CompositorShortcutAdapter,
     pub(crate) remote_control: nickel_remote_control::RemoteControlRuntime,
     pub(crate) local_cues: crate::local_cues::LocalCues,
-    remote_controller_observer: nickel_ui::ControllerInput,
+    remote_controller_observer: twinkle::ControllerInput,
     remote_cleanup_wake: nickel_remote_control::ConnectionCleanupWake,
     remote_settings_staging: Arc<remote_settings::SettingsStaging>,
     remote_diagnostic_staging: Arc<remote_worker::WorkerStaging>,
@@ -2934,10 +2933,8 @@ pub struct NickelSession {
     pub workspace_hidden_windows: HashMap<WindowId, (Window, Point<i32, Logical>)>,
     displaced_output_windows: HashMap<String, Vec<DisplacedWindow>>,
     geometry_authorities: HashMap<WindowId, nickel_core::geometry_authority::GeometryAuthority>,
-    internal_move_baselines: HashMap<
-        nickel_ui::InternalSurfaceId,
-        nickel_core::geometry_authority::CompensationBaseline,
-    >,
+    internal_move_baselines:
+        HashMap<twinkle::InternalSurfaceId, nickel_core::geometry_authority::CompensationBaseline>,
     interactive_resize_baselines:
         HashMap<WindowId, nickel_core::geometry_authority::CompensationBaseline>,
     pub(crate) x11_geometry_settlements:
@@ -3542,7 +3539,7 @@ impl NickelSession {
     fn remote_global_pointer_hit_allowed(
         &self,
         point: Point<f64, Logical>,
-        internal: Option<(nickel_ui::InternalSurfaceId, nickel_ui::Point)>,
+        internal: Option<(twinkle::InternalSurfaceId, twinkle::Point)>,
     ) -> bool {
         if let Some((surface, _)) = internal {
             return !self.internal_ui.remote_access_protected(surface);
@@ -5724,9 +5721,9 @@ impl NickelSession {
                 {
                     self.internal_ui.step(
                         id,
-                        nickel_ui::HostBatch {
+                        twinkle::HostBatch {
                             application_changed: true,
-                            events: vec![nickel_ui::HostEvent::Poll],
+                            events: vec![twinkle::HostEvent::Poll],
                             ..Default::default()
                         },
                     );
@@ -5750,9 +5747,9 @@ impl NickelSession {
                 {
                     self.internal_ui.step(
                         id,
-                        nickel_ui::HostBatch {
+                        twinkle::HostBatch {
                             application_changed: true,
-                            events: vec![nickel_ui::HostEvent::Poll],
+                            events: vec![twinkle::HostEvent::Poll],
                             ..Default::default()
                         },
                     );
@@ -5843,14 +5840,14 @@ impl NickelSession {
     /// and are never reinterpreted as protocol window ids.
     fn register_internal_application(
         &mut self,
-        surface: nickel_ui::InternalSurfaceId,
+        surface: twinkle::InternalSurfaceId,
     ) -> Option<WindowId> {
         self.register_internal_application_with_plugin(surface, None)
     }
 
     fn register_internal_application_with_plugin(
         &mut self,
-        surface: nickel_ui::InternalSurfaceId,
+        surface: twinkle::InternalSurfaceId,
         plugin: Option<&nickel_core::plugins::PluginSurfaceKey>,
     ) -> Option<WindowId> {
         if let Some(id) = self.internal_surface_windows.get(&surface).copied() {
@@ -5905,7 +5902,7 @@ impl NickelSession {
         Some(id)
     }
 
-    fn unregister_internal_application(&mut self, surface: nickel_ui::InternalSurfaceId) {
+    fn unregister_internal_application(&mut self, surface: twinkle::InternalSurfaceId) {
         let Some(id) = self.internal_surface_windows.remove(&surface) else {
             return;
         };
@@ -6040,13 +6037,13 @@ impl NickelSession {
     pub(crate) fn internal_surface_for_window(
         &self,
         window: WindowId,
-    ) -> Option<nickel_ui::InternalSurfaceId> {
+    ) -> Option<twinkle::InternalSurfaceId> {
         self.internal_window_surfaces.get(&window).copied()
     }
 
     pub(crate) fn internal_window_for_surface(
         &self,
-        surface: nickel_ui::InternalSurfaceId,
+        surface: twinkle::InternalSurfaceId,
     ) -> Option<WindowId> {
         self.internal_surface_windows.get(&surface).copied()
     }
@@ -6216,7 +6213,7 @@ impl NickelSession {
         &self,
         pos: Point<f64, Logical>,
     ) -> Option<(
-        nickel_ui::InternalSurfaceId,
+        twinkle::InternalSurfaceId,
         crate::session::window_frame::FramePart,
     )> {
         let (surface, part) = self.internal_ui.internal_frame_target((pos.x, pos.y))?;
@@ -6347,7 +6344,7 @@ impl NickelSession {
         {
             self.internal_ui.step(
                 parent,
-                nickel_ui::HostBatch {
+                twinkle::HostBatch {
                     application_changed: true,
                     ..Default::default()
                 },
@@ -6407,7 +6404,7 @@ impl NickelSession {
             };
             let anchor = spec.anchor;
             let host = nickel_file::context_popup::FileContextPopup::host(spec);
-            let (width, height) = nickel_ui::InternalUiSurface::logical_size(&host);
+            let (width, height) = twinkle::InternalUiSurface::logical_size(&host);
             let max_x = output_x + (output.width as i32 - width as i32).max(0);
             let max_y = output_y + (output.height as i32 - height as i32).max(0);
             let x = (placement.geometry.0 + anchor.x.round() as i32).clamp(output_x, max_x);
@@ -6423,7 +6420,7 @@ impl NickelSession {
             );
             self.internal_ui.step(
                 popup,
-                nickel_ui::HostBatch {
+                twinkle::HostBatch {
                     scale_factor: Some(output.scale),
                     ..Default::default()
                 },
@@ -6431,7 +6428,7 @@ impl NickelSession {
             self.internal_file_context_popup = Some((popup, parent));
             self.internal_ui.step(
                 parent,
-                nickel_ui::HostBatch {
+                twinkle::HostBatch {
                     application_changed: true,
                     ..Default::default()
                 },
@@ -6484,7 +6481,7 @@ impl NickelSession {
 
     fn controller_role_for_runtime(
         &self,
-        runtime: nickel_ui::InternalSurfaceId,
+        runtime: twinkle::InternalSurfaceId,
     ) -> Option<crate::winit_shell::SurfaceRole> {
         let shell_id = self
             .internal_shell_surfaces
@@ -6498,7 +6495,7 @@ impl NickelSession {
             .map(|surface| surface.role)
     }
 
-    fn grant_controller_role_lease(&mut self, target: nickel_ui::InternalSurfaceId) {
+    fn grant_controller_role_lease(&mut self, target: twinkle::InternalSurfaceId) {
         let Some(role) = self.controller_role_for_runtime(target) else {
             self.revoke_controller_role_lease();
             return;
@@ -6576,7 +6573,7 @@ impl NickelSession {
     #[cfg(test)]
     pub(crate) fn handle_brokered_controller_batch(
         &mut self,
-        events: Vec<nickel_ui::ControllerEnvelope>,
+        events: Vec<twinkle::ControllerEnvelope>,
         neutral: bool,
     ) {
         let routing_epoch = self.refresh_controller_route().0;
@@ -6585,7 +6582,7 @@ impl NickelSession {
 
     pub(crate) fn handle_brokered_controller_batch_for_route(
         &mut self,
-        events: Vec<nickel_ui::ControllerEnvelope>,
+        events: Vec<twinkle::ControllerEnvelope>,
         neutral: bool,
         ingress_routing_epoch: u64,
     ) {
@@ -6749,18 +6746,18 @@ impl NickelSession {
             .set_controller_family(nickel_controller_family(payload.family));
         self.cancel_remote_pointer();
         self.cancel_remote_keyboard();
-        if action == Some(nickel_ui::ControllerAction::Launcher)
+        if action == Some(twinkle::ControllerAction::Launcher)
             && payload.edge == nickel_session_protocol::InputState::Pressed
             && binding.1.launcher_intercepted
         {
             self.toggle_launcher_from(InvocationSource::Keyboard);
         } else if let Some(target) = binding.1.target {
-            let execution_binding = nickel_ui::ControllerExecutionBinding {
+            let execution_binding = twinkle::ControllerExecutionBinding {
                 device_generation: payload.device_generation,
                 edge: match payload.edge {
-                    nickel_session_protocol::InputState::Pressed => nickel_input::KeyEdge::Pressed,
+                    nickel_session_protocol::InputState::Pressed => twinkle_input::KeyEdge::Pressed,
                     nickel_session_protocol::InputState::Released => {
-                        nickel_input::KeyEdge::Released
+                        twinkle_input::KeyEdge::Released
                     }
                 },
                 routing_epoch: payload.routing_epoch,
@@ -6774,8 +6771,8 @@ impl NickelSession {
             };
             self.internal_ui.step(
                 target,
-                nickel_ui::HostBatch {
-                    controller_authority: Some(nickel_ui::ControllerExecutionAuthority {
+                twinkle::HostBatch {
+                    controller_authority: Some(twinkle::ControllerExecutionAuthority {
                         routing_epoch: binding.0,
                         lease_epoch: active_lease.epoch.0,
                         connection_generation: active_lease.connection_generation.0,
@@ -6783,11 +6780,11 @@ impl NickelSession {
                         cutoff: None,
                         surface_generation: current_surface_generation,
                     }),
-                    events: vec![nickel_ui::HostEvent::AdmittedController {
+                    events: vec![twinkle::HostEvent::AdmittedController {
                         action,
                         binding: execution_binding,
                     }],
-                    ..nickel_ui::HostBatch::default()
+                    ..twinkle::HostBatch::default()
                 },
             );
             self.flush_internal_shell_input();
@@ -7168,14 +7165,12 @@ impl NickelSession {
                 && batch.events.iter().all(|event| {
                     matches!(
                         event,
-                        nickel_ui::HostEvent::NormalizedIngress(
-                            nickel_ui::NormalizedInputEnvelope {
-                                input: nickel_input::InputEvent::Pointer(
-                                    nickel_input::PointerEvent::Motion { .. }
-                                ),
-                                ..
-                            }
-                        )
+                        twinkle::HostEvent::NormalizedIngress(twinkle::NormalizedInputEnvelope {
+                            input: twinkle_input::InputEvent::Pointer(
+                                twinkle_input::PointerEvent::Motion { .. }
+                            ),
+                            ..
+                        })
                     )
                 })
         });
@@ -7326,7 +7321,7 @@ impl NickelSession {
     /// `None` is an explicit global dependency change (theme, locale, wallpaper,
     /// topology, scale or application replacement). Local service/input updates
     /// carry identities; visibility and placement are reconciled independently.
-    fn sync_internal_shell_changes(&mut self, changed: Option<&[nickel_ui::InternalSurfaceId]>) {
+    fn sync_internal_shell_changes(&mut self, changed: Option<&[twinkle::InternalSurfaceId]>) {
         if self
             .internal_shell
             .as_ref()
@@ -7377,7 +7372,7 @@ impl NickelSession {
 
     fn update_internal_shell_scenes(
         &mut self,
-        changed: Option<&[nickel_ui::InternalSurfaceId]>,
+        changed: Option<&[twinkle::InternalSurfaceId]>,
         request_frame: bool,
     ) {
         let recovery_was_visible = self.shell_recovery_visible();
@@ -7713,18 +7708,18 @@ impl NickelSession {
         }
     }
 
-    pub fn insert_internal_surface<A: nickel_ui::Application + 'static>(
+    pub fn insert_internal_surface<A: twinkle::Application + 'static>(
         &mut self,
         application: A,
         placement: crate::session::InternalSurfacePlacement,
         scale: f32,
-    ) -> nickel_ui::InternalSurfaceId {
+    ) -> twinkle::InternalSurfaceId {
         let id = self.internal_ui.insert(application, placement, scale);
         self.schedule_internal_ui_frame();
         id
     }
 
-    pub fn remove_internal_surface(&mut self, id: nickel_ui::InternalSurfaceId) -> bool {
+    pub fn remove_internal_surface(&mut self, id: twinkle::InternalSurfaceId) -> bool {
         let subject = crate::session::grabs::move_internal_grab::operation_window(id);
         if let Some(operation) = self.window_operations.operation_for_window(subject) {
             let _ = self.window_operations.cancel(
@@ -7801,7 +7796,7 @@ impl NickelSession {
 
     pub(crate) fn apply_internal_move(
         &mut self,
-        surface: nickel_ui::InternalSurfaceId,
+        surface: twinkle::InternalSurfaceId,
         placement: crate::session::InternalSurfacePlacement,
     ) -> bool {
         let Some(id) = self.internal_surface_windows.get(&surface).copied() else {
@@ -7846,7 +7841,7 @@ impl NickelSession {
 
     pub(crate) fn finish_internal_move(
         &mut self,
-        surface: nickel_ui::InternalSurfaceId,
+        surface: twinkle::InternalSurfaceId,
         compensate: bool,
     ) -> bool {
         let Some(baseline) = self.internal_move_baselines.remove(&surface) else {
@@ -7889,7 +7884,7 @@ impl NickelSession {
 
     pub(crate) fn internal_resize_constraints(
         &self,
-        surface: nickel_ui::InternalSurfaceId,
+        surface: twinkle::InternalSurfaceId,
     ) -> nickel_core::geometry_authority::GeometryConstraints {
         let file = self
             .internal_ui
@@ -7924,7 +7919,7 @@ impl NickelSession {
 
     pub(crate) fn apply_internal_resize(
         &mut self,
-        surface: nickel_ui::InternalSurfaceId,
+        surface: twinkle::InternalSurfaceId,
         placement: crate::session::InternalSurfacePlacement,
     ) -> bool {
         let Some(id) = self.internal_surface_windows.get(&surface).copied() else {
@@ -7965,7 +7960,7 @@ impl NickelSession {
 
     pub(crate) fn finish_internal_resize(
         &mut self,
-        surface: nickel_ui::InternalSurfaceId,
+        surface: twinkle::InternalSurfaceId,
         compensate: bool,
     ) -> bool {
         let Some(baseline) = self.internal_move_baselines.remove(&surface) else {
@@ -8010,7 +8005,7 @@ impl NickelSession {
 
     fn refresh_internal_shell_surface_viewport(
         &mut self,
-        runtime: nickel_ui::InternalSurfaceId,
+        runtime: twinkle::InternalSurfaceId,
         size: (u32, u32),
     ) -> bool {
         let Some(owner) = self
@@ -8032,8 +8027,8 @@ impl NickelSession {
 
     pub fn step_internal_surface(
         &mut self,
-        id: nickel_ui::InternalSurfaceId,
-        batch: nickel_ui::HostBatch,
+        id: twinkle::InternalSurfaceId,
+        batch: twinkle::HostBatch,
     ) -> bool {
         let changed = self.internal_ui.step(id, batch);
         self.start_pending_internal_file_drag(id);
@@ -8047,7 +8042,7 @@ impl NickelSession {
         changed
     }
 
-    fn start_pending_internal_file_drag(&mut self, id: nickel_ui::InternalSurfaceId) {
+    fn start_pending_internal_file_drag(&mut self, id: twinkle::InternalSurfaceId) {
         let Some((surface, serial)) = self.internal_file_drag_serial else {
             return;
         };
@@ -8057,7 +8052,7 @@ impl NickelSession {
         let Some(drag) = self
             .internal_ui
             .application_mut::<nickel_file::FileApp>(id)
-            .and_then(nickel_ui::Application::take_outbound_file_drag)
+            .and_then(twinkle::Application::take_outbound_file_drag)
         else {
             return;
         };
@@ -8176,7 +8171,7 @@ fn remote_shell_event_role(
 
 fn remote_shell_surface_event_role(
     role: crate::winit_shell::SurfaceRole,
-    id: nickel_ui::InternalSurfaceId,
+    id: twinkle::InternalSurfaceId,
     shell: &crate::internal_shell::InternalShellCoordinator,
 ) -> Option<nickel_remote_control::desktop_events::ShellEventRole> {
     if shell.is_taskbar_surface_id(id) {
@@ -9146,7 +9141,7 @@ impl NickelSession {
             hotkeys: CompositorShortcutAdapter::default(),
             remote_control: Default::default(),
             local_cues: Default::default(),
-            remote_controller_observer: nickel_ui::ControllerInput::new(),
+            remote_controller_observer: twinkle::ControllerInput::new(),
             remote_cleanup_wake,
             remote_settings_staging,
             remote_diagnostic_staging,
@@ -13956,7 +13951,7 @@ impl NickelSession {
         true
     }
 
-    fn focus_internal_surface(&mut self, surface: nickel_ui::InternalSurfaceId) -> bool {
+    fn focus_internal_surface(&mut self, surface: twinkle::InternalSurfaceId) -> bool {
         if !self.internal_ui.is_visible(surface) {
             return false;
         }
@@ -14346,7 +14341,7 @@ impl NickelSession {
         }
     }
 
-    fn supersede_internal_move_for_presentation(&mut self, surface: nickel_ui::InternalSurfaceId) {
+    fn supersede_internal_move_for_presentation(&mut self, surface: twinkle::InternalSurfaceId) {
         let subject = crate::session::grabs::move_internal_grab::operation_window(surface);
         let Some(operation) = self.window_operations.operation_for_window(subject) else {
             return;

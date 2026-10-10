@@ -11,16 +11,17 @@ name = "nickel-file"
 path = "src/bin/nickel-file.rs"
 
 [dependencies]
+nickel-ui-host = { path = "../nickel-ui-host" }
 image.workspace = true
-nickel-ui = { path = "../nickel-ui" }
+twinkle = { path = "../twinkle" }
 nucleo-matcher.workspace = true
 nickel-core = { path = "../nickel-core" }
-nickel-input = { path = "../nickel-input", features = ["winit"] }
+twinkle-input = { path = "../twinkle-input", features = ["winit"] }
 nickel-i18n = { path = "../nickel-i18n" }
 nickel-logging = { path = "../nickel-logging" }
 nickel-platform = { path = "../nickel-platform" }
 nickel-session-protocol = { path = "../nickel-session-protocol" }
-nickel-ui-testkit = { path = "../nickel-ui-testkit", optional = true }
+twinkle-testkit = { path = "../twinkle-testkit", optional = true }
 notify.workspace = true
 tracing.workspace = true
 sys-locale.workspace = true
@@ -31,14 +32,14 @@ raw-window-handle.workspace = true
 arboard = { version = "3.6.1", default-features = false, features = ["wayland-data-control"] }
 
 [dev-dependencies]
-nickel-ui-testkit = { path = "../nickel-ui-testkit" }
+twinkle-testkit = { path = "../twinkle-testkit" }
 sha2.workspace = true
 softbuffer.workspace = true
 tempfile = "3"
 
 [features]
 default = []
-workbench-fixtures = ["dep:nickel-ui-testkit"]
+workbench-fixtures = ["dep:twinkle-testkit"]
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { workspace = true, features = [

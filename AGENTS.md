@@ -6,10 +6,10 @@ Nickel is a cross-platform desktop shell targeting Windows and Linux. Its native
 
 - `crates/nickel/`: application binaries, session orchestration, and platform entry points.
 - `crates/nickel-core/`: platform-neutral application state and domain logic.
-- `crates/nickel-ui/`: native rendering, layout, input, and widgets.
+- `crates/twinkle/`: native rendering, layout, input, and widgets.
 - `crates/nickel-platform/`: narrow Windows and Linux adapters.
-- `crates/nickel-plugin-runtime/`: validated JavaScript package execution, hooks, and capability-gated host APIs.
-- `crates/nickel-plugin-presentation/`: package composition and translation of JSX trees into native presentation.
+- `crates/twinkle-jsx-runtime/`: validated JavaScript package execution, hooks, and capability-gated host APIs.
+- `crates/twinkle-presentation/`: package composition and translation of JSX trees into native presentation.
 - `crates/nickel-session-protocol/`: typed communication between shell processes and trusted local clients.
 - `assets/plugins/nickel-default/`: the production default shell, canonically authored in TSX/CSS; JS, JSX, and TS package inputs remain supported.
 - `assets/plugins/nickel-cupertino-dock/`: a bundled derived shell that inherits the default shell and replaces its shell/taskbar contracts.

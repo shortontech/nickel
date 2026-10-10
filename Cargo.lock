@@ -1513,7 +1513,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -3263,7 +3263,7 @@ version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "536bfad37a309d62069485248eeaba1e8d9853aaf951caaeaed0585a95346f08"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -3449,17 +3449,13 @@ dependencies = [
  "nickel-core",
  "nickel-file",
  "nickel-i18n",
- "nickel-input",
+ "nickel-jsx-host",
  "nickel-logging",
  "nickel-platform",
- "nickel-plugin-presentation",
- "nickel-plugin-runtime",
  "nickel-remote-control",
- "nickel-render-assets",
  "nickel-session-protocol",
  "nickel-storage",
- "nickel-ui",
- "nickel-ui-testkit",
+ "nickel-ui-host",
  "nickel-uwu",
  "nix 0.31.3",
  "notify",
@@ -3481,6 +3477,11 @@ dependencies = [
  "thiserror 2.0.20",
  "toml 0.9.12+spec-1.1.0",
  "tracing",
+ "twinkle",
+ "twinkle-input",
+ "twinkle-presentation",
+ "twinkle-render-assets",
+ "twinkle-testkit",
  "uds_windows",
  "url",
  "wayland-scanner",
@@ -3549,13 +3550,14 @@ dependencies = [
  "nickel-i18n",
  "nickel-markdown",
  "nickel-platform",
- "nickel-ui",
- "nickel-ui-testkit",
+ "nickel-ui-host",
  "qrcode",
  "serde",
  "serde_json",
  "tempfile",
  "toml 0.9.12+spec-1.1.0",
+ "twinkle",
+ "twinkle-testkit",
  "url",
 ]
 
@@ -3564,13 +3566,15 @@ name = "nickel-core"
 version = "0.2.0"
 dependencies = [
  "libc",
- "nickel-input",
  "nickel-storage",
  "semver",
  "serde",
  "serde_json",
  "sha2",
  "tempfile",
+ "twinkle-input",
+ "twinkle-protocol",
+ "twinkle-theme",
 ]
 
 [[package]]
@@ -3584,12 +3588,10 @@ dependencies = [
  "nickel-build-support",
  "nickel-core",
  "nickel-i18n",
- "nickel-input",
  "nickel-logging",
  "nickel-platform",
  "nickel-session-protocol",
- "nickel-ui",
- "nickel-ui-testkit",
+ "nickel-ui-host",
  "notify",
  "nucleo-matcher",
  "raw-window-handle",
@@ -3598,6 +3600,9 @@ dependencies = [
  "sys-locale",
  "tempfile",
  "tracing",
+ "twinkle",
+ "twinkle-input",
+ "twinkle-testkit",
  "url",
  "windows",
  "winit 0.30.13",
@@ -3611,8 +3616,7 @@ dependencies = [
  "ctrlc",
  "image",
  "nickel-i18n",
- "nickel-ui",
- "nickel-ui-testkit",
+ "nickel-ui-host",
  "nokhwa",
  "ort",
  "serde",
@@ -3620,6 +3624,8 @@ dependencies = [
  "sha2",
  "thiserror 2.0.20",
  "toml 0.9.12+spec-1.1.0",
+ "twinkle",
+ "twinkle-testkit",
  "ureq",
  "v4l",
 ]
@@ -3644,13 +3650,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "nickel-input"
+name = "nickel-jsx-host"
 version = "0.2.0"
 dependencies = [
- "gilrs",
- "proptest",
- "windows",
- "winit 0.30.13",
+ "nickel-core",
+ "serde",
+ "serde_json",
+ "twinkle-jsx-runtime",
 ]
 
 [[package]]
@@ -3667,10 +3673,10 @@ name = "nickel-markdown"
 version = "0.2.0"
 dependencies = [
  "nickel-i18n",
- "nickel-ui",
  "pulldown-cmark",
  "serde",
  "serde_json",
+ "twinkle",
 ]
 
 [[package]]
@@ -3682,9 +3688,10 @@ dependencies = [
  "nickel-i18n",
  "nickel-markdown",
  "nickel-platform",
- "nickel-ui",
- "nickel-ui-testkit",
+ "nickel-ui-host",
  "tempfile",
+ "twinkle",
+ "twinkle-testkit",
  "url",
 ]
 
@@ -3728,34 +3735,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "nickel-plugin-presentation"
-version = "0.2.0"
-dependencies = [
- "cssparser",
- "image",
- "nickel-core",
- "nickel-plugin-runtime",
- "nickel-ui",
- "serde_json",
-]
-
-[[package]]
-name = "nickel-plugin-runtime"
-version = "0.2.0"
-dependencies = [
- "nickel-core",
- "oxc_allocator",
- "oxc_codegen",
- "oxc_parser",
- "oxc_semantic",
- "oxc_span",
- "oxc_transformer",
- "serde",
- "serde_json",
- "v8",
-]
-
-[[package]]
 name = "nickel-remote-control"
 version = "0.2.0"
 dependencies = [
@@ -3768,7 +3747,6 @@ dependencies = [
  "http-body-util",
  "image",
  "libc",
- "nickel-input",
  "nickel-session-protocol",
  "nickel-storage",
  "rmcp",
@@ -3784,15 +3762,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "toml 0.9.12+spec-1.1.0",
-]
-
-[[package]]
-name = "nickel-render-assets"
-version = "0.2.0"
-dependencies = [
- "cosmic-text",
- "image",
- "nickel-core",
+ "twinkle-input",
 ]
 
 [[package]]
@@ -3836,66 +3806,26 @@ dependencies = [
  "arboard",
  "nickel-core",
  "nickel-i18n",
- "nickel-input",
  "nickel-logging",
- "nickel-render-assets",
  "nickel-terminal",
- "nickel-ui",
+ "nickel-ui-host",
+ "twinkle",
+ "twinkle-input",
+ "twinkle-render-assets",
  "winit 0.30.13",
 ]
 
 [[package]]
-name = "nickel-ui"
+name = "nickel-ui-host"
 version = "0.2.0"
 dependencies = [
- "arboard",
- "cosmic-text",
- "gilrs",
- "image",
  "nickel-core",
  "nickel-i18n",
- "nickel-input",
- "nickel-render-assets",
  "nickel-session-protocol",
- "proptest",
- "sha2",
- "smallvec",
- "softbuffer",
- "toml 0.9.12+spec-1.1.0",
  "tracing",
- "ui-declarative-macros",
- "unicode-segmentation",
- "windows",
- "windows-core",
+ "twinkle",
+ "twinkle-input",
  "winit 0.30.13",
-]
-
-[[package]]
-name = "nickel-ui-testkit"
-version = "0.2.0"
-dependencies = [
- "nickel-input",
- "nickel-ui",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "nickel-ui-workbench"
-version = "0.2.0"
-dependencies = [
- "image",
- "nickel",
- "nickel-file",
- "nickel-gaze",
- "nickel-markdown",
- "nickel-markdown-ui",
- "nickel-ui",
- "nickel-ui-testkit",
- "serde",
- "serde_json",
- "sha2",
- "toml 0.9.12+spec-1.1.0",
 ]
 
 [[package]]
@@ -3938,6 +3868,26 @@ version = "0.2.0"
 dependencies = [
  "windows",
  "windows-core",
+]
+
+[[package]]
+name = "nickel-workbench"
+version = "0.2.0"
+dependencies = [
+ "image",
+ "nickel",
+ "nickel-file",
+ "nickel-gaze",
+ "nickel-markdown",
+ "nickel-markdown-ui",
+ "nickel-ui-host",
+ "serde",
+ "serde_json",
+ "sha2",
+ "toml 0.9.12+spec-1.1.0",
+ "twinkle",
+ "twinkle-testkit",
+ "twinkle-workbench",
 ]
 
 [[package]]
@@ -4060,7 +4010,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -4638,7 +4588,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d8fae84b431384b68627d0f9b3b1245fcf9f46f6c0e3dc902e9dce64edd1967"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -5561,7 +5511,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -6023,7 +5973,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -6627,7 +6577,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -6867,10 +6817,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -7389,6 +7339,126 @@ dependencies = [
 ]
 
 [[package]]
+name = "twinkle"
+version = "0.2.0"
+dependencies = [
+ "arboard",
+ "cosmic-text",
+ "gilrs",
+ "image",
+ "proptest",
+ "sha2",
+ "smallvec",
+ "softbuffer",
+ "toml 0.9.12+spec-1.1.0",
+ "tracing",
+ "twinkle-input",
+ "twinkle-macros",
+ "twinkle-render-assets",
+ "unicode-segmentation",
+ "windows",
+ "windows-core",
+ "winit 0.30.13",
+]
+
+[[package]]
+name = "twinkle-input"
+version = "0.2.0"
+dependencies = [
+ "gilrs",
+ "proptest",
+ "serde",
+ "serde_json",
+ "windows",
+ "winit 0.30.13",
+]
+
+[[package]]
+name = "twinkle-jsx-runtime"
+version = "0.2.0"
+dependencies = [
+ "oxc_allocator",
+ "oxc_codegen",
+ "oxc_parser",
+ "oxc_semantic",
+ "oxc_span",
+ "oxc_transformer",
+ "serde",
+ "serde_json",
+ "twinkle-protocol",
+ "v8",
+]
+
+[[package]]
+name = "twinkle-macros"
+version = "0.2.0"
+dependencies = [
+ "proc-macro-crate",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "twinkle-presentation"
+version = "0.2.0"
+dependencies = [
+ "cssparser",
+ "image",
+ "serde_json",
+ "twinkle",
+ "twinkle-jsx-runtime",
+ "twinkle-protocol",
+ "twinkle-theme",
+]
+
+[[package]]
+name = "twinkle-protocol"
+version = "0.2.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "twinkle-render-assets"
+version = "0.2.0"
+dependencies = [
+ "cosmic-text",
+ "image",
+]
+
+[[package]]
+name = "twinkle-testkit"
+version = "0.2.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "twinkle",
+ "twinkle-input",
+]
+
+[[package]]
+name = "twinkle-theme"
+version = "0.2.0"
+
+[[package]]
+name = "twinkle-workbench"
+version = "0.2.0"
+dependencies = [
+ "image",
+ "serde",
+ "serde_json",
+ "toml 0.9.12+spec-1.1.0",
+ "twinkle",
+ "twinkle-input",
+ "twinkle-jsx-runtime",
+ "twinkle-presentation",
+ "twinkle-protocol",
+ "twinkle-testkit",
+]
+
+[[package]]
 name = "twox-hash"
 version = "1.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7433,16 +7503,7 @@ checksum = "f2f6fb2847f6742cd76af783a2a2c49e9375d0a111c7bef6f71cd9e738c72d6e"
 dependencies = [
  "memoffset",
  "tempfile",
- "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "ui-declarative-macros"
-version = "0.2.0"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -8286,7 +8347,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]

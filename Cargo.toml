@@ -1,4 +1,5 @@
 [workspace]
+exclude = ["vendor/winit"]
 members = [
     "crates/nickel-build-support",
     "crates/nickel-codex",
@@ -6,18 +7,21 @@ members = [
     "crates/nickel-codex-ui",
     "crates/nickel-remote-control",
     "crates/nickel-mcp-client",
-    "crates/nickel-input",
-    "crates/nickel-ui",
-    "crates/nickel-ui-testkit",
-    "crates/nickel-ui-workbench",
+    "crates/twinkle-input",
+    "crates/twinkle",
+    "crates/twinkle-testkit",
+    "crates/twinkle-workbench",
+    "crates/nickel-workbench",
     "crates/nickel-windows-app-probe",
     "crates/nickel-windows-shell-setup",
     "crates/nickel-watchdog",
     "crates/nickel-uwu",
     "crates/nickel-windows-uwp-target",
-    "crates/ui-declarative-macros",
+    "crates/twinkle-macros",
     "crates/nickel",
     "crates/nickel-core",
+    "crates/nickel-ui-host",
+    "crates/nickel-jsx-host",
     "crates/nickel-storage",
     "crates/nickel-logging",
     "crates/nickel-markdown",
@@ -27,9 +31,11 @@ members = [
     "crates/nickel-i18n",
     "crates/nickel-i18n-lint",
     "crates/nickel-platform",
-    "crates/nickel-plugin-runtime",
-    "crates/nickel-plugin-presentation",
-    "crates/nickel-render-assets",
+    "crates/twinkle-jsx-runtime",
+    "crates/twinkle-presentation",
+    "crates/twinkle-protocol",
+    "crates/twinkle-theme",
+    "crates/twinkle-render-assets",
     "crates/nickel-session-protocol",
     "crates/nickel-terminal",
     "crates/nickel-terminal-ui",
@@ -47,7 +53,6 @@ incremental = false
 
 [patch.crates-io]
 pipewire-native = { path = "vendor/pipewire-native" }
-ui-declarative-macros = { path = "crates/ui-declarative-macros" }
 winit = { path = "vendor/winit" }
 
 [patch."https://github.com/Smithay/smithay.git"]
@@ -125,7 +130,7 @@ tokio-util = "0.7.18"
 tempfile = "3.27.0"
 tar = "0.4.44"
 wgpu = "30.0.0"
-winit = "0.30.12"
+winit = { path = "vendor/winit", version = "0.30.13" }
 windows = "0.62.2"
 winresource = "0.1.31"
 xcursor = "0.3.10"

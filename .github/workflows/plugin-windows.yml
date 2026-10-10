@@ -9,11 +9,11 @@ on:
       - "Cargo.lock"
       - "Cargo.toml"
       - "crates/nickel/**"
+      - "crates/nickel-jsx-host/**"
       - "crates/nickel-codex-ui/**"
       - "crates/nickel-core/**"
-      - "crates/nickel-plugin-runtime/**"
+      - "crates/twinkle*/**"
       - "crates/nickel-session-protocol/**"
-      - "crates/nickel-ui/**"
       - "assets/plugins/**"
       - "assets/plugin-runtime/**"
   pull_request:
@@ -22,11 +22,11 @@ on:
       - "Cargo.lock"
       - "Cargo.toml"
       - "crates/nickel/**"
+      - "crates/nickel-jsx-host/**"
       - "crates/nickel-codex-ui/**"
       - "crates/nickel-core/**"
-      - "crates/nickel-plugin-runtime/**"
+      - "crates/twinkle*/**"
       - "crates/nickel-session-protocol/**"
-      - "crates/nickel-ui/**"
       - "assets/plugins/**"
       - "assets/plugin-runtime/**"
   workflow_dispatch:
@@ -73,7 +73,7 @@ jobs:
       - name: Test the JSX host and plugin packages
         shell: pwsh
         run: |
-          cargo test --locked -p nickel-plugin-runtime
+          cargo test --locked -p twinkle-jsx-runtime -p nickel-jsx-host
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked -p nickel-session-protocol
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

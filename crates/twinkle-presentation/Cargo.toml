@@ -1,0 +1,19 @@
+[package]
+name = "twinkle-presentation"
+version = "0.2.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+twinkle-theme = { path = "../twinkle-theme" }
+cssparser = "0.38.0"
+image.workspace = true
+twinkle-jsx-runtime = { path = "../twinkle-jsx-runtime", optional = true }
+twinkle-protocol = { path = "../twinkle-protocol" }
+twinkle = { path = "../twinkle" }
+serde_json.workspace = true
+
+[features]
+default = []
+jsx = ["dep:twinkle-jsx-runtime"]

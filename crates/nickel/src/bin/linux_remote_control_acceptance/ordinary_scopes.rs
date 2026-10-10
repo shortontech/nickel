@@ -75,7 +75,7 @@ pub(super) fn exercise(
         std::slice::from_ref(&first_resource.id),
         &mut unrelated,
     )?;
-    if other["title"] != "Nickel UI Counter"
+    if other["title"] != "Twinkle Counter"
         || other["verified_application"]
             .as_str()
             .is_none_or(|id| id.is_empty() || id == application)
@@ -825,7 +825,7 @@ impl Movement {
         }
 
         let window = wait_for_scoped_window(address, identity, lease, &existing)?;
-        if window["title"] != "Nickel UI Counter"
+        if window["title"] != "Twinkle Counter"
             || window["verified_application"] != self.counter_application
         {
             return Err("output-scoped launch mapped an unexpected native application".into());
@@ -1820,7 +1820,7 @@ impl OrdinaryClient {
         let executable = directory.join("examples").join(example);
         if !executable.is_file() {
             return Err(format!(
-                "missing repository example {example}; build nickel-ui --example {example}"
+                "missing repository example {example}; build twinkle --example {example}"
             ));
         }
         let log = environment.runtime.join(format!("ordinary-{label}.log"));

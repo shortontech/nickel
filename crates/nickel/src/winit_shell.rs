@@ -13,10 +13,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use std::time::Instant;
 
-use nickel_input::InputEvent;
 use nickel_session_protocol::ShellRole as SessionShellRole;
-use nickel_ui::backend::PaintCommand;
-use nickel_ui::{AggregatePresenterCacheDiagnostics, DamageRegion, HostChangeToken};
+use twinkle::backend::PaintCommand;
+use twinkle::{AggregatePresenterCacheDiagnostics, DamageRegion, HostChangeToken};
+use twinkle_input::InputEvent;
 use winit::dpi::{LogicalPosition, LogicalSize};
 use winit::event::{Event, WindowEvent};
 #[cfg(not(target_os = "windows"))]
@@ -400,7 +400,7 @@ fn surface_runtime_diagnostics(
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct NativePresentSample {
-    pub correlation: nickel_ui::NativeFrameCorrelation,
+    pub correlation: twinkle::NativeFrameCorrelation,
     pub present_us: u64,
     pub input_to_present_us: Option<u64>,
 }
@@ -505,7 +505,7 @@ fn record_pump_status(pending: &mut VecDeque<ShellEvent>, status: PumpStatus) {
 }
 
 fn queue_shell_input(pending: &mut VecDeque<ShellEvent>, surface: SurfaceId, event: InputEvent) {
-    let InputEvent::Pointer(nickel_input::PointerEvent::Motion {
+    let InputEvent::Pointer(twinkle_input::PointerEvent::Motion {
         device,
         order,
         position,
@@ -518,7 +518,7 @@ fn queue_shell_input(pending: &mut VecDeque<ShellEvent>, surface: SurfaceId, eve
     if let Some(ShellEvent::Input {
         surface: queued_surface,
         event:
-            InputEvent::Pointer(nickel_input::PointerEvent::Motion {
+            InputEvent::Pointer(twinkle_input::PointerEvent::Motion {
                 device: queued_device,
                 order: queued_order,
                 position: queued_position,
@@ -531,7 +531,7 @@ fn queue_shell_input(pending: &mut VecDeque<ShellEvent>, surface: SurfaceId, eve
         *queued_order = order;
         *queued_position = position;
         *queued_delta = match (*queued_delta, delta) {
-            (Some(previous), Some(next)) => Some(nickel_input::Vector {
+            (Some(previous), Some(next)) => Some(twinkle_input::Vector {
                 x: previous.x + next.x,
                 y: previous.y + next.y,
             }),
@@ -542,7 +542,7 @@ fn queue_shell_input(pending: &mut VecDeque<ShellEvent>, surface: SurfaceId, eve
     }
     pending.push_back(ShellEvent::Input {
         surface,
-        event: InputEvent::Pointer(nickel_input::PointerEvent::Motion {
+        event: InputEvent::Pointer(twinkle_input::PointerEvent::Motion {
             device,
             order,
             position,
@@ -696,8 +696,8 @@ pub struct WinitShell {
     _window_thread_guard: crate::platform::InternalWindowThreadGuard,
     pending_events: VecDeque<ShellEvent>,
     displays: Vec<(DisplayGeometry, String)>,
-    input_adapters: HashMap<WindowId, nickel_input::winit::Adapter>,
-    devices: nickel_input::winit::DeviceRegistry,
+    input_adapters: HashMap<WindowId, twinkle_input::winit::Adapter>,
+    devices: twinkle_input::winit::DeviceRegistry,
     warm_present_us: VecDeque<u64>,
     input_to_present_us: VecDeque<u64>,
     warm_present_allocations: VecDeque<u64>,
@@ -767,7 +767,7 @@ impl WinitShell {
             pending_events: VecDeque::new(),
             displays: Vec::new(),
             input_adapters: HashMap::new(),
-            devices: nickel_input::winit::DeviceRegistry::default(),
+            devices: twinkle_input::winit::DeviceRegistry::default(),
             warm_present_us: VecDeque::with_capacity(RUNTIME_SAMPLE_CAPACITY),
             input_to_present_us: VecDeque::with_capacity(RUNTIME_SAMPLE_CAPACITY),
             warm_present_allocations: VecDeque::with_capacity(RUNTIME_SAMPLE_CAPACITY),
@@ -2173,7 +2173,7 @@ impl WinitShell {
         &mut self,
         id: SurfaceId,
         commands: &[PaintCommand],
-        damage: Option<&[nickel_ui::Rect]>,
+        damage: Option<&[twinkle::Rect]>,
     ) -> Result<DamageRegion, String> {
         let index = *self
             .surface_indices
@@ -2313,7 +2313,7 @@ impl WinitShell {
         id: SurfaceId,
         token: HostChangeToken,
         commands: &[PaintCommand],
-        damage: Option<&[nickel_ui::Rect]>,
+        damage: Option<&[twinkle::Rect]>,
     ) -> Result<Option<DamageRegion>, String> {
         let index = *self
             .surface_indices
@@ -2573,8 +2573,8 @@ impl WinitShell {
         &mut self,
         target: &nickel_session_protocol::ResolvedShellTarget,
     ) -> Result<(), String> {
-        use nickel_input::{DeviceId, EventOrder, KeyEdge, Point, PointerButton, PointerEvent};
         use nickel_session_protocol::{PointerInteraction, ShellRole};
+        use twinkle_input::{DeviceId, EventOrder, KeyEdge, Point, PointerButton, PointerEvent};
 
         let role_matches = |surface: &ShellSurface| match target.role {
             ShellRole::Panel => surface.diagnostic_role() == SurfaceRole::Taskbar,
@@ -2666,17 +2666,17 @@ impl WinitShell {
     fn queue_test_pointer_button(
         &mut self,
         surface: SurfaceId,
-        device: nickel_input::DeviceId,
-        position: nickel_input::Point,
-        button: nickel_input::PointerButton,
-        edge: nickel_input::KeyEdge,
+        device: twinkle_input::DeviceId,
+        position: twinkle_input::Point,
+        button: twinkle_input::PointerButton,
+        edge: twinkle_input::KeyEdge,
         order: u64,
     ) {
         self.pending_events.push_back(ShellEvent::Input {
             surface,
-            event: InputEvent::Pointer(nickel_input::PointerEvent::Button {
+            event: InputEvent::Pointer(twinkle_input::PointerEvent::Button {
                 device,
-                order: nickel_input::EventOrder(order),
+                order: twinkle_input::EventOrder(order),
                 button,
                 edge,
                 position: Some(position),
@@ -3568,12 +3568,12 @@ mod tests {
         record_pump_status, require_displays, surface_geometry, surface_is_borderless,
     };
 
-    use nickel_input::{
-        DeviceId, EventOrder, InputEvent, KeyEdge, Point, PointerButton, PointerEvent, Vector,
-    };
-    use nickel_ui::AggregatePresenterCacheDiagnostics;
     use std::collections::{BTreeMap, HashSet, VecDeque};
     use std::time::{Duration, Instant};
+    use twinkle::AggregatePresenterCacheDiagnostics;
+    use twinkle_input::{
+        DeviceId, EventOrder, InputEvent, KeyEdge, Point, PointerButton, PointerEvent, Vector,
+    };
     use winit::platform::pump_events::PumpStatus;
 
     #[test]

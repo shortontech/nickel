@@ -14,8 +14,8 @@ name = "nickel_shell"
 
 [features]
 default = ["backend-udev"]
-workbench-fixtures = ["dep:nickel-ui-testkit", "nickel-codex-ui/workbench-fixtures"]
-backend-winit = ["smithay/backend_winit", "nickel-input/winit"]
+workbench-fixtures = ["dep:twinkle-testkit", "nickel-codex-ui/workbench-fixtures"]
+backend-winit = ["smithay/backend_winit", "twinkle-input/winit"]
 backend-udev = [
     "smithay/backend_drm",
     "smithay/backend_egl",
@@ -28,24 +28,25 @@ backend-udev = [
 ]
 
 [dependencies]
+nickel-ui-host = { path = "../nickel-ui-host" }
 base64.workspace = true
 image.workspace = true
 dirs.workspace = true
 jiff.workspace = true
 sha2.workspace = true
 url.workspace = true
-nickel-ui = { path = "../nickel-ui" }
+twinkle = { path = "../twinkle" }
 nickel-core = { path = "../nickel-core" }
 nickel-file = { path = "../nickel-file" }
 nickel-codex = { path = "../nickel-codex" }
 nickel-codex-ui = { path = "../nickel-codex-ui" }
 nickel-i18n = { path = "../nickel-i18n" }
-nickel-input = { path = "../nickel-input", features = ["winit", "windows"] }
+twinkle-input = { path = "../twinkle-input", features = ["winit", "windows"] }
 nickel-remote-control = { path = "../nickel-remote-control" }
 nickel-logging = { path = "../nickel-logging" }
-nickel-plugin-runtime = { path = "../nickel-plugin-runtime" }
-nickel-plugin-presentation = { path = "../nickel-plugin-presentation" }
-nickel-render-assets = { path = "../nickel-render-assets" }
+nickel-jsx-host = { path = "../nickel-jsx-host" }
+twinkle-presentation = { path = "../twinkle-presentation", features = ["jsx"] }
+twinkle-render-assets = { path = "../twinkle-render-assets" }
 nickel-storage = { path = "../nickel-storage" }
 nickel-session-protocol = { path = "../nickel-session-protocol" }
 nucleo-matcher.workspace = true
@@ -55,7 +56,7 @@ softbuffer.workspace = true
 tracing.workspace = true
 winit.workspace = true
 zeroize.workspace = true
-nickel-ui-testkit = { path = "../nickel-ui-testkit", optional = true }
+twinkle-testkit = { path = "../twinkle-testkit", optional = true }
 serde.workspace = true
 serde_json.workspace = true
 tempfile = "3.25.0"
@@ -146,7 +147,7 @@ windows = { workspace = true, features = [
 
 [dev-dependencies]
 accesskit = "0.24.1"
-nickel-ui-testkit = { path = "../nickel-ui-testkit" }
+twinkle-testkit = { path = "../twinkle-testkit" }
 sha2.workspace = true
 serde_json.workspace = true
 tempfile = "3.25.0"

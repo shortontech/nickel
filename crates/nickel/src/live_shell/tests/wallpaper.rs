@@ -7,7 +7,7 @@
         {
             *pixel = Rgba([8, 8, 8, 255]);
         }
-        let viewport = nickel_ui::Size {
+        let viewport = twinkle::Size {
             width: 400.0,
             height: 200.0,
         };
@@ -35,7 +35,7 @@
         assert_eq!(
             desktop_label_foreground(
                 Some(&checker),
-                nickel_ui::Size {
+                twinkle::Size {
                     width: 9.0,
                     height: 5.0,
                 },
@@ -114,7 +114,7 @@
             for desktop in &desktops {
                 assert!(changed.contains(desktop), "wallpaper commit must invalidate every desktop");
                 let scene = coordinator.scene(*desktop).unwrap();
-                assert!(nickel_ui::backend::contains_image_pixels(
+                assert!(twinkle::backend::contains_image_pixels(
                     &scene, coordinator.shell_mut().wallpaper.as_ref().unwrap()
                 ));
             }
@@ -144,14 +144,14 @@
         let mut shell = LiveShell::new().expect("live shell");
         assert!(shell.refresh_configured_wallpaper(Some(first_path)));
         let first_scene = shell.scene(SurfaceRole::Desktop, 320, 200);
-        assert!(nickel_ui::backend::contains_image_pixels(
+        assert!(twinkle::backend::contains_image_pixels(
             &first_scene,
             shell.wallpaper.as_ref().expect("first wallpaper")
         ));
 
         assert!(shell.refresh_configured_wallpaper(Some(second_path)));
         let second_scene = shell.scene(SurfaceRole::Desktop, 320, 200);
-        assert!(nickel_ui::backend::contains_image_pixels(
+        assert!(twinkle::backend::contains_image_pixels(
             &second_scene,
             shell.wallpaper.as_ref().expect("second wallpaper")
         ));
@@ -171,7 +171,7 @@
         let scene = shell.scene(SurfaceRole::Desktop, 320, 200);
         let banner_count = scene.iter().filter(|command| matches!(
             command,
-            nickel_ui::backend::PaintCommand::Text { text, .. }
+            twinkle::backend::PaintCommand::Text { text, .. }
                 if text == "Desktop files unavailable"
         )).count();
         assert_eq!(banner_count, 1);

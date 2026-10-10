@@ -1,0 +1,4 @@
+.app { padding: 24px; gap: 12px; color: #f4f5f6; }
+.actions { gap: 12px; }
+.entry { width: 360px; height: 36px; background-color: #303943; border-radius: 6px; }
+.action { background-color: #3b4e68; border-radius: 6px; padding: 8px; }

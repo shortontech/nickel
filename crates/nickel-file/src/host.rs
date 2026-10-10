@@ -3,12 +3,12 @@ use std::time::Instant;
 #[cfg(target_os = "windows")]
 use std::time::Duration;
 
-use nickel_input::{
-    AggregateModifier, InputEvent, KeyCode, KeyEdge, PhysicalKey, PointerButton, PointerEvent,
-};
-use nickel_ui::{
+use twinkle::{
     AdapterOutcome, Application, ControllerFence, EventDisposition, HostAdapter, HostServices,
     Point, ReadingDirection, SemanticNodeSnapshot, ShortcutOutcome, UiHost,
+};
+use twinkle_input::{
+    AggregateModifier, InputEvent, KeyCode, KeyEdge, PhysicalKey, PointerButton, PointerEvent,
 };
 use winit::{
     dpi::LogicalSize,
@@ -36,8 +36,8 @@ fn set_nickel_file_icon(window: &Window) {
 /// Native-window integration for the standalone Nickel File executable.
 ///
 /// Embedded hosts normally drive [`FileApp`] directly through the
-/// [`nickel_ui::Application`] contract. This adapter remains public so a host
-/// which already uses Nickel UI's native runtime can preserve the standalone
+/// [`twinkle::Application`] contract. This adapter remains public so a host
+/// which already uses Twinkle's native runtime can preserve the standalone
 /// window behavior without asking this crate to create an event loop.
 pub struct FileHostAdapter {
     sync_requested: bool,
@@ -120,7 +120,7 @@ fn perform_tab_cycle(app: &mut FileApp, reverse: bool) -> ShortcutOutcome {
     ShortcutOutcome::handled(true)
 }
 
-fn selection_command_modifier(modifiers: &nickel_input::ModifierState) -> bool {
+fn selection_command_modifier(modifiers: &twinkle_input::ModifierState) -> bool {
     modifiers.aggregate(AggregateModifier::Control)
 }
 
@@ -373,13 +373,13 @@ impl FileApp {
                     && !app.address_editing
                     && app.rename_editor.is_none()
                     && !app.places_open
-                    && let nickel_input::LogicalKey::Character(character) = &logical
+                    && let twinkle_input::LogicalKey::Character(character) = &logical
                     && !character.is_empty()
                     && character.chars().all(|c| !c.is_control())
                 {
                     let query = format!("{}{character}", app.filter_query);
                     app.update(FileMessage::FilterQueryChanged(query));
-                    app.pending_focus = Some(nickel_ui::UiId::from("file-filter-query"));
+                    app.pending_focus = Some(twinkle::UiId::from("file-filter-query"));
                     return AdapterOutcome {
                         changed: true,
                         disposition: EventDisposition::Handled,
@@ -407,7 +407,7 @@ impl FileApp {
                         app.filter_query.pop();
                         let query = app.filter_query.clone();
                         app.update(FileMessage::FilterQueryChanged(query));
-                        app.pending_focus = Some(nickel_ui::UiId::from("file-filter-query"));
+                        app.pending_focus = Some(twinkle::UiId::from("file-filter-query"));
                         return AdapterOutcome {
                             changed: true,
                             disposition: EventDisposition::Handled,
@@ -748,8 +748,8 @@ impl HostAdapter<FileApp> for FileHostAdapter {
     ) -> Result<AdapterOutcome, Box<dyn std::error::Error>> {
         if let winit::event::WindowEvent::KeyboardInput { event: key, .. } = event
             && !key.repeat
-            && let nickel_input::PhysicalKey::Code(key_code) =
-                nickel_input::winit::physical_key(key.physical_key)
+            && let twinkle_input::PhysicalKey::Code(key_code) =
+                twinkle_input::winit::physical_key(key.physical_key)
             && let Some(shortcut) = &self.focused_shortcut
         {
             let edge = if key.state == winit::event::ElementState::Pressed {
@@ -977,11 +977,11 @@ mod tests {
         selection_command_modifier, update_drop_hover,
     };
     use crate::{FileApp, FileMessage};
-    use nickel_input::{
+    use twinkle::{Application, EventDisposition};
+    use twinkle_input::{
         DeviceId, EventOrder, InputEvent, KeyCode, KeyEdge, KeyEvent, KeyLocation, LogicalKey,
         Modifier, ModifierState, PhysicalKey,
     };
-    use nickel_ui::{Application, EventDisposition};
 
     fn key_event(key: KeyCode, modifiers: ModifierState) -> InputEvent {
         InputEvent::Key(KeyEvent {
@@ -1059,8 +1059,7 @@ mod tests {
     #[test]
     fn command_shortcut_disposition_comes_from_executed_branch() {
         let directory = tempfile::tempdir().unwrap();
-        let mut host =
-            nickel_ui::UiHost::new(FileApp::new(directory.path().to_path_buf()), 860, 620);
+        let mut host = twinkle::UiHost::new(FileApp::new(directory.path().to_path_buf()), 860, 620);
         let control = ModifierState::from_sides([Modifier::ControlLeft]);
 
         let command =
@@ -1086,8 +1085,7 @@ mod tests {
     #[test]
     fn typing_in_files_starts_folder_filter_and_requests_focus() {
         let directory = tempfile::tempdir().unwrap();
-        let mut host =
-            nickel_ui::UiHost::new(FileApp::new(directory.path().to_path_buf()), 860, 620);
+        let mut host = twinkle::UiHost::new(FileApp::new(directory.path().to_path_buf()), 860, 620);
         let mut input = key_event(KeyCode::KeyR, ModifierState::default());
         let InputEvent::Key(ref mut key) = input else {
             unreachable!()
@@ -1142,13 +1140,13 @@ mod tests {
         let folder = directory.path().join("destination");
         std::fs::create_dir(&folder).unwrap();
         std::fs::write(directory.path().join("file.txt"), b"file").unwrap();
-        let host = nickel_ui::UiHost::new(FileApp::new(directory.path().to_path_buf()), 860, 620);
+        let host = twinkle::UiHost::new(FileApp::new(directory.path().to_path_buf()), 860, 620);
         let node = host
             .semantic_nodes()
             .into_iter()
             .find(|node| node.name.as_deref() == Some("destination"))
             .unwrap();
-        let point = nickel_ui::Point {
+        let point = twinkle::Point {
             x: node.bounds.origin.x + node.bounds.size.width / 2.0,
             y: node.bounds.origin.y + node.bounds.size.height / 2.0,
         };

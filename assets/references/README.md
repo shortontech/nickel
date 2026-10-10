@@ -11,7 +11,7 @@ decoration, exact copy, current values, and font rasterization are excluded from
 The 2026-08-28 Appearance comparison used FFmpeg 8.0.1. It cropped the reference to
 `1424:1062:0:43` (removing host decoration), cropped the deterministic dark English render to
 `1424:1062:0:0`, and applied `blend=all_mode=difference`. The ignored aid is written to
-`target/nickel-ui-snapshots/appearance-dark-en-difference.png`; the original reference and render,
+`target/twinkle-snapshots/appearance-dark-en-difference.png`; the original reference and render,
 not this aid, remain the acceptance oracle.
 
 Start Menu review uses the 2026-08-31 controller-launcher reference as a hierarchy oracle: compare

@@ -17,7 +17,7 @@ fn main() -> ExitCode {
         eprintln!("usage: nickel-markdown-ui PATH");
         return ExitCode::from(2);
     }
-    match nickel_ui::run(ViewerApplication::open(PathBuf::from(&arguments[0]))) {
+    match nickel_ui_host::run(ViewerApplication::open(PathBuf::from(&arguments[0]))) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("Nickel Markdown failed: {error}");

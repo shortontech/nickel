@@ -17,7 +17,7 @@ axum-server.workspace = true
 rustls.workspace = true
 rustls-pemfile.workspace = true
 http.workspace = true
-nickel-input = { path = "../nickel-input" }
+twinkle-input = { path = "../twinkle-input" }
 nickel-session-protocol = { path = "../nickel-session-protocol" }
 nickel-storage = { path = "../nickel-storage" }
 rmcp.workspace = true

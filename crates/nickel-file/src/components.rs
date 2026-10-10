@@ -1,7 +1,7 @@
 use std::{path::PathBuf, sync::Arc};
 
 use nickel_core::theme::ThemePalette;
-use nickel_ui::{
+use twinkle::{
     AnyView, Collection, CollectionPresentation, CollectionState, Component, ComponentBuilderExt,
     FileGridItem, ImageFit, Insets, NavigationScope, SemanticRole, TextField, VerticalScroll, ui,
 };
@@ -132,7 +132,7 @@ pub(crate) fn properties_dialog(
         FileMessage::PropertiesScroll(app.properties_scroll),
         app.properties_scroll,
     )
-    .theme(palette.into())
+    .theme(nickel_ui_host::semantic_theme(palette))
     .on_scroll(FileMessage::PropertiesScroll)
     .controlled(true)
     .height(576.0)
@@ -481,7 +481,7 @@ pub(crate) fn command_surface(
         FileMessage::CommandScroll(app.command_scroll_offset),
         app.command_scroll_offset,
     )
-    .theme(palette.into())
+    .theme(nickel_ui_host::semantic_theme(palette))
     .on_scroll(FileMessage::CommandScroll)
     .controlled(true)
     .height(results_height)
@@ -710,7 +710,7 @@ pub(crate) fn tab(
     }
 }
 
-fn file_entry_drag_message(seed: FileMessage, gesture: nickel_ui::DragGesture) -> FileMessage {
+fn file_entry_drag_message(seed: FileMessage, gesture: twinkle::DragGesture) -> FileMessage {
     let FileMessage::Entry(index) = seed else {
         return seed;
     };
@@ -785,7 +785,7 @@ pub(crate) fn details_row(
             on_drag={(FileMessage::Entry(index), file_entry_drag_message)}
             semantic_role={SemanticRole::Button} accessibility_label={entry.display_name()}
             focus_background_tint={palette.accent} controller_focus_background_tint={palette.complement}>
-            <Row gap={12.0} align_items={nickel_ui::Align::Center}>
+            <Row gap={12.0} align_items={twinkle::Align::Center}>
                 <Image asset_id={icon_id} image={icon_image} generation={u64::from(icon_id)} fit={ImageFit::Contain} width={28.0} height={28.0} />
                 <Container id={format!("details-name-{index}")} grow={1.0} min_width={120.0} height={28.0}>
                     <Text color={palette.text} wrap={true} max_lines={2} ellipsis={true} line_height={18.0}>{entry.display_name()}</Text>

@@ -1,6 +1,7 @@
 //! Experimental JavaScript panel host. The bundled example uses the same small
 //! component vocabulary as an external plugin; native surfaces remain shell-owned.
 
+use nickel_jsx_host::SettingsRuntimeExt;
 use std::{
     borrow::Cow,
     sync::{
@@ -14,14 +15,14 @@ use nickel_core::package_composition::PackageIdentity;
 use nickel_core::plugins::{
     PluginCapability, PluginManifest, PluginPackage, PluginSurface, PluginSurfaceKind,
 };
-use nickel_plugin_presentation::components::{PanelNode, RetainedPanelTree, render_retained_panel};
-pub use nickel_plugin_presentation::components::{PluginImages, PluginMessage};
 #[cfg(test)]
-use nickel_plugin_runtime::NativePatchCounters;
-use nickel_plugin_runtime::composition_runtime::{
+use nickel_jsx_host::NativePatchCounters;
+use nickel_jsx_host::composition_runtime::{
     ComponentEventHandle, ComponentMount, ScheduledExpandedBatch, ShellCompositionRuntime,
 };
-use nickel_plugin_runtime::{JsxModuleGraph, JsxRuntime, ModuleSource, ScheduledPatch};
+use nickel_jsx_host::{JsxModuleGraph, JsxRuntime, ModuleSource, ScheduledPatch};
+use twinkle_presentation::components::{PanelNode, RetainedPanelTree, render_retained_panel};
+pub use twinkle_presentation::components::{PluginImages, PluginMessage};
 
 struct CompositionPanelState {
     host: std::rc::Rc<std::cell::RefCell<ShellCompositionRuntime>>,
@@ -30,28 +31,28 @@ struct CompositionPanelState {
     manifests: std::collections::BTreeMap<PackageIdentity, PluginManifest>,
     snapshots: std::collections::BTreeMap<PackageIdentity, Value>,
 }
-use nickel_ui::{
+use serde_json::Value;
+use twinkle::{
     AnyView, Column, DragPhase, FrameOverlay, Length, OverlayAnchor, OverlayId, OverlayMenu,
     OverlayStyle, Row, Shortcut, Size, Spacer, TransientSurface, UiFrame, UiId, ViewContext,
 };
 #[cfg(test)]
-use nickel_ui::{Point, SemanticRole};
-use serde_json::Value;
+use twinkle::{Point, SemanticRole};
 
 /// Advance a native plugin host, including viewport feedback and bounded
 /// virtual-row measurement. Embedders must use this instead of stepping the
 /// generic UI host alone: virtual collections initially contain no row trees.
 /// Continue servicing the returned native deadline when convergence is pending.
 pub fn step_host(
-    host: &mut nickel_ui::UiHost<PluginPanelApplication>,
+    host: &mut twinkle::UiHost<PluginPanelApplication>,
     data: Option<String>,
-    batch: nickel_ui::HostBatch,
-) -> Result<(nickel_ui::HostEventOutcome, u64), String> {
+    batch: twinkle::HostBatch,
+) -> Result<(twinkle::HostEventOutcome, u64), String> {
     crate::live_shell::step_plugin_host(host, data, batch)
 }
 
 use nickel_core::display_projection::ProjectionMode;
-use nickel_plugin_presentation::css::StyleSheet;
+use twinkle_presentation::css::StyleSheet;
 
 use crate::window_preview::PreviewAction;
 
@@ -158,7 +159,7 @@ pub fn enabled() -> bool {
     std::env::var_os("NICKEL_DEV_PLUGIN_PANEL").is_some()
 }
 
-type WallpaperDemandCache = Option<(u64, nickel_ui::Rect, Arc<Vec<String>>)>;
+type WallpaperDemandCache = Option<(u64, twinkle::Rect, Arc<Vec<String>>)>;
 
 pub struct PluginPanelApplication {
     runtime: std::rc::Rc<std::cell::RefCell<JsxRuntime>>,
@@ -181,7 +182,7 @@ pub struct PluginPanelApplication {
     surface_snapshot: Value,
     diagnostic_mount: u64,
     native_text_revision: std::cell::Cell<Option<(u64, u64, Option<u64>)>>,
-    virtual_feedback_generation: std::cell::Cell<Option<(u64, u64, nickel_ui::Rect)>>,
+    virtual_feedback_generation: std::cell::Cell<Option<(u64, u64, twinkle::Rect)>>,
     virtual_collection_presence: std::cell::Cell<Option<(u64, bool)>>,
     wallpaper_demand_cache: std::cell::RefCell<WallpaperDemandCache>,
     application_image_demand_cache:
@@ -190,8 +191,8 @@ pub struct PluginPanelApplication {
     virtual_work_pending: bool,
     #[cfg(test)]
     maintenance_owner_cursor: usize,
-    virtual_measurement_generation: Option<(u64, u64, u64, nickel_ui::Rect, f32)>,
-    pending_frame_correlation: Option<nickel_ui::NativeFrameCorrelation>,
+    virtual_measurement_generation: Option<(u64, u64, u64, twinkle::Rect, f32)>,
+    pending_frame_correlation: Option<twinkle::NativeFrameCorrelation>,
     #[cfg(test)]
     diagnostic_patch_operations: u64,
     #[cfg(test)]
@@ -482,8 +483,8 @@ fn package_module_graph(package: &PluginPackage) -> Result<Option<JsxModuleGraph
 
 fn package_runtime(package: &PluginPackage, data: Option<&str>) -> Result<JsxRuntime, String> {
     match package_module_graph(package)? {
-        Some(graph) => JsxRuntime::new_modules(&graph, data),
-        None => JsxRuntime::new(&package.source, data),
+        Some(graph) => nickel_jsx_host::create_module_runtime(&graph, data),
+        None => nickel_jsx_host::create_runtime(&package.source, data),
     }
 }
 
@@ -1471,7 +1472,7 @@ impl PluginPanelApplication {
         let runtime = if let Some(runtime) = shared_runtime {
             runtime
         } else {
-            std::rc::Rc::new(std::cell::RefCell::new(JsxRuntime::new(
+            std::rc::Rc::new(std::cell::RefCell::new(nickel_jsx_host::create_runtime(
                 source,
                 data.as_deref(),
             )?))
@@ -1558,7 +1559,7 @@ impl PluginPanelApplication {
         Ok(changed)
     }
 
-    pub fn sync_reading_direction(&mut self, direction: nickel_ui::ReadingDirection) -> bool {
+    pub fn sync_reading_direction(&mut self, direction: twinkle::ReadingDirection) -> bool {
         let changed = self.stylesheet.set_reading_direction(direction);
         if changed {
             self.virtual_measurement_epoch = self.virtual_measurement_epoch.wrapping_add(1);
@@ -1626,8 +1627,8 @@ impl PluginPanelApplication {
 
     pub(crate) fn wallpaper_preview_demand(
         &self,
-        layout: &nickel_ui::ResolvedLayout,
-        viewport: nickel_ui::Rect,
+        layout: &twinkle::ResolvedLayout,
+        viewport: twinkle::Rect,
     ) -> Arc<Vec<String>> {
         if self.virtual_work_pending {
             return Arc::new(Vec::new());
@@ -1674,8 +1675,8 @@ impl PluginPanelApplication {
     pub(crate) fn virtual_collection_feedback(
         &self,
         generation: u64,
-        layout: &nickel_ui::ResolvedLayout,
-        viewport: nickel_ui::Rect,
+        layout: &twinkle::ResolvedLayout,
+        viewport: twinkle::Rect,
     ) -> Result<Vec<PluginMessage>, String> {
         let generation_present = self.accepted.generation();
         if !self.has_virtual_collections() {
@@ -1700,11 +1701,10 @@ impl PluginPanelApplication {
     pub(crate) fn virtual_measurements(
         &self,
         generation: u64,
-        layout: &nickel_ui::ResolvedLayout,
-        viewport: nickel_ui::Rect,
+        layout: &twinkle::ResolvedLayout,
+        viewport: twinkle::Rect,
         scale: f32,
-    ) -> Result<Vec<nickel_plugin_presentation::components::VirtualCollectionMeasurements>, String>
-    {
+    ) -> Result<Vec<twinkle_presentation::components::VirtualCollectionMeasurements>, String> {
         let accepted = self.accepted.generation();
         if self
             .virtual_collection_presence
@@ -1735,9 +1735,9 @@ impl PluginPanelApplication {
     pub(crate) fn apply_virtual_measurements(
         &mut self,
         generation: u64,
-        viewport: nickel_ui::Rect,
+        viewport: twinkle::Rect,
         scale: f32,
-        measurements: &[nickel_plugin_presentation::components::VirtualCollectionMeasurements],
+        measurements: &[twinkle_presentation::components::VirtualCollectionMeasurements],
     ) -> Result<bool, String> {
         let changed = self.accepted.apply_virtual_measurements(
             measurements,
@@ -1757,14 +1757,14 @@ impl PluginPanelApplication {
     pub(crate) fn deliver_virtual_feedback(&mut self, feedback: Vec<PluginMessage>) {
         // Native range selection changes materialization, not the row template.
         let epoch = self.virtual_measurement_epoch;
-        nickel_ui::Application::update_messages(self, feedback);
+        twinkle::Application::update_messages(self, feedback);
         self.virtual_measurement_epoch = epoch;
     }
 
     pub(crate) fn virtual_anchor_candidates(
         &self,
-        layout: &nickel_ui::ResolvedLayout,
-    ) -> Result<Vec<nickel_ui::UiId>, String> {
+        layout: &twinkle::ResolvedLayout,
+    ) -> Result<Vec<twinkle::UiId>, String> {
         if !self.accepted.node().contains_virtual_collection() {
             return Ok(Vec::new());
         }
@@ -1779,11 +1779,11 @@ impl PluginPanelApplication {
 
     pub fn virtual_key_focus_event(
         &self,
-        collection: &nickel_ui::UiId,
+        collection: &twinkle::UiId,
         revision: u64,
         key: &str,
-        layout: &nickel_ui::ResolvedLayout,
-    ) -> Result<nickel_ui::UiEvent, String> {
+        layout: &twinkle::ResolvedLayout,
+    ) -> Result<twinkle::UiEvent, String> {
         self.accepted
             .node()
             .virtual_key_focus_event(collection, revision, key, layout)
@@ -1791,15 +1791,15 @@ impl PluginPanelApplication {
 
     pub(crate) fn capture_virtual_targets(
         &self,
-        target: &nickel_ui::UiId,
-        layout: &nickel_ui::ResolvedLayout,
-    ) -> Result<Vec<nickel_plugin_presentation::components::VirtualCollectionTarget>, String> {
+        target: &twinkle::UiId,
+        layout: &twinkle::ResolvedLayout,
+    ) -> Result<Vec<twinkle_presentation::components::VirtualCollectionTarget>, String> {
         self.accepted.node().capture_virtual_targets(target, layout)
     }
 
     pub(crate) fn preserve_virtual_targets(
         &mut self,
-        targets: &[nickel_plugin_presentation::components::VirtualCollectionTarget],
+        targets: &[twinkle_presentation::components::VirtualCollectionTarget],
     ) {
         if targets.is_empty() {
             return;
@@ -1818,7 +1818,7 @@ impl PluginPanelApplication {
 
     pub(crate) fn begin_virtual_target_repair(
         &mut self,
-        targets: &[nickel_plugin_presentation::components::VirtualCollectionTarget],
+        targets: &[twinkle_presentation::components::VirtualCollectionTarget],
     ) {
         self.accepted.begin_virtual_target_repair(targets);
     }
@@ -4052,7 +4052,7 @@ impl PluginPanelApplication {
     fn mark_frame_correlation(&mut self, previous_generation: u64) {
         let generation = self.accepted.generation();
         if generation != previous_generation && self.last_error.is_none() {
-            self.pending_frame_correlation = Some(nickel_ui::NativeFrameCorrelation {
+            self.pending_frame_correlation = Some(twinkle::NativeFrameCorrelation {
                 mount: self.diagnostic_mount,
                 generation,
             });
@@ -4060,7 +4060,7 @@ impl PluginPanelApplication {
     }
 }
 
-impl nickel_ui::Application for PluginPanelApplication {
+impl twinkle::Application for PluginPanelApplication {
     type Message = PluginMessage;
 
     fn window_focus_message(&self, focused: bool) -> Option<Self::Message> {
@@ -4070,18 +4070,18 @@ impl nickel_ui::Application for PluginPanelApplication {
             .map(PluginMessage::Click)
     }
 
-    fn shortcut_outcome(&mut self, shortcut: Shortcut) -> nickel_ui::ShortcutOutcome {
+    fn shortcut_outcome(&mut self, shortcut: Shortcut) -> twinkle::ShortcutOutcome {
         if self.overlay_open && shortcut == Shortcut::Escape {
-            return nickel_ui::ShortcutOutcome::from_changed(false);
+            return twinkle::ShortcutOutcome::from_changed(false);
         }
         if self.overlay_open && shortcut == Shortcut::Submit {
-            return nickel_ui::ShortcutOutcome::from_changed(false);
+            return twinkle::ShortcutOutcome::from_changed(false);
         }
         if let Some(action) = self.accepted.node().window_shortcut_action(shortcut) {
             self.update(PluginMessage::Click(action));
-            return nickel_ui::ShortcutOutcome::handled(true);
+            return twinkle::ShortcutOutcome::handled(true);
         }
-        nickel_ui::ShortcutOutcome::from_changed(false)
+        twinkle::ShortcutOutcome::from_changed(false)
     }
 
     fn update(&mut self, message: Self::Message) {
@@ -4145,7 +4145,7 @@ impl nickel_ui::Application for PluginPanelApplication {
                     }]))
                 }
                 PluginMessage::Drop(action, gesture) => {
-                    let bounds = |rect: nickel_ui::Rect| {
+                    let bounds = |rect: twinkle::Rect| {
                         serde_json::json!({
                             "x": rect.origin.x,
                             "y": rect.origin.y,
@@ -4171,11 +4171,11 @@ impl nickel_ui::Application for PluginPanelApplication {
         self.dispatch_validated_events(events);
     }
 
-    fn take_frame_correlation(&mut self) -> Option<nickel_ui::NativeFrameCorrelation> {
+    fn take_frame_correlation(&mut self) -> Option<twinkle::NativeFrameCorrelation> {
         self.pending_frame_correlation.take()
     }
 
-    fn view(&self, context: ViewContext) -> impl nickel_ui::View<Self::Message> {
+    fn view(&self, context: ViewContext) -> impl twinkle::View<Self::Message> {
         // Geometry may change on a native scroll without changing the accepted
         // JSX generation. Paint-only hover bypasses view and keeps this cache.
         self.wallpaper_demand_cache.borrow_mut().take();
@@ -4322,7 +4322,7 @@ impl nickel_ui::Application for PluginPanelApplication {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nickel_ui::Application;
+    use twinkle::Application;
 
     fn with_package_runtime_stack(test: impl FnOnce() + Send + 'static) {
         std::thread::Builder::new()
@@ -4348,9 +4348,9 @@ mod tests {
             "#,
             )
             .unwrap();
-            let mut host = nickel_ui::UiHost::new(application, 320, 100);
+            let mut host = twinkle::UiHost::new(application, 320, 100);
             step_host(&mut host, None, Default::default()).unwrap();
-            let viewport = nickel_ui::Rect::new(0.0, 0.0, 320.0, 100.0);
+            let viewport = twinkle::Rect::new(0.0, 0.0, 320.0, 100.0);
             let demand = host
                 .application()
                 .wallpaper_preview_demand(host.resolved_layout(), viewport);
@@ -4368,9 +4368,9 @@ mod tests {
             step_host(
                 &mut host,
                 None,
-                nickel_ui::HostBatch {
-                    events: vec![nickel_ui::HostEvent::Ui(nickel_ui::UiEvent::Scroll {
-                        point: nickel_ui::Point { x: 40.0, y: 50.0 },
+                twinkle::HostBatch {
+                    events: vec![twinkle::HostEvent::Ui(twinkle::UiEvent::Scroll {
+                        point: twinkle::Point { x: 40.0, y: 50.0 },
                         delta_y: 400.0,
                     })],
                     ..Default::default()
@@ -4412,8 +4412,8 @@ mod tests {
                 "#,
             )
             .unwrap();
-            let mut host = nickel_ui::UiHost::new(application, 320, 100);
-            let viewport = nickel_ui::Rect::new(0.0, 0.0, 320.0, 100.0);
+            let mut host = twinkle::UiHost::new(application, 320, 100);
+            let viewport = twinkle::Rect::new(0.0, 0.0, 320.0, 100.0);
             // Zero is a valid initial generation, not an initialized-cache marker.
             let first = host
                 .application()
@@ -4441,7 +4441,7 @@ mod tests {
                 host.application().virtual_feedback_generation.get(),
                 Some((generation, source_generation, viewport))
             );
-            let changed_viewport = nickel_ui::Rect::new(0.0, 0.0, 320.0, 80.0);
+            let changed_viewport = twinkle::Rect::new(0.0, 0.0, 320.0, 80.0);
             let resized = host
                 .application()
                 .virtual_collection_feedback(generation, host.resolved_layout(), changed_viewport)
@@ -4466,7 +4466,7 @@ mod tests {
 
     fn logical_source(
         node: &PanelNode,
-    ) -> Option<&std::sync::Arc<nickel_plugin_presentation::virtual_source::VirtualSource>> {
+    ) -> Option<&std::sync::Arc<twinkle_presentation::virtual_source::VirtualSource>> {
         if let PanelNode::Div {
             collection: Some(collection),
             ..
@@ -4494,11 +4494,11 @@ mod tests {
                 "#;
             let make_host = || {
                 let mut host =
-                    nickel_ui::UiHost::new(PluginPanelApplication::new(source).unwrap(), 320, 140);
+                    twinkle::UiHost::new(PluginPanelApplication::new(source).unwrap(), 320, 140);
                 step_host(&mut host, None, Default::default()).unwrap();
                 assert!(!host.application().has_virtual_collections());
                 let open = host
-                    .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                    .query_unique(&twinkle::SemanticSelector::RoleAndName {
                         role: SemanticRole::Button,
                         name: "Open rows".into(),
                     })
@@ -4510,19 +4510,17 @@ mod tests {
             let mut host = make_host();
             let mut sequential = make_host();
             let events = || {
-                let mut events = vec![nickel_ui::HostEvent::Ui(
-                    nickel_ui::UiEvent::KeyboardNavigateActivate,
+                let mut events = vec![twinkle::HostEvent::Ui(
+                    twinkle::UiEvent::KeyboardNavigateActivate,
                 )];
-                events.extend(
-                    (0..33).map(|_| nickel_ui::HostEvent::Ui(nickel_ui::UiEvent::FocusNext)),
-                );
+                events.extend((0..33).map(|_| twinkle::HostEvent::Ui(twinkle::UiEvent::FocusNext)));
                 events
             };
             for event in events() {
                 step_host(
                     &mut sequential,
                     None,
-                    nickel_ui::HostBatch {
+                    twinkle::HostBatch {
                         events: vec![event],
                         ..Default::default()
                     },
@@ -4532,7 +4530,7 @@ mod tests {
             let (outcome, _) = step_host(
                 &mut host,
                 None,
-                nickel_ui::HostBatch {
+                twinkle::HostBatch {
                     events: events(),
                     ..Default::default()
                 },
@@ -4543,7 +4541,7 @@ mod tests {
             // The scroll viewport is also a focus stop: 33 advances reach row 31.
             for host in [&host, &sequential] {
                 let last = host
-                    .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                    .query_unique(&twinkle::SemanticSelector::RoleAndName {
                         role: SemanticRole::Button,
                         name: "Row 31".into(),
                     })
@@ -4557,7 +4555,7 @@ mod tests {
     #[test]
     fn virtual_controller_batches_preserve_admission_and_paired_releases() {
         with_package_runtime_stack(|| {
-            use nickel_ui::{
+            use twinkle::{
                 ControllerAction, ControllerExecutionAuthority, ControllerExecutionBinding,
                 ControllerExecutionDisposition, HostBatch, HostEvent,
             };
@@ -4571,7 +4569,7 @@ mod tests {
             "#;
             let make = || {
                 let mut host =
-                    nickel_ui::UiHost::new(PluginPanelApplication::new(source).unwrap(), 320, 100);
+                    twinkle::UiHost::new(PluginPanelApplication::new(source).unwrap(), 320, 100);
                 step_host(&mut host, None, Default::default()).unwrap();
                 host
             };
@@ -4592,9 +4590,9 @@ mod tests {
                         binding: ControllerExecutionBinding {
                             device_generation: 5,
                             edge: if index % 2 == 0 {
-                                nickel_input::KeyEdge::Pressed
+                                twinkle_input::KeyEdge::Pressed
                             } else {
-                                nickel_input::KeyEdge::Released
+                                twinkle_input::KeyEdge::Released
                             },
                             event_id: start + index,
                             routing_epoch: 9,
@@ -4664,7 +4662,7 @@ mod tests {
                     )
                     .unwrap();
                 }
-                let selected = |host: &nickel_ui::UiHost<PluginPanelApplication>| {
+                let selected = |host: &twinkle::UiHost<PluginPanelApplication>| {
                     host.inspect()
                         .controller_target
                         .unwrap()
@@ -4696,10 +4694,7 @@ mod tests {
             )
             .unwrap();
             assert_eq!(host.inspect().controller_target, Some(selected.clone()));
-            assert_eq!(
-                host.inspect().modality,
-                nickel_ui::InputModality::Controller
-            );
+            assert_eq!(host.inspect().modality, twinkle::InputModality::Controller);
             let bounds = host.resolved_layout().find(&selected).unwrap().allocated;
             assert!(
                 bounds.origin.y >= 0.0 && bounds.origin.y + bounds.size.height <= 100.01,
@@ -4712,7 +4707,7 @@ mod tests {
     #[test]
     fn virtual_navigation_batches_preserve_normalized_authority_and_replay_fences() {
         with_package_runtime_stack(|| {
-            use nickel_input::{
+            use twinkle_input::{
                 DeviceId, EventOrder, InputEvent, KeyCode, KeyEdge, KeyEvent, KeyLocation,
                 LogicalKey, ModifierState, NamedKey, PhysicalKey,
             };
@@ -4726,10 +4721,10 @@ mod tests {
             "#,
             )
             .unwrap();
-            let mut host = nickel_ui::UiHost::new(application, 320, 100);
+            let mut host = twinkle::UiHost::new(application, 320, 100);
             step_host(&mut host, None, Default::default()).unwrap();
             let first = host
-                .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                .query_unique(&twinkle::SemanticSelector::RoleAndName {
                     role: SemanticRole::Button,
                     name: "Row 0".into(),
                 })
@@ -4760,7 +4755,7 @@ mod tests {
                     host.input_lease(),
                     None,
                 );
-                let nickel_ui::HostEvent::NormalizedIngress(envelope) = event else {
+                let twinkle::HostEvent::NormalizedIngress(envelope) = event else {
                     unreachable!()
                 };
                 envelopes.push(envelope);
@@ -4784,12 +4779,12 @@ mod tests {
                 let (outcome, _) = step_host(
                     &mut host,
                     None,
-                    nickel_ui::HostBatch {
+                    twinkle::HostBatch {
                         normalized_authorities: supplied,
                         events: envelopes
                             .iter()
                             .cloned()
-                            .map(nickel_ui::HostEvent::NormalizedIngress)
+                            .map(twinkle::HostEvent::NormalizedIngress)
                             .collect(),
                         ..Default::default()
                     },
@@ -4797,7 +4792,7 @@ mod tests {
                 .unwrap();
                 assert_eq!(outcome.telemetry.events_processed, 64);
                 let expected = host
-                    .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                    .query_unique(&twinkle::SemanticSelector::RoleAndName {
                         role: SemanticRole::Button,
                         name: format!("Row {expected}"),
                     })
@@ -4859,7 +4854,7 @@ mod tests {
                             .unwrap(),
                         0
                     );
-                    let mut host = nickel_ui::UiHost::new(application, 320, 100);
+                    let mut host = twinkle::UiHost::new(application, 320, 100);
                     crate::live_shell::step_plugin_host(&mut host, None, Default::default())
                         .unwrap();
                     let built: usize = host
@@ -4902,7 +4897,7 @@ mod tests {
                             .virtual_measurements(
                                 host.resolved_frame_generation(),
                                 host.resolved_layout(),
-                                nickel_ui::Rect::new(0.0, 0.0, 320.0, 100.0),
+                                twinkle::Rect::new(0.0, 0.0, 320.0, 100.0),
                                 1.0
                             )
                             .unwrap()
@@ -4923,9 +4918,9 @@ mod tests {
                     crate::live_shell::step_plugin_host(
                         &mut host,
                         None,
-                        nickel_ui::HostBatch {
-                            events: vec![nickel_ui::HostEvent::Ui(nickel_ui::UiEvent::Scroll {
-                                point: nickel_ui::Point { x: 40.0, y: 50.0 },
+                        twinkle::HostBatch {
+                            events: vec![twinkle::HostEvent::Ui(twinkle::UiEvent::Scroll {
+                                point: twinkle::Point { x: 40.0, y: 50.0 },
                                 delta_y: 400.0,
                             })],
                             ..Default::default()
@@ -5014,7 +5009,7 @@ mod tests {
                 "#
                 );
                 let mut host =
-                    nickel_ui::UiHost::new(PluginPanelApplication::new(&source).unwrap(), 320, 20);
+                    twinkle::UiHost::new(PluginPanelApplication::new(&source).unwrap(), 320, 20);
                 let mut before = 0usize;
                 let mut work = Vec::new();
                 for turn in 0..16 {
@@ -5022,12 +5017,12 @@ mod tests {
                     crate::live_shell::step_plugin_host(
                         &mut host,
                         None,
-                        nickel_ui::HostBatch {
+                        twinkle::HostBatch {
                             now: Some(now),
                             events: if turn == 0 {
                                 vec![]
                             } else {
-                                vec![nickel_ui::HostEvent::Poll]
+                                vec![twinkle::HostEvent::Poll]
                             },
                             ..Default::default()
                         },
@@ -5094,7 +5089,7 @@ mod tests {
                 let make_host = || {
                     let mut application = PluginPanelApplication::new(&source).unwrap();
                     application.stylesheet = StyleSheet::compile(".row { height: 20px; }").unwrap();
-                    nickel_ui::UiHost::new(application, 320, 120)
+                    twinkle::UiHost::new(application, 320, 120)
                 };
                 let mut host = make_host();
                 let mut counts = Vec::new();
@@ -5104,12 +5099,12 @@ mod tests {
                     let (outcome, _) = crate::live_shell::step_plugin_host(
                         &mut host,
                         None,
-                        nickel_ui::HostBatch {
+                        twinkle::HostBatch {
                             now: Some(now),
                             events: if turn == 0 {
                                 vec![]
                             } else {
-                                vec![nickel_ui::HostEvent::Poll]
+                                vec![twinkle::HostEvent::Poll]
                             },
                             ..Default::default()
                         },
@@ -5178,10 +5173,10 @@ mod tests {
                     }))); }
             "#;
             let mut host =
-                nickel_ui::UiHost::new(PluginPanelApplication::new(source).unwrap(), 320, 120);
+                twinkle::UiHost::new(PluginPanelApplication::new(source).unwrap(), 320, 120);
             step_host(&mut host, None, Default::default()).unwrap();
             assert!(
-                host.query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                host.query_unique(&twinkle::SemanticSelector::RoleAndName {
                     role: SemanticRole::Button,
                     name: "Row 0".into(),
                 })
@@ -5195,14 +5190,14 @@ mod tests {
             step_host(
                 &mut host,
                 None,
-                nickel_ui::HostBatch {
+                twinkle::HostBatch {
                     application_changed: true,
                     ..Default::default()
                 },
             )
             .unwrap();
             assert!(
-                host.query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                host.query_unique(&twinkle::SemanticSelector::RoleAndName {
                     role: SemanticRole::Button,
                     name: "Row 999".into(),
                 })
@@ -5229,14 +5224,14 @@ mod tests {
             let mut application = PluginPanelApplication::new(source).unwrap();
             application.stylesheet =
                 StyleSheet::compile(".short { height: 20px; } .tall { height: 60px; }").unwrap();
-            let mut host = nickel_ui::UiHost::new(application, 320, 120);
+            let mut host = twinkle::UiHost::new(application, 320, 120);
             crate::live_shell::step_plugin_host(&mut host, None, Default::default()).unwrap();
             crate::live_shell::step_plugin_host(
                 &mut host,
                 None,
-                nickel_ui::HostBatch {
-                    events: vec![nickel_ui::HostEvent::Ui(nickel_ui::UiEvent::Scroll {
-                        point: nickel_ui::Point { x: 40.0, y: 50.0 },
+                twinkle::HostBatch {
+                    events: vec![twinkle::HostEvent::Ui(twinkle::UiEvent::Scroll {
+                        point: twinkle::Point { x: 40.0, y: 50.0 },
                         delta_y: 405.0,
                     })],
                     ..Default::default()
@@ -5296,7 +5291,7 @@ mod tests {
             crate::live_shell::step_plugin_host(
                 &mut host,
                 None,
-                nickel_ui::HostBatch {
+                twinkle::HostBatch {
                     scale_factor: Some(1.5),
                     surface_size: Some((400, 120)),
                     ..Default::default()
@@ -5369,7 +5364,7 @@ mod tests {
                         StyleSheet::compile(".short { height: 36px; } .tall { height: 96px; }")
                             .unwrap();
                 }
-                let mut host = nickel_ui::UiHost::new(application, 320, 120);
+                let mut host = twinkle::UiHost::new(application, 320, 120);
                 step_host(&mut host, None, Default::default()).unwrap();
                 let column = host
                     .resolved_layout()
@@ -5380,7 +5375,7 @@ mod tests {
                 let collection = column.id.clone();
                 let revision = column.virtual_navigation.as_ref().unwrap().revision;
                 let ordinal = count / 2 + 3;
-                let selector = nickel_ui::SemanticSelector::RoleAndName {
+                let selector = twinkle::SemanticSelector::RoleAndName {
                     role: SemanticRole::Button,
                     name: format!("Row {ordinal}"),
                 };
@@ -5432,8 +5427,8 @@ mod tests {
                 step_host(
                     &mut host,
                     None,
-                    nickel_ui::HostBatch {
-                        events: vec![nickel_ui::HostEvent::Ui(event)],
+                    twinkle::HostBatch {
+                        events: vec![twinkle::HostEvent::Ui(event)],
                         ..Default::default()
                     },
                 )
@@ -5493,9 +5488,9 @@ mod tests {
                         StyleSheet::compile(".short { height: 36px; } .tall { height: 96px; }")
                             .unwrap();
                 }
-                let mut host = nickel_ui::UiHost::new(application, 320, 120);
+                let mut host = twinkle::UiHost::new(application, 320, 120);
                 step_host(&mut host, None, Default::default()).unwrap();
-                let selector = |ordinal| nickel_ui::SemanticSelector::RoleAndName {
+                let selector = |ordinal| twinkle::SemanticSelector::RoleAndName {
                     role: SemanticRole::Button,
                     name: format!("Row {ordinal}"),
                 };
@@ -5504,8 +5499,8 @@ mod tests {
                 host.request_focus(first);
                 let mut expected_clicks = Vec::new();
                 for (event, ordinal) in [
-                    (nickel_ui::UiEvent::KeyboardNavigateEnd, count - 1),
-                    (nickel_ui::UiEvent::KeyboardNavigateStart, 0),
+                    (twinkle::UiEvent::KeyboardNavigateEnd, count - 1),
+                    (twinkle::UiEvent::KeyboardNavigateStart, 0),
                 ] {
                     let before: usize = host
                         .application()
@@ -5516,8 +5511,8 @@ mod tests {
                     step_host(
                         &mut host,
                         None,
-                        nickel_ui::HostBatch {
-                            events: vec![nickel_ui::HostEvent::Ui(event)],
+                        twinkle::HostBatch {
+                            events: vec![twinkle::HostEvent::Ui(event)],
                             ..Default::default()
                         },
                     )
@@ -5554,9 +5549,9 @@ mod tests {
                     step_host(
                         &mut host,
                         None,
-                        nickel_ui::HostBatch {
-                            events: vec![nickel_ui::HostEvent::Ui(
-                                nickel_ui::UiEvent::KeyboardNavigateActivate,
+                        twinkle::HostBatch {
+                            events: vec![twinkle::HostEvent::Ui(
+                                twinkle::UiEvent::KeyboardNavigateActivate,
                             )],
                             ..Default::default()
                         },
@@ -5593,7 +5588,7 @@ mod tests {
                     })));}
             "#;
             let mut host =
-                nickel_ui::UiHost::new(PluginPanelApplication::new(source).unwrap(), 320, 120);
+                twinkle::UiHost::new(PluginPanelApplication::new(source).unwrap(), 320, 120);
             step_host(&mut host, None, Default::default()).unwrap();
             for (count, key, label) in [(8, "7", "Row 7/0"), (128, "77", "Row 7/77")] {
                 let column = host
@@ -5621,14 +5616,14 @@ mod tests {
                 step_host(
                     &mut host,
                     None,
-                    nickel_ui::HostBatch {
-                        events: vec![nickel_ui::HostEvent::Ui(event)],
+                    twinkle::HostBatch {
+                        events: vec![twinkle::HostEvent::Ui(event)],
                         ..Default::default()
                     },
                 )
                 .unwrap();
                 let target = host
-                    .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                    .query_unique(&twinkle::SemanticSelector::RoleAndName {
                         role: SemanticRole::Button,
                         name: label.into(),
                     })
@@ -5681,15 +5676,15 @@ mod tests {
             "#;
                 let source = format!("const nested = {nested};\n{source}");
                 let mut host =
-                    nickel_ui::UiHost::new(PluginPanelApplication::new(&source).unwrap(), 320, 120);
+                    twinkle::UiHost::new(PluginPanelApplication::new(&source).unwrap(), 320, 120);
                 step_host(&mut host, None, Default::default()).unwrap();
                 for (event, label) in [
                     (
-                        nickel_ui::UiEvent::KeyboardNavigateEnd,
+                        twinkle::UiEvent::KeyboardNavigateEnd,
                         if nested { "Row 7/1/127" } else { "Row 7/127" },
                     ),
                     (
-                        nickel_ui::UiEvent::KeyboardNavigateStart,
+                        twinkle::UiEvent::KeyboardNavigateStart,
                         if nested { "Row 0/0/0" } else { "Row 0/0" },
                     ),
                 ] {
@@ -5702,14 +5697,14 @@ mod tests {
                     step_host(
                         &mut host,
                         None,
-                        nickel_ui::HostBatch {
-                            events: vec![nickel_ui::HostEvent::Ui(event)],
+                        twinkle::HostBatch {
+                            events: vec![twinkle::HostEvent::Ui(event)],
                             ..Default::default()
                         },
                     )
                     .unwrap();
                     let target = host
-                        .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                        .query_unique(&twinkle::SemanticSelector::RoleAndName {
                             role: SemanticRole::Button,
                             name: label.into(),
                         })
@@ -5758,9 +5753,9 @@ mod tests {
                     }))); }
             "#;
             let mut host =
-                nickel_ui::UiHost::new(PluginPanelApplication::new(source).unwrap(), 320, 120);
+                twinkle::UiHost::new(PluginPanelApplication::new(source).unwrap(), 320, 120);
             step_host(&mut host, None, Default::default()).unwrap();
-            let selector = nickel_ui::SemanticSelector::RoleAndName {
+            let selector = twinkle::SemanticSelector::RoleAndName {
                 role: SemanticRole::Button,
                 name: "Row 2".into(),
             };
@@ -5801,7 +5796,7 @@ mod tests {
             assert!(host.application().last_error().is_none());
             host.perform_semantic_action(
                 target.clone(),
-                nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
+                twinkle::SemanticAction::Invoke(twinkle::ActionKind::Activate),
             );
             assert_eq!(
                 host.application()
@@ -5821,7 +5816,7 @@ mod tests {
             assert!(host.query_unique(&selector).is_err());
             host.perform_semantic_action(
                 target.clone(),
-                nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
+                twinkle::SemanticAction::Invoke(twinkle::ActionKind::Activate),
             );
             assert_eq!(
                 host.application()
@@ -5852,8 +5847,8 @@ mod tests {
             step_host(
                 &mut host,
                 Some(serde_json::json!({"reversed":true,"label":"updated"}).to_string()),
-                nickel_ui::HostBatch {
-                    events: vec![nickel_ui::HostEvent::Ui(nickel_ui::UiEvent::Scroll {
+                twinkle::HostBatch {
+                    events: vec![twinkle::HostEvent::Ui(twinkle::UiEvent::Scroll {
                         point: Point { x: 40.0, y: 50.0 },
                         delta_y: -100_000.0,
                     })],
@@ -5897,13 +5892,13 @@ mod tests {
                     }))); }
             "#;
             let mut host =
-                nickel_ui::UiHost::new(PluginPanelApplication::new(source).unwrap(), 320, 120);
+                twinkle::UiHost::new(PluginPanelApplication::new(source).unwrap(), 320, 120);
             for _ in 0..32 {
                 let now = host.next_deadline().unwrap_or_else(Instant::now);
                 step_host(
                     &mut host,
                     None,
-                    nickel_ui::HostBatch {
+                    twinkle::HostBatch {
                         now: Some(now),
                         ..Default::default()
                     },
@@ -5914,7 +5909,7 @@ mod tests {
                 }
             }
             assert!(!host.application().virtual_work_pending());
-            let selector = nickel_ui::SemanticSelector::RoleAndName {
+            let selector = twinkle::SemanticSelector::RoleAndName {
                 role: SemanticRole::Button,
                 name: "Row 0/2".into(),
             };
@@ -5943,9 +5938,9 @@ mod tests {
                 step_host(
                     &mut host,
                     None,
-                    nickel_ui::HostBatch {
+                    twinkle::HostBatch {
                         now: Some(now),
-                        events: vec![nickel_ui::HostEvent::Poll],
+                        events: vec![twinkle::HostEvent::Poll],
                         ..Default::default()
                     },
                 )
@@ -5960,7 +5955,7 @@ mod tests {
             );
             host.perform_semantic_action(
                 target.clone(),
-                nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
+                twinkle::SemanticAction::Invoke(twinkle::ActionKind::Activate),
             );
             assert_eq!(
                 host.application()
@@ -5980,7 +5975,7 @@ mod tests {
             assert!(host.query_unique(&selector).is_err());
             host.perform_semantic_action(
                 target.clone(),
-                nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
+                twinkle::SemanticAction::Invoke(twinkle::ActionKind::Activate),
             );
             assert_eq!(
                 host.application()
@@ -6021,7 +6016,7 @@ mod tests {
                             })))); }
             "#;
             let application = PluginPanelApplication::new(source).unwrap();
-            let mut host = nickel_ui::UiHost::new(application, 320, 240);
+            let mut host = twinkle::UiHost::new(application, 320, 240);
             crate::live_shell::step_plugin_host(&mut host, None, Default::default()).unwrap();
             let initial = logical_source(host.application().accepted.node())
                 .unwrap()
@@ -6040,8 +6035,8 @@ mod tests {
                 current.key(0).map(str::as_ptr),
                 "layout invalidation must share unchanged logical key storage"
             );
-            let selector = |name: &str| nickel_ui::SemanticSelector::RoleAndName {
-                role: nickel_ui::SemanticRole::Button,
+            let selector = |name: &str| twinkle::SemanticSelector::RoleAndName {
+                role: twinkle::SemanticRole::Button,
                 name: name.into(),
             };
             let removed = host.query_unique(&selector("Row b")).unwrap().id;
@@ -6072,7 +6067,7 @@ mod tests {
             assert!(host.query_unique(&selector("Row b")).is_err());
             host.perform_semantic_action(
                 removed,
-                nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
+                twinkle::SemanticAction::Invoke(twinkle::ActionKind::Activate),
             );
             assert_eq!(
                 host.application()
@@ -6085,7 +6080,7 @@ mod tests {
             let first = host.query_unique(&selector("Row c")).unwrap();
             host.perform_semantic_action(
                 first.id,
-                nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
+                twinkle::SemanticAction::Invoke(twinkle::ActionKind::Activate),
             );
             assert_eq!(
                 host.application()
@@ -6158,7 +6153,7 @@ mod tests {
 
     #[test]
     fn public_session_callback_emits_native_operation_and_rejects_ungranted_or_stale_requests() {
-        use nickel_ui::Application;
+        use twinkle::Application;
         let snapshot = serde_json::json!({"session":{"revision":"current","account":{"displayName":"User","username":"user"},"locked":false,"support":{"lock":true,"logout":true,"suspend":false,"reboot":false,"powerOff":false,"restartShell":false}}});
         let source = "function App(){return h(FixedWindow,{width:'100%',height:'100%'},h(Button,{onClick:()=>nickel.session.logout()},'Logout'))}";
         let mut granted_manifest = manifest().clone();
@@ -6331,7 +6326,7 @@ mod tests {
     fn hidden_registered_setting_effects_use_existing_owner_without_rendering_an_entry() {
         let mut manifest = super::manifest().clone();
         manifest.capabilities = vec![PluginCapability::LauncherShow];
-        let runtime=std::rc::Rc::new(std::cell::RefCell::new(JsxRuntime::new(
+        let runtime=std::rc::Rc::new(std::cell::RefCell::new(nickel_jsx_host::create_runtime(
             "registerSetting({id:'toggle',group:'Test',label:'Toggle',type:'switch',defaultValue:false,onChange:()=>nickel.request('show-launcher')}); function App(){throw Error('hidden entry must not be evaluated');}",None).unwrap()));
         let mut registry = nickel_core::settings_registry::SettingsRegistry::default();
         runtime
@@ -7135,17 +7130,17 @@ mod tests {
             (42, Arc::new(image::RgbaImage::new(8, 8))),
         );
         assert!(app.sync_images(images));
-        let mut host = nickel_ui::UiHost::new(app, 300, 180);
+        let mut host = twinkle::UiHost::new(app, 300, 180);
         let target = host
-            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
-                role: nickel_ui::SemanticRole::Button,
+            .query_unique(&twinkle::SemanticSelector::RoleAndName {
+                role: twinkle::SemanticRole::Button,
                 name: "Open window".into(),
             })
             .unwrap();
         assert!(!host.commands().is_empty());
-        host.step(nickel_ui::HostBatch {
-            events: vec![nickel_ui::HostEvent::Ui(
-                nickel_ui::UiEvent::AccessibilityActivate(target.id),
+        host.step(twinkle::HostBatch {
+            events: vec![twinkle::HostEvent::Ui(
+                twinkle::UiEvent::AccessibilityActivate(target.id),
             )],
             ..Default::default()
         });
@@ -7170,17 +7165,17 @@ mod tests {
             ),
         )]);
         assert!(app.sync_application_images(images));
-        let mut host = nickel_ui::UiHost::new(app, 300, 180);
-        assert!(host.commands().iter().any(|command| matches!(command, nickel_ui::backend::PaintCommand::Image { id, .. } if *id == 0x7100)));
+        let mut host = twinkle::UiHost::new(app, 300, 180);
+        assert!(host.commands().iter().any(|command| matches!(command, twinkle::backend::PaintCommand::Image { id, .. } if *id == 0x7100)));
         assert!(
             host.application_mut()
                 .sync_application_images(Default::default())
         );
-        host.step(nickel_ui::HostBatch {
+        host.step(twinkle::HostBatch {
             application_changed: true,
             ..Default::default()
         });
-        assert!(!host.commands().iter().any(|command| matches!(command, nickel_ui::backend::PaintCommand::Image { id, .. } if *id == 0x7100)));
+        assert!(!host.commands().iter().any(|command| matches!(command, twinkle::backend::PaintCommand::Image { id, .. } if *id == 0x7100)));
     }
 
     #[test]
@@ -7219,8 +7214,8 @@ mod tests {
                 ]}),
             )
             .unwrap();
-            let mut host = nickel_ui::UiHost::new(app, 600, 214);
-            let selector = |name: &str| nickel_ui::SemanticSelector::RoleAndName {
+            let mut host = twinkle::UiHost::new(app, 600, 214);
+            let selector = |name: &str| twinkle::SemanticSelector::RoleAndName {
                 role: SemanticRole::Button,
                 name: name.into(),
             };
@@ -7230,7 +7225,7 @@ mod tests {
             assert!(second.bounds.origin.x + second.bounds.size.width <= 600.0);
             host.perform_semantic_action(
                 first.id,
-                nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
+                twinkle::SemanticAction::Invoke(twinkle::ActionKind::Activate),
             );
             assert_eq!(
                 host.application_mut().take_effects(),
@@ -7249,15 +7244,15 @@ mod tests {
         let mut application = PluginPanelApplication::new(source).unwrap();
         application.stylesheet =
             StyleSheet::compile("slider { width: 180px; height: 24px; }").unwrap();
-        let mut host = nickel_ui::UiHost::new(application, 440, 220);
+        let mut host = twinkle::UiHost::new(application, 440, 220);
         let hue = host
-            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+            .query_unique(&twinkle::SemanticSelector::RoleAndName {
                 role: SemanticRole::Slider,
                 name: "Hue".into(),
             })
             .unwrap();
         let intensity = host
-            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+            .query_unique(&twinkle::SemanticSelector::RoleAndName {
                 role: SemanticRole::Slider,
                 name: "Intensity".into(),
             })
@@ -7265,7 +7260,7 @@ mod tests {
         assert_ne!(hue.id, intensity.id);
         host.perform_semantic_action(
             hue.id,
-            nickel_ui::SemanticAction::SetValue(nickel_ui::SemanticValueInput::Number(0.75)),
+            twinkle::SemanticAction::SetValue(twinkle::SemanticValueInput::Number(0.75)),
         );
         let PanelNode::Surface { children, .. } = &host.application_mut().accepted.node() else {
             panic!("plugin root is not a Window");
@@ -7281,7 +7276,7 @@ mod tests {
         );
         host.perform_semantic_action(
             intensity.id,
-            nickel_ui::SemanticAction::SetValue(nickel_ui::SemanticValueInput::Number(0.35)),
+            twinkle::SemanticAction::SetValue(twinkle::SemanticValueInput::Number(0.35)),
         );
         let PanelNode::Surface { children, .. } = &host.application_mut().accepted.node() else {
             panic!("plugin root is not a Window");
@@ -7296,7 +7291,7 @@ mod tests {
             matches!(&children[1], PanelNode::Slider { value, .. } if (*value - 0.35).abs() < 0.001)
         );
         let hue = host
-            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+            .query_unique(&twinkle::SemanticSelector::RoleAndName {
                 role: SemanticRole::Slider,
                 name: "Hue".into(),
             })
@@ -7305,8 +7300,8 @@ mod tests {
             x: hue.bounds.origin.x + hue.bounds.size.width * 0.2,
             y: hue.bounds.origin.y + hue.bounds.size.height / 2.0,
         };
-        host.handle_event(nickel_ui::UiEvent::PointerPressed(pointer));
-        host.handle_event(nickel_ui::UiEvent::PointerReleased(pointer));
+        host.handle_event(twinkle::UiEvent::PointerPressed(pointer));
+        host.handle_event(twinkle::UiEvent::PointerReleased(pointer));
         let PanelNode::Surface { children, .. } = &host.application_mut().accepted.node() else {
             panic!("plugin root is not a Window");
         };
@@ -7496,10 +7491,10 @@ mod tests {
                 &package.manifest.surfaces[0],
             )
             .unwrap();
-            let mut host = nickel_ui::UiHost::new(app, 440, 400);
+            let mut host = twinkle::UiHost::new(app, 440, 400);
             let open = host
-                .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
-                    role: nickel_ui::SemanticRole::Button,
+                .query_unique(&twinkle::SemanticSelector::RoleAndName {
+                    role: twinkle::SemanticRole::Button,
                     name: "Open dialog".into(),
                 })
                 .unwrap();
@@ -7513,22 +7508,22 @@ mod tests {
             ));
             assert!(open.bounds.origin.y > 250.0);
             assert!(open.bounds.origin.y + open.bounds.size.height <= 400.0);
-            host.step(nickel_ui::HostBatch {
-                events: vec![nickel_ui::HostEvent::Ui(
-                    nickel_ui::UiEvent::AccessibilityActivate(open.id),
+            host.step(twinkle::HostBatch {
+                events: vec![twinkle::HostEvent::Ui(
+                    twinkle::UiEvent::AccessibilityActivate(open.id),
                 )],
                 ..Default::default()
             });
             assert!(host.inspect().open_overlay.is_some());
             let show = host
-                .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
-                    role: nickel_ui::SemanticRole::Button,
+                .query_unique(&twinkle::SemanticSelector::RoleAndName {
+                    role: twinkle::SemanticRole::Button,
                     name: "Show launcher".into(),
                 })
                 .unwrap();
-            host.step(nickel_ui::HostBatch {
-                events: vec![nickel_ui::HostEvent::Ui(
-                    nickel_ui::UiEvent::AccessibilityActivate(show.id),
+            host.step(twinkle::HostBatch {
+                events: vec![twinkle::HostEvent::Ui(
+                    twinkle::UiEvent::AccessibilityActivate(show.id),
                 )],
                 ..Default::default()
             });
@@ -7551,28 +7546,28 @@ mod tests {
             source: "function App() { return h(FixedWindow, {width: '100%', height: '100%'}, h(Button, {id: 'go', className: 'primary', onClick: () => nickel.request('show-launcher')}, 'Go'), h(TextField, {id: 'name', className: 'entry', value: '', onChange: value => {}})); }".into(),
         };
         PluginPanelApplication::validate_package(&package).unwrap();
-        let mut host = nickel_ui::UiHost::new(
+        let mut host = twinkle::UiHost::new(
             PluginPanelApplication::from_package(&package).unwrap(),
             440,
             120,
         );
         assert!(host.commands().iter().any(|command| matches!(
             command,
-            nickel_ui::backend::PaintCommand::RoundedFill { color: 0xff345678, radius, .. } if *radius == 4.0
+            twinkle::backend::PaintCommand::RoundedFill { color: 0xff345678, radius, .. } if *radius == 4.0
         )));
         assert!(host.commands().iter().any(|command| matches!(
             command,
-            nickel_ui::backend::PaintCommand::RoundedFill { color: 0xffaabbcc, radius, .. } if *radius == 6.0
+            twinkle::backend::PaintCommand::RoundedFill { color: 0xffaabbcc, radius, .. } if *radius == 6.0
         )));
         let button = host
-            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+            .query_unique(&twinkle::SemanticSelector::RoleAndName {
                 role: SemanticRole::Button,
                 name: "Go".into(),
             })
             .unwrap();
-        host.step(nickel_ui::HostBatch {
-            events: vec![nickel_ui::HostEvent::Ui(
-                nickel_ui::UiEvent::AccessibilityActivate(button.id.clone()),
+        host.step(twinkle::HostBatch {
+            events: vec![twinkle::HostEvent::Ui(
+                twinkle::UiEvent::AccessibilityActivate(button.id.clone()),
             )],
             ..Default::default()
         });
@@ -7581,36 +7576,36 @@ mod tests {
             vec![PluginEffect::ShowLauncher]
         );
         let field = host
-            .query_unique(&nickel_ui::SemanticSelector::Role(SemanticRole::TextField))
+            .query_unique(&twinkle::SemanticSelector::Role(SemanticRole::TextField))
             .unwrap();
-        host.step(nickel_ui::HostBatch {
-            events: vec![nickel_ui::HostEvent::Ui(
-                nickel_ui::UiEvent::AccessibilityFocus(button.id),
+        host.step(twinkle::HostBatch {
+            events: vec![twinkle::HostEvent::Ui(
+                twinkle::UiEvent::AccessibilityFocus(button.id),
             )],
             ..Default::default()
         });
         assert!(host.commands().iter().any(|command| matches!(
             command,
-            nickel_ui::backend::PaintCommand::RoundedFill {
+            twinkle::backend::PaintCommand::RoundedFill {
                 color: 0xff123abc,
                 ..
-            } | nickel_ui::backend::PaintCommand::Fill {
+            } | twinkle::backend::PaintCommand::Fill {
                 color: 0xff123abc,
                 ..
             }
         )));
-        host.step(nickel_ui::HostBatch {
-            events: vec![nickel_ui::HostEvent::Ui(
-                nickel_ui::UiEvent::AccessibilityFocus(field.id),
+        host.step(twinkle::HostBatch {
+            events: vec![twinkle::HostEvent::Ui(
+                twinkle::UiEvent::AccessibilityFocus(field.id),
             )],
             ..Default::default()
         });
         assert!(host.commands().iter().any(|command| matches!(
             command,
-            nickel_ui::backend::PaintCommand::RoundedFill {
+            twinkle::backend::PaintCommand::RoundedFill {
                 color: 0xff3479ab,
                 ..
-            } | nickel_ui::backend::PaintCommand::Fill {
+            } | twinkle::backend::PaintCommand::Fill {
                 color: 0xff3479ab,
                 ..
             }
@@ -7626,7 +7621,7 @@ mod tests {
             stylesheet: "window.parent { color: #123456; font-size: 20px; line-height: 28px; } div.nested { color: #abcdef; } button.override { color: #fedcba; } text.own { color: #aabbcc; }".into(),
             source: "function App() { return h(FixedWindow, {width: '100%', height: '100%', className: 'parent'}, h(Text, {}, 'Root text'), h('div', {className: 'nested'}, h(Text, {}, 'Nested text'), h(Text, {className: 'own', color: 0xff112233}, 'Own text'), h(Button, {id: 'nested-button', onClick: () => {}}, 'Nested button'), h(TextField, {id: 'nested-field', value: '', placeholder: 'Enter', onChange: () => {}})), h(Button, {id: 'override', className: 'override', onClick: () => {}}, 'Override')); }".into(),
         };
-        let host = nickel_ui::UiHost::new(
+        let host = twinkle::UiHost::new(
             PluginPanelApplication::from_package(&package).unwrap(),
             500,
             300,
@@ -7635,7 +7630,7 @@ mod tests {
             host.commands()
                 .iter()
                 .find_map(|command| match command {
-                    nickel_ui::backend::PaintCommand::Text {
+                    twinkle::backend::PaintCommand::Text {
                         bounds,
                         text,
                         scale,
@@ -7670,20 +7665,20 @@ mod tests {
             "badge.task-badge { background: #123456; border-radius: 7px; color: #abcdef; font-size: 12px; }",
         )
         .unwrap();
-        let host = nickel_ui::UiHost::new(app, 120, 56);
+        let host = twinkle::UiHost::new(app, 120, 56);
         assert!(host.commands().iter().any(|command| matches!(
             command,
-            nickel_ui::backend::PaintCommand::RoundedFill { color: 0xff123456, radius, .. } if *radius == 7.0
+            twinkle::backend::PaintCommand::RoundedFill { color: 0xff123456, radius, .. } if *radius == 7.0
         )));
         assert!(host.commands().iter().any(|command| matches!(
             command,
-            nickel_ui::backend::PaintCommand::Text {
+            twinkle::backend::PaintCommand::Text {
                 color: 0xffabcdef,
                 ..
             }
         )));
         assert!(
-            host.query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+            host.query_unique(&twinkle::SemanticSelector::RoleAndName {
                 role: SemanticRole::Status,
                 name: "Mail: 5".into(),
             })
@@ -7703,19 +7698,19 @@ mod tests {
             source: "function App() { return h(FixedWindow, {width: '100%', height: '100%'}, h(Div, {className: 'grid'}, h(Button, {id: 'left', onClick: () => nickel.request('show-launcher')}, 'Left'), h(Button, {id: 'right', onClick: () => nickel.request('show-launcher')}, 'Right'))); }".into(),
         };
         PluginPanelApplication::validate_package(&package).unwrap();
-        let host = nickel_ui::UiHost::new(
+        let host = twinkle::UiHost::new(
             PluginPanelApplication::from_package(&package).unwrap(),
             440,
             120,
         );
         let left = host
-            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+            .query_unique(&twinkle::SemanticSelector::RoleAndName {
                 role: SemanticRole::Button,
                 name: "Left".into(),
             })
             .unwrap();
         let right = host
-            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+            .query_unique(&twinkle::SemanticSelector::RoleAndName {
                 role: SemanticRole::Button,
                 name: "Right".into(),
             })
@@ -7733,13 +7728,13 @@ mod tests {
             stylesheet: ".grid { display: grid; grid-template-columns: 40px 60px; width: 200px; height: 80px; justify-content: center; align-items: center; } button#short { height: 20px; } button#tall { height: 40px; }".into(),
             source: "function App() { return h(FixedWindow, {width: '100%', height: '100%'}, h('div', {className: 'grid'}, h(Button, {id: 'short', onClick: () => {}}, 'Short'), h(Button, {id: 'tall', onClick: () => {}}, 'Tall'))); }".into(),
         };
-        let host = nickel_ui::UiHost::new(
+        let host = twinkle::UiHost::new(
             PluginPanelApplication::from_package(&package).unwrap(),
             400,
             120,
         );
         let button = |name: &str| {
-            host.query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+            host.query_unique(&twinkle::SemanticSelector::RoleAndName {
                 role: SemanticRole::Button,
                 name: name.into(),
             })
@@ -7762,13 +7757,13 @@ mod tests {
             stylesheet: "div.toolbar { display: flex; width: 100%; height: 80px; align-items: center; justify-content: space-between; } button { width: 50px; height: 20px; }".into(),
             source: "function App() { return h(FixedWindow, {width: '100%', height: '100%'}, h('div', {className: 'toolbar'}, h(Button, {id: 'left', onClick: () => {}}, 'Left'), h(Button, {id: 'right', onClick: () => {}}, 'Right'))); }".into(),
         };
-        let host = nickel_ui::UiHost::new(
+        let host = twinkle::UiHost::new(
             PluginPanelApplication::from_package(&package).unwrap(),
             400,
             220,
         );
         let button = |name: &str| {
-            host.query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+            host.query_unique(&twinkle::SemanticSelector::RoleAndName {
                 role: SemanticRole::Button,
                 name: name.into(),
             })
@@ -7793,14 +7788,14 @@ mod tests {
                     "function App() {{ return h(FixedWindow, {{width: '100%', height: '100%'}}, h(Row, {{className: 'bar'}}, h(Button, {{id: 'left', onClick: () => {{}}}}, 'Left'), h(Spacer, {{className: '{spacer_class}'}}), h(Button, {{id: 'right', onClick: () => {{}}}}, 'Right'))); }}"
                 ),
             };
-            nickel_ui::UiHost::new(
+            twinkle::UiHost::new(
                 PluginPanelApplication::from_package(&package).unwrap(),
                 300,
                 80,
             )
         };
-        let bounds = |host: &nickel_ui::UiHost<PluginPanelApplication>, name: &str| {
-            host.query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+        let bounds = |host: &twinkle::UiHost<PluginPanelApplication>, name: &str| {
+            host.query_unique(&twinkle::SemanticSelector::RoleAndName {
                 role: SemanticRole::Button,
                 name: name.into(),
             })
@@ -7850,13 +7845,13 @@ mod tests {
                 }
             "#.into(),
         };
-            let host = nickel_ui::UiHost::new(
+            let host = twinkle::UiHost::new(
                 PluginPanelApplication::from_package(&package).unwrap(),
                 400,
                 220,
             );
             let button = |name: &str| {
-                host.query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                host.query_unique(&twinkle::SemanticSelector::RoleAndName {
                     role: SemanticRole::Button,
                     name: name.into(),
                 })
@@ -7898,9 +7893,9 @@ mod tests {
                 ..
             }
         ));
-        let host = nickel_ui::UiHost::new(app, 1366, 56);
+        let host = twinkle::UiHost::new(app, 1366, 56);
         assert!(
-            host.query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+            host.query_unique(&twinkle::SemanticSelector::RoleAndName {
                 role: SemanticRole::Button,
                 name: "Open".into(),
             })
@@ -7920,7 +7915,7 @@ mod tests {
                 .height,
             56
         );
-        let css_host = nickel_ui::UiHost::new(css_sized, 1366, 100);
+        let css_host = twinkle::UiHost::new(css_sized, 1366, 100);
         let snapshot = css_host.layout_snapshot();
         assert!(
             snapshot.contains("allocated=0.00,0.00,1366.00,56.00"),
@@ -7983,7 +7978,7 @@ mod tests {
                 .width,
             520
         );
-        let css_host = nickel_ui::UiHost::new(css_sized, 600, 400);
+        let css_host = twinkle::UiHost::new(css_sized, 600, 400);
         let snapshot = css_host.layout_snapshot();
         assert!(snapshot.contains("preferred=520.00,340.00"), "{snapshot}");
         package.stylesheet = "window.settings { width: 520px; height: 360px; }".into();
@@ -8189,18 +8184,18 @@ mod tests {
             )
             .unwrap()
         };
-        let mut host = nickel_ui::UiHost::new(make("Before"), 320, 100);
+        let mut host = twinkle::UiHost::new(make("Before"), 320, 100);
         let initial = host.application().native_text_revision.get().unwrap();
         assert!(initial.2.is_some());
         for _ in 0..4 {
-            let outcome = host.step(nickel_ui::HostBatch {
+            let outcome = host.step(twinkle::HostBatch {
                 application_changed: true,
                 ..Default::default()
             });
             assert_eq!(host.application().native_text_revision.get(), Some(initial));
             assert_eq!(outcome.telemetry.nodes_measured, 0);
         }
-        let other = nickel_ui::UiHost::new(make("Before"), 320, 100);
+        let other = twinkle::UiHost::new(make("Before"), 320, 100);
         assert_ne!(
             other.application().native_text_revision.get().unwrap().2,
             initial.2
@@ -8208,18 +8203,18 @@ mod tests {
         host.application_mut()
             .sync_data(&serde_json::json!({"label":"A longer changed label"}))
             .unwrap();
-        host.step(nickel_ui::HostBatch {
+        host.step(twinkle::HostBatch {
             application_changed: true,
             ..Default::default()
         });
         let changed = host.application().native_text_revision.get().unwrap();
         assert_ne!(changed.2, initial.2);
-        let cold = nickel_ui::UiHost::new(make("A longer changed label"), 320, 100);
+        let cold = twinkle::UiHost::new(make("A longer changed label"), 320, 100);
         assert_eq!(host.commands(), cold.commands());
         assert_eq!(host.layout_snapshot(), cold.layout_snapshot());
         host.application_mut()
-            .sync_reading_direction(nickel_ui::ReadingDirection::RightToLeft);
-        host.step(nickel_ui::HostBatch {
+            .sync_reading_direction(twinkle::ReadingDirection::RightToLeft);
+        host.step(twinkle::HostBatch {
             application_changed: true,
             ..Default::default()
         });
@@ -8241,16 +8236,16 @@ mod tests {
     #[test]
     fn unstyled_plugin_button_has_no_mandatory_paint() {
         let source = "function App() { return h(Panel, {background: 0}, h(Button, {id: 'go', onClick: () => {}}, 'Go')); }";
-        let host = nickel_ui::UiHost::new(PluginPanelApplication::new(source).unwrap(), 320, 80);
+        let host = twinkle::UiHost::new(PluginPanelApplication::new(source).unwrap(), 320, 80);
         assert!(!host.commands().iter().any(|command| matches!(
             command,
-            nickel_ui::backend::PaintCommand::RoundedFill {
+            twinkle::backend::PaintCommand::RoundedFill {
                 color: 0x66455675,
                 ..
             }
         )));
         assert!(
-            host.query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+            host.query_unique(&twinkle::SemanticSelector::RoleAndName {
                 role: SemanticRole::Button,
                 name: "Go".into(),
             })
@@ -8266,25 +8261,25 @@ mod tests {
             "button.clear { background: transparent; border: 1px solid transparent; }",
         )
         .unwrap();
-        let host = nickel_ui::UiHost::new(application, 320, 80);
+        let host = twinkle::UiHost::new(application, 320, 80);
         assert!(!host.commands().iter().any(|command| matches!(
             command,
-            nickel_ui::backend::PaintCommand::Fill { color: 0, .. }
-                | nickel_ui::backend::PaintCommand::RoundedFill { color: 0, .. }
-                | nickel_ui::backend::PaintCommand::Stroke { color: 0, .. }
+            twinkle::backend::PaintCommand::Fill { color: 0, .. }
+                | twinkle::backend::PaintCommand::RoundedFill { color: 0, .. }
+                | twinkle::backend::PaintCommand::Stroke { color: 0, .. }
         )));
     }
 
     #[test]
     fn unstyled_window_root_does_not_paint_opaque_black() {
         let source = "function App() { return h(Window, {placement: 'fixed', width: 440, height: 220}, h(Text, {}, 'Visible')); }";
-        let host = nickel_ui::UiHost::new(PluginPanelApplication::new(source).unwrap(), 440, 220);
+        let host = twinkle::UiHost::new(PluginPanelApplication::new(source).unwrap(), 440, 220);
         assert!(!host.commands().iter().any(|command| matches!(
             command,
-            nickel_ui::backend::PaintCommand::Fill {
+            twinkle::backend::PaintCommand::Fill {
                 color: 0xff000000,
                 ..
-            } | nickel_ui::backend::PaintCommand::RoundedFill {
+            } | twinkle::backend::PaintCommand::RoundedFill {
                 color: 0xff000000,
                 ..
             }
@@ -8295,13 +8290,13 @@ mod tests {
     fn unstyled_box_does_not_paint_opaque_black() {
         let source =
             "function App() { return h(Panel, {}, h(Box, {x: 0, y: 0, width: 80, height: 40})); }";
-        let host = nickel_ui::UiHost::new(PluginPanelApplication::new(source).unwrap(), 440, 220);
+        let host = twinkle::UiHost::new(PluginPanelApplication::new(source).unwrap(), 440, 220);
         assert!(!host.commands().iter().any(|command| matches!(
             command,
-            nickel_ui::backend::PaintCommand::Fill {
+            twinkle::backend::PaintCommand::Fill {
                 color: 0xff000000,
                 ..
-            } | nickel_ui::backend::PaintCommand::RoundedFill {
+            } | twinkle::backend::PaintCommand::RoundedFill {
                 color: 0xff000000,
                 ..
             }
@@ -8312,13 +8307,13 @@ mod tests {
     fn progress_paint_comes_from_css() {
         let source = "function App() { return h(Panel, {}, h(Progress, {className: 'meter', percent: 50, width: 100, height: 8})); }";
         let mut application = PluginPanelApplication::new(source).unwrap();
-        let unstyled = nickel_ui::UiHost::new(application, 440, 220);
+        let unstyled = twinkle::UiHost::new(application, 440, 220);
         assert!(!unstyled.commands().iter().any(|command| matches!(
             command,
-            nickel_ui::backend::PaintCommand::Fill {
+            twinkle::backend::PaintCommand::Fill {
                 color: 0xffaaaaaa | 0xff555555,
                 ..
-            } | nickel_ui::backend::PaintCommand::RoundedFill {
+            } | twinkle::backend::PaintCommand::RoundedFill {
                 color: 0xffaaaaaa | 0xff555555,
                 ..
             }
@@ -8329,12 +8324,12 @@ mod tests {
             "progress.meter { background: #112233; border-radius: 4px; } progress-fill.meter { background: #aabbcc; }",
         )
         .unwrap();
-        let styled = nickel_ui::UiHost::new(application, 440, 220);
+        let styled = twinkle::UiHost::new(application, 440, 220);
         for color in [0xff112233, 0xffaabbcc] {
             assert!(styled.commands().iter().any(|command| matches!(
                 command,
-                nickel_ui::backend::PaintCommand::Fill { color: painted, .. }
-                    | nickel_ui::backend::PaintCommand::RoundedFill { color: painted, .. }
+                twinkle::backend::PaintCommand::Fill { color: painted, .. }
+                    | twinkle::backend::PaintCommand::RoundedFill { color: painted, .. }
                     if *painted == color
             )));
         }
@@ -8352,15 +8347,15 @@ mod tests {
             source: "function App() { return h(Window, {id: 'main', placement: 'fixed', width: '100%', height: '100%'}, h('div', {className: 'content'}, h(Button, {id: 'open', onClick: () => nickel.request('show-launcher')}, 'Open'))); }".into(),
         };
         let app = PluginPanelApplication::from_package(&package).unwrap();
-        let mut host = nickel_ui::UiHost::new(app, 400, 200);
+        let mut host = twinkle::UiHost::new(app, 400, 200);
         for (width, height) in [(400, 200), (240, 120)] {
-            host.step(nickel_ui::HostBatch {
+            host.step(twinkle::HostBatch {
                 surface_size: Some((width, height)),
                 ..Default::default()
             });
             let button = host
-                .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
-                    role: nickel_ui::SemanticRole::Button,
+                .query_unique(&twinkle::SemanticSelector::RoleAndName {
+                    role: twinkle::SemanticRole::Button,
                     name: "Open".into(),
                 })
                 .unwrap();
@@ -8386,15 +8381,15 @@ mod tests {
             source: "function App() { return h(Window, {id: 'main', accessibilityLabel: 'Managed window', width: 900, height: 600}, h(Button, {id: 'open', onClick: () => {}}, 'Open')); }".into(),
         };
         let app = PluginPanelApplication::from_package(&package).unwrap();
-        let mut host = nickel_ui::UiHost::new(app, 900, 600);
+        let mut host = twinkle::UiHost::new(app, 900, 600);
         for (width, height) in [(900, 600), (1100, 720), (640, 480)] {
-            host.step(nickel_ui::HostBatch {
+            host.step(twinkle::HostBatch {
                 surface_size: Some((width, height)),
                 ..Default::default()
             });
             let root = host
-                .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
-                    role: nickel_ui::SemanticRole::ApplicationPresentation,
+                .query_unique(&twinkle::SemanticSelector::RoleAndName {
+                    role: twinkle::SemanticRole::ApplicationPresentation,
                     name: "Managed window".into(),
                 })
                 .unwrap();
@@ -8438,21 +8433,21 @@ mod tests {
             if !granted {
                 package.manifest.capabilities.clear();
             }
-            let mut host = nickel_ui::UiHost::new(
+            let mut host = twinkle::UiHost::new(
                 PluginPanelApplication::from_package(&package).unwrap(),
                 320,
                 120,
             );
             for name in ["Open a dialog", "Open Settings"] {
                 let button = host
-                    .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
-                        role: nickel_ui::SemanticRole::Button,
+                    .query_unique(&twinkle::SemanticSelector::RoleAndName {
+                        role: twinkle::SemanticRole::Button,
                         name: name.into(),
                     })
                     .unwrap_or_else(|error| panic!("missing {name}: {error:?}"));
-                host.step(nickel_ui::HostBatch {
-                    events: vec![nickel_ui::HostEvent::Ui(
-                        nickel_ui::UiEvent::AccessibilityActivate(button.id),
+                host.step(twinkle::HostBatch {
+                    events: vec![twinkle::HostEvent::Ui(
+                        twinkle::UiEvent::AccessibilityActivate(button.id),
                     )],
                     ..Default::default()
                 });
@@ -8784,11 +8779,11 @@ mod tests {
             )
             .unwrap();
             app.stylesheet = StyleSheet::compile(&package.stylesheet).unwrap();
-            let mut host = nickel_ui::UiHost::new(app, 809, 529);
+            let mut host = twinkle::UiHost::new(app, 809, 529);
             step_host(
                 &mut host,
                 None,
-                nickel_ui::HostBatch {
+                twinkle::HostBatch {
                     application_changed: true,
                     ..Default::default()
                 },
@@ -8802,8 +8797,8 @@ mod tests {
                 "Papirus",
             ] {
                 let target = host
-                    .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
-                        role: nickel_ui::SemanticRole::Button,
+                    .query_unique(&twinkle::SemanticSelector::RoleAndName {
+                        role: twinkle::SemanticRole::Button,
                         name: label.into(),
                     })
                     .unwrap();
@@ -9419,14 +9414,14 @@ mod tests {
                 show ? h(TextField,{id:'field',placeholder:'Field',value:'',autoFocus:true,onChange:()=>{},onBlur:()=>{if(activated){setShow(false);nickel.projects.show();}}}) : null);
         }"#;
         let app = PluginPanelApplication::new_with_manifest(source, &manifest, None).unwrap();
-        let mut host = nickel_ui::UiHost::new(app, 320, 180);
-        host.step(nickel_ui::HostBatch {
+        let mut host = twinkle::UiHost::new(app, 320, 180);
+        host.step(twinkle::HostBatch {
             window_focused: Some(false),
             ..Default::default()
         });
         // Initial loss may precede first compositor activation; it does not dismiss the window.
         assert!(host.application_mut().take_effects().is_empty());
-        host.step(nickel_ui::HostBatch {
+        host.step(twinkle::HostBatch {
             window_focused: Some(true),
             ..Default::default()
         });
@@ -9437,13 +9432,13 @@ mod tests {
                 toggle: false
             }]
         );
-        host.step(nickel_ui::HostBatch {
+        host.step(twinkle::HostBatch {
             window_focused: Some(true),
             ..Default::default()
         });
         assert!(host.application_mut().take_effects().is_empty());
         let field = host
-            .query_unique(&nickel_ui::SemanticSelector::Role(SemanticRole::TextField))
+            .query_unique(&twinkle::SemanticSelector::Role(SemanticRole::TextField))
             .unwrap();
         host.request_focus(field.id);
         assert!(
@@ -9451,7 +9446,7 @@ mod tests {
             "control focus does not activate the Window callback"
         );
         // A focused child callback can rebuild; the root callback still belongs to the old batch.
-        host.step(nickel_ui::HostBatch {
+        host.step(twinkle::HostBatch {
             window_focused: Some(false),
             ..Default::default()
         });
@@ -9468,7 +9463,7 @@ mod tests {
                 }
             ]
         );
-        host.step(nickel_ui::HostBatch {
+        host.step(twinkle::HostBatch {
             window_focused: Some(false),
             ..Default::default()
         });
@@ -9476,8 +9471,8 @@ mod tests {
 
         manifest.capabilities.clear();
         let app = PluginPanelApplication::new_with_manifest(source, &manifest, None).unwrap();
-        let mut denied = nickel_ui::UiHost::new(app, 320, 180);
-        denied.step(nickel_ui::HostBatch {
+        let mut denied = twinkle::UiHost::new(app, 320, 180);
+        denied.step(twinkle::HostBatch {
             window_focused: Some(true),
             ..Default::default()
         });
@@ -9488,22 +9483,19 @@ mod tests {
     #[test]
     fn jsx_text_fields_keep_explicit_accessible_names_when_values_change() {
         let source = "function App(){const [value,setValue]=useState(''); return h(Column,{}, h(TextField,{id:'search',value,placeholder:'Type here…',accessibilityLabel:'Search applications',onChange:setValue}), h(TextField,{id:'legacy',value:'',placeholder:'Legacy search',onChange:()=>{}}));}";
-        let mut host =
-            nickel_ui::UiHost::new(PluginPanelApplication::new(source).unwrap(), 400, 160);
-        let selector = nickel_ui::SemanticSelector::RoleAndName {
+        let mut host = twinkle::UiHost::new(PluginPanelApplication::new(source).unwrap(), 400, 160);
+        let selector = twinkle::SemanticSelector::RoleAndName {
             role: SemanticRole::TextField,
             name: "Search applications".into(),
         };
         let input = host.query_unique(&selector).unwrap();
         host.perform_semantic_action(
             input.id,
-            nickel_ui::SemanticAction::SetValue(nickel_ui::SemanticValueInput::Text(
-                "terminal".into(),
-            )),
+            twinkle::SemanticAction::SetValue(twinkle::SemanticValueInput::Text("terminal".into())),
         );
         assert!(host.query_unique(&selector).is_ok());
         assert!(
-            host.query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+            host.query_unique(&twinkle::SemanticSelector::RoleAndName {
                 role: SemanticRole::TextField,
                 name: "Legacy search".into()
             })
@@ -9536,31 +9528,31 @@ mod tests {
             }
         "#;
         let app = PluginPanelApplication::new_with_manifest(source, &manifest, None).unwrap();
-        let mut host = nickel_ui::UiHost::new(app, 320, 180);
+        let mut host = twinkle::UiHost::new(app, 320, 180);
         let first = host
-            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+            .query_unique(&twinkle::SemanticSelector::RoleAndName {
                 role: SemanticRole::TextField,
                 name: "First".into(),
             })
             .unwrap();
         let second = host
-            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+            .query_unique(&twinkle::SemanticSelector::RoleAndName {
                 role: SemanticRole::TextField,
                 name: "Second".into(),
             })
             .unwrap();
         let button = host
-            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+            .query_unique(&twinkle::SemanticSelector::RoleAndName {
                 role: SemanticRole::Button,
                 name: "Focus button".into(),
             })
             .unwrap();
-        host.handle_event(nickel_ui::UiEvent::AccessibilityFocus(first.id));
+        host.handle_event(twinkle::UiEvent::AccessibilityFocus(first.id));
         assert_eq!(
             host.application_mut().take_effects(),
             vec![PluginEffect::ShowLauncher]
         );
-        host.handle_event(nickel_ui::UiEvent::AccessibilityFocus(second.id));
+        host.handle_event(twinkle::UiEvent::AccessibilityFocus(second.id));
         assert_eq!(
             host.application_mut().take_effects(),
             vec![
@@ -9568,7 +9560,7 @@ mod tests {
                 PluginEffect::ShowLauncher
             ]
         );
-        host.handle_event(nickel_ui::UiEvent::AccessibilityFocus(button.id));
+        host.handle_event(twinkle::UiEvent::AccessibilityFocus(button.id));
         assert_eq!(
             host.application_mut().take_effects(),
             vec![PluginEffect::ToggleControlCenter]
@@ -9595,18 +9587,18 @@ mod tests {
             }
         "#;
         let app = PluginPanelApplication::new_with_manifest(source, &manifest, None).unwrap();
-        let mut host = nickel_ui::UiHost::new(app, 320, 180);
+        let mut host = twinkle::UiHost::new(app, 320, 180);
         let field = host
-            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+            .query_unique(&twinkle::SemanticSelector::RoleAndName {
                 role: SemanticRole::TextField,
                 name: "Field".into(),
             })
             .unwrap();
-        host.handle_event(nickel_ui::UiEvent::AccessibilityFocus(field.id));
+        host.handle_event(twinkle::UiEvent::AccessibilityFocus(field.id));
         assert!(host.application_mut().take_effects().is_empty());
         let remove = host.application().button_message("remove").unwrap();
         host.application_mut().update(remove);
-        host.step(nickel_ui::HostBatch {
+        host.step(twinkle::HostBatch {
             application_changed: true,
             ..Default::default()
         });
@@ -9614,7 +9606,7 @@ mod tests {
             host.application_mut().take_effects(),
             vec![PluginEffect::ToggleControlCenter]
         );
-        host.step(nickel_ui::HostBatch {
+        host.step(twinkle::HostBatch {
             application_changed: true,
             ..Default::default()
         });
@@ -9855,7 +9847,7 @@ mod tests {
                 "/../../assets/plugins/example-window"
             );
             let package = PluginPackage::load(directory).unwrap();
-            let mut host = nickel_ui::UiHost::new(
+            let mut host = twinkle::UiHost::new(
                 PluginPanelApplication::from_package(&package).unwrap(),
                 520,
                 340,
@@ -9868,31 +9860,31 @@ mod tests {
                 }
             ));
             let open = host
-                .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
-                    role: nickel_ui::SemanticRole::Button,
+                .query_unique(&twinkle::SemanticSelector::RoleAndName {
+                    role: twinkle::SemanticRole::Button,
                     name: "Open dialog".into(),
                 })
                 .unwrap();
             assert!(open.bounds.size.width > 0.0);
             assert!(open.bounds.size.height > 0.0);
-            host.step(nickel_ui::HostBatch {
-                events: vec![nickel_ui::HostEvent::Ui(
-                    nickel_ui::UiEvent::AccessibilityActivate(open.id),
+            host.step(twinkle::HostBatch {
+                events: vec![twinkle::HostEvent::Ui(
+                    twinkle::UiEvent::AccessibilityActivate(open.id),
                 )],
                 ..Default::default()
             });
             assert!(host.inspect().open_overlay.is_some());
             let settings = host
-                .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
-                    role: nickel_ui::SemanticRole::Button,
+                .query_unique(&twinkle::SemanticSelector::RoleAndName {
+                    role: twinkle::SemanticRole::Button,
                     name: "Open Settings".into(),
                 })
                 .unwrap();
             assert!(settings.bounds.size.width > 0.0);
             assert!(settings.bounds.size.height > 0.0);
-            host.step(nickel_ui::HostBatch {
-                events: vec![nickel_ui::HostEvent::Ui(
-                    nickel_ui::UiEvent::AccessibilityActivate(settings.id),
+            host.step(twinkle::HostBatch {
+                events: vec![twinkle::HostEvent::Ui(
+                    twinkle::UiEvent::AccessibilityActivate(settings.id),
                 )],
                 ..Default::default()
             });
@@ -9917,7 +9909,7 @@ mod tests {
             .iter()
             .find(|surface| surface.id == "home")
             .unwrap();
-        let mut host = nickel_ui::UiHost::new(
+        let mut host = twinkle::UiHost::new(
             PluginPanelApplication::from_package_surface(
                 &package,
                 &std::collections::BTreeMap::new(),
@@ -9928,8 +9920,8 @@ mod tests {
             home.height,
         );
         let button = host
-            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
-                role: nickel_ui::SemanticRole::Button,
+            .query_unique(&twinkle::SemanticSelector::RoleAndName {
+                role: twinkle::SemanticRole::Button,
                 name: "Reopen details".into(),
             })
             .unwrap();
@@ -9937,9 +9929,9 @@ mod tests {
         assert!(button.bounds.size.height > 0.0);
         assert!(button.bounds.origin.x + button.bounds.size.width <= home.width as f32);
         assert!(button.bounds.origin.y + button.bounds.size.height <= home.height as f32);
-        host.step(nickel_ui::HostBatch {
-            events: vec![nickel_ui::HostEvent::Ui(
-                nickel_ui::UiEvent::AccessibilityActivate(button.id),
+        host.step(twinkle::HostBatch {
+            events: vec![twinkle::HostEvent::Ui(
+                twinkle::UiEvent::AccessibilityActivate(button.id),
             )],
             ..Default::default()
         });
@@ -9951,14 +9943,14 @@ mod tests {
             }]
         );
         let focus = host
-            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
-                role: nickel_ui::SemanticRole::Button,
+            .query_unique(&twinkle::SemanticSelector::RoleAndName {
+                role: twinkle::SemanticRole::Button,
                 name: "Focus details".into(),
             })
             .unwrap();
-        host.step(nickel_ui::HostBatch {
-            events: vec![nickel_ui::HostEvent::Ui(
-                nickel_ui::UiEvent::AccessibilityActivate(focus.id),
+        host.step(twinkle::HostBatch {
+            events: vec![twinkle::HostEvent::Ui(
+                twinkle::UiEvent::AccessibilityActivate(focus.id),
             )],
             ..Default::default()
         });
@@ -9975,7 +9967,7 @@ mod tests {
             .iter()
             .find(|surface| surface.id == "details")
             .unwrap();
-        let mut details = nickel_ui::UiHost::new(
+        let mut details = twinkle::UiHost::new(
             PluginPanelApplication::from_package_surface(
                 &package,
                 &std::collections::BTreeMap::new(),
@@ -9986,8 +9978,8 @@ mod tests {
             details_surface.height,
         );
         let close = details
-            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
-                role: nickel_ui::SemanticRole::Button,
+            .query_unique(&twinkle::SemanticSelector::RoleAndName {
+                role: twinkle::SemanticRole::Button,
                 name: "Close details".into(),
             })
             .unwrap();
@@ -9995,9 +9987,9 @@ mod tests {
         assert!(close.bounds.size.height > 0.0);
         assert!(close.bounds.origin.x + close.bounds.size.width <= details_surface.width as f32);
         assert!(close.bounds.origin.y + close.bounds.size.height <= details_surface.height as f32);
-        details.step(nickel_ui::HostBatch {
-            events: vec![nickel_ui::HostEvent::Ui(
-                nickel_ui::UiEvent::AccessibilityActivate(close.id),
+        details.step(twinkle::HostBatch {
+            events: vec![twinkle::HostEvent::Ui(
+                twinkle::UiEvent::AccessibilityActivate(close.id),
             )],
             ..Default::default()
         });
@@ -10064,7 +10056,7 @@ mod tests {
             .find(|surface| surface.id == "confirm")
             .unwrap();
         let settings = std::collections::BTreeMap::new();
-        let mut home = nickel_ui::UiHost::new(
+        let mut home = twinkle::UiHost::new(
             PluginPanelApplication::from_package_surface(&package, &settings, home).unwrap(),
             home.width,
             home.height,
@@ -10077,16 +10069,16 @@ mod tests {
             }
         ));
         let open = home
-            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
-                role: nickel_ui::SemanticRole::Button,
+            .query_unique(&twinkle::SemanticSelector::RoleAndName {
+                role: twinkle::SemanticRole::Button,
                 name: "Open dialog".into(),
             })
             .unwrap();
         assert!(open.bounds.size.width > 0.0);
         assert!(open.bounds.size.height > 0.0);
-        home.step(nickel_ui::HostBatch {
-            events: vec![nickel_ui::HostEvent::Ui(
-                nickel_ui::UiEvent::AccessibilityActivate(open.id),
+        home.step(twinkle::HostBatch {
+            events: vec![twinkle::HostEvent::Ui(
+                twinkle::UiEvent::AccessibilityActivate(open.id),
             )],
             ..Default::default()
         });
@@ -10097,7 +10089,7 @@ mod tests {
                 surface_id: "confirm".into(),
             }]
         );
-        let mut dialog = nickel_ui::UiHost::new(
+        let mut dialog = twinkle::UiHost::new(
             PluginPanelApplication::from_package_surface(&package, &settings, dialog).unwrap(),
             dialog.width,
             dialog.height,
@@ -10110,16 +10102,16 @@ mod tests {
             }
         ));
         let dismiss = dialog
-            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
-                role: nickel_ui::SemanticRole::Button,
+            .query_unique(&twinkle::SemanticSelector::RoleAndName {
+                role: twinkle::SemanticRole::Button,
                 name: "Dismiss".into(),
             })
             .unwrap();
         assert!(dismiss.bounds.size.width > 0.0);
         assert!(dismiss.bounds.size.height > 0.0);
-        dialog.step(nickel_ui::HostBatch {
-            events: vec![nickel_ui::HostEvent::Ui(
-                nickel_ui::UiEvent::AccessibilityActivate(dismiss.id),
+        dialog.step(twinkle::HostBatch {
+            events: vec![twinkle::HostEvent::Ui(
+                twinkle::UiEvent::AccessibilityActivate(dismiss.id),
             )],
             ..Default::default()
         });
@@ -10152,7 +10144,7 @@ mod tests {
             .find(|surface| surface.id == "notice")
             .unwrap();
         let settings = std::collections::BTreeMap::new();
-        let mut home = nickel_ui::UiHost::new(
+        let mut home = twinkle::UiHost::new(
             PluginPanelApplication::from_package_surface(&package, &settings, home).unwrap(),
             home.width,
             home.height,
@@ -10165,16 +10157,16 @@ mod tests {
             }
         ));
         let show = home
-            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
-                role: nickel_ui::SemanticRole::Button,
+            .query_unique(&twinkle::SemanticSelector::RoleAndName {
+                role: twinkle::SemanticRole::Button,
                 name: "Show overlay".into(),
             })
             .unwrap();
         assert!(show.bounds.size.width > 0.0);
         assert!(show.bounds.size.height > 0.0);
-        home.step(nickel_ui::HostBatch {
-            events: vec![nickel_ui::HostEvent::Ui(
-                nickel_ui::UiEvent::AccessibilityActivate(show.id),
+        home.step(twinkle::HostBatch {
+            events: vec![twinkle::HostEvent::Ui(
+                twinkle::UiEvent::AccessibilityActivate(show.id),
             )],
             ..Default::default()
         });
@@ -10185,7 +10177,7 @@ mod tests {
                 surface_id: "notice".into(),
             }]
         );
-        let mut overlay = nickel_ui::UiHost::new(
+        let mut overlay = twinkle::UiHost::new(
             PluginPanelApplication::from_package_surface(&package, &settings, overlay).unwrap(),
             overlay.width,
             overlay.height,
@@ -10199,22 +10191,22 @@ mod tests {
         ));
         assert!(overlay.commands().iter().any(|command| matches!(
             command,
-            nickel_ui::backend::PaintCommand::RoundedFill {
+            twinkle::backend::PaintCommand::RoundedFill {
                 color: 0xb0202830,
                 ..
             }
         )));
         let hide = overlay
-            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
-                role: nickel_ui::SemanticRole::Button,
+            .query_unique(&twinkle::SemanticSelector::RoleAndName {
+                role: twinkle::SemanticRole::Button,
                 name: "Close overlay".into(),
             })
             .unwrap();
         assert!(hide.bounds.size.width > 0.0);
         assert!(hide.bounds.size.height > 0.0);
-        overlay.step(nickel_ui::HostBatch {
-            events: vec![nickel_ui::HostEvent::Ui(
-                nickel_ui::UiEvent::AccessibilityActivate(hide.id),
+        overlay.step(twinkle::HostBatch {
+            events: vec![twinkle::HostEvent::Ui(
+                twinkle::UiEvent::AccessibilityActivate(hide.id),
             )],
             ..Default::default()
         });
@@ -10242,32 +10234,32 @@ mod tests {
             if !valid {
                 current.source = current.source.replace("Math.min(99, openCount + 1)", "100");
             }
-            let mut host = nickel_ui::UiHost::new(
+            let mut host = twinkle::UiHost::new(
                 PluginPanelApplication::from_package(&current).unwrap(),
                 320,
                 120,
             );
             let open = host
-                .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
-                    role: nickel_ui::SemanticRole::Button,
+                .query_unique(&twinkle::SemanticSelector::RoleAndName {
+                    role: twinkle::SemanticRole::Button,
                     name: "Open a dialog".into(),
                 })
                 .unwrap();
-            host.step(nickel_ui::HostBatch {
-                events: vec![nickel_ui::HostEvent::Ui(
-                    nickel_ui::UiEvent::AccessibilityActivate(open.id),
+            host.step(twinkle::HostBatch {
+                events: vec![twinkle::HostEvent::Ui(
+                    twinkle::UiEvent::AccessibilityActivate(open.id),
                 )],
                 ..Default::default()
             });
             let save = host
-                .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
-                    role: nickel_ui::SemanticRole::Button,
+                .query_unique(&twinkle::SemanticSelector::RoleAndName {
+                    role: twinkle::SemanticRole::Button,
                     name: "Save count".into(),
                 })
                 .unwrap();
-            host.step(nickel_ui::HostBatch {
-                events: vec![nickel_ui::HostEvent::Ui(
-                    nickel_ui::UiEvent::AccessibilityActivate(save.id),
+            host.step(twinkle::HostBatch {
+                events: vec![twinkle::HostEvent::Ui(
+                    twinkle::UiEvent::AccessibilityActivate(save.id),
                 )],
                 ..Default::default()
             });
@@ -10310,21 +10302,21 @@ mod tests {
             "#
             .into(),
         };
-        let mut host = nickel_ui::UiHost::new(
+        let mut host = twinkle::UiHost::new(
             PluginPanelApplication::from_package(&package).unwrap(),
             440,
             160,
         );
         let open = host
-            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
-                role: nickel_ui::SemanticRole::Button,
+            .query_unique(&twinkle::SemanticSelector::RoleAndName {
+                role: twinkle::SemanticRole::Button,
                 name: "Open dialog".into(),
             })
             .unwrap();
         for _ in 0..2 {
-            host.step(nickel_ui::HostBatch {
-                events: vec![nickel_ui::HostEvent::Ui(
-                    nickel_ui::UiEvent::AccessibilityActivate(open.id.clone()),
+            host.step(twinkle::HostBatch {
+                events: vec![twinkle::HostEvent::Ui(
+                    twinkle::UiEvent::AccessibilityActivate(open.id.clone()),
                 )],
                 ..Default::default()
             });
@@ -10333,8 +10325,8 @@ mod tests {
                 host.application_mut().accepted.node().dialog("confirm"),
                 Some(PanelNode::Dialog { open: true, .. })
             ));
-            host.step(nickel_ui::HostBatch {
-                events: vec![nickel_ui::HostEvent::Ui(nickel_ui::UiEvent::Dismiss)],
+            host.step(twinkle::HostBatch {
+                events: vec![twinkle::HostEvent::Ui(twinkle::UiEvent::Dismiss)],
                 ..Default::default()
             });
             assert!(host.inspect().open_overlay.is_none());
@@ -10369,16 +10361,16 @@ mod tests {
                 }),
             )
             .unwrap();
-        let mut host = nickel_ui::UiHost::new(application, surface.width, surface.height);
+        let mut host = twinkle::UiHost::new(application, surface.width, surface.height);
         let open = host
-            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
-                role: nickel_ui::SemanticRole::Button,
+            .query_unique(&twinkle::SemanticSelector::RoleAndName {
+                role: twinkle::SemanticRole::Button,
                 name: "Log out".into(),
             })
             .unwrap();
-        host.step(nickel_ui::HostBatch {
-            events: vec![nickel_ui::HostEvent::Ui(
-                nickel_ui::UiEvent::AccessibilityActivate(open.id),
+        host.step(twinkle::HostBatch {
+            events: vec![twinkle::HostEvent::Ui(
+                twinkle::UiEvent::AccessibilityActivate(open.id),
             )],
             ..Default::default()
         });
@@ -10387,7 +10379,7 @@ mod tests {
             .commands()
             .iter()
             .filter_map(|command| match command {
-                nickel_ui::backend::PaintCommand::Text { text, .. } => Some(text.as_str()),
+                twinkle::backend::PaintCommand::Text { text, .. } => Some(text.as_str()),
                 _ => None,
             })
             .collect::<Vec<_>>();
@@ -10398,7 +10390,7 @@ mod tests {
         assert!(labels.contains(&"Cancel"), "{labels:?}");
         let dialog = nodes
             .iter()
-            .find(|node| node.role == Some(nickel_ui::SemanticRole::Dialog))
+            .find(|node| node.role == Some(twinkle::SemanticRole::Dialog))
             .unwrap();
         let confirm = nodes
             .iter()
@@ -10496,7 +10488,7 @@ mod tests {
         for shortcut in [Shortcut::Escape, Shortcut::Submit] {
             assert_eq!(
                 panel.shortcut_outcome(shortcut).disposition,
-                nickel_ui::EventDisposition::Handled
+                twinkle::EventDisposition::Handled
             );
             assert_eq!(panel.take_effects(), vec![PluginEffect::ShowLauncher]);
         }
@@ -10571,15 +10563,15 @@ mod tests {
     #[test]
     fn secure_jsx_text_field_masks_paint_and_protects_remote_semantics() {
         let source = "function App() { return h(Panel, {}, h(TextField, {id: 'password', value: 'secret-value', placeholder: 'Password', secure: true, onChange: value => {}})); }";
-        let host = nickel_ui::UiHost::new(PluginPanelApplication::new(source).unwrap(), 320, 100);
+        let host = twinkle::UiHost::new(PluginPanelApplication::new(source).unwrap(), 320, 100);
         assert!(host.remote_access_protected());
         assert!(matches!(
             host.bounded_semantic_nodes(64, 4096),
-            Err(nickel_ui::BoundedSemanticError::ProtectedSurface)
+            Err(twinkle::BoundedSemanticError::ProtectedSurface)
         ));
         assert!(!host.commands().iter().any(|command| matches!(
             command,
-            nickel_ui::backend::PaintCommand::Text { text, .. } if text.contains("secret-value")
+            twinkle::backend::PaintCommand::Text { text, .. } if text.contains("secret-value")
         )));
     }
 
@@ -10650,16 +10642,16 @@ mod tests {
             stylesheet: ".grid { display: grid; grid-template-columns: 80px 80px; } button { width: 70px; height: 30px; }".into(),
             source: "function App() { return h(FixedWindow, {width: '100%', height: '100%'}, h(Column, {}, h(Row, {}, h(Button, {id: 'row-first', onClick: () => {}}, 'Row first'), h(Button, {id: 'row-second', onClick: () => {}}, 'Row second')), h('div', {className: 'grid'}, h(Button, {id: 'grid-first', onClick: () => {}}, 'Grid first'), h(Button, {id: 'grid-second', onClick: () => {}}, 'Grid second')))); }".into(),
         };
-            let ltr = nickel_ui::UiHost::new(
+            let ltr = twinkle::UiHost::new(
                 PluginPanelApplication::from_package(&package).unwrap(),
                 240,
                 120,
             );
             let mut rtl_app = PluginPanelApplication::from_package(&package).unwrap();
-            assert!(rtl_app.sync_reading_direction(nickel_ui::ReadingDirection::RightToLeft));
-            let rtl = nickel_ui::UiHost::new(rtl_app, 240, 120);
-            let x = |host: &nickel_ui::UiHost<PluginPanelApplication>, name: &str| {
-                host.query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+            assert!(rtl_app.sync_reading_direction(twinkle::ReadingDirection::RightToLeft));
+            let rtl = twinkle::UiHost::new(rtl_app, 240, 120);
+            let x = |host: &twinkle::UiHost<PluginPanelApplication>, name: &str| {
+                host.query_unique(&twinkle::SemanticSelector::RoleAndName {
                     role: SemanticRole::Button,
                     name: name.into(),
                 })
@@ -10710,10 +10702,10 @@ mod tests {
         let mut panel = PluginPanelApplication::new(source).unwrap();
         let mount = panel.diagnostic_mount;
         panel.update(PluginMessage::Click(0));
-        let correlation = nickel_ui::Application::take_frame_correlation(&mut panel).unwrap();
+        let correlation = twinkle::Application::take_frame_correlation(&mut panel).unwrap();
         assert_eq!(correlation.mount, mount);
         assert_eq!(correlation.generation, panel.accepted.generation());
-        assert!(nickel_ui::Application::take_frame_correlation(&mut panel).is_none());
+        assert!(twinkle::Application::take_frame_correlation(&mut panel).is_none());
     }
 
     #[test]
@@ -10839,7 +10831,7 @@ mod tests {
             "function App(){const [count,setCount]=useState(0);globalThis.pollSetter=setCount;return h(Panel,null,h(Text,null,'count:'+count));}"
         ).unwrap();
         let runtime = panel.runtime.clone();
-        let mut host = nickel_ui::UiHost::new(panel, 320, 80);
+        let mut host = twinkle::UiHost::new(panel, 320, 80);
         let generation = host.resolved_frame_generation();
         assert!(host.next_deadline().is_none());
         assert!(!host.poll());
@@ -11194,13 +11186,13 @@ mod tests {
         with_package_runtime_stack(|| {
             let (application, _composition) =
                 settings_admission_application("nickel-default/appearance").unwrap();
-            let mut host = nickel_ui::UiHost::new(application, 1100, 800);
+            let mut host = twinkle::UiHost::new(application, 1100, 800);
             let mut samples = Vec::new();
             let mut view_samples = Vec::new();
             let mut layout_samples = Vec::new();
             for index in 0..60 {
                 let started = std::time::Instant::now();
-                let outcome = host.step(nickel_ui::HostBatch {
+                let outcome = host.step(twinkle::HostBatch {
                     surface_size: Some((1000 + index * 2, 740 + index % 20)),
                     ..Default::default()
                 });
@@ -11230,7 +11222,7 @@ mod tests {
             application
                 .sync_host_data_field("plugins", &catalog)
                 .unwrap();
-            let mut host = nickel_ui::UiHost::new(application, 1100, 1000);
+            let mut host = twinkle::UiHost::new(application, 1100, 1000);
             crate::live_shell::step_plugin_host(&mut host, None, Default::default()).unwrap();
             for _ in 0..32 {
                 if !host.application().virtual_work_pending {
@@ -11240,23 +11232,23 @@ mod tests {
                 crate::live_shell::step_plugin_host(
                     &mut host,
                     None,
-                    nickel_ui::HostBatch {
+                    twinkle::HostBatch {
                         now,
                         ..Default::default()
                     },
                 )
                 .unwrap();
             }
-            let activate = |host: &mut nickel_ui::UiHost<PluginPanelApplication>, name: &str| {
+            let activate = |host: &mut twinkle::UiHost<PluginPanelApplication>, name: &str| {
                 let target = host
-                    .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                    .query_unique(&twinkle::SemanticSelector::RoleAndName {
                         role: SemanticRole::Button,
                         name: name.into(),
                     })
                     .unwrap();
                 host.perform_semantic_action(
                     target.id,
-                    nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
+                    twinkle::SemanticAction::Invoke(twinkle::ActionKind::Activate),
                 );
                 assert!(host.application_mut().last_error().is_none());
             };
@@ -11271,7 +11263,7 @@ mod tests {
             crate::live_shell::step_plugin_host(
                 &mut host,
                 None,
-                nickel_ui::HostBatch {
+                twinkle::HostBatch {
                     application_changed: true,
                     ..Default::default()
                 },
@@ -11295,10 +11287,10 @@ mod tests {
             .spawn(|| {
                 let (application, _composition) =
                     settings_admission_application("nickel-default/appearance").unwrap();
-                let mut host = nickel_ui::UiHost::new(application, 1100, 1400);
+                let mut host = twinkle::UiHost::new(application, 1100, 1400);
                 for name in ["Interface hue", "Color intensity"] {
                     let slider = host
-                        .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                        .query_unique(&twinkle::SemanticSelector::RoleAndName {
                             role: SemanticRole::Slider,
                             name: name.into(),
                         })
@@ -11307,12 +11299,12 @@ mod tests {
                         x: slider.bounds.origin.x + slider.bounds.size.width * fraction,
                         y: slider.bounds.origin.y + slider.bounds.size.height / 2.0,
                     };
-                    let send = |host: &mut nickel_ui::UiHost<PluginPanelApplication>, event| {
+                    let send = |host: &mut twinkle::UiHost<PluginPanelApplication>, event| {
                         crate::live_shell::step_plugin_host(
                             host,
                             None,
-                            nickel_ui::HostBatch {
-                                events: vec![nickel_ui::HostEvent::Ui(event)],
+                            twinkle::HostBatch {
+                                events: vec![twinkle::HostEvent::Ui(event)],
                                 ..Default::default()
                             },
                         )
@@ -11320,24 +11312,24 @@ mod tests {
                         assert!(host.application_mut().last_error().is_none());
                     };
                     host.application_mut().take_effects();
-                    send(&mut host, nickel_ui::UiEvent::PointerMoved(point(0.2)));
-                    send(&mut host, nickel_ui::UiEvent::PointerPressed(point(0.2)));
+                    send(&mut host, twinkle::UiEvent::PointerMoved(point(0.2)));
+                    send(&mut host, twinkle::UiEvent::PointerPressed(point(0.2)));
                     for fraction in [0.3, 0.5, 0.7] {
-                        send(&mut host, nickel_ui::UiEvent::PointerMoved(point(fraction)));
+                        send(&mut host, twinkle::UiEvent::PointerMoved(point(fraction)));
                         assert!(host.application_mut().take_effects().is_empty());
                     }
-                    send(&mut host, nickel_ui::UiEvent::PointerReleased(point(0.7)));
+                    send(&mut host, twinkle::UiEvent::PointerReleased(point(0.7)));
                     assert!(matches!(
                         host.application_mut().take_effects().as_slice(),
                         [PluginEffect::Appearance { .. }]
                     ));
-                    send(&mut host, nickel_ui::UiEvent::PointerPressed(point(0.1)));
-                    send(&mut host, nickel_ui::UiEvent::PointerMoved(point(0.4)));
-                    send(&mut host, nickel_ui::UiEvent::PointerCancelled);
+                    send(&mut host, twinkle::UiEvent::PointerPressed(point(0.1)));
+                    send(&mut host, twinkle::UiEvent::PointerMoved(point(0.4)));
+                    send(&mut host, twinkle::UiEvent::PointerCancelled);
                     assert!(host.application_mut().take_effects().is_empty());
                     host.perform_semantic_action(
                         slider.id,
-                        nickel_ui::SemanticAction::SetValue(nickel_ui::SemanticValueInput::Number(
+                        twinkle::SemanticAction::SetValue(twinkle::SemanticValueInput::Number(
                             80.0,
                         )),
                     );
@@ -11390,7 +11382,7 @@ mod tests {
             composition.clone(),
         )
         .unwrap();
-        let mut host = nickel_ui::UiHost::new(application, 1100, 800);
+        let mut host = twinkle::UiHost::new(application, 1100, 800);
         let open = open_started.elapsed();
         let mount_count = composition.borrow().mount_count();
         assert!(mount_count > 0);
@@ -11407,7 +11399,7 @@ mod tests {
 
         let page_started = std::time::Instant::now();
         let appearance = host
-            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+            .query_unique(&twinkle::SemanticSelector::RoleAndName {
                 role: SemanticRole::Button,
                 name: "Appearance".into(),
             })
@@ -11421,7 +11413,7 @@ mod tests {
         );
         host.perform_semantic_action(
             appearance.id,
-            nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
+            twinkle::SemanticAction::Invoke(twinkle::ActionKind::Activate),
         );
         let page_switch = page_started.elapsed();
         assert!(host.application_mut().last_error().is_none());
@@ -11434,7 +11426,7 @@ mod tests {
         assert_eq!(navigation["__handlerSlots"]["action"], navigation_handler);
 
         let control = host
-            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+            .query_unique(&twinkle::SemanticSelector::RoleAndName {
                 role: SemanticRole::Slider,
                 name: "Interface hue".into(),
             })
@@ -11447,7 +11439,7 @@ mod tests {
         let edit_started = std::time::Instant::now();
         host.perform_semantic_action(
             control.id,
-            nickel_ui::SemanticAction::SetValue(nickel_ui::SemanticValueInput::Number(210.0)),
+            twinkle::SemanticAction::SetValue(twinkle::SemanticValueInput::Number(210.0)),
         );
         let control_edit = edit_started.elapsed();
         assert!(host.application_mut().last_error().is_none());
@@ -11519,7 +11511,7 @@ mod tests {
             composition,
         )
         .unwrap();
-        let mut host = nickel_ui::UiHost::new(application, 900, 600);
+        let mut host = twinkle::UiHost::new(application, 900, 600);
         let navigation = serde_json::json!({
             "revision": "live",
             "destination": "nickel-default/plugins",
@@ -11589,19 +11581,19 @@ mod tests {
             "forced sibling refresh must not take the unchanged fast path"
         );
         let appearance = host
-            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+            .query_unique(&twinkle::SemanticSelector::RoleAndName {
                 role: SemanticRole::Button,
                 name: "Appearance".into(),
             })
             .unwrap();
-        let point = nickel_ui::Point {
+        let point = twinkle::Point {
             x: appearance.bounds.origin.x + appearance.bounds.size.width / 2.0,
             y: appearance.bounds.origin.y + appearance.bounds.size.height / 2.0,
         };
-        host.step(nickel_ui::HostBatch {
+        host.step(twinkle::HostBatch {
             events: vec![
-                nickel_ui::HostEvent::Ui(nickel_ui::UiEvent::PointerMoved(point)),
-                nickel_ui::HostEvent::Ui(nickel_ui::UiEvent::PointerPressed(point)),
+                twinkle::HostEvent::Ui(twinkle::UiEvent::PointerMoved(point)),
+                twinkle::HostEvent::Ui(twinkle::UiEvent::PointerPressed(point)),
             ],
             ..Default::default()
         });
@@ -11611,15 +11603,15 @@ mod tests {
                 .sync_host_data_fields(&[("clock", &clock)])
                 .unwrap()
         );
-        host.step(nickel_ui::HostBatch {
-            events: vec![nickel_ui::HostEvent::Ui(
-                nickel_ui::UiEvent::PointerReleased(point),
-            )],
+        host.step(twinkle::HostBatch {
+            events: vec![twinkle::HostEvent::Ui(twinkle::UiEvent::PointerReleased(
+                point,
+            ))],
             ..Default::default()
         });
         assert!(host.application_mut().last_error().is_none());
         assert!(
-            host.query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+            host.query_unique(&twinkle::SemanticSelector::RoleAndName {
                 role: SemanticRole::Slider,
                 name: "Interface hue".into(),
             })
@@ -11720,17 +11712,17 @@ mod tests {
                         ("wallpaper", &wallpaper),
                         ("shortcuts", &crate::shortcut_capabilities::snapshot(false, None)),
                     ]).unwrap();
-                    let mut host = nickel_ui::UiHost::new(application, 1100, 800);
-                    let target = host.query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                    let mut host = twinkle::UiHost::new(application, 1100, 800);
+                    let target = host.query_unique(&twinkle::SemanticSelector::RoleAndName {
                         role: SemanticRole::Button, name: target.into(),
                     }).unwrap();
                     let center = Point {
                         x: target.bounds.origin.x + target.bounds.size.width / 2.0,
                         y: target.bounds.origin.y + target.bounds.size.height / 2.0,
                     };
-                    let motion = |host: &mut nickel_ui::UiHost<PluginPanelApplication>, x| {
-                        crate::live_shell::step_plugin_host(host, None, nickel_ui::HostBatch {
-                            events: vec![nickel_ui::HostEvent::Ui(nickel_ui::UiEvent::PointerMoved(Point { x, ..center }))],
+                    let motion = |host: &mut twinkle::UiHost<PluginPanelApplication>, x| {
+                        crate::live_shell::step_plugin_host(host, None, twinkle::HostBatch {
+                            events: vec![twinkle::HostEvent::Ui(twinkle::UiEvent::PointerMoved(Point { x, ..center }))],
                             ..Default::default()
                         }).unwrap()
                     };
@@ -11828,10 +11820,10 @@ mod tests {
     fn production_settings_traversal_reports_retained_lifetimes() {
         with_package_runtime_stack(|| {
             fn settle_previews(
-                host: &mut nickel_ui::UiHost<PluginPanelApplication>,
+                host: &mut twinkle::UiHost<PluginPanelApplication>,
                 previews: &mut crate::wallpaper_previews::WallpaperPreviews,
                 key: &nickel_core::plugins::PluginSurfaceKey,
-                outcome: &mut nickel_ui::HostEventOutcome,
+                outcome: &mut twinkle::HostEventOutcome,
                 retained: &mut u64,
             ) {
                 let timeout = Instant::now() + std::time::Duration::from_secs(30);
@@ -11841,7 +11833,7 @@ mod tests {
                         "preview/geometry convergence timed out"
                     );
                     let size = host.render_frame().logical_size;
-                    let viewport = nickel_ui::Rect::new(0.0, 0.0, size.0 as f32, size.1 as f32);
+                    let viewport = twinkle::Rect::new(0.0, 0.0, size.0 as f32, size.1 as f32);
                     let demand = host
                         .application()
                         .wallpaper_preview_demand(host.resolved_layout(), viewport);
@@ -11862,7 +11854,7 @@ mod tests {
                     let (next, bytes) = step_host(
                         host,
                         None,
-                        nickel_ui::HostBatch {
+                        twinkle::HostBatch {
                             application_changed: true,
                             ..Default::default()
                         },
@@ -11946,7 +11938,7 @@ mod tests {
                     ),
                 ])
                 .unwrap();
-            let mut host = nickel_ui::UiHost::new(application, 1100, 800);
+            let mut host = twinkle::UiHost::new(application, 1100, 800);
             let mut reports = Vec::new();
             let cycles = std::env::var("NICKEL_SETTINGS_TRAVERSAL_CYCLES")
                 .map(|value| {
@@ -12001,8 +11993,8 @@ mod tests {
                     let (mut outcome, mut retained) = step_host(
                         &mut host,
                         None,
-                        nickel_ui::HostBatch {
-                            events: vec![nickel_ui::HostEvent::Ui(nickel_ui::UiEvent::Scroll {
+                        twinkle::HostBatch {
+                            events: vec![twinkle::HostEvent::Ui(twinkle::UiEvent::Scroll {
                                 point: Point { x: 700.0, y: 600.0 },
                                 delta_y: delta,
                             })],
@@ -12086,7 +12078,7 @@ mod tests {
                         "cycle {cycle} {page}: live navigation token {token} has no callback authority"
                     );
                     let navigation = host
-                        .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                        .query_unique(&twinkle::SemanticSelector::RoleAndName {
                             role: SemanticRole::Button,
                             name: page.into(),
                         })
@@ -12097,7 +12089,7 @@ mod tests {
                     let phase_bytes = crate::allocation_counter::thread_requested_bytes();
                     let mut action = host.perform_semantic_action(
                         navigation.id,
-                        nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
+                        twinkle::SemanticAction::Invoke(twinkle::ActionKind::Activate),
                     );
                     assert!(
                         action.semantic_failures.is_empty(),
@@ -12339,7 +12331,7 @@ mod tests {
     #[test]
     fn production_settings_associations_bound_cards_and_handler_rows() {
         with_package_runtime_stack(|| {
-            let settle = |host: &mut nickel_ui::UiHost<PluginPanelApplication>| {
+            let settle = |host: &mut twinkle::UiHost<PluginPanelApplication>| {
                 for _ in 0..16 {
                     if !host.application().virtual_work_pending {
                         return;
@@ -12350,9 +12342,9 @@ mod tests {
                     crate::live_shell::step_plugin_host(
                         host,
                         None,
-                        nickel_ui::HostBatch {
+                        twinkle::HostBatch {
                             now: Some(now),
-                            events: vec![nickel_ui::HostEvent::Poll],
+                            events: vec![twinkle::HostEvent::Poll],
                             ..Default::default()
                         },
                     )
@@ -12379,7 +12371,7 @@ mod tests {
             application
                 .sync_host_data_fields(&[("associations", &catalog)])
                 .unwrap();
-            let mut host = nickel_ui::UiHost::new(application, 1100, 800);
+            let mut host = twinkle::UiHost::new(application, 1100, 800);
             crate::live_shell::step_plugin_host(&mut host, None, Default::default()).unwrap();
             settle(&mut host);
             assert!(!host.application().virtual_work_pending);
@@ -12389,7 +12381,7 @@ mod tests {
                     .len(),
                 128
             );
-            let bounded = |host: &nickel_ui::UiHost<PluginPanelApplication>| {
+            let bounded = |host: &twinkle::UiHost<PluginPanelApplication>| {
                 let rows = host
                     .application()
                     .accepted
@@ -12404,7 +12396,7 @@ mod tests {
                 assert!(host.resolved_layout().nodes().len() < 600);
             };
             bounded(&host);
-            let last = nickel_ui::SemanticSelector::RoleAndName {
+            let last = twinkle::SemanticSelector::RoleAndName {
                 role: SemanticRole::Button,
                 name: "Handler 127/127".into(),
             };
@@ -12412,8 +12404,8 @@ mod tests {
             crate::live_shell::step_plugin_host(
                 &mut host,
                 None,
-                nickel_ui::HostBatch {
-                    events: vec![nickel_ui::HostEvent::Ui(nickel_ui::UiEvent::Scroll {
+                twinkle::HostBatch {
+                    events: vec![twinkle::HostEvent::Ui(twinkle::UiEvent::Scroll {
                         point: Point { x: 700.0, y: 600.0 },
                         delta_y: 1_000_000.0,
                     })],
@@ -12429,7 +12421,7 @@ mod tests {
                 .expect("last handler in last association reachable");
             host.perform_semantic_action(
                 last.id,
-                nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
+                twinkle::SemanticAction::Invoke(twinkle::ActionKind::Activate),
             );
             assert!(
                 host.application().last_error().is_none(),
@@ -12446,7 +12438,7 @@ mod tests {
                 "{effects:?}"
             );
             let search = host
-                .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                .query_unique(&twinkle::SemanticSelector::RoleAndName {
                     role: SemanticRole::TextField,
                     name: "Search default applications".into(),
                 })
@@ -12455,7 +12447,7 @@ mod tests {
             for (query, count) in [("Handler 37/", 1), ("no matching handler", 0), ("", 128)] {
                 host.perform_semantic_action(
                     search.id.clone(),
-                    nickel_ui::SemanticAction::SetValue(nickel_ui::SemanticValueInput::Text(
+                    twinkle::SemanticAction::SetValue(twinkle::SemanticValueInput::Text(
                         query.into(),
                     )),
                 );
@@ -12471,14 +12463,14 @@ mod tests {
                 assert!(host.application().last_error().is_none());
             }
             let family = host
-                .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                .query_unique(&twinkle::SemanticSelector::RoleAndName {
                     role: SemanticRole::Button,
                     name: "Documents".into(),
                 })
                 .unwrap();
             host.perform_semantic_action(
                 family.id,
-                nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
+                twinkle::SemanticAction::Invoke(twinkle::ActionKind::Activate),
             );
             crate::live_shell::step_plugin_host(&mut host, None, Default::default()).unwrap();
             settle(&mut host);
@@ -12495,7 +12487,7 @@ mod tests {
     #[test]
     fn production_settings_plugins_virtualize_and_preserve_editor_drafts() {
         with_package_runtime_stack(|| {
-            let settle = |host: &mut nickel_ui::UiHost<PluginPanelApplication>, phase: &str| {
+            let settle = |host: &mut twinkle::UiHost<PluginPanelApplication>, phase: &str| {
                 for _ in 0..32 {
                     if !host.application().virtual_work_pending {
                         return;
@@ -12504,7 +12496,7 @@ mod tests {
                     step_host(
                         host,
                         None,
-                        nickel_ui::HostBatch {
+                        twinkle::HostBatch {
                             now: Some(now),
                             ..Default::default()
                         },
@@ -12537,10 +12529,10 @@ mod tests {
             application
                 .sync_host_data_fields(&[("plugins", &snapshot)])
                 .unwrap();
-            let mut host = nickel_ui::UiHost::new(application, 1100, 800);
+            let mut host = twinkle::UiHost::new(application, 1100, 800);
             step_host(&mut host, None, Default::default()).unwrap();
             settle(&mut host, "initial mount");
-            let editor = |index| nickel_ui::SemanticSelector::RoleAndName {
+            let editor = |index| twinkle::SemanticSelector::RoleAndName {
                 role: SemanticRole::TextField,
                 name: format!("Value {index}"),
             };
@@ -12548,7 +12540,7 @@ mod tests {
             assert!(host.query_unique(&editor(255)).is_err());
             host.perform_semantic_action(
                 first.id,
-                nickel_ui::SemanticAction::SetValue(nickel_ui::SemanticValueInput::Text(
+                twinkle::SemanticAction::SetValue(twinkle::SemanticValueInput::Text(
                     "Unapplied draft".into(),
                 )),
             );
@@ -12559,8 +12551,8 @@ mod tests {
                 step_host(
                     &mut host,
                     None,
-                    nickel_ui::HostBatch {
-                        events: vec![nickel_ui::HostEvent::Ui(nickel_ui::UiEvent::Scroll {
+                    twinkle::HostBatch {
+                        events: vec![twinkle::HostEvent::Ui(twinkle::UiEvent::Scroll {
                             point: Point { x: 700.0, y: 600.0 },
                             delta_y,
                         })],
@@ -12591,7 +12583,7 @@ mod tests {
                 "Unapplied draft"
             );
             let apply = host
-                .query(&nickel_ui::SemanticSelector::RoleAndName {
+                .query(&twinkle::SemanticSelector::RoleAndName {
                     role: SemanticRole::Button,
                     name: "Apply".into(),
                 })
@@ -12604,7 +12596,7 @@ mod tests {
                 .unwrap();
             host.perform_semantic_action(
                 apply.id,
-                nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
+                twinkle::SemanticAction::Invoke(twinkle::ActionKind::Activate),
             );
             let expected =
                 crate::plugins_capabilities::PluginsSettingEffect::parse(&serde_json::json!({
@@ -12637,7 +12629,7 @@ mod tests {
             step_host(
                 &mut host,
                 None,
-                nickel_ui::HostBatch {
+                twinkle::HostBatch {
                     application_changed: true,
                     ..Default::default()
                 },
@@ -12650,8 +12642,8 @@ mod tests {
                 step_host(
                     &mut host,
                     None,
-                    nickel_ui::HostBatch {
-                        events: vec![nickel_ui::HostEvent::Ui(nickel_ui::UiEvent::Scroll {
+                    twinkle::HostBatch {
+                        events: vec![twinkle::HostEvent::Ui(twinkle::UiEvent::Scroll {
                             point: Point { x: 700.0, y: 600.0 },
                             delta_y,
                         })],
@@ -12683,8 +12675,8 @@ mod tests {
             step_host(
                 &mut host,
                 None,
-                nickel_ui::HostBatch {
-                    events: vec![nickel_ui::HostEvent::Ui(nickel_ui::UiEvent::Scroll {
+                twinkle::HostBatch {
+                    events: vec![twinkle::HostEvent::Ui(twinkle::UiEvent::Scroll {
                         point: Point { x: 700.0, y: 600.0 },
                         delta_y: 1_000_000.0,
                     })],
@@ -12723,8 +12715,8 @@ mod tests {
             step_host(
                 &mut host,
                 None,
-                nickel_ui::HostBatch {
-                    events: vec![nickel_ui::HostEvent::Ui(nickel_ui::UiEvent::Scroll {
+                twinkle::HostBatch {
+                    events: vec![twinkle::HostEvent::Ui(twinkle::UiEvent::Scroll {
                         point: Point { x: 700.0, y: 600.0 },
                         delta_y: -1_000_000.0,
                     })],
@@ -12760,10 +12752,10 @@ mod tests {
             let (mut application, _composition) =
                 settings_admission_application("nickel-default/displays").unwrap();
             application.sync_host_data_field("displays", &serde_json::json!({"available":true,"revision":"0123456789abcdef","operations":{"identify":true},"outputs":outputs})).unwrap();
-            let mut host = nickel_ui::UiHost::new(application, 1100, 800);
+            let mut host = twinkle::UiHost::new(application, 1100, 800);
             crate::live_shell::step_plugin_host(&mut host, None, Default::default()).unwrap();
             let card = host
-                .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                .query_unique(&twinkle::SemanticSelector::RoleAndName {
                     role: SemanticRole::Button,
                     name: "Fixture 2 display, DP-2".into(),
                 })
@@ -12778,16 +12770,16 @@ mod tests {
             };
             let before = host.application().accepted.source().clone();
             for event in [
-                nickel_ui::UiEvent::PointerMoved(start),
-                nickel_ui::UiEvent::PointerPressed(start),
-                nickel_ui::UiEvent::PointerMoved(end),
-                nickel_ui::UiEvent::PointerReleased(end),
+                twinkle::UiEvent::PointerMoved(start),
+                twinkle::UiEvent::PointerPressed(start),
+                twinkle::UiEvent::PointerMoved(end),
+                twinkle::UiEvent::PointerReleased(end),
             ] {
                 crate::live_shell::step_plugin_host(
                     &mut host,
                     None,
-                    nickel_ui::HostBatch {
-                        events: vec![nickel_ui::HostEvent::Ui(event)],
+                    twinkle::HostBatch {
+                        events: vec![twinkle::HostEvent::Ui(event)],
                         ..Default::default()
                     },
                 )
@@ -12797,7 +12789,7 @@ mod tests {
             assert_ne!(host.application().accepted.source(), &before);
             assert!(host.application_mut().take_effects().is_empty());
             assert!(
-                host.query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                host.query_unique(&twinkle::SemanticSelector::RoleAndName {
                     role: SemanticRole::Button,
                     name: "Fixture 2 display, DP-2".into()
                 })
@@ -12809,7 +12801,7 @@ mod tests {
     #[test]
     fn production_settings_display_modes_virtualize_without_losing_draft() {
         with_package_runtime_stack(|| {
-            let settle = |host: &mut nickel_ui::UiHost<PluginPanelApplication>| {
+            let settle = |host: &mut twinkle::UiHost<PluginPanelApplication>| {
                 for _ in 0..16 {
                     if !host.application().virtual_work_pending {
                         return;
@@ -12818,7 +12810,7 @@ mod tests {
                     step_host(
                         host,
                         None,
-                        nickel_ui::HostBatch {
+                        twinkle::HostBatch {
                             now: Some(now),
                             ..Default::default()
                         },
@@ -12848,14 +12840,14 @@ mod tests {
             application
                 .sync_host_data_fields(&[("displays", &snapshot)])
                 .unwrap();
-            let mut host = nickel_ui::UiHost::new(application, 1100, 800);
+            let mut host = twinkle::UiHost::new(application, 1100, 800);
             step_host(&mut host, None, Default::default()).unwrap();
             settle(&mut host);
-            let mode = |index: usize| nickel_ui::SemanticSelector::RoleAndName {
+            let mode = |index: usize| twinkle::SemanticSelector::RoleAndName {
                 role: SemanticRole::Button,
                 name: format!("1920 × 1080 · {}.00 Hz", 60 + index),
             };
-            let assert_top_text = |host: &nickel_ui::UiHost<PluginPanelApplication>| {
+            let assert_top_text = |host: &twinkle::UiHost<PluginPanelApplication>| {
                 for label in [
                     "Arrange displays",
                     "Drag displays to match their physical positions. Apply to preview your changes.",
@@ -12864,7 +12856,7 @@ mod tests {
                     assert!(
                         host.commands().iter().any(|command| matches!(
                             command,
-                            nickel_ui::backend::PaintCommand::Text { text, .. } if text == label
+                            twinkle::backend::PaintCommand::Text { text, .. } if text == label
                         )),
                         "missing display text {label:?}"
                     );
@@ -12884,8 +12876,8 @@ mod tests {
                 step_host(
                     &mut host,
                     None,
-                    nickel_ui::HostBatch {
-                        events: vec![nickel_ui::HostEvent::Ui(nickel_ui::UiEvent::Scroll {
+                    twinkle::HostBatch {
+                        events: vec![twinkle::HostEvent::Ui(twinkle::UiEvent::Scroll {
                             point: Point { x: 700.0, y: 600.0 },
                             delta_y,
                         })],
@@ -12900,7 +12892,7 @@ mod tests {
                 if visit == 0 {
                     host.perform_semantic_action(
                         button.id,
-                        nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
+                        twinkle::SemanticAction::Invoke(twinkle::ActionKind::Activate),
                     );
                     step_host(&mut host, None, Default::default()).unwrap();
                     settle(&mut host);
@@ -12940,14 +12932,14 @@ mod tests {
                 );
             }
             let discard = host
-                .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                .query_unique(&twinkle::SemanticSelector::RoleAndName {
                     role: SemanticRole::Button,
                     name: "Discard draft".into(),
                 })
                 .unwrap();
             host.perform_semantic_action(
                 discard.id,
-                nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
+                twinkle::SemanticAction::Invoke(twinkle::ActionKind::Activate),
             );
             step_host(&mut host, None, Default::default()).unwrap();
             settle(&mut host);
@@ -12982,9 +12974,9 @@ mod tests {
             application
                 .sync_host_data_fields(&[("wifi", &snapshot)])
                 .unwrap();
-            let mut host = nickel_ui::UiHost::new(application, 1100, 800);
+            let mut host = twinkle::UiHost::new(application, 1100, 800);
             step_host(&mut host, None, Default::default()).unwrap();
-            let text = |name: String| nickel_ui::SemanticSelector::RoleAndName {
+            let text = |name: String| twinkle::SemanticSelector::RoleAndName {
                 role: SemanticRole::Text,
                 name,
             };
@@ -12994,8 +12986,8 @@ mod tests {
                 step_host(
                     &mut host,
                     None,
-                    nickel_ui::HostBatch {
-                        events: vec![nickel_ui::HostEvent::Ui(nickel_ui::UiEvent::Scroll {
+                    twinkle::HostBatch {
+                        events: vec![twinkle::HostEvent::Ui(twinkle::UiEvent::Scroll {
                             point: Point { x: 700.0, y: 600.0 },
                             delta_y,
                         })],
@@ -13089,7 +13081,7 @@ mod tests {
                 application
                     .sync_host_data_fields(&[(page, snapshot)])
                     .unwrap();
-                let mut host = nickel_ui::UiHost::new(application, 1100, 800);
+                let mut host = twinkle::UiHost::new(application, 1100, 800);
                 crate::live_shell::step_plugin_host(&mut host, None, Default::default()).unwrap();
                 assert!(!host.application().virtual_work_pending);
                 let source = logical_source(host.application().accepted.node())
@@ -13102,8 +13094,8 @@ mod tests {
                     crate::live_shell::step_plugin_host(
                         &mut host,
                         None,
-                        nickel_ui::HostBatch {
-                            events: vec![nickel_ui::HostEvent::Ui(nickel_ui::UiEvent::Scroll {
+                        twinkle::HostBatch {
+                            events: vec![twinkle::HostEvent::Ui(twinkle::UiEvent::Scroll {
                                 point: Point { x: 700.0, y: 600.0 },
                                 delta_y,
                             })],
@@ -13166,7 +13158,7 @@ mod tests {
                 crate::live_shell::step_plugin_host(
                     &mut host,
                     None,
-                    nickel_ui::HostBatch {
+                    twinkle::HostBatch {
                         application_changed: true,
                         ..Default::default()
                     },
@@ -13187,7 +13179,7 @@ mod tests {
     #[test]
     fn production_repeated_settings_preserve_drafts_across_virtual_unmount() {
         with_package_runtime_stack(|| {
-            fn settle(host: &mut nickel_ui::UiHost<PluginPanelApplication>) {
+            fn settle(host: &mut twinkle::UiHost<PluginPanelApplication>) {
                 for _ in 0..16 {
                     if !host.application().virtual_work_pending {
                         return;
@@ -13198,7 +13190,7 @@ mod tests {
                         .node()
                         .virtual_collection_feedback(
                             host.resolved_layout(),
-                            nickel_ui::Rect::new(0.0, 0.0, 1100.0, 800.0),
+                            twinkle::Rect::new(0.0, 0.0, 1100.0, 800.0),
                         )
                         .unwrap()
                     {
@@ -13217,9 +13209,9 @@ mod tests {
                     step_host(
                         host,
                         None,
-                        nickel_ui::HostBatch {
+                        twinkle::HostBatch {
                             now: host.next_deadline(),
-                            events: vec![nickel_ui::HostEvent::Poll],
+                            events: vec![twinkle::HostEvent::Poll],
                             ..Default::default()
                         },
                     )
@@ -13272,12 +13264,12 @@ mod tests {
                     composition,
                 )
                 .unwrap();
-                let mut host = nickel_ui::UiHost::new(application, 1100, 800);
+                let mut host = twinkle::UiHost::new(application, 1100, 800);
                 step_host(&mut host, None, Default::default())
                     .unwrap_or_else(|error| panic!("{nesting}: {error}"));
                 settle(&mut host);
                 let field = host
-                    .query(&nickel_ui::SemanticSelector::RoleAndName {
+                    .query(&twinkle::SemanticSelector::RoleAndName {
                         role: SemanticRole::TextField,
                         name: "Name".into(),
                     })
@@ -13286,7 +13278,7 @@ mod tests {
                     .unwrap_or_else(|| {
                         panic!(
                             "repeated inputs missing: {:?}; {:?}",
-                            host.query(&nickel_ui::SemanticSelector::RoleAndName {
+                            host.query(&twinkle::SemanticSelector::RoleAndName {
                                 role: SemanticRole::TextField,
                                 name: "Name".into()
                             }),
@@ -13295,7 +13287,7 @@ mod tests {
                     });
                 host.perform_semantic_action(
                     field.id.clone(),
-                    nickel_ui::SemanticAction::SetValue(nickel_ui::SemanticValueInput::Text(
+                    twinkle::SemanticAction::SetValue(twinkle::SemanticValueInput::Text(
                         "Unapplied draft".into(),
                     )),
                 );
@@ -13312,8 +13304,8 @@ mod tests {
                 step_host(
                     &mut host,
                     None,
-                    nickel_ui::HostBatch {
-                        events: vec![nickel_ui::HostEvent::Ui(nickel_ui::UiEvent::ImePreedit(
+                    twinkle::HostBatch {
+                        events: vec![twinkle::HostEvent::Ui(twinkle::UiEvent::ImePreedit(
                             "未確定".into(),
                         ))],
                         ..Default::default()
@@ -13324,7 +13316,7 @@ mod tests {
                 assert!(
                     host.commands().iter().any(|command| matches!(
                         command,
-                        nickel_ui::backend::PaintCommand::Text { text, .. }
+                        twinkle::backend::PaintCommand::Text { text, .. }
                             if text.contains("未確定")
                     )),
                     "focused editor did not display its IME preedit"
@@ -13339,8 +13331,8 @@ mod tests {
                     step_host(
                         &mut host,
                         None,
-                        nickel_ui::HostBatch {
-                            events: vec![nickel_ui::HostEvent::Ui(nickel_ui::UiEvent::Scroll {
+                        twinkle::HostBatch {
+                            events: vec![twinkle::HostEvent::Ui(twinkle::UiEvent::Scroll {
                                 point: Point { x: 700.0, y: 600.0 },
                                 delta_y: delta,
                             })],
@@ -13365,10 +13357,10 @@ mod tests {
                         step_host(
                             &mut host,
                             None,
-                            nickel_ui::HostBatch {
-                                events: vec![nickel_ui::HostEvent::Ui(
-                                    nickel_ui::UiEvent::TextInput("late IME commit".into()),
-                                )],
+                            twinkle::HostBatch {
+                                events: vec![twinkle::HostEvent::Ui(twinkle::UiEvent::TextInput(
+                                    "late IME commit".into(),
+                                ))],
                                 ..Default::default()
                             },
                         )
@@ -13403,13 +13395,13 @@ mod tests {
                 assert!(
                     !host.commands().iter().any(|command| matches!(
                         command,
-                        nickel_ui::backend::PaintCommand::Text { text, .. }
+                        twinkle::backend::PaintCommand::Text { text, .. }
                             if text.contains("未確定") || text.contains("late IME commit")
                     )),
                     "retired composition reappeared after rematerialization"
                 );
                 let apply = host
-                    .query(&nickel_ui::SemanticSelector::RoleAndName {
+                    .query(&twinkle::SemanticSelector::RoleAndName {
                         role: SemanticRole::Button,
                         name: "Apply".into(),
                     })
@@ -13418,7 +13410,7 @@ mod tests {
                     .unwrap();
                 host.perform_semantic_action(
                     apply.id,
-                    nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
+                    twinkle::SemanticAction::Invoke(twinkle::ActionKind::Activate),
                 );
                 step_host(&mut host, None, Default::default()).unwrap();
                 let saved =
@@ -13447,9 +13439,9 @@ mod tests {
             application
                 .sync_host_data_fields(&[("wallpaper", &wallpaper)])
                 .unwrap();
-            let mut host = nickel_ui::UiHost::new(application, 1100, 800);
+            let mut host = twinkle::UiHost::new(application, 1100, 800);
             step_host(&mut host, None, Default::default()).unwrap();
-            let viewport = nickel_ui::Rect::new(0.0, 0.0, 1100.0, 800.0);
+            let viewport = twinkle::Rect::new(0.0, 0.0, 1100.0, 800.0);
             let first = host
                 .application()
                 .wallpaper_preview_demand(host.resolved_layout(), viewport);
@@ -13458,8 +13450,8 @@ mod tests {
             step_host(
                 &mut host,
                 None,
-                nickel_ui::HostBatch {
-                    events: vec![nickel_ui::HostEvent::Ui(nickel_ui::UiEvent::Scroll {
+                twinkle::HostBatch {
+                    events: vec![twinkle::HostEvent::Ui(twinkle::UiEvent::Scroll {
                         point: Point { x: 700.0, y: 600.0 },
                         delta_y: 100_000.0,
                     })],
@@ -13475,7 +13467,7 @@ mod tests {
             assert!(demand.iter().any(|asset| asset == "wallpaper:fixture-127"));
             assert!(!demand.iter().any(|asset| asset == "wallpaper:fixture-0"));
             let last = host
-                .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                .query_unique(&twinkle::SemanticSelector::RoleAndName {
                     role: SemanticRole::Button,
                     name: "Wallpaper 127".into(),
                 })
@@ -13484,9 +13476,9 @@ mod tests {
             step_host(
                 &mut host,
                 None,
-                nickel_ui::HostBatch {
-                    events: vec![nickel_ui::HostEvent::Ui(
-                        nickel_ui::UiEvent::AccessibilityFocus(last.id.clone()),
+                twinkle::HostBatch {
+                    events: vec![twinkle::HostEvent::Ui(
+                        twinkle::UiEvent::AccessibilityFocus(last.id.clone()),
                     )],
                     ..Default::default()
                 },
@@ -13517,7 +13509,7 @@ mod tests {
             step_host(
                 &mut host,
                 None,
-                nickel_ui::HostBatch {
+                twinkle::HostBatch {
                     application_changed: true,
                     ..Default::default()
                 },
@@ -13526,7 +13518,7 @@ mod tests {
             assert_eq!(host.inspect().keyboard_focus, Some(last.id.clone()));
             let bounds = host.resolved_layout().find(&last.id).unwrap().allocated;
             assert!(bounds.origin.y >= 0.0 && bounds.origin.y + bounds.size.height <= 800.0);
-            assert!(host.commands().iter().any(|command| matches!(command, nickel_ui::backend::PaintCommand::Image {id,..} if *id >= 64000 && *id < 64008)));
+            assert!(host.commands().iter().any(|command| matches!(command, twinkle::backend::PaintCommand::Image {id,..} if *id >= 64000 && *id < 64008)));
             assert!(host.resolved_layout().nodes().len() < 500);
             assert!(host.application_mut().take_effects().is_empty());
         });
@@ -13549,7 +13541,7 @@ mod tests {
             application
                 .sync_host_data_fields(&[("wallpaper", &wallpaper)])
                 .unwrap();
-            let mut host = nickel_ui::UiHost::new(application, 1100, 800);
+            let mut host = twinkle::UiHost::new(application, 1100, 800);
             crate::live_shell::step_plugin_host(&mut host, None, Default::default()).unwrap();
             assert!(!host.application().virtual_work_pending);
             let source = logical_source(host.application().accepted.node())
@@ -13575,8 +13567,8 @@ mod tests {
             crate::live_shell::step_plugin_host(
                 &mut host,
                 None,
-                nickel_ui::HostBatch {
-                    events: vec![nickel_ui::HostEvent::Ui(nickel_ui::UiEvent::Scroll {
+                twinkle::HostBatch {
+                    events: vec![twinkle::HostEvent::Ui(twinkle::UiEvent::Scroll {
                         point: Point { x: 700.0, y: 600.0 },
                         delta_y: 100_000.0,
                     })],
@@ -13612,7 +13604,7 @@ mod tests {
                 "retired offscreen wallpaper kept its callback"
             );
             let last = host
-                .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                .query_unique(&twinkle::SemanticSelector::RoleAndName {
                     role: SemanticRole::Button,
                     name: "Wallpaper 127".into(),
                 })
@@ -13620,7 +13612,7 @@ mod tests {
             assert!(last.bounds.origin.y < 800.0);
             host.perform_semantic_action(
                 last.id,
-                nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
+                twinkle::SemanticAction::Invoke(twinkle::ActionKind::Activate),
             );
             assert!(host.application().last_error().is_none());
             let effects = host.application_mut().take_effects();
@@ -13629,7 +13621,7 @@ mod tests {
                 "{effects:?}"
             );
             let chooser = host
-                .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                .query_unique(&twinkle::SemanticSelector::RoleAndName {
                     role: SemanticRole::Button,
                     name: "Choose image…".into(),
                 })
@@ -13638,24 +13630,24 @@ mod tests {
             crate::live_shell::step_plugin_host(&mut host, None, Default::default()).unwrap();
             let mut peak_javascript_handlers = 0;
             for (index, event) in (0..128)
-                .map(|index| (index, nickel_ui::UiEvent::FocusNext))
+                .map(|index| (index, twinkle::UiEvent::FocusNext))
                 .chain(
                     (0..127)
                         .rev()
-                        .map(|index| (index, nickel_ui::UiEvent::FocusPrevious)),
+                        .map(|index| (index, twinkle::UiEvent::FocusPrevious)),
                 )
             {
                 crate::live_shell::step_plugin_host(
                     &mut host,
                     None,
-                    nickel_ui::HostBatch {
-                        events: vec![nickel_ui::HostEvent::Ui(event)],
+                    twinkle::HostBatch {
+                        events: vec![twinkle::HostEvent::Ui(event)],
                         ..Default::default()
                     },
                 )
                 .unwrap();
                 let expected = host
-                    .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                    .query_unique(&twinkle::SemanticSelector::RoleAndName {
                         role: SemanticRole::Button,
                         name: format!("Wallpaper {index}"),
                     })
@@ -13715,13 +13707,13 @@ mod tests {
                 crate::live_shell::step_plugin_host(
                     &mut host,
                     None,
-                    nickel_ui::HostBatch {
+                    twinkle::HostBatch {
                         events: (0..steps)
                             .map(|_| {
-                                nickel_ui::HostEvent::Ui(if forward {
-                                    nickel_ui::UiEvent::FocusNext
+                                twinkle::HostEvent::Ui(if forward {
+                                    twinkle::UiEvent::FocusNext
                                 } else {
-                                    nickel_ui::UiEvent::FocusPrevious
+                                    twinkle::UiEvent::FocusPrevious
                                 })
                             })
                             .collect(),
@@ -13730,7 +13722,7 @@ mod tests {
                 )
                 .unwrap();
                 let expected = host
-                    .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                    .query_unique(&twinkle::SemanticSelector::RoleAndName {
                         role: SemanticRole::Button,
                         name: format!("Wallpaper {expected_index}"),
                     })
@@ -13758,7 +13750,7 @@ mod tests {
             .unwrap();
             assert_eq!(host.inspect().keyboard_focus, Some(focused.clone()));
             let reordered = host
-                .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                .query_unique(&twinkle::SemanticSelector::RoleAndName {
                     role: SemanticRole::Button,
                     name: "Wallpaper 0".into(),
                 })
@@ -13775,7 +13767,7 @@ mod tests {
                 step_host(
                     &mut host,
                     None,
-                    nickel_ui::HostBatch {
+                    twinkle::HostBatch {
                         surface_size: Some((1100, height)),
                         ..Default::default()
                     },
@@ -13793,14 +13785,14 @@ mod tests {
                 assert!(host.application_mut().take_effects().is_empty());
             }
             let navigation = host
-                .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                .query_unique(&twinkle::SemanticSelector::RoleAndName {
                     role: SemanticRole::Button,
                     name: "Keyboard shortcuts".into(),
                 })
                 .unwrap();
             host.perform_semantic_action(
                 navigation.id,
-                nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
+                twinkle::SemanticAction::Invoke(twinkle::ActionKind::Activate),
             );
             crate::live_shell::step_plugin_host(&mut host, None, Default::default()).unwrap();
             assert!(

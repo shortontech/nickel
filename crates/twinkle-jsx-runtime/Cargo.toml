@@ -1,0 +1,18 @@
+[package]
+name = "twinkle-jsx-runtime"
+version = "0.2.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+twinkle-protocol = { path = "../twinkle-protocol" }
+serde.workspace = true
+serde_json.workspace = true
+oxc_allocator = "=0.152.0"
+oxc_codegen = "=0.152.0"
+oxc_parser = "=0.152.0"
+oxc_semantic = "=0.152.0"
+oxc_span = "=0.152.0"
+oxc_transformer = "=0.152.0"
+v8 = { version = "150.4", default-features = false }

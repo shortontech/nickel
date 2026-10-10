@@ -1,241 +1,7 @@
+/// <reference path="../../crates/twinkle-jsx-runtime/types/twinkle.d.ts" />
 // Nickel's global JSX API. This file is for editors and the development
 // compiler; the installed plugin still contains plain JavaScript. Components
 // and public component references are callable in JSX. Children are ordinary JSX values.
-declare namespace JSX {
-    interface Element {}
-    interface ElementChildrenAttribute { children: {} }
-    interface IntrinsicElements {
-        div: NickelDivProps;
-    }
-}
-
-type NickelChild = JSX.Element | string | number | null | undefined | boolean | ReadonlyArray<NickelChild>;
-type NickelComponent<P = NickelProps> = (props: P) => JSX.Element | null;
-type NickelAnchor = "center" | "top-left" | "top-center" | "top-right" | "bottom-left" | "bottom-center" | "bottom-right";
-type NickelJson = null | boolean | number | string | ReadonlyArray<NickelJson> | { readonly [key: string]: NickelJson };
-type NickelColor = number; // 0xAARRGGBB
-type NickelClick = () => void;
-interface NickelDragGesture {
-    phase: "start" | "move" | "end" | "cancel";
-    x: number;
-    y: number;
-    bounds: { x: number; y: number; width: number; height: number };
-}
-interface NickelDropGesture {
-    x: number;
-    y: number;
-    sourceId: string;
-    sourceBounds: { x: number; y: number; width: number; height: number };
-    targetId: string;
-    targetBounds: { x: number; y: number; width: number; height: number };
-}
-
-interface NickelProps {
-    key?: string | number;
-    className?: string;
-    children?: NickelChild;
-}
-
-interface NickelDivProps extends NickelProps {
-    id?: string;
-    onClick?: NickelClick;
-    onDrop?: (gesture: NickelDropGesture) => void;
-    role?: "button" | "radio" | "radiogroup" | "option" | "group";
-    "aria-label"?: string;
-    "aria-checked"?: boolean;
-    "aria-selected"?: boolean;
-    disabled?: boolean;
-}
-
-interface NickelPanelProps extends NickelProps {
-    background?: NickelColor;
-    height?: number;
-}
-interface NickelWindowProps extends NickelProps {
-    /** Native window activation, distinct from control focus; duplicate reports are ignored. */
-    onFocus?: () => void;
-    /** Native focus loss after activation; initial unactivated focus loss is ignored. */
-    onBlur?: () => void;
-    onSubmit?: () => void;
-    onEscape?: () => void;
-    id?: string;
-    title?: string;
-    width: number | "100%";
-    height: number | "100%";
-    placement?: "managed" | "fixed";
-    output?: "primary" | "all";
-    edge?: "top" | "bottom" | "left" | "right";
-    anchor?: "center" | "top-left" | "top-center" | "top-right" | "bottom-left" | "bottom-center" | "bottom-right";
-    reserveWorkArea?: boolean;
-    bottomOffset?: number;
-    background?: NickelColor;
-}
-interface NickelBoxProps extends NickelProps {
-    x: number;
-    y: number;
-    width: number;
-    height: number;
-    background?: NickelColor;
-    radius?: number;
-}
-interface NickelTextProps extends NickelProps { color?: NickelColor; wrap?: boolean; maxLines?: number }
-interface NickelButtonProps extends NickelProps {
-    id?: string;
-    width?: number;
-    height?: number;
-    accessibilityLabel?: string;
-    icon?: string;
-    showLabel?: boolean;
-    disabled?: boolean;
-    state?: "selected" | "unselected" | "disabled";
-    onClick: NickelClick;
-    onFocus?: NickelClick;
-    onBlur?: NickelClick;
-    onContextMenu?: NickelClick;
-    onDrag?: (gesture: NickelDragGesture) => void;
-    onDrop?: (gesture: NickelDropGesture) => void;
-}
-interface NickelTextFieldProps extends NickelProps {
-    id?: string;
-    value?: string;
-    accessibilityLabel?: string;
-    disabled?: boolean;
-    placeholder?: string;
-    /** Mask the displayed value and protect the surface from remote inspection. */
-    secure?: boolean;
-    onChange: (value: string) => void;
-    onFocus?: NickelClick;
-    onBlur?: NickelClick;
-}
-interface NickelSliderProps extends NickelProps {
-    id?: string;
-    value: number;
-    accessibilityLabel: string;
-    /** Defaults to 0..1; onChange receives a value in this numeric range. */
-    min?: number;
-    max?: number;
-    step?: number;
-    onChange: (value: number) => void;
-}
-interface NickelSwitchProps extends NickelProps {
-    id: string;
-    state: "on" | "off" | "disabled-on" | "disabled-off";
-    accessibilityLabel: string;
-    onClick?: NickelClick;
-}
-interface NickelColorSwatchProps extends NickelProps {
-    id?: string;
-    /** CSS color; omit for the custom-color button. */
-    color?: string;
-    selected?: boolean;
-    accessibilityLabel: string;
-    onClick: NickelClick;
-}
-interface NickelSelectProps extends NickelProps {
-    id: string;
-    value: string;
-    open?: boolean;
-    accessibilityLabel: string;
-    onClick: NickelClick;
-}
-interface NickelOptionProps extends NickelProps {
-    /** Optional package or application artwork asset key. */
-    icon?: string;
-    id: string;
-    onClick: NickelClick;
-}
-interface NickelImageProps extends NickelProps {
-    asset: string;
-    width: number;
-    height: number;
-    fit?: "contain" | "cover" | "stretch";
-}
-interface NickelImageButtonProps extends NickelImageProps {
-    id?: string;
-    accessibilityLabel: string;
-    onClick: NickelClick;
-    onContextMenu?: NickelClick;
-}
-interface NickelDialogProps extends NickelProps {
-    id?: string;
-    anchor: string;
-    open?: boolean;
-    onClose?: NickelClick;
-    width?: number;
-    height?: number;
-}
-interface NickelMenuProps extends NickelProps {
-    id: string;
-    anchor: string;
-    open?: boolean;
-    x?: number;
-    y?: number;
-}
-interface NickelMenuItemProps extends NickelProps {
-    id: string;
-    label?: string;
-    onClick?: NickelClick;
-    disabledReason?: string;
-    shortcut?: string;
-    separatorBefore?: boolean;
-}
-interface NickelBadgeProps extends NickelProps {
-    item?: string;
-    label?: string;
-    count: number;
-    color?: NickelColor;
-}
-interface NickelProgressProps extends NickelProps {
-    percent: number;
-    width: number;
-    height: number;
-}
-declare function Fragment(props:NickelProps):JSX.Element;
-declare function h(kind: unknown, props?: object | null, ...children: NickelChild[]): JSX.Element;
-/** @deprecated Compatibility helper; use Window or FixedWindow for new surfaces. */
-declare function Panel(props: NickelPanelProps): JSX.Element;
-declare function Window(props: NickelWindowProps): JSX.Element;
-/** Convenience JSX component that renders Window with fixed placement. */
-declare function FixedWindow(props: Omit<NickelWindowProps, "placement">): JSX.Element;
-declare function Box(props: NickelBoxProps): JSX.Element;
-/** Positions Box children by their x and y coordinates. Size it with CSS. */
-declare function Layer(props: NickelProps & { id?: string }): JSX.Element;
-/** Generic CSS layout box. Defaults to block layout. */
-declare function Div(props: NickelDivProps): JSX.Element;
-declare function Badge(props: NickelBadgeProps): JSX.Element;
-declare function Row(props: NickelProps): JSX.Element;
-declare function Column(props: NickelProps): JSX.Element;
-declare function ScrollView(props: NickelProps & { id: string; height?: number; grow?: boolean }): JSX.Element;
-/** Embedded virtual rows selected by the native ancestor viewport. Stable item keys must be unique, nonempty, and at most 512 UTF-8 bytes. Native row slots have a minimum height of one logical pixel, matching Collection; itemHeight supplies initial estimates. */
-declare function VirtualColumn<T>(props: { id: string; className?: string; items: readonly T[]; itemKey: (item: T, index: number) => string; itemHeight: number | ((item: T, index: number) => number); gap?: number; overscan?: number; renderItem: (item: T, index: number) => JSX.Element }): JSX.Element;
-declare function Text(props: NickelTextProps): JSX.Element;
-declare function Image(props: NickelImageProps): JSX.Element;
-declare function ImageButton(props: NickelImageButtonProps): JSX.Element;
-declare function Progress(props: NickelProgressProps): JSX.Element;
-declare function TextField(props: NickelTextFieldProps): JSX.Element;
-declare function Checkbox(props: NickelProps & { id?: string; checked?: boolean; indeterminate?: boolean; disabled?: boolean; label?: string; accessibilityLabel?: string; onChange?: (checked: boolean) => void; onClick?: NickelClick }): JSX.Element;
-declare function Slider(props: NickelSliderProps): JSX.Element;
-declare function Switch(props: NickelSwitchProps): JSX.Element;
-declare function ColorSwatch(props: NickelColorSwatchProps): JSX.Element;
-declare function Select(props: NickelSelectProps): JSX.Element;
-declare function Option(props: NickelOptionProps): JSX.Element;
-declare function Button(props: NickelButtonProps): JSX.Element;
-declare function Spacer(props: NickelProps): JSX.Element;
-/** Host-provided content placed inside this component's layout box. */
-declare function Slot(props: NickelProps & { id: string }): JSX.Element;
-declare function Dialog(props: NickelDialogProps): JSX.Element;
-declare function Menu(props: NickelMenuProps): JSX.Element;
-declare function MenuItem(props: NickelMenuItemProps): JSX.Element;
-
-declare function useState<T>(initial: T | (() => T)): [T, (next: T | ((previous: T) => T)) => void];
-declare function useReducer<S, A>(reducer: (state: S, action: A) => S, initialState: S): [S, (action: A) => void];
-declare function useReducer<S, A, I>(reducer: (state: S, action: A) => S, initialArg: I, init: (initialArg: I) => S): [S, (action: A) => void];
-declare function useRef<T>(initial: T): { current: T };
-/** Stable, opaque ID for accessibility relationships within this component's mounted surface. */
-declare function useId(): string;
-interface NickelContext<T> { readonly Provider: NickelComponent<{value:T;children?:NickelChild}>; readonly defaultValue: T }
-declare function createContext<T>(defaultValue: T): NickelContext<T>;
-declare function useContext<T>(context: NickelContext<T>): T;
 declare function useWindows(): ReadonlyArray<Readonly<NickelNativeWindow>>;
 declare function useWindows<T>(selector: (windows: ReadonlyArray<Readonly<NickelNativeWindow>>) => T): T;
 declare function useActiveWindow(): Readonly<NickelNativeWindow> | null;
@@ -253,9 +19,6 @@ declare function useWorkspace(): Readonly<{id:string;active:boolean}>|null;
 interface NickelOutputsSnapshot extends NickelAvailability {readonly generation:number;readonly revision:string|null;readonly outputs:NickelDisplaySnapshot["outputs"]}
 declare function useOutputs(): Readonly<NickelOutputsSnapshot>;
 declare function useOutputs<T>(selector:(outputs:Readonly<NickelOutputsSnapshot>)=>T):T;
-interface NickelLocaleSnapshot {readonly generation:number;readonly tag:string;readonly direction:"ltr"|"rtl";readonly known:boolean}
-declare function useLocale():Readonly<NickelLocaleSnapshot>;
-interface NickelExternalStore<T> {readonly subscribe:(listener:()=>void)=>()=>void;readonly getSnapshot:()=>T}
 declare const NickelStores:Readonly<{
     windows:NickelExternalStore<ReadonlyArray<Readonly<NickelNativeWindow>>>;
     applications:NickelExternalStore<ReadonlyArray<Readonly<NickelApplication>>>;
@@ -266,37 +29,6 @@ declare const NickelStores:Readonly<{
     theme:NickelExternalStore<Readonly<NickelThemeSnapshot>>;
     capabilities:NickelExternalStore<Readonly<Record<NickelCapability,Readonly<NickelCapabilitySnapshot>>>>;
 }>;
-/** Only matching functions from a host-branded NickelStores entry are accepted. */
-declare function useSyncExternalStore<T>(subscribe:NickelExternalStore<T>["subscribe"],getSnapshot:NickelExternalStore<T>["getSnapshot"]):T;
-declare function memo<P>(component:NickelComponent<P>,compare?:(previous:Readonly<P & {children?:NickelChild}>,next:Readonly<P & {children?:NickelChild}>)=>boolean):NickelComponent<P>;
-interface NickelComponentFailure { readonly message:string }
-interface NickelErrorBoundaryProps {
-    readonly children?:NickelChild;
-    readonly fallback?:NickelChild | ((error:Readonly<NickelComponentFailure>,reset:()=>void)=>NickelChild);
-    /** A changed member resets a failed boundary before its next render. */
-    readonly resetKeys?:ReadonlyArray<unknown>;
-}
-declare const ErrorBoundary:NickelComponent<NickelErrorBoundaryProps>;
-interface NickelThemePalette {
-    readonly background:NickelColor; readonly panel:NickelColor; readonly surface:NickelColor;
-    readonly surfaceHover:NickelColor; readonly text:NickelColor; readonly muted:NickelColor;
-    readonly accent:NickelColor; readonly accentSoft:NickelColor; readonly complement:NickelColor;
-}
-interface NickelThemeSnapshot {
-    readonly generation:number;
-    readonly mode:"light"|"dark"|"unknown";
-    readonly accent:NickelColor|null;
-    readonly accentHue:number|null;
-    readonly accentIntensity:number|null;
-    /** null means the host has not bridged an authoritative preference. */
-    readonly reducedMotion:boolean|null;
-    /** null means the host has not bridged an authoritative preference. */
-    readonly reducedTransparency:boolean|null;
-    readonly palette:Readonly<NickelThemePalette>|null;
-}
-declare function useTheme(): Readonly<NickelThemeSnapshot>;
-declare function useTheme<T>(selector: (theme: Readonly<NickelThemeSnapshot>) => T): T;
-declare function useReducedMotion(): boolean|null;
 type NickelCapability =
     | "launcher-show" | "control-center-show" | "on-screen-keyboard-show"
     | "on-screen-keyboard-read" | "on-screen-keyboard-input"
@@ -321,29 +53,6 @@ interface NickelCapabilitySnapshot {
     readonly reason:string|null;
 }
 declare function useCapability(capability: NickelCapability): Readonly<NickelCapabilitySnapshot>;
-declare function useEffect(setup: () => void | (() => void), dependencies?: ReadonlyArray<unknown>): void;
-interface NickelSurfaceSnapshot {
-    readonly generation:number;
-    /** Opaque host-owned identity for this exact mounted surface. */
-    readonly mountId:string|null;
-    readonly id:string|null;
-    readonly kind:"panel"|"dock"|"desktop"|"window"|"dialog"|"overlay"|null;
-    readonly logicalSize:Readonly<{width:number;height:number}>|null;
-    /** Unavailable until the native output authority is projected to this mount. */
-    readonly output:string|null;
-    readonly availableSize:Readonly<{width:number;height:number}>|null;
-    readonly scaleFactor:number|null;
-    readonly focused:boolean|null;
-    readonly visible:boolean|null;
-}
-declare function useSurface():NickelSurfaceSnapshot;
-declare function useSurface<T>(selector:(surface:NickelSurfaceSnapshot)=>T):T;
-declare function useOutput():NickelDisplaySnapshot["outputs"][number]|null;
-declare function useScaleFactor():number|null;
-declare function useSurfaceFocus():boolean|null;
-declare function useMemo<T>(factory: () => T, dependencies?: ReadonlyArray<unknown>): T;
-declare function useCallback<T extends (...args: never[]) => unknown>(callback: T, dependencies?: ReadonlyArray<unknown>): T;
-
 type NickelSurfaceRequest = Readonly<
     | { type: "show-plugin-surface"; surfaceId: string }
     | { type: "hide-plugin-surface"; surfaceId: string }
@@ -662,3 +371,41 @@ declare const nickel: Readonly<{
         revert(): void;
     }>;
 }>;
+
+type NickelChild = TwinkleChild;
+type NickelComponent<P=NickelProps> = TwinkleComponent<P>;
+type NickelAnchor = TwinkleAnchor;
+type NickelJson = TwinkleJson;
+type NickelColor = TwinkleColor;
+type NickelClick = TwinkleClick;
+type NickelDragGesture = TwinkleDragGesture;
+type NickelDropGesture = TwinkleDropGesture;
+type NickelProps = TwinkleProps;
+type NickelDivProps = TwinkleDivProps;
+type NickelPanelProps = TwinklePanelProps;
+type NickelWindowProps = TwinkleWindowProps;
+type NickelBoxProps = TwinkleBoxProps;
+type NickelTextProps = TwinkleTextProps;
+type NickelButtonProps = TwinkleButtonProps;
+type NickelTextFieldProps = TwinkleTextFieldProps;
+type NickelSliderProps = TwinkleSliderProps;
+type NickelSwitchProps = TwinkleSwitchProps;
+type NickelColorSwatchProps = TwinkleColorSwatchProps;
+type NickelSelectProps = TwinkleSelectProps;
+type NickelOptionProps = TwinkleOptionProps;
+type NickelImageProps = TwinkleImageProps;
+type NickelImageButtonProps = TwinkleImageButtonProps;
+type NickelDialogProps = TwinkleDialogProps;
+type NickelMenuProps = TwinkleMenuProps;
+type NickelMenuItemProps = TwinkleMenuItemProps;
+type NickelBadgeProps = TwinkleBadgeProps;
+type NickelProgressProps = TwinkleProgressProps;
+type NickelContext<T> = TwinkleContext<T>;
+type NickelLocaleSnapshot = TwinkleLocaleSnapshot;
+interface NickelExternalStore<T> extends TwinkleExternalStore<T> {}
+type NickelComponentFailure = TwinkleComponentFailure;
+type NickelErrorBoundaryProps = TwinkleErrorBoundaryProps;
+type NickelThemePalette = TwinkleThemePalette;
+type NickelThemeSnapshot = TwinkleThemeSnapshot;
+type NickelSurfaceSnapshot = TwinkleSurfaceSnapshot;
+declare function useOutput():NickelDisplaySnapshot["outputs"][number]|null;

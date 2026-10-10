@@ -9,11 +9,11 @@ use std::{
     time::Duration,
 };
 
-use nickel_ui::{
+use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+use twinkle::{
     AdapterOutcome, Application, Container, FrameOverlay, HostAdapter, HostServices, OverlayAnchor,
     OverlayMenu, OverlayMenuItem, Point, UiHost, UiId, View, ViewContext,
 };
-use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use windows::Win32::{
     Foundation::{HWND, POINT},
     UI::WindowsAndMessaging::{
@@ -191,7 +191,7 @@ impl<Message: Clone + Send + 'static> HostAdapter<PopupApplication<Message>>
             }
         }
         host.open_transient(
-            nickel_ui::OverlayId::new("windows-detached-context"),
+            twinkle::OverlayId::new("windows-detached-context"),
             UiId::from("popup-anchor"),
         );
         services.window().focus_window();
@@ -332,7 +332,7 @@ fn run<Message: Clone + Send + 'static>(
                     focused: false,
                     cancelled,
                 };
-                nickel_ui::run_with_adapter_on_any_thread(application, adapter)
+                nickel_ui_host::run_with_adapter_on_any_thread(application, adapter)
                     .map_err(|error| error.to_string())
             })
             .ok()?;

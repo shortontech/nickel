@@ -77,7 +77,7 @@ fn native_axis_held(
         (offset / range * 2.0 - 1.0).abs()
     };
     let threshold =
-        f64::from(nickel_input::controller::ControllerConfig::default().release_threshold_milli)
+        f64::from(twinkle_input::controller::ControllerConfig::default().release_threshold_milli)
             / 1000.0;
     Ok(normalized >= threshold)
 }

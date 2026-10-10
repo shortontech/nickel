@@ -102,7 +102,7 @@ impl Drop for LaunchPreparationAdmission {
     }
 }
 
-pub(crate) fn observe_physical_key(event: nickel_input::windows::NativeKeyboardEvent) {
+pub(crate) fn observe_physical_key(event: twinkle_input::windows::NativeKeyboardEvent) {
     use std::sync::atomic::Ordering;
     if !event.injected {
         crate::windows_remote_input::observe_physical_key(event);
@@ -117,7 +117,7 @@ pub(crate) fn observe_physical_key(event: nickel_input::windows::NativeKeyboardE
     }
 }
 
-pub(crate) fn observe_physical_pointer(event: nickel_input::windows::NativePointerEvent) {
+pub(crate) fn observe_physical_pointer(event: twinkle_input::windows::NativePointerEvent) {
     if !event.injected {
         crate::windows_remote_input::observe_physical_pointer(event);
         crate::windows_remote_input::release_all();
@@ -8758,7 +8758,7 @@ impl WindowsRemoteControl {
     pub(crate) fn reconcile_indicators(
         &mut self,
         shell: &mut WinitShell,
-        theme: nickel_ui::SemanticTheme,
+        theme: twinkle::SemanticTheme,
     ) {
         let result = self.sync_indicators(shell, theme).and_then(|()| {
             if self.pending_indicator_activation.is_empty() {
@@ -8828,7 +8828,7 @@ impl WindowsRemoteControl {
     fn sync_indicators(
         &mut self,
         shell: &mut WinitShell,
-        theme: nickel_ui::SemanticTheme,
+        theme: twinkle::SemanticTheme,
     ) -> Result<(), String> {
         let control = self.remote_control.control();
         let control = control
@@ -8977,11 +8977,11 @@ impl WindowsRemoteControl {
             app.grants = grants.clone();
             app.theme = theme;
             app.stopped_confirmation = stopped_confirmation;
-            indicator.host.step(nickel_ui::HostBatch {
+            indicator.host.step(twinkle::HostBatch {
                 surface_size: Some((width, height)),
                 application_changed: changed,
                 now: Some(now),
-                events: vec![nickel_ui::HostEvent::Poll],
+                events: vec![twinkle::HostEvent::Poll],
                 ..Default::default()
             });
             let scale = shell
@@ -8996,10 +8996,10 @@ impl WindowsRemoteControl {
             )?;
             indicator.authority_revision = authority_revision.clone();
             if let Some(target) = indicator.accessibility.take_stop() {
-                let outcome = indicator.host.step(nickel_ui::HostBatch {
-                    events: vec![nickel_ui::HostEvent::Accessibility {
+                let outcome = indicator.host.step(twinkle::HostBatch {
+                    events: vec![twinkle::HostEvent::Accessibility {
                         target,
-                        action: nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
+                        action: twinkle::SemanticAction::Invoke(twinkle::ActionKind::Activate),
                     }],
                     ..Default::default()
                 });
@@ -9069,7 +9069,7 @@ impl WindowsRemoteControl {
             }
             ShellEvent::LogicalResize { .. } | ShellEvent::PixelResize { .. } => {
                 if let Some(surface) = shell.surface(id) {
-                    indicator.host.step(nickel_ui::HostBatch {
+                    indicator.host.step(twinkle::HostBatch {
                         surface_size: Some(surface.window().size()),
                         ..Default::default()
                     });
@@ -9635,7 +9635,7 @@ fn control_capability(
 
 fn windows_semantic_projection(
     role: crate::winit_shell::SurfaceRole,
-    mut projection: Vec<nickel_ui::SemanticNodeSnapshot>,
+    mut projection: Vec<twinkle::SemanticNodeSnapshot>,
 ) -> Result<Vec<nickel_remote_control::semantics::SemanticNode>, String> {
     use nickel_remote_control::semantics::{SemanticNode, SemanticValue};
     for node in &mut projection {
@@ -9657,13 +9657,13 @@ fn windows_semantic_projection(
                 return Err("semantic geometry unavailable".to_owned());
             }
             let value = match node.value {
-                Some(nickel_ui::SemanticValueSnapshot::Boolean(value)) => {
+                Some(twinkle::SemanticValueSnapshot::Boolean(value)) => {
                     Some(SemanticValue::Boolean(value))
                 }
-                Some(nickel_ui::SemanticValueSnapshot::Text(value)) => {
+                Some(twinkle::SemanticValueSnapshot::Text(value)) => {
                     Some(SemanticValue::Text(value))
                 }
-                Some(nickel_ui::SemanticValueSnapshot::Number {
+                Some(twinkle::SemanticValueSnapshot::Number {
                     value,
                     minimum,
                     maximum,
@@ -9682,7 +9682,7 @@ fn windows_semantic_projection(
                         step,
                     })
                 }
-                Some(nickel_ui::SemanticValueSnapshot::ProtectedText { .. }) => {
+                Some(twinkle::SemanticValueSnapshot::ProtectedText { .. }) => {
                     return Err("protected surface".into());
                 }
                 None => None,
@@ -9708,65 +9708,65 @@ fn windows_semantic_projection(
 
 fn windows_semantic_mutation(
     action: nickel_remote_control::semantics::SemanticMutation,
-) -> nickel_ui::SemanticAction {
+) -> twinkle::SemanticAction {
     use nickel_remote_control::semantics::{SemanticInvocation, SemanticMutation};
     match action {
         SemanticMutation::SetBoolean(value) => {
-            nickel_ui::SemanticAction::SetValue(nickel_ui::SemanticValueInput::Boolean(value))
+            twinkle::SemanticAction::SetValue(twinkle::SemanticValueInput::Boolean(value))
         }
         SemanticMutation::SetNumber(value) => {
-            nickel_ui::SemanticAction::SetValue(nickel_ui::SemanticValueInput::Number(value))
+            twinkle::SemanticAction::SetValue(twinkle::SemanticValueInput::Number(value))
         }
         SemanticMutation::SetText(value) => {
-            nickel_ui::SemanticAction::SetValue(nickel_ui::SemanticValueInput::Text(value))
+            twinkle::SemanticAction::SetValue(twinkle::SemanticValueInput::Text(value))
         }
-        SemanticMutation::Invoke(value) => nickel_ui::SemanticAction::Invoke(match value {
-            SemanticInvocation::Activate => nickel_ui::ActionKind::Activate,
-            SemanticInvocation::Cancel => nickel_ui::ActionKind::Cancel,
-            SemanticInvocation::ContextMenu => nickel_ui::ActionKind::ContextMenu,
-            SemanticInvocation::Increment => nickel_ui::ActionKind::Increment,
-            SemanticInvocation::Decrement => nickel_ui::ActionKind::Decrement,
-            SemanticInvocation::Expand => nickel_ui::ActionKind::Expand,
-            SemanticInvocation::Collapse => nickel_ui::ActionKind::Collapse,
-            SemanticInvocation::Select => nickel_ui::ActionKind::Select,
-            SemanticInvocation::Dismiss => nickel_ui::ActionKind::Dismiss,
-            SemanticInvocation::Scroll => nickel_ui::ActionKind::Scroll,
-            SemanticInvocation::EnterNavigation => nickel_ui::ActionKind::EnterNavigation,
-            SemanticInvocation::ExitNavigation => nickel_ui::ActionKind::ExitNavigation,
+        SemanticMutation::Invoke(value) => twinkle::SemanticAction::Invoke(match value {
+            SemanticInvocation::Activate => twinkle::ActionKind::Activate,
+            SemanticInvocation::Cancel => twinkle::ActionKind::Cancel,
+            SemanticInvocation::ContextMenu => twinkle::ActionKind::ContextMenu,
+            SemanticInvocation::Increment => twinkle::ActionKind::Increment,
+            SemanticInvocation::Decrement => twinkle::ActionKind::Decrement,
+            SemanticInvocation::Expand => twinkle::ActionKind::Expand,
+            SemanticInvocation::Collapse => twinkle::ActionKind::Collapse,
+            SemanticInvocation::Select => twinkle::ActionKind::Select,
+            SemanticInvocation::Dismiss => twinkle::ActionKind::Dismiss,
+            SemanticInvocation::Scroll => twinkle::ActionKind::Scroll,
+            SemanticInvocation::EnterNavigation => twinkle::ActionKind::EnterNavigation,
+            SemanticInvocation::ExitNavigation => twinkle::ActionKind::ExitNavigation,
         }),
     }
 }
 
 fn windows_semantic_action_has_guarded_disposition(
     role: crate::winit_shell::SurfaceRole,
-    action: nickel_ui::ActionKind,
+    action: twinkle::ActionKind,
 ) -> bool {
     role == crate::winit_shell::SurfaceRole::VolumeOsd
         || (role == crate::winit_shell::SurfaceRole::Launcher
-            && action == nickel_ui::ActionKind::SetValue)
+            && action == twinkle::ActionKind::SetValue)
 }
 
 fn windows_semantic_mutation_kind(
     action: &nickel_remote_control::semantics::SemanticMutation,
-) -> nickel_ui::ActionKind {
+) -> twinkle::ActionKind {
     use nickel_remote_control::semantics::{SemanticInvocation, SemanticMutation};
     match action {
         SemanticMutation::SetBoolean(_)
         | SemanticMutation::SetNumber(_)
-        | SemanticMutation::SetText(_) => nickel_ui::ActionKind::SetValue,
+        | SemanticMutation::SetText(_) => twinkle::ActionKind::SetValue,
         SemanticMutation::Invoke(invocation) => match invocation {
-            SemanticInvocation::Activate => nickel_ui::ActionKind::Activate,
-            SemanticInvocation::Cancel => nickel_ui::ActionKind::Cancel,
-            SemanticInvocation::ContextMenu => nickel_ui::ActionKind::ContextMenu,
-            SemanticInvocation::Increment => nickel_ui::ActionKind::Increment,
-            SemanticInvocation::Decrement => nickel_ui::ActionKind::Decrement,
-            SemanticInvocation::Expand => nickel_ui::ActionKind::Expand,
-            SemanticInvocation::Collapse => nickel_ui::ActionKind::Collapse,
-            SemanticInvocation::Select => nickel_ui::ActionKind::Select,
-            SemanticInvocation::Dismiss => nickel_ui::ActionKind::Dismiss,
-            SemanticInvocation::Scroll => nickel_ui::ActionKind::Scroll,
-            SemanticInvocation::EnterNavigation => nickel_ui::ActionKind::EnterNavigation,
-            SemanticInvocation::ExitNavigation => nickel_ui::ActionKind::ExitNavigation,
+            SemanticInvocation::Activate => twinkle::ActionKind::Activate,
+            SemanticInvocation::Cancel => twinkle::ActionKind::Cancel,
+            SemanticInvocation::ContextMenu => twinkle::ActionKind::ContextMenu,
+            SemanticInvocation::Increment => twinkle::ActionKind::Increment,
+            SemanticInvocation::Decrement => twinkle::ActionKind::Decrement,
+            SemanticInvocation::Expand => twinkle::ActionKind::Expand,
+            SemanticInvocation::Collapse => twinkle::ActionKind::Collapse,
+            SemanticInvocation::Select => twinkle::ActionKind::Select,
+            SemanticInvocation::Dismiss => twinkle::ActionKind::Dismiss,
+            SemanticInvocation::Scroll => twinkle::ActionKind::Scroll,
+            SemanticInvocation::EnterNavigation => twinkle::ActionKind::EnterNavigation,
+            SemanticInvocation::ExitNavigation => twinkle::ActionKind::ExitNavigation,
         },
     }
 }
@@ -10014,19 +10014,19 @@ mod tests {
     fn shell_semantic_policy_admits_only_guarded_windows_actions() {
         assert!(windows_semantic_action_has_guarded_disposition(
             crate::winit_shell::SurfaceRole::Launcher,
-            nickel_ui::ActionKind::SetValue,
+            twinkle::ActionKind::SetValue,
         ));
         assert!(windows_semantic_action_has_guarded_disposition(
             crate::winit_shell::SurfaceRole::VolumeOsd,
-            nickel_ui::ActionKind::SetValue,
+            twinkle::ActionKind::SetValue,
         ));
         assert!(!windows_semantic_action_has_guarded_disposition(
             crate::winit_shell::SurfaceRole::Launcher,
-            nickel_ui::ActionKind::Activate,
+            twinkle::ActionKind::Activate,
         ));
         assert!(!windows_semantic_action_has_guarded_disposition(
             crate::winit_shell::SurfaceRole::ControlCenter,
-            nickel_ui::ActionKind::SetValue,
+            twinkle::ActionKind::SetValue,
         ));
     }
 

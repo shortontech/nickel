@@ -1,7 +1,6 @@
 # Nickel JSX runtime
 
-`bootstrap.js` defines components, hooks, Settings registration, and the public
-`nickel` capability clients evaluated inside a package's JavaScript context.
+The generic [`bootstrap.js`](../../crates/twinkle-jsx-runtime/src/bootstrap.js) defines native components, hooks, application data, and render/event transactions. Nickel installs its own [`host bootstrap`](../../crates/nickel-jsx-host/src/bootstrap.js) for Settings registration and the public `nickel` service clients inside a package context.
 Nickel uses Oxc to erase TypeScript and lower JSX, then runs the cached JavaScript
 through direct V8 bindings without Node, Deno, a browser, or a DOM. TSX is the
 canonical authoring format; JavaScript, JSX, TypeScript, and CSS remain supported
@@ -14,7 +13,7 @@ The optional Settings window in [nickel-default](../plugins/nickel-default/)
 reads registered settings and custom pages. Its controls are replaceable public
 components and inherit overridable CSS variables.
 
-`nickel-plugin-runtime` owns module loading, hooks, render/event transactions,
+`twinkle-jsx-runtime` owns module loading, hooks, render/event transactions,
 and shell composition. Packages have isolated JavaScript contexts. Foreign
 component callbacks retain their producing package's authority; a parent grant
 does not authorize its replacement's effects. Native component parsing, layout,

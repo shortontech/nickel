@@ -312,9 +312,9 @@ fn physical_emergency_control(
 
 fn desktop_modifiers(
     modifiers: &smithay::input::keyboard::ModifiersState,
-) -> nickel_input::ModifierState {
-    use nickel_input::AggregateModifier;
-    nickel_input::ModifierState::from_sides_and_unsided(
+) -> twinkle_input::ModifierState {
+    use twinkle_input::AggregateModifier;
+    twinkle_input::ModifierState::from_sides_and_unsided(
         [],
         [
             (modifiers.ctrl, AggregateModifier::Control),
@@ -331,18 +331,18 @@ fn desktop_modifiers(
 /// keys keep their native identity; characters retain XKB's modified symbol.
 fn desktop_key_event(
     native: (u32, Keysym, KeyState),
-    modifiers: nickel_input::ModifierState,
-    device: nickel_input::DeviceId,
-    order: nickel_input::EventOrder,
+    modifiers: twinkle_input::ModifierState,
+    device: twinkle_input::DeviceId,
+    order: twinkle_input::EventOrder,
     repeat: bool,
-) -> nickel_input::KeyEvent {
-    use nickel_input::{KeyLocation, LogicalKey, NamedKey, NativeCode, NativeKey, PhysicalKey};
+) -> twinkle_input::KeyEvent {
+    use twinkle_input::{KeyLocation, LogicalKey, NamedKey, NativeCode, NativeKey, PhysicalKey};
     use winit::platform::scancode::PhysicalKeyExtScancode;
     let (raw, sym, state) = native;
     let physical = raw
         .checked_sub(8)
         .map(|scan| {
-            nickel_input::winit::physical_key(winit::keyboard::PhysicalKey::from_scancode(scan))
+            twinkle_input::winit::physical_key(winit::keyboard::PhysicalKey::from_scancode(scan))
         })
         .unwrap_or_else(|| {
             PhysicalKey::Native(NativeKey {
@@ -408,16 +408,16 @@ fn desktop_key_event(
         PhysicalKey::Code(_) => KeyLocation::Standard,
         PhysicalKey::Native(_) => KeyLocation::Unknown,
     };
-    nickel_input::KeyEvent {
+    twinkle_input::KeyEvent {
         device,
         order,
         physical,
         logical,
         location,
         edge: if state == KeyState::Pressed {
-            nickel_input::KeyEdge::Pressed
+            twinkle_input::KeyEdge::Pressed
         } else {
-            nickel_input::KeyEdge::Released
+            twinkle_input::KeyEdge::Released
         },
         repeat,
         modifiers,
@@ -426,20 +426,20 @@ fn desktop_key_event(
 
 fn desktop_key_events(
     native: (u32, Keysym, KeyState),
-    modifiers: nickel_input::ModifierState,
-    device: nickel_input::DeviceId,
-    order: nickel_input::EventOrder,
+    modifiers: twinkle_input::ModifierState,
+    device: twinkle_input::DeviceId,
+    order: twinkle_input::EventOrder,
     repeat: bool,
-) -> Vec<nickel_input::InputEvent> {
+) -> Vec<twinkle_input::InputEvent> {
     let (_, sym, state) = native;
-    let mut events = vec![nickel_input::InputEvent::Key(desktop_key_event(
+    let mut events = vec![twinkle_input::InputEvent::Key(desktop_key_event(
         native, modifiers, device, order, repeat,
     ))];
     if state == KeyState::Pressed
         && let Some(character) = sym.key_char().filter(|character| !character.is_control())
     {
-        events.push(nickel_input::InputEvent::Text(
-            nickel_input::TextEvent::Commit {
+        events.push(twinkle_input::InputEvent::Text(
+            twinkle_input::TextEvent::Commit {
                 device,
                 order,
                 text: character.to_string(),
@@ -454,9 +454,9 @@ fn desktop_key_events(
 pub(super) fn internal_virtual_key(
     keysym: u32,
     modifiers: &[u32],
-    order: nickel_input::EventOrder,
-) -> Result<nickel_input::KeyEvent, &'static str> {
-    use nickel_input::{Modifier, ModifierState, NativeCode, NativeKey, PhysicalKey};
+    order: twinkle_input::EventOrder,
+) -> Result<twinkle_input::KeyEvent, &'static str> {
+    use twinkle_input::{Modifier, ModifierState, NativeCode, NativeKey, PhysicalKey};
     if modifiers.len() > 5 {
         return Err("invalid on-screen keyboard modifiers");
     }
@@ -474,7 +474,7 @@ pub(super) fn internal_virtual_key(
     let mut event = desktop_key_event(
         (0, Keysym::new(keysym), KeyState::Pressed),
         ModifierState::from_sides(sides),
-        nickel_input::DeviceId(u64::MAX),
+        twinkle_input::DeviceId(u64::MAX),
         order,
         false,
     );
@@ -592,7 +592,7 @@ impl NickelSession {
 
     fn begin_internal_surface_move(
         &mut self,
-        surface: nickel_ui::InternalSurfaceId,
+        surface: twinkle::InternalSurfaceId,
         button: u32,
         serial: smithay::utils::Serial,
     ) -> Option<WindowPointerOperation> {
@@ -633,7 +633,7 @@ impl NickelSession {
 
     fn begin_internal_surface_resize(
         &mut self,
-        surface: nickel_ui::InternalSurfaceId,
+        surface: twinkle::InternalSurfaceId,
         edges: ResizeEdge,
         button: u32,
         serial: smithay::utils::Serial,
@@ -1333,8 +1333,8 @@ impl NickelSession {
                                     let paste_event = desktop_key_event(
                                         (event.key_code().raw(), sym, state),
                                         desktop_modifiers(modifiers),
-                                        nickel_input::DeviceId(0),
-                                        nickel_input::EventOrder(u64::from(time.millis())),
+                                        twinkle_input::DeviceId(0),
+                                        twinkle_input::EventOrder(u64::from(time.millis())),
                                         false,
                                     );
                                     match session.request_native_image_paste(recipient) {
@@ -1728,12 +1728,12 @@ impl NickelSession {
                 // Preserve native button identity before the generic widget adapter
                 // reduces all buttons to a boolean pressed/released action.
                 let desktop_button = match event.button() {
-                    Some(MouseButton::Left) => nickel_input::PointerButton::Primary,
-                    Some(MouseButton::Right) => nickel_input::PointerButton::Secondary,
-                    Some(MouseButton::Middle) => nickel_input::PointerButton::Middle,
-                    Some(MouseButton::Back) => nickel_input::PointerButton::Back,
-                    Some(MouseButton::Forward) => nickel_input::PointerButton::Forward,
-                    _ => nickel_input::PointerButton::Native(button as u16),
+                    Some(MouseButton::Left) => twinkle_input::PointerButton::Primary,
+                    Some(MouseButton::Right) => twinkle_input::PointerButton::Secondary,
+                    Some(MouseButton::Middle) => twinkle_input::PointerButton::Middle,
+                    Some(MouseButton::Back) => twinkle_input::PointerButton::Back,
+                    Some(MouseButton::Forward) => twinkle_input::PointerButton::Forward,
+                    _ => twinkle_input::PointerButton::Native(button as u16),
                 };
                 // Once Smithay owns a pointer grab, every following button edge must reach that
                 // grab. Letting an internal surface consume the release here strands Super+drag
@@ -1746,9 +1746,9 @@ impl NickelSession {
                         super::internal_ui::DesktopPointerAction::Button {
                             button: desktop_button,
                             edge: if button_state == ButtonState::Pressed {
-                                nickel_input::KeyEdge::Pressed
+                                twinkle_input::KeyEdge::Pressed
                             } else {
-                                nickel_input::KeyEdge::Released
+                                twinkle_input::KeyEdge::Released
                             },
                         },
                         desktop_modifiers(&keyboard.modifier_state()),
@@ -2747,7 +2747,7 @@ fn desktop_axis(
         (-continuous.0, -continuous.1)
     };
     super::internal_ui::DesktopPointerAction::Axis {
-        delta: nickel_input::Vector { x, y },
+        delta: twinkle_input::Vector { x, y },
         discrete: wheel.then_some((x as i32, y as i32)),
     }
 }
@@ -2930,10 +2930,10 @@ fn vt_from_keysym(sym: Keysym) -> Option<i32> {
     }
 }
 
-fn recovery_shortcut_from_keysym(sym: Keysym) -> Option<nickel_ui::Shortcut> {
+fn recovery_shortcut_from_keysym(sym: Keysym) -> Option<twinkle::Shortcut> {
     match sym.raw() {
-        keysyms::KEY_Return | keysyms::KEY_KP_Enter => Some(nickel_ui::Shortcut::Submit),
-        keysyms::KEY_Escape => Some(nickel_ui::Shortcut::Escape),
+        keysyms::KEY_Return | keysyms::KEY_KP_Enter => Some(twinkle::Shortcut::Submit),
+        keysyms::KEY_Escape => Some(twinkle::Shortcut::Escape),
         _ => None,
     }
 }
@@ -3116,14 +3116,14 @@ mod tests {
         else {
             panic!("axis event")
         };
-        assert_eq!(delta, nickel_input::Vector { x: -0.25, y: -1.5 });
+        assert_eq!(delta, twinkle_input::Vector { x: -0.25, y: -1.5 });
         assert_eq!(discrete, None);
     }
 
     #[test]
     fn desktop_keys_keep_physical_identity_separate_from_layout_and_edges() {
-        use nickel_input::{DeviceId, EventOrder, KeyEdge, LogicalKey, PhysicalKey};
         use smithay::input::keyboard::{Keysym, keysyms};
+        use twinkle_input::{DeviceId, EventOrder, KeyEdge, LogicalKey, PhysicalKey};
         let event = super::desktop_key_event(
             (38, Keysym::new(keysyms::KEY_q), super::KeyState::Released),
             Default::default(),
@@ -3134,7 +3134,7 @@ mod tests {
         // evdev 30 / XKB 38 is physical A, regardless of the layout's q symbol.
         assert_eq!(
             event.physical,
-            PhysicalKey::Code(nickel_input::KeyCode::KeyA)
+            PhysicalKey::Code(twinkle_input::KeyCode::KeyA)
         );
         assert_eq!(event.logical, LogicalKey::Character("q".into()));
         assert_eq!(event.edge, KeyEdge::Released);
@@ -3153,12 +3153,12 @@ mod tests {
         );
         assert_eq!(
             enter.physical,
-            PhysicalKey::Code(nickel_input::KeyCode::NumpadEnter)
+            PhysicalKey::Code(twinkle_input::KeyCode::NumpadEnter)
         );
-        assert_eq!(enter.location, nickel_input::KeyLocation::Numpad);
+        assert_eq!(enter.location, twinkle_input::KeyLocation::Numpad);
         assert_eq!(
             enter.logical,
-            LogicalKey::Named(nickel_input::NamedKey::Enter)
+            LogicalKey::Named(twinkle_input::NamedKey::Enter)
         );
         assert!(enter.repeat);
 
@@ -3172,8 +3172,8 @@ mod tests {
         assert!(matches!(
             &text[..],
             [
-                nickel_input::InputEvent::Key(_),
-                nickel_input::InputEvent::Text(nickel_input::TextEvent::Commit {
+                twinkle_input::InputEvent::Key(_),
+                twinkle_input::InputEvent::Text(twinkle_input::TextEvent::Commit {
                     device: DeviceId(7),
                     order: EventOrder(13),
                     text,
@@ -3332,15 +3332,15 @@ mod tests {
     fn recovery_keys_offer_retry_and_safe_exit_without_forwarding_text() {
         assert_eq!(
             recovery_shortcut_from_keysym(Keysym::new(keysyms::KEY_Return)),
-            Some(nickel_ui::Shortcut::Submit)
+            Some(twinkle::Shortcut::Submit)
         );
         assert_eq!(
             recovery_shortcut_from_keysym(Keysym::new(keysyms::KEY_KP_Enter)),
-            Some(nickel_ui::Shortcut::Submit)
+            Some(twinkle::Shortcut::Submit)
         );
         assert_eq!(
             recovery_shortcut_from_keysym(Keysym::new(keysyms::KEY_Escape)),
-            Some(nickel_ui::Shortcut::Escape)
+            Some(twinkle::Shortcut::Escape)
         );
         assert_eq!(
             recovery_shortcut_from_keysym(Keysym::new(keysyms::KEY_a)),

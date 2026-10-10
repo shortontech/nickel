@@ -34,27 +34,27 @@ static HELD_BUTTONS: AtomicU8 = AtomicU8::new(0);
 static PHYSICAL_KEYS: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
 static PHYSICAL_BUTTONS: AtomicU8 = AtomicU8::new(0);
 
-pub(crate) fn observe_physical_key(event: nickel_input::windows::NativeKeyboardEvent) {
+pub(crate) fn observe_physical_key(event: twinkle_input::windows::NativeKeyboardEvent) {
     if event.injected || event.virtual_key > 255 {
         return;
     }
     let key = event.virtual_key as usize;
     let bit = 1_u64 << (key % 64);
     match event.edge {
-        nickel_input::KeyEdge::Pressed => {
+        twinkle_input::KeyEdge::Pressed => {
             PHYSICAL_KEYS[key / 64].fetch_or(bit, Ordering::AcqRel);
         }
-        nickel_input::KeyEdge::Released => {
+        twinkle_input::KeyEdge::Released => {
             PHYSICAL_KEYS[key / 64].fetch_and(!bit, Ordering::AcqRel);
         }
     }
 }
 
-pub(crate) fn observe_physical_pointer(event: nickel_input::windows::NativePointerEvent) {
+pub(crate) fn observe_physical_pointer(event: twinkle_input::windows::NativePointerEvent) {
     if event.injected {
         return;
     }
-    use nickel_input::windows::NativePointerKind;
+    use twinkle_input::windows::NativePointerKind;
     match event.kind {
         NativePointerKind::PrimaryPressed => {
             PHYSICAL_BUTTONS.fetch_or(LEFT, Ordering::AcqRel);

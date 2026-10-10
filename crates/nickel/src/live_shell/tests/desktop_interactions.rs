@@ -132,7 +132,7 @@
             .accessibility_nodes()
             .iter()
             .find(|node| node.semantic_role == Some(SemanticRole::GridCell))
-            .expect("desktop entry belongs to Nickel UI semantic authority");
+            .expect("desktop entry belongs to Twinkle semantic authority");
         assert_eq!(entry.label.as_deref(), Some("document.txt"));
         assert_eq!(entry.rect.size.width, 96.0);
         assert!(entry.actions.contains(&ActionKind::Activate));
@@ -223,19 +223,19 @@
             .icon_cache
             .insert(PathBuf::from("/desktop/first.txt"), Arc::clone(&artwork));
         let before_commands = shell.scene(SurfaceRole::Desktop, 400, 600);
-        assert!(nickel_ui::backend::contains_image_pixels(
+        assert!(twinkle::backend::contains_image_pixels(
             &before_commands,
             &artwork
         ));
         let before_token = shell.desktop_change_token;
 
-        assert!(shell.desktop_input(nickel_input::InputEvent::Pointer(
-            nickel_input::PointerEvent::Button {
-                device: nickel_input::DeviceId(1),
-                order: nickel_input::EventOrder(1),
-                button: nickel_input::PointerButton::Primary,
-                edge: nickel_input::KeyEdge::Pressed,
-                position: Some(nickel_input::Point { x: 4.0, y: 4.0 }),
+        assert!(shell.desktop_input(twinkle_input::InputEvent::Pointer(
+            twinkle_input::PointerEvent::Button {
+                device: twinkle_input::DeviceId(1),
+                order: twinkle_input::EventOrder(1),
+                button: twinkle_input::PointerButton::Primary,
+                edge: twinkle_input::KeyEdge::Pressed,
+                position: Some(twinkle_input::Point { x: 4.0, y: 4.0 }),
             },
         )));
         assert_eq!(
@@ -246,33 +246,33 @@
         );
         assert_ne!(shell.desktop_change_token, before_token);
         assert_ne!(shell.scene(SurfaceRole::Desktop, 400, 600), before_commands);
-        assert!(shell.desktop_input(nickel_input::InputEvent::Pointer(
-            nickel_input::PointerEvent::Button {
-                device: nickel_input::DeviceId(1),
-                order: nickel_input::EventOrder(2),
-                button: nickel_input::PointerButton::Primary,
-                edge: nickel_input::KeyEdge::Released,
-                position: Some(nickel_input::Point { x: 4.0, y: 4.0 }),
+        assert!(shell.desktop_input(twinkle_input::InputEvent::Pointer(
+            twinkle_input::PointerEvent::Button {
+                device: twinkle_input::DeviceId(1),
+                order: twinkle_input::EventOrder(2),
+                button: twinkle_input::PointerButton::Primary,
+                edge: twinkle_input::KeyEdge::Released,
+                position: Some(twinkle_input::Point { x: 4.0, y: 4.0 }),
             },
         )));
         let selected_commands = shell.scene(SurfaceRole::Desktop, 400, 600);
         assert!(shell.desktop_host.application().layout.icons_visible());
-        assert!(nickel_ui::backend::contains_image_pixels(
+        assert!(twinkle::backend::contains_image_pixels(
             &selected_commands,
             &artwork
         ));
 
         let pointer_token = shell.desktop_change_token;
         assert!(
-            shell.desktop_input(nickel_input::InputEvent::Key(nickel_input::KeyEvent {
-                device: nickel_input::DeviceId(1),
-                order: nickel_input::EventOrder(3),
-                physical: nickel_input::PhysicalKey::Code(KeyCode::ArrowDown),
-                logical: nickel_input::LogicalKey::Named(nickel_input::NamedKey::ArrowDown),
-                location: nickel_input::KeyLocation::Standard,
-                edge: nickel_input::KeyEdge::Pressed,
+            shell.desktop_input(twinkle_input::InputEvent::Key(twinkle_input::KeyEvent {
+                device: twinkle_input::DeviceId(1),
+                order: twinkle_input::EventOrder(3),
+                physical: twinkle_input::PhysicalKey::Code(KeyCode::ArrowDown),
+                logical: twinkle_input::LogicalKey::Named(twinkle_input::NamedKey::ArrowDown),
+                location: twinkle_input::KeyLocation::Standard,
+                edge: twinkle_input::KeyEdge::Pressed,
                 repeat: false,
-                modifiers: nickel_input::ModifierState::default(),
+                modifiers: twinkle_input::ModifierState::default(),
             },))
         );
         assert_eq!(
@@ -331,28 +331,28 @@
             .icon_cache
             .insert(path.clone(), Arc::clone(&artwork));
         let initial = shell.scene(SurfaceRole::Desktop, 400, 600);
-        assert!(nickel_ui::backend::contains_image_pixels(
+        assert!(twinkle::backend::contains_image_pixels(
             &initial, &artwork
         ));
 
-        let press = nickel_input::Point { x: 300.0, y: 300.0 };
-        let drag = nickel_input::Point { x: 0.0, y: 0.0 };
-        assert!(shell.desktop_input(nickel_input::InputEvent::Pointer(
-            nickel_input::PointerEvent::Button {
-                device: nickel_input::DeviceId(1),
-                order: nickel_input::EventOrder(1),
-                button: nickel_input::PointerButton::Primary,
-                edge: nickel_input::KeyEdge::Pressed,
+        let press = twinkle_input::Point { x: 300.0, y: 300.0 };
+        let drag = twinkle_input::Point { x: 0.0, y: 0.0 };
+        assert!(shell.desktop_input(twinkle_input::InputEvent::Pointer(
+            twinkle_input::PointerEvent::Button {
+                device: twinkle_input::DeviceId(1),
+                order: twinkle_input::EventOrder(1),
+                button: twinkle_input::PointerButton::Primary,
+                edge: twinkle_input::KeyEdge::Pressed,
                 position: Some(press),
             },
         )));
         let host_token_before_motion = shell.desktop_change_token;
-        assert!(shell.desktop_input(nickel_input::InputEvent::Pointer(
-            nickel_input::PointerEvent::Motion {
-                device: nickel_input::DeviceId(1),
-                order: nickel_input::EventOrder(2),
+        assert!(shell.desktop_input(twinkle_input::InputEvent::Pointer(
+            twinkle_input::PointerEvent::Motion {
+                device: twinkle_input::DeviceId(1),
+                order: twinkle_input::EventOrder(2),
                 position: drag,
-                delta: Some(nickel_input::Vector {
+                delta: Some(twinkle_input::Vector {
                     x: -300.0,
                     y: -300.0,
                 }),
@@ -365,7 +365,7 @@
         assert!(shell.desktop_application_dirty);
         let dragging = shell.scene(SurfaceRole::Desktop, 400, 600);
         assert!(!shell.desktop_application_dirty);
-        assert!(nickel_ui::backend::contains_image_pixels(
+        assert!(twinkle::backend::contains_image_pixels(
             &dragging, &artwork
         ));
         let dragging_overlays = shell
@@ -390,7 +390,7 @@
         let due = Instant::now() + Duration::from_millis(300);
         let _ = shell.poll_host_deadlines(due);
         let after_poll = shell.scene(SurfaceRole::Desktop, 400, 600);
-        assert!(nickel_ui::backend::contains_image_pixels(
+        assert!(twinkle::backend::contains_image_pixels(
             &after_poll,
             &artwork
         ));
@@ -408,17 +408,17 @@
                 if (*color >> 24) > 0 && (*color >> 24) < 0xff
         )));
 
-        assert!(shell.desktop_input(nickel_input::InputEvent::Pointer(
-            nickel_input::PointerEvent::Button {
-                device: nickel_input::DeviceId(1),
-                order: nickel_input::EventOrder(3),
-                button: nickel_input::PointerButton::Primary,
-                edge: nickel_input::KeyEdge::Released,
+        assert!(shell.desktop_input(twinkle_input::InputEvent::Pointer(
+            twinkle_input::PointerEvent::Button {
+                device: twinkle_input::DeviceId(1),
+                order: twinkle_input::EventOrder(3),
+                button: twinkle_input::PointerButton::Primary,
+                edge: twinkle_input::KeyEdge::Released,
                 position: Some(drag),
             },
         )));
         let released = shell.scene(SurfaceRole::Desktop, 400, 600);
-        assert!(nickel_ui::backend::contains_image_pixels(
+        assert!(twinkle::backend::contains_image_pixels(
             &released, &artwork
         ));
         assert!(
@@ -468,30 +468,30 @@
                 .unwrap()
                 .paste_available
         );
-        let point = nickel_input::Point { x: 300.0, y: 300.0 };
+        let point = twinkle_input::Point { x: 300.0, y: 300.0 };
         let button = |edge, order| {
-            nickel_input::InputEvent::Pointer(nickel_input::PointerEvent::Button {
-                device: nickel_input::DeviceId(1),
-                order: nickel_input::EventOrder(order),
-                button: nickel_input::PointerButton::Secondary,
+            twinkle_input::InputEvent::Pointer(twinkle_input::PointerEvent::Button {
+                device: twinkle_input::DeviceId(1),
+                order: twinkle_input::EventOrder(order),
+                button: twinkle_input::PointerButton::Secondary,
                 edge,
                 position: Some(point),
             })
         };
 
         assert!(shell.desktop_host.application().layout.icons_visible());
-        assert!(shell.desktop_input(button(nickel_input::KeyEdge::Pressed, 1)));
+        assert!(shell.desktop_input(button(twinkle_input::KeyEdge::Pressed, 1)));
         shell.scene(SurfaceRole::Desktop, 800, 600);
         assert!(shell.desktop_host.application().context_menu.is_some());
         assert!(shell.desktop_host.inspect().open_overlay.is_some());
 
-        let _ = shell.desktop_input(button(nickel_input::KeyEdge::Released, 2));
-        let _ = shell.desktop_input(nickel_input::InputEvent::Pointer(
-            nickel_input::PointerEvent::Motion {
-                device: nickel_input::DeviceId(1),
-                order: nickel_input::EventOrder(3),
-                position: nickel_input::Point { x: 300.0, y: 260.0 },
-                delta: Some(nickel_input::Vector { x: 0.0, y: -40.0 }),
+        let _ = shell.desktop_input(button(twinkle_input::KeyEdge::Released, 2));
+        let _ = shell.desktop_input(twinkle_input::InputEvent::Pointer(
+            twinkle_input::PointerEvent::Motion {
+                device: twinkle_input::DeviceId(1),
+                order: twinkle_input::EventOrder(3),
+                position: twinkle_input::Point { x: 300.0, y: 260.0 },
+                delta: Some(twinkle_input::Vector { x: 0.0, y: -40.0 }),
             },
         ));
 
@@ -499,22 +499,22 @@
         assert!(shell.desktop_host.application().context_menu.is_some());
         assert!(shell.desktop_host.inspect().open_overlay.is_some());
 
-        let _ = shell.desktop_input(nickel_input::InputEvent::Pointer(
-            nickel_input::PointerEvent::Button {
-                device: nickel_input::DeviceId(1),
-                order: nickel_input::EventOrder(4),
-                button: nickel_input::PointerButton::Primary,
-                edge: nickel_input::KeyEdge::Pressed,
-                position: Some(nickel_input::Point { x: 750.0, y: 550.0 }),
+        let _ = shell.desktop_input(twinkle_input::InputEvent::Pointer(
+            twinkle_input::PointerEvent::Button {
+                device: twinkle_input::DeviceId(1),
+                order: twinkle_input::EventOrder(4),
+                button: twinkle_input::PointerButton::Primary,
+                edge: twinkle_input::KeyEdge::Pressed,
+                position: Some(twinkle_input::Point { x: 750.0, y: 550.0 }),
             },
         ));
         assert!(shell.desktop_host.inspect().open_overlay.is_none());
-        assert!(shell.desktop_input(button(nickel_input::KeyEdge::Pressed, 5)));
+        assert!(shell.desktop_input(button(twinkle_input::KeyEdge::Pressed, 5)));
         shell.scene(SurfaceRole::Desktop, 800, 600);
         assert!(shell.desktop_host.inspect().open_overlay.is_some());
 
-        assert!(shell.desktop_input(nickel_input::InputEvent::FocusLost {
-            order: nickel_input::EventOrder(6),
+        assert!(shell.desktop_input(twinkle_input::InputEvent::FocusLost {
+            order: twinkle_input::EventOrder(6),
         }));
         assert!(shell.desktop_host.application().context_menu.is_none());
         assert!(shell.desktop_host.inspect().open_overlay.is_none());
@@ -551,13 +551,13 @@
         ]);
         shell.set_desktop_output("left".into(), -800.0, 0.0, 1.25);
         let _ = shell.scene(SurfaceRole::Desktop, 800, 600);
-        assert!(shell.desktop_input(nickel_input::InputEvent::Pointer(
-            nickel_input::PointerEvent::Button {
-                device: nickel_input::DeviceId(1),
-                order: nickel_input::EventOrder(1),
-                button: nickel_input::PointerButton::Secondary,
-                edge: nickel_input::KeyEdge::Pressed,
-                position: Some(nickel_input::Point { x: 200.0, y: 200.0 }),
+        assert!(shell.desktop_input(twinkle_input::InputEvent::Pointer(
+            twinkle_input::PointerEvent::Button {
+                device: twinkle_input::DeviceId(1),
+                order: twinkle_input::EventOrder(1),
+                button: twinkle_input::PointerButton::Secondary,
+                edge: twinkle_input::KeyEdge::Pressed,
+                position: Some(twinkle_input::Point { x: 200.0, y: 200.0 }),
             },
         )));
         assert_eq!(
@@ -596,12 +596,12 @@
                 .iter()
                 .all(|overlay| !matches!(overlay, FrameOverlay::Menu(_)))
         );
-        assert!(!shell.desktop_input(nickel_input::InputEvent::Pointer(
-            nickel_input::PointerEvent::Motion {
-                device: nickel_input::DeviceId(1),
-                order: nickel_input::EventOrder(2),
-                position: nickel_input::Point { x: 250.0, y: 220.0 },
-                delta: Some(nickel_input::Vector { x: 50.0, y: 20.0 }),
+        assert!(!shell.desktop_input(twinkle_input::InputEvent::Pointer(
+            twinkle_input::PointerEvent::Motion {
+                device: twinkle_input::DeviceId(1),
+                order: twinkle_input::EventOrder(2),
+                position: twinkle_input::Point { x: 250.0, y: 220.0 },
+                delta: Some(twinkle_input::Vector { x: 50.0, y: 20.0 }),
             },
         )));
         assert!(shell.desktop_host.application().context_menu.is_some());
@@ -643,12 +643,12 @@
             native_menu_visible,
             "the owner output must restore its native desktop menu"
         );
-        let _ = shell.desktop_input(nickel_input::InputEvent::Pointer(
-            nickel_input::PointerEvent::Motion {
-                device: nickel_input::DeviceId(1),
-                order: nickel_input::EventOrder(3),
-                position: nickel_input::Point { x: 210.0, y: 210.0 },
-                delta: Some(nickel_input::Vector { x: 10.0, y: 10.0 }),
+        let _ = shell.desktop_input(twinkle_input::InputEvent::Pointer(
+            twinkle_input::PointerEvent::Motion {
+                device: twinkle_input::DeviceId(1),
+                order: twinkle_input::EventOrder(3),
+                position: twinkle_input::Point { x: 210.0, y: 210.0 },
+                delta: Some(twinkle_input::Vector { x: 10.0, y: 10.0 }),
             },
         ));
         assert!(shell.desktop_host.application().context_menu.is_some());
@@ -656,13 +656,13 @@
         // A press on the foreign surface is an explicit outside press: it
         // dismisses once and is consumed instead of reaching that desktop.
         shell.set_desktop_output("right".into(), 0.0, 0.0, 1.0);
-        assert!(shell.desktop_input(nickel_input::InputEvent::Pointer(
-            nickel_input::PointerEvent::Button {
-                device: nickel_input::DeviceId(1),
-                order: nickel_input::EventOrder(4),
-                button: nickel_input::PointerButton::Primary,
-                edge: nickel_input::KeyEdge::Pressed,
-                position: Some(nickel_input::Point { x: 50.0, y: 50.0 }),
+        assert!(shell.desktop_input(twinkle_input::InputEvent::Pointer(
+            twinkle_input::PointerEvent::Button {
+                device: twinkle_input::DeviceId(1),
+                order: twinkle_input::EventOrder(4),
+                button: twinkle_input::PointerButton::Primary,
+                edge: twinkle_input::KeyEdge::Pressed,
+                position: Some(twinkle_input::Point { x: 50.0, y: 50.0 }),
             },
         )));
         assert!(shell.desktop_host.application().context_menu.is_none());
@@ -856,9 +856,9 @@
         });
         shell.scene(SurfaceRole::Desktop, 800, 600);
         let event = |button, edge, order, point| {
-            nickel_input::InputEvent::Pointer(nickel_input::PointerEvent::Button {
-                device: nickel_input::DeviceId(1),
-                order: nickel_input::EventOrder(order),
+            twinkle_input::InputEvent::Pointer(twinkle_input::PointerEvent::Button {
+                device: twinkle_input::DeviceId(1),
+                order: twinkle_input::EventOrder(order),
                 button,
                 edge,
                 position: Some(point),
@@ -866,16 +866,16 @@
         };
 
         assert!(shell.desktop_input(event(
-            nickel_input::PointerButton::Secondary,
-            nickel_input::KeyEdge::Pressed,
+            twinkle_input::PointerButton::Secondary,
+            twinkle_input::KeyEdge::Pressed,
             1,
-            nickel_input::Point { x: 4.0, y: 4.0 },
+            twinkle_input::Point { x: 4.0, y: 4.0 },
         )));
         let _ = shell.desktop_input(event(
-            nickel_input::PointerButton::Secondary,
-            nickel_input::KeyEdge::Released,
+            twinkle_input::PointerButton::Secondary,
+            twinkle_input::KeyEdge::Released,
             2,
-            nickel_input::Point { x: 4.0, y: 4.0 },
+            twinkle_input::Point { x: 4.0, y: 4.0 },
         ));
         let selected = shell
             .desktop_host
@@ -892,7 +892,7 @@
             .find(|node| node.label.as_deref() == Some("Rename"))
             .expect("the native desktop host exposes the rendered Rename row")
             .rect;
-        let point = nickel_input::Point {
+        let point = twinkle_input::Point {
             x: (rename.origin.x + rename.size.width / 2.0) as f64,
             y: (rename.origin.y + rename.size.height / 2.0) as f64,
         };
@@ -910,8 +910,8 @@
         assert_ne!(underneath, Some(selected));
 
         assert!(shell.desktop_input(event(
-            nickel_input::PointerButton::Primary,
-            nickel_input::KeyEdge::Pressed,
+            twinkle_input::PointerButton::Primary,
+            twinkle_input::KeyEdge::Pressed,
             3,
             point,
         )));
@@ -923,8 +923,8 @@
         );
 
         assert!(shell.desktop_input(event(
-            nickel_input::PointerButton::Primary,
-            nickel_input::KeyEdge::Released,
+            twinkle_input::PointerButton::Primary,
+            twinkle_input::KeyEdge::Released,
             4,
             point,
         )));
@@ -946,7 +946,7 @@
         assert!(file.contains("FileGridItem::new_with_generation"));
         assert!(desktop_production.contains("FilePlaneItem::new_with_generation"));
         assert!(desktop_production.contains(".semantic_role(SemanticRole::GridCell)"));
-        let shared = include_str!("../../../../nickel-ui/src/ui/components.rs");
+        let shared = include_str!("../../../../twinkle/src/ui/components.rs");
         assert!(shared.contains("pub struct FilePlaneItem"));
         assert!(shared.contains("fn from_image(message: Message"));
         assert!(shared.contains("Self::from_image(message, label"));
@@ -1024,9 +1024,9 @@
             item.position.x,
             "preview motion must not mutate persisted layout"
         );
-        let bounds = nickel_ui::Rect::new(0.0, 0.0, 1920.0, 1024.0);
-        let frame = nickel_ui::UiFrame::layout(
-            desktop.view(nickel_ui::ViewContext::new(bounds, Default::default())), bounds);
+        let bounds = twinkle::Rect::new(0.0, 0.0, 1920.0, 1024.0);
+        let frame = twinkle::UiFrame::layout(
+            desktop.view(twinkle::ViewContext::new(bounds, Default::default())), bounds);
         let target = frame.semantic_targets_for_message(&super::DesktopMessage::Activate(item.id));
         assert_eq!(target[0].bounds.origin.x, item.position.x + 49.0,
             "the visible icon must track unsnapped pointer motion");
@@ -1092,26 +1092,26 @@
 
         let x = f64::from(start.x + 4.0);
         let y = f64::from(start.y + 4.0);
-        let input = |order, edge, x| nickel_input::InputEvent::Pointer(
-            nickel_input::PointerEvent::Button {
-                device: nickel_input::DeviceId(1),
-                order: nickel_input::EventOrder(order),
-                button: nickel_input::PointerButton::Primary,
+        let input = |order, edge, x| twinkle_input::InputEvent::Pointer(
+            twinkle_input::PointerEvent::Button {
+                device: twinkle_input::DeviceId(1),
+                order: twinkle_input::EventOrder(order),
+                button: twinkle_input::PointerButton::Primary,
                 edge,
-                position: Some(nickel_input::Point { x, y }),
+                position: Some(twinkle_input::Point { x, y }),
             },
         );
-        assert!(shell.desktop_input(input(1, nickel_input::KeyEdge::Pressed, x)));
-        assert!(shell.desktop_input(nickel_input::InputEvent::Pointer(
-            nickel_input::PointerEvent::Motion {
-                device: nickel_input::DeviceId(1),
-                order: nickel_input::EventOrder(2),
-                position: nickel_input::Point { x: x + 145.0, y },
+        assert!(shell.desktop_input(input(1, twinkle_input::KeyEdge::Pressed, x)));
+        assert!(shell.desktop_input(twinkle_input::InputEvent::Pointer(
+            twinkle_input::PointerEvent::Motion {
+                device: twinkle_input::DeviceId(1),
+                order: twinkle_input::EventOrder(2),
+                position: twinkle_input::Point { x: x + 145.0, y },
                 delta: None,
             },
         )));
         assert_eq!(shell.desktop_host.application().layout.items()[0].position.x, start.x);
-        assert!(shell.desktop_input(input(3, nickel_input::KeyEdge::Released, x + 145.0)));
+        assert!(shell.desktop_input(input(3, twinkle_input::KeyEdge::Released, x + 145.0)));
         assert_eq!(
             shell.desktop_host.application().layout.items()[0].position.x,
             start.x + cell_width * 2.0,
@@ -1239,7 +1239,7 @@ fn desktop_settings_destinations_are_typed_and_keep_the_invoking_output() {
     let palette = nickel_core::theme::ThemePalette::from_appearance(Default::default());
     let mut desktop = super::DesktopApplication::fixture(None, palette);
     desktop.open_background_context(None);
-    nickel_ui::Application::update(
+    twinkle::Application::update(
         &mut desktop,
         super::desktop::DesktopMessage::Command(super::desktop::DesktopCommand::Personalize),
     );
@@ -1249,7 +1249,7 @@ fn desktop_settings_destinations_are_typed_and_keep_the_invoking_output() {
     );
     desktop.set_active_output("DP-2".into(), nickel_file::desktop::Point::default(), 1.0);
     desktop.open_background_context(None);
-    nickel_ui::Application::update(
+    twinkle::Application::update(
         &mut desktop,
         super::desktop::DesktopMessage::Command(super::desktop::DesktopCommand::DisplaySettings),
     );
@@ -1331,12 +1331,12 @@ fn desktop_settings_destinations_are_typed_and_keep_the_invoking_output() {
                 .find(|node| node.semantic_role == Some(SemanticRole::GridCell)).unwrap().rect;
             let right_id = coordinator.surface(SurfaceRole::Desktop, Some("right")).unwrap().id;
             coordinator.scene(right_id).unwrap();
-            let input = |button, edge| nickel_input::InputEvent::Pointer(nickel_input::PointerEvent::Button {
-                device: nickel_input::DeviceId(1),
-                order: nickel_input::EventOrder(1),
+            let input = |button, edge| twinkle_input::InputEvent::Pointer(twinkle_input::PointerEvent::Button {
+                device: twinkle_input::DeviceId(1),
+                order: twinkle_input::EventOrder(1),
                 button,
                 edge,
-                position: Some(nickel_input::Point {
+                position: Some(twinkle_input::Point {
                     x: f64::from(target.origin.x + target.size.width / 2.0),
                     y: f64::from(target.origin.y + target.size.height / 2.0),
                 }),
@@ -1346,24 +1346,24 @@ fn desktop_settings_destinations_are_typed_and_keep_the_invoking_output() {
                 ..Default::default()
             };
             let changes = coordinator.step_slot_changes(left_id, batch(input(
-                nickel_input::PointerButton::Primary, nickel_input::KeyEdge::Pressed,
+                twinkle_input::PointerButton::Primary, twinkle_input::KeyEdge::Pressed,
             )));
             assert_eq!(changes, vec![left_id]);
             assert_eq!(coordinator.shell_mut().desktop_host.application().layout.selected().len(), 1);
             coordinator.step_slot_changes(left_id, batch(input(
-                nickel_input::PointerButton::Primary, nickel_input::KeyEdge::Released,
+                twinkle_input::PointerButton::Primary, twinkle_input::KeyEdge::Released,
             )));
             coordinator.step_slot_changes(left_id, batch(input(
-                nickel_input::PointerButton::Secondary, nickel_input::KeyEdge::Pressed,
+                twinkle_input::PointerButton::Secondary, twinkle_input::KeyEdge::Pressed,
             )));
             assert_eq!(coordinator.shell_mut().desktop_host.application().context_menu.as_ref().unwrap().output, "left");
             // A captured button pair must finish before the router can emit Leave.
             coordinator.step_slot_changes(left_id, batch(input(
-                nickel_input::PointerButton::Secondary, nickel_input::KeyEdge::Released,
+                twinkle_input::PointerButton::Secondary, twinkle_input::KeyEdge::Released,
             )));
-            coordinator.step_slot_changes(left_id, batch(nickel_input::InputEvent::Pointer(nickel_input::PointerEvent::Leave {
-                device: nickel_input::DeviceId(1),
-                order: nickel_input::EventOrder(2),
+            coordinator.step_slot_changes(left_id, batch(twinkle_input::InputEvent::Pointer(twinkle_input::PointerEvent::Leave {
+                device: twinkle_input::DeviceId(1),
+                order: twinkle_input::EventOrder(2),
             })));
             // Pointer departure alone is not focus loss, even outside the desktop.
             assert!(!coordinator.shell_mut().desktop_host.application().pointer_seen);
@@ -1371,22 +1371,22 @@ fn desktop_settings_destinations_are_typed_and_keep_the_invoking_output() {
             assert_eq!(coordinator.shell_mut().desktop_host.application().layout.selected().len(), 1);
             // Close the menu before checking the desktop key reducer; menu input
             // deliberately belongs to its own normalized UiHost while it is open.
-            coordinator.step_slot_changes(left_id, batch(nickel_input::InputEvent::FocusLost {
-                order: nickel_input::EventOrder(2),
+            coordinator.step_slot_changes(left_id, batch(twinkle_input::InputEvent::FocusLost {
+                order: twinkle_input::EventOrder(2),
             }));
             assert!(coordinator.shell_mut().desktop_host.application().context_menu.is_none());
             assert!(coordinator.shell_mut().desktop_host.inspect().open_overlay.is_none());
             assert!(coordinator.shell_mut().desktop_overlay_pointer_capture.is_none());
             assert!(coordinator.shell_mut().desktop_host.application().layout.selected().is_empty());
-            coordinator.step_slot_changes(left_id, batch(nickel_input::InputEvent::Key(nickel_input::KeyEvent {
-                device: nickel_input::DeviceId(1),
-                order: nickel_input::EventOrder(3),
-                physical: nickel_input::PhysicalKey::Code(KeyCode::ControlLeft),
-                logical: nickel_input::LogicalKey::Named(nickel_input::NamedKey::Control),
-                location: nickel_input::KeyLocation::Left,
-                edge: nickel_input::KeyEdge::Pressed,
+            coordinator.step_slot_changes(left_id, batch(twinkle_input::InputEvent::Key(twinkle_input::KeyEvent {
+                device: twinkle_input::DeviceId(1),
+                order: twinkle_input::EventOrder(3),
+                physical: twinkle_input::PhysicalKey::Code(KeyCode::ControlLeft),
+                logical: twinkle_input::LogicalKey::Named(twinkle_input::NamedKey::Control),
+                location: twinkle_input::KeyLocation::Left,
+                edge: twinkle_input::KeyEdge::Pressed,
                 repeat: false,
-                modifiers: nickel_input::ModifierState::from_sides([nickel_input::Modifier::ControlLeft]),
+                modifiers: twinkle_input::ModifierState::from_sides([twinkle_input::Modifier::ControlLeft]),
             })));
             assert!(coordinator.shell_mut().desktop_host.application().modifiers.toggle);
             coordinator.step_slot_changes(left_id, HostBatch {
@@ -1432,16 +1432,16 @@ fn desktop_settings_destinations_are_typed_and_keep_the_invoking_output() {
         desktop.layout.select(first, Default::default());
         let mut shell = LiveShell::new().unwrap();
         shell.desktop_host = UiHost::new(desktop, 96, 112);
-        let axis = |discrete: Option<(i32, i32)>| nickel_input::InputEvent::Pointer(nickel_input::PointerEvent::Axis {
-            device: nickel_input::DeviceId(1), order: nickel_input::EventOrder(1),
-            delta: nickel_input::Vector { x: 0.0, y: if discrete.is_some() { -0.5 } else { -1.5 } },
-            discrete, position: Some(nickel_input::Point { x: 4.0, y: 4.0 }),
+        let axis = |discrete: Option<(i32, i32)>| twinkle_input::InputEvent::Pointer(twinkle_input::PointerEvent::Axis {
+            device: twinkle_input::DeviceId(1), order: twinkle_input::EventOrder(1),
+            delta: twinkle_input::Vector { x: 0.0, y: if discrete.is_some() { -0.5 } else { -1.5 } },
+            discrete, position: Some(twinkle_input::Point { x: 4.0, y: 4.0 }),
         });
         assert!(shell.desktop_input(axis(None)));
         assert_eq!(shell.desktop_host.application().overflow_offsets["primary"], 1.5);
-        shell.desktop_input(nickel_input::InputEvent::Pointer(nickel_input::PointerEvent::Motion {
-            device: nickel_input::DeviceId(1), order: nickel_input::EventOrder(2),
-            position: nickel_input::Point { x: 4.0, y: 4.0 }, delta: None,
+        shell.desktop_input(twinkle_input::InputEvent::Pointer(twinkle_input::PointerEvent::Motion {
+            device: twinkle_input::DeviceId(1), order: twinkle_input::EventOrder(2),
+            position: twinkle_input::Point { x: 4.0, y: 4.0 }, delta: None,
         }));
         assert_eq!(shell.desktop_host.application().overflow_offsets["primary"], 1.5);
         assert!(shell.desktop_input(axis(Some((0, 0)))));

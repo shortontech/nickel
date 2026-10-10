@@ -1,4 +1,4 @@
-//! Compositor ownership for Nickel UI applications which do not have a Wayland surface.
+//! Compositor ownership for Twinkle applications which do not have a Wayland surface.
 
 use std::{
     cell::RefCell,
@@ -8,7 +8,7 @@ use std::{
     time::Instant,
 };
 
-use nickel_ui::{
+use twinkle::{
     Application, DamageRegion, GradientAxis, HostBatch, HostEvent, HostEventOutcome,
     InternalSurfaceId, InternalSurfaceSet, LinearGradient, Point as UiPoint, SoftwareRenderer,
     Text, UiEvent, View, ViewContext,
@@ -40,7 +40,7 @@ use smithay::{
 mod memory_test_renderer;
 
 smithay::backend::renderer::element::render_elements! {
-    /// Smithay elements emitted by the compositor-owned Nickel UI presenter.
+    /// Smithay elements emitted by the compositor-owned Twinkle presenter.
     pub InternalUiRenderElement<R> where R: Renderer + ImportMem;
     Memory=MemoryRenderBufferRenderElement<R>,
     Text=RescaleRenderElement<MemoryRenderBufferRenderElement<R>>,
@@ -451,7 +451,7 @@ enum TextTextureKind {
     },
     Styled {
         text: String,
-        spans: Vec<nickel_ui::StyledTextSpan>,
+        spans: Vec<twinkle::StyledTextSpan>,
         command_scale: u32,
         font_size: Option<u32>,
         color: u32,
@@ -483,9 +483,9 @@ enum ShapeTextureKind {
 }
 
 enum GpuPrimitive {
-    Solid(nickel_ui::Rect, SolidColorBuffer),
+    Solid(twinkle::Rect, SolidColorBuffer),
     Texture {
-        rect: nickel_ui::Rect,
+        rect: twinkle::Rect,
         source: Rectangle<f64, Logical>,
         text_scale: Option<f32>,
         buffer: MemoryRenderBuffer,
@@ -507,7 +507,7 @@ const SHAPE_CACHE_ENTRY_LIMIT: usize = 256;
 const SHAPE_CACHE_BYTE_LIMIT: usize = 16 * 1024 * 1024;
 const MAX_CACHED_SHAPE_PIXELS: f32 = 512.0 * 512.0;
 
-fn cache_rounded_shape(rect: nickel_ui::Rect) -> bool {
+fn cache_rounded_shape(rect: twinkle::Rect) -> bool {
     rect.size.width * rect.size.height <= MAX_CACHED_SHAPE_PIXELS
 }
 
@@ -572,10 +572,10 @@ impl SmithayFrameRenderer {
             damage.rects.clear();
             damage
                 .rects
-                .push(nickel_ui::Rect::new(0.0, 0.0, width as f32, height as f32));
+                .push(twinkle::Rect::new(0.0, 0.0, width as f32, height as f32));
         }
         self.diagnostics.software_frame_bytes =
-            result.pixels.capacity() * std::mem::size_of::<nickel_ui::Pixel>();
+            result.pixels.capacity() * std::mem::size_of::<twinkle::Pixel>();
         self.diagnostics.fallback_raster_bytes = texture_bytes(width, height);
         if damage.is_empty() {
             return;
@@ -740,7 +740,7 @@ impl SmithayFrameRenderer {
                     if cache_rounded_shape(*rect) {
                         1
                     } else {
-                        nickel_ui::backend::rounded_coverage_spans(
+                        twinkle::backend::rounded_coverage_spans(
                             *rect, *color, *radius, None, true, 1.0,
                         )
                         .len()
@@ -754,7 +754,7 @@ impl SmithayFrameRenderer {
                     if cache_rounded_shape(*rect) {
                         1
                     } else {
-                        nickel_ui::backend::rounded_coverage_spans(
+                        twinkle::backend::rounded_coverage_spans(
                             *rect, *color, *radius, None, false, 1.0,
                         )
                         .len()
@@ -769,7 +769,7 @@ impl SmithayFrameRenderer {
                     if cache_rounded_shape(*rect) {
                         1
                     } else {
-                        nickel_ui::backend::rounded_coverage_spans(
+                        twinkle::backend::rounded_coverage_spans(
                             *rect,
                             *color,
                             *radius,
@@ -793,7 +793,7 @@ impl SmithayFrameRenderer {
         })
     }
 
-    fn push_solid(&mut self, rect: nickel_ui::Rect, color: u32, clip: nickel_ui::Rect) {
+    fn push_solid(&mut self, rect: twinkle::Rect, color: u32, clip: twinkle::Rect) {
         let Some(rect) = intersect(rect, clip) else {
             return;
         };
@@ -809,9 +809,9 @@ impl SmithayFrameRenderer {
 
     fn push_gradient(
         &mut self,
-        rect: nickel_ui::Rect,
+        rect: twinkle::Rect,
         gradient: LinearGradient,
-        clip: nickel_ui::Rect,
+        clip: twinkle::Rect,
     ) {
         let (steps, horizontal) = match gradient.axis {
             GradientAxis::Horizontal => (rect.size.width.ceil().max(1.0) as u32, true),
@@ -826,14 +826,14 @@ impl SmithayFrameRenderer {
             let progress = ((step as f32 + 0.5) / extent.max(1.0)).clamp(0.0, 1.0);
             let color = interpolate_color(gradient.start, gradient.end, progress);
             let strip = if horizontal {
-                nickel_ui::Rect::new(
+                twinkle::Rect::new(
                     rect.origin.x + step as f32,
                     rect.origin.y,
                     (rect.size.width - step as f32).min(1.0),
                     rect.size.height,
                 )
             } else {
-                nickel_ui::Rect::new(
+                twinkle::Rect::new(
                     rect.origin.x,
                     rect.origin.y + step as f32,
                     rect.size.width,
@@ -847,8 +847,8 @@ impl SmithayFrameRenderer {
     fn push_rounded_texture(
         &mut self,
         command: &PaintCommand,
-        bounds: nickel_ui::Rect,
-        clip: nickel_ui::Rect,
+        bounds: twinkle::Rect,
+        clip: twinkle::Rect,
         scale: f32,
     ) {
         let Some(rect) = intersect(bounds, clip) else {
@@ -894,7 +894,7 @@ impl SmithayFrameRenderer {
                 PaintCommand::TopRoundedFill { rect, .. }
                 | PaintCommand::RoundedFill { rect, .. }
                 | PaintCommand::RoundedStroke { rect, .. } => {
-                    rect.origin = nickel_ui::Point { x: 0.0, y: 0.0 };
+                    rect.origin = twinkle::Point { x: 0.0, y: 0.0 };
                 }
                 _ => unreachable!("rounded texture receives rounded geometry"),
             }
@@ -949,7 +949,7 @@ impl SmithayFrameRenderer {
             scale_factor: frame.scale_factor,
         });
         self.primitives.clear();
-        let viewport = nickel_ui::Rect::new(
+        let viewport = twinkle::Rect::new(
             0.0,
             0.0,
             frame.logical_size.0 as f32,
@@ -971,7 +971,7 @@ impl SmithayFrameRenderer {
                     if cache_rounded_shape(*rect) {
                         self.push_rounded_texture(command, *rect, clip, frame.scale_factor);
                     } else {
-                        for (span, shaded) in nickel_ui::backend::rounded_coverage_spans(
+                        for (span, shaded) in twinkle::backend::rounded_coverage_spans(
                             *rect, *color, *radius, None, true, 1.0,
                         ) {
                             self.push_solid(span, shaded, clip);
@@ -986,7 +986,7 @@ impl SmithayFrameRenderer {
                     if cache_rounded_shape(*rect) {
                         self.push_rounded_texture(command, *rect, clip, frame.scale_factor);
                     } else {
-                        for (span, shaded) in nickel_ui::backend::rounded_coverage_spans(
+                        for (span, shaded) in twinkle::backend::rounded_coverage_spans(
                             *rect, *color, *radius, None, false, 1.0,
                         ) {
                             self.push_solid(span, shaded, clip);
@@ -1002,7 +1002,7 @@ impl SmithayFrameRenderer {
                     if cache_rounded_shape(*rect) {
                         self.push_rounded_texture(command, *rect, clip, frame.scale_factor);
                     } else {
-                        for (span, shaded) in nickel_ui::backend::rounded_coverage_spans(
+                        for (span, shaded) in twinkle::backend::rounded_coverage_spans(
                             *rect,
                             *color,
                             *radius,
@@ -1021,12 +1021,12 @@ impl SmithayFrameRenderer {
                 | PaintCommand::OverlayStroke { rect, color, width } => {
                     let width = width.max(0.0).min(rect.size.width).min(rect.size.height);
                     self.push_solid(
-                        nickel_ui::Rect::new(rect.origin.x, rect.origin.y, rect.size.width, width),
+                        twinkle::Rect::new(rect.origin.x, rect.origin.y, rect.size.width, width),
                         *color,
                         clip,
                     );
                     self.push_solid(
-                        nickel_ui::Rect::new(
+                        twinkle::Rect::new(
                             rect.origin.x,
                             rect.origin.y + rect.size.height - width,
                             rect.size.width,
@@ -1036,7 +1036,7 @@ impl SmithayFrameRenderer {
                         clip,
                     );
                     self.push_solid(
-                        nickel_ui::Rect::new(
+                        twinkle::Rect::new(
                             rect.origin.x,
                             rect.origin.y + width,
                             width,
@@ -1046,7 +1046,7 @@ impl SmithayFrameRenderer {
                         clip,
                     );
                     self.push_solid(
-                        nickel_ui::Rect::new(
+                        twinkle::Rect::new(
                             rect.origin.x + rect.size.width - width,
                             rect.origin.y + width,
                             width,
@@ -1058,7 +1058,7 @@ impl SmithayFrameRenderer {
                 }
                 PaintCommand::PushClip(rect) => clips.push(
                     intersect(clip, *rect)
-                        .unwrap_or_else(|| nickel_ui::Rect::new(0.0, 0.0, 0.0, 0.0)),
+                        .unwrap_or_else(|| twinkle::Rect::new(0.0, 0.0, 0.0, 0.0)),
                 ),
                 PaintCommand::PopClip => {
                     if clips.len() > 1 {
@@ -1161,8 +1161,8 @@ impl SmithayFrameRenderer {
     fn push_text_texture(
         &mut self,
         command: &PaintCommand,
-        bounds: nickel_ui::Rect,
-        clip: nickel_ui::Rect,
+        bounds: twinkle::Rect,
+        clip: twinkle::Rect,
         scale: f32,
     ) {
         let Some(rect) = intersect(bounds, clip) else {
@@ -1191,7 +1191,7 @@ impl SmithayFrameRenderer {
         let mut local = command.clone();
         match &mut local {
             PaintCommand::Text { bounds, .. } | PaintCommand::StyledText { bounds, .. } => {
-                bounds.origin = nickel_ui::Point { x: 0.0, y: 0.0 };
+                bounds.origin = twinkle::Point { x: 0.0, y: 0.0 };
             }
             _ => unreachable!("text texture receives a text command"),
         }
@@ -1290,7 +1290,7 @@ impl SmithayFrameRenderer {
             damage.rects.clear();
             damage
                 .rects
-                .push(nickel_ui::Rect::new(0.0, 0.0, width as f32, height as f32));
+                .push(twinkle::Rect::new(0.0, 0.0, width as f32, height as f32));
         }
         self.primitives.clear();
         self.import_fallback = None;
@@ -1527,7 +1527,7 @@ impl FrameRenderer for SmithayFrameRenderer {
             self.diagnostics.software_frame_bytes = 0;
             self.diagnostics.fallback_raster_bytes = 0;
             DamageRegion {
-                rects: [nickel_ui::Rect::new(
+                rects: [twinkle::Rect::new(
                     0.0,
                     0.0,
                     frame.logical_size.0 as f32,
@@ -1635,17 +1635,17 @@ fn texture_bytes(width: u32, height: u32) -> usize {
         .saturating_mul(4)
 }
 
-fn text_align_key(align: nickel_ui::TextAlign) -> u8 {
+fn text_align_key(align: twinkle::TextAlign) -> u8 {
     match align {
-        nickel_ui::TextAlign::Start => 0,
-        nickel_ui::TextAlign::Center => 1,
-        nickel_ui::TextAlign::End => 2,
+        twinkle::TextAlign::Start => 0,
+        twinkle::TextAlign::Center => 1,
+        twinkle::TextAlign::End => 2,
     }
 }
 
 fn text_texture_key(
     command: &PaintCommand,
-    bounds: nickel_ui::Rect,
+    bounds: twinkle::Rect,
     frame_scale: f32,
 ) -> TextTextureKey {
     let kind = match command {
@@ -1692,8 +1692,8 @@ fn text_texture_key(
 }
 
 fn text_source_rect(
-    rect: nickel_ui::Rect,
-    bounds: nickel_ui::Rect,
+    rect: twinkle::Rect,
+    bounds: twinkle::Rect,
     scale: f32,
     texture_width: u32,
     texture_height: u32,
@@ -1727,11 +1727,11 @@ fn text_source_rect(
 }
 
 fn text_destination_rect(
-    bounds: nickel_ui::Rect,
+    bounds: twinkle::Rect,
     source: Rectangle<f64, Logical>,
     scale: f32,
-) -> nickel_ui::Rect {
-    nickel_ui::Rect::new(
+) -> twinkle::Rect {
+    twinkle::Rect::new(
         bounds.origin.x + source.loc.x as f32 / scale,
         bounds.origin.y + source.loc.y as f32 / scale,
         source.size.w as f32 / scale,
@@ -1739,12 +1739,12 @@ fn text_destination_rect(
     )
 }
 
-fn intersect(left: nickel_ui::Rect, right: nickel_ui::Rect) -> Option<nickel_ui::Rect> {
+fn intersect(left: twinkle::Rect, right: twinkle::Rect) -> Option<twinkle::Rect> {
     let x = left.origin.x.max(right.origin.x);
     let y = left.origin.y.max(right.origin.y);
     let right_edge = (left.origin.x + left.size.width).min(right.origin.x + right.size.width);
     let bottom = (left.origin.y + left.size.height).min(right.origin.y + right.size.height);
-    (right_edge > x && bottom > y).then(|| nickel_ui::Rect::new(x, y, right_edge - x, bottom - y))
+    (right_edge > x && bottom > y).then(|| twinkle::Rect::new(x, y, right_edge - x, bottom - y))
 }
 
 fn color32f(color: u32) -> Color32F {
@@ -1821,11 +1821,11 @@ pub struct InternalUiRuntime {
     routed_events: Vec<(
         InternalSurfaceId,
         HostBatch,
-        Option<nickel_input::ModifierState>,
+        Option<twinkle_input::ModifierState>,
     )>,
     /// Session-owned mapping from renderer-local identities to the coordinator
     /// recipient lifetime that will execute routed input.
-    routed_recipients: BTreeMap<InternalSurfaceId, nickel_ui::NormalizedRecipientBinding>,
+    routed_recipients: BTreeMap<InternalSurfaceId, twinkle::NormalizedRecipientBinding>,
     next_recipient_lease: u64,
     desktop_input: desktop_input::DesktopInputState,
     renderer_mode: InternalUiRendererMode,
@@ -2059,7 +2059,7 @@ impl InternalUiRuntime {
             let _ = renderer.render_frame(surface.render_frame());
         }
         let mut rgba = Vec::with_capacity(
-            usize::from(width) * usize::from(height) * std::mem::size_of::<nickel_ui::Pixel>(),
+            usize::from(width) * usize::from(height) * std::mem::size_of::<twinkle::Pixel>(),
         );
         for pixel in renderer.pixels() {
             rgba.extend_from_slice(&[pixel.r, pixel.g, pixel.b, pixel.a]);
@@ -2082,7 +2082,7 @@ impl InternalUiRuntime {
 
     pub fn insert_boxed(
         &mut self,
-        surface: Box<dyn nickel_ui::InternalUiSurface>,
+        surface: Box<dyn twinkle::InternalUiSurface>,
         placement: InternalSurfacePlacement,
         scale: f32,
     ) -> InternalSurfaceId {
@@ -2124,7 +2124,7 @@ impl InternalUiRuntime {
         self.surfaces.get_mut(id)?.application_mut().downcast_mut()
     }
 
-    pub fn semantic_nodes(&self, id: InternalSurfaceId) -> Vec<nickel_ui::SemanticNodeSnapshot> {
+    pub fn semantic_nodes(&self, id: InternalSurfaceId) -> Vec<twinkle::SemanticNodeSnapshot> {
         self.surfaces
             .get(id)
             .map(|surface| surface.semantic_nodes())
@@ -2137,7 +2137,7 @@ impl InternalUiRuntime {
     pub(crate) fn accessibility_nodes(
         &self,
         id: InternalSurfaceId,
-    ) -> Vec<nickel_ui::AccessibilityNode> {
+    ) -> Vec<twinkle::AccessibilityNode> {
         self.surfaces
             .get(id)
             .map(|surface| surface.accessibility_nodes())
@@ -2147,7 +2147,7 @@ impl InternalUiRuntime {
     pub(crate) fn bounded_application_semantics(
         &self,
         id: InternalSurfaceId,
-    ) -> Result<(u64, Vec<nickel_ui::SemanticNodeSnapshot>), String> {
+    ) -> Result<(u64, Vec<twinkle::SemanticNodeSnapshot>), String> {
         let presentation = self.presentation.get(&id).ok_or("surface unavailable")?;
         if !presentation.visible
             || presentation.external_scene.is_some()
@@ -2166,8 +2166,8 @@ impl InternalUiRuntime {
             )
             .map_err(|error| {
                 match error {
-                    nickel_ui::BoundedSemanticError::ProtectedSurface => "protected surface",
-                    nickel_ui::BoundedSemanticError::BudgetExceeded => {
+                    twinkle::BoundedSemanticError::ProtectedSurface => "protected surface",
+                    twinkle::BoundedSemanticError::BudgetExceeded => {
                         "semantic projection exceeds budget"
                     }
                 }
@@ -2193,7 +2193,7 @@ impl InternalUiRuntime {
         id: InternalSurfaceId,
         tree_generation: u64,
         ordinal: usize,
-        action: nickel_ui::SemanticAction,
+        action: twinkle::SemanticAction,
     ) -> Result<bool, String> {
         let presentation = self.presentation.get(&id).ok_or("surface unavailable")?;
         if !presentation.visible
@@ -2219,7 +2219,7 @@ impl InternalUiRuntime {
                 Some(self.clipboard_limit),
             )
             .map_err(|error| {
-                use nickel_ui::{BoundedSemanticActionError as E, BoundedSemanticError as S};
+                use twinkle::{BoundedSemanticActionError as E, BoundedSemanticError as S};
                 match error {
                     E::InputBusy => "local surface input is held",
                     E::StaleGeneration => "stale semantic tree",
@@ -2437,7 +2437,7 @@ impl InternalUiRuntime {
         };
         self.routed_recipients.insert(
             runtime,
-            nickel_ui::NormalizedRecipientBinding { lease, lifetime },
+            twinkle::NormalizedRecipientBinding { lease, lifetime },
         );
     }
 
@@ -2451,7 +2451,7 @@ impl InternalUiRuntime {
         let lease = self.allocate_recipient_lease();
         self.routed_recipients.insert(
             runtime,
-            nickel_ui::NormalizedRecipientBinding {
+            twinkle::NormalizedRecipientBinding {
                 lease,
                 lifetime: recipient.snapshot_token(),
             },
@@ -2461,12 +2461,12 @@ impl InternalUiRuntime {
     pub(crate) fn normalized_recipient(
         &mut self,
         runtime: InternalSurfaceId,
-    ) -> nickel_ui::NormalizedRecipientBinding {
+    ) -> twinkle::NormalizedRecipientBinding {
         if let Some(binding) = self.routed_recipients.get(&runtime).copied() {
             return binding;
         }
         let lease = self.allocate_recipient_lease();
-        let binding = nickel_ui::NormalizedRecipientBinding {
+        let binding = twinkle::NormalizedRecipientBinding {
             lease,
             lifetime: runtime.snapshot_token(),
         };
@@ -2523,7 +2523,7 @@ impl InternalUiRuntime {
 
     pub(crate) fn refresh_window_decoration_colors(
         &mut self,
-        theme: nickel_ui::SemanticTheme,
+        theme: twinkle::SemanticTheme,
     ) -> bool {
         let mut changed = false;
         for surface in self.presentation.values_mut() {
@@ -2780,7 +2780,7 @@ impl InternalUiRuntime {
         batch.normalized_authorities.clear();
         let mut consumed_authorities = Vec::new();
         let expected_recipient = self.routed_recipients.get(&id).copied().unwrap_or(
-            nickel_ui::NormalizedRecipientBinding {
+            twinkle::NormalizedRecipientBinding {
                 lease: id.snapshot_token(),
                 lifetime: id.snapshot_token(),
             },
@@ -2844,8 +2844,8 @@ impl InternalUiRuntime {
     pub(crate) fn perform_accessibility_action(
         &mut self,
         id: InternalSurfaceId,
-        target: nickel_ui::UiId,
-        action: nickel_ui::SemanticAction,
+        target: twinkle::UiId,
+        action: twinkle::SemanticAction,
     ) -> Result<bool, String> {
         let Some(surface) = self.surfaces.get_mut(id) else {
             return Err("local accessibility surface is unavailable".to_owned());
@@ -2884,7 +2884,7 @@ impl InternalUiRuntime {
     ) -> Vec<(
         InternalSurfaceId,
         HostBatch,
-        Option<nickel_input::ModifierState>,
+        Option<twinkle_input::ModifierState>,
     )> {
         let mut routed = std::mem::take(&mut self.routed_events);
         for (_, batch, _) in &mut routed {
@@ -3029,14 +3029,14 @@ impl InternalUiRuntime {
         self.focused
     }
 
-    pub(crate) fn open_overlay(&self, id: InternalSurfaceId) -> Option<nickel_ui::OverlayId> {
+    pub(crate) fn open_overlay(&self, id: InternalSurfaceId) -> Option<twinkle::OverlayId> {
         self.surfaces.get(id)?.inspect().open_overlay
     }
 
     pub(crate) fn focused_field_lease(
         &self,
         id: InternalSurfaceId,
-    ) -> Option<(nickel_ui::UiId, u64)> {
+    ) -> Option<(twinkle::UiId, u64)> {
         let inspection = self.surfaces.get(id)?.inspect();
         Some((
             inspection.keyboard_focus?,
@@ -3399,7 +3399,7 @@ impl InternalUiRuntime {
             let submitted = self.step(
                 id,
                 HostBatch {
-                    events: vec![HostEvent::Shortcut(nickel_ui::Shortcut::Submit)],
+                    events: vec![HostEvent::Shortcut(twinkle::Shortcut::Submit)],
                     ..Default::default()
                 },
             );
@@ -3802,7 +3802,7 @@ pub enum TouchPhase {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nickel_ui::{Button, Text, View, ViewContext};
+    use twinkle::{Button, Text, View, ViewContext};
 
     #[test]
     fn software_surface_rasters_off_thread_and_uploads_latest_frame() {
@@ -3818,7 +3818,7 @@ mod tests {
             .unwrap();
         let id = runtime.insert_scene(
             vec![PaintCommand::Fill {
-                rect: nickel_ui::Rect::new(0.0, 0.0, 8.0, 6.0),
+                rect: twinkle::Rect::new(0.0, 0.0, 8.0, 6.0),
                 color: 0x123456,
             }],
             InternalSurfacePlacement {
@@ -3932,7 +3932,7 @@ mod tests {
     fn synchronizing_an_unchanged_external_scene_does_not_redirty_it() {
         let mut runtime = InternalUiRuntime::default();
         let scene = vec![PaintCommand::Fill {
-            rect: nickel_ui::Rect::new(0.0, 0.0, 20.0, 10.0),
+            rect: twinkle::Rect::new(0.0, 0.0, 20.0, 10.0),
             color: 0xff0a141e,
         }];
         let id = runtime.insert_scene(scene.clone(), placement(Some("DP-1")), 1.0);
@@ -3999,18 +3999,18 @@ mod tests {
         ));
         let commands = vec![
             PaintCommand::Image {
-                bounds: nickel_ui::Rect::new(0.0, 0.0, 32.0, 32.0),
+                bounds: twinkle::Rect::new(0.0, 0.0, 32.0, 32.0),
                 id: 7,
                 generation: 1,
                 image,
                 high_density: None,
             },
             PaintCommand::Text {
-                bounds: nickel_ui::Rect::new(40.0, 0.0, 120.0, 24.0),
+                bounds: twinkle::Rect::new(40.0, 0.0, 120.0, 24.0),
                 text: "File manager".into(),
                 scale: 1.0,
                 color: 0xffffffff,
-                align: nickel_ui::TextAlign::Start,
+                align: twinkle::TextAlign::Start,
                 bold: false,
                 wrap: false,
             },
@@ -4129,7 +4129,7 @@ mod tests {
         runtime.render_buffer(id);
         assert!(!runtime.has_damage());
         let generation = runtime.bounded_application_semantics(id).unwrap().0;
-        let invoke = || nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate);
+        let invoke = || twinkle::SemanticAction::Invoke(twinkle::ActionKind::Activate);
         assert!(
             runtime
                 .perform_bounded_application_action(id, generation, 0, invoke())
@@ -4190,7 +4190,7 @@ mod tests {
         let mut place = placement(None);
         place.role = InternalSurfaceRole::Application;
         let id = runtime.insert(CopyApp::default(), place, 1.0);
-        let invoke = || nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate);
+        let invoke = || twinkle::SemanticAction::Invoke(twinkle::ActionKind::Activate);
         runtime.set_clipboard_limit(10);
         let generation = runtime.bounded_application_semantics(id).unwrap().0;
         assert!(
@@ -4224,15 +4224,12 @@ mod tests {
     impl Application for SubmitCounter {
         type Message = ();
         fn update(&mut self, (): ()) {}
-        fn shortcut_outcome(
-            &mut self,
-            shortcut: nickel_ui::Shortcut,
-        ) -> nickel_ui::ShortcutOutcome {
-            if shortcut != nickel_ui::Shortcut::Submit {
-                return nickel_ui::ShortcutOutcome::from_changed(false);
+        fn shortcut_outcome(&mut self, shortcut: twinkle::Shortcut) -> twinkle::ShortcutOutcome {
+            if shortcut != twinkle::Shortcut::Submit {
+                return twinkle::ShortcutOutcome::from_changed(false);
             }
             self.0 += 1;
-            nickel_ui::ShortcutOutcome::handled(true)
+            twinkle::ShortcutOutcome::handled(true)
         }
         fn view(&self, _: ViewContext) -> impl View<Self::Message> {
             Text::new("submit")
@@ -4299,7 +4296,7 @@ mod tests {
             for surface in runtime.presentation.values_mut() {
                 surface.dirty = false;
             }
-            let theme = nickel_ui::SemanticTheme::from(
+            let theme = nickel_ui_host::semantic_theme(
                 nickel_core::theme::ThemePalette::from_appearance(appearance),
             );
             assert!(runtime.refresh_window_decoration_colors(theme));
@@ -4371,12 +4368,12 @@ mod tests {
             },
             1.5,
         );
-        let input = nickel_input::InputEvent::Pointer(nickel_input::PointerEvent::Button {
-            device: nickel_input::DeviceId(7),
-            order: nickel_input::EventOrder(29),
-            button: nickel_input::PointerButton::Secondary,
-            edge: nickel_input::KeyEdge::Released,
-            position: Some(nickel_input::Point { x: 13.0, y: 71.0 }),
+        let input = twinkle_input::InputEvent::Pointer(twinkle_input::PointerEvent::Button {
+            device: twinkle_input::DeviceId(7),
+            order: twinkle_input::EventOrder(29),
+            button: twinkle_input::PointerButton::Secondary,
+            edge: twinkle_input::KeyEdge::Released,
+            position: Some(twinkle_input::Point { x: 13.0, y: 71.0 }),
         });
         assert!(runtime.step(
             desktop,
@@ -4751,9 +4748,9 @@ mod tests {
     #[test]
     fn rectangular_display_list_selects_gpu_solids_and_honors_clip() {
         let commands = [
-            PaintCommand::PushClip(nickel_ui::Rect::new(5.0, 4.0, 20.0, 10.0)),
+            PaintCommand::PushClip(twinkle::Rect::new(5.0, 4.0, 20.0, 10.0)),
             PaintCommand::Fill {
-                rect: nickel_ui::Rect::new(0.0, 0.0, 40.0, 30.0),
+                rect: twinkle::Rect::new(0.0, 0.0, 40.0, 30.0),
                 color: 0xff336699,
             },
             PaintCommand::PopClip,
@@ -4774,7 +4771,7 @@ mod tests {
         let GpuPrimitive::Solid(rect, _) = &renderer.primitives[0] else {
             panic!("fill should produce a solid")
         };
-        assert_eq!(*rect, nickel_ui::Rect::new(5.0, 4.0, 20.0, 10.0));
+        assert_eq!(*rect, twinkle::Rect::new(5.0, 4.0, 20.0, 10.0));
         assert!(renderer.raster.is_none());
         assert!(renderer.software.is_none());
         assert_eq!(renderer.diagnostics().software_frame_bytes, 0);
@@ -4793,7 +4790,7 @@ mod tests {
     #[test]
     fn explicit_software_mode_rasterizes_a_gpu_supported_frame() {
         let commands = [PaintCommand::Fill {
-            rect: nickel_ui::Rect::new(0.0, 0.0, 40.0, 30.0),
+            rect: twinkle::Rect::new(0.0, 0.0, 40.0, 30.0),
             color: 0xff336699,
         }];
         let mut renderer = SmithayFrameRenderer::new(40, 30, 1.0, InternalUiRendererMode::Software);
@@ -4824,7 +4821,7 @@ mod tests {
     #[test]
     fn successful_gpu_frame_releases_software_fallback_storage() {
         let commands = [PaintCommand::Fill {
-            rect: nickel_ui::Rect::new(0.0, 0.0, 40.0, 30.0),
+            rect: twinkle::Rect::new(0.0, 0.0, 40.0, 30.0),
             color: 0xff336699,
         }];
         let mut renderer = SmithayFrameRenderer::new(40, 30, 1.0, InternalUiRendererMode::Software);
@@ -4862,7 +4859,7 @@ mod tests {
     #[test]
     fn small_rounded_fill_uses_one_cached_texture_and_stays_on_gpu() {
         let commands = [PaintCommand::RoundedFill {
-            rect: nickel_ui::Rect::new(8.0, 8.0, 320.0, 80.0),
+            rect: twinkle::Rect::new(8.0, 8.0, 320.0, 80.0),
             color: 0x336699,
             radius: 8.0,
         }];
@@ -4900,7 +4897,7 @@ mod tests {
     #[test]
     fn large_rounded_fill_avoids_a_full_surface_texture() {
         let commands = [PaintCommand::RoundedFill {
-            rect: nickel_ui::Rect::new(0.0, 0.0, 1920.0, 1080.0),
+            rect: twinkle::Rect::new(0.0, 0.0, 1920.0, 1080.0),
             color: 0x336699,
             radius: 8.0,
         }];
@@ -4931,7 +4928,7 @@ mod tests {
         let commands = (1..=12)
             .rev()
             .map(|layer| PaintCommand::RoundedFill {
-                rect: nickel_ui::Rect::new(
+                rect: twinkle::Rect::new(
                     12.0 - layer as f32,
                     10.0 - layer as f32,
                     320.0 + layer as f32 * 2.0,
@@ -4968,7 +4965,7 @@ mod tests {
     fn dense_icon_plane_uses_gpu_without_full_surface_rasterization() {
         let commands = (0..1_536)
             .map(|index| PaintCommand::Fill {
-                rect: nickel_ui::Rect::new((index % 48) as f32, (index / 48) as f32, 1.0, 1.0),
+                rect: twinkle::Rect::new((index % 48) as f32, (index / 48) as f32, 1.0, 1.0),
                 color: 0xff336699,
             })
             .collect::<Vec<_>>();
@@ -4990,7 +4987,7 @@ mod tests {
     #[test]
     fn element_heavy_scene_uses_bounded_fallback() {
         let commands = [PaintCommand::Gradient {
-            rect: nickel_ui::Rect::new(0.0, 0.0, 20.0, (MAX_GPU_ELEMENTS_PER_SURFACE + 1) as f32),
+            rect: twinkle::Rect::new(0.0, 0.0, 20.0, (MAX_GPU_ELEMENTS_PER_SURFACE + 1) as f32),
             gradient: LinearGradient {
                 start: 0xff336699,
                 end: 0xff112233,
@@ -5030,11 +5027,11 @@ mod tests {
     #[test]
     fn text_uses_a_bounded_texture_without_full_surface_fallback() {
         let commands = [PaintCommand::Text {
-            bounds: nickel_ui::Rect::new(0.0, 0.0, 20.0, 12.0),
+            bounds: twinkle::Rect::new(0.0, 0.0, 20.0, 12.0),
             text: "Nickel".into(),
             scale: 1.0,
             color: 0x336699,
-            align: nickel_ui::TextAlign::Start,
+            align: twinkle::TextAlign::Start,
             bold: false,
             wrap: false,
         }];
@@ -5062,11 +5059,11 @@ mod tests {
     #[test]
     fn text_maps_the_complete_pixel_rounded_texture_at_fractional_bounds() {
         let commands = [PaintCommand::Text {
-            bounds: nickel_ui::Rect::new(7.25, 3.5, 153.6, 17.2),
+            bounds: twinkle::Rect::new(7.25, 3.5, 153.6, 17.2),
             text: "Fractional label".into(),
             scale: 1.0,
             color: 0xff336699,
-            align: nickel_ui::TextAlign::Start,
+            align: twinkle::TextAlign::Start,
             bold: false,
             wrap: false,
         }];
@@ -5093,11 +5090,11 @@ mod tests {
         use super::memory_test_renderer::MemoryTestRenderer;
         use smithay::backend::renderer::element::{RenderElement, UnderlyingStorage};
         let commands = [PaintCommand::Text {
-            bounds: nickel_ui::Rect::new(0.0, 0.0, 160.0, 32.0),
+            bounds: twinkle::Rect::new(0.0, 0.0, 160.0, 32.0),
             text: "catering.html".into(),
             scale: 1.0,
             color: 0xffffff,
-            align: nickel_ui::TextAlign::Start,
+            align: twinkle::TextAlign::Start,
             bold: false,
             wrap: false,
         }];
@@ -5145,16 +5142,16 @@ mod tests {
             for clipped in [false, true] {
                 let mut commands = Vec::new();
                 if clipped {
-                    commands.push(PaintCommand::PushClip(nickel_ui::Rect::new(
+                    commands.push(PaintCommand::PushClip(twinkle::Rect::new(
                         12.75, 5.25, 120.3, 13.2,
                     )));
                 }
                 commands.push(PaintCommand::Text {
-                    bounds: nickel_ui::Rect::new(7.25, 3.5, 153.6, 17.2),
+                    bounds: twinkle::Rect::new(7.25, 3.5, 153.6, 17.2),
                     text: "Google Chrome".into(),
                     scale: 1.0,
                     color: 0xffffff,
-                    align: nickel_ui::TextAlign::Center,
+                    align: twinkle::TextAlign::Center,
                     bold: false,
                     wrap: false,
                 });
@@ -5196,8 +5193,8 @@ mod tests {
 
     #[test]
     fn clipped_text_crops_on_the_raster_pixel_grid() {
-        let bounds = nickel_ui::Rect::new(10.0, 5.0, 10.5, 8.5);
-        let rect = nickel_ui::Rect::new(12.0, 7.0, 5.0, 4.0);
+        let bounds = twinkle::Rect::new(10.0, 5.0, 10.5, 8.5);
+        let rect = twinkle::Rect::new(12.0, 7.0, 5.0, 4.0);
 
         assert_eq!(
             text_source_rect(rect, bounds, 1.25, 14, 11),
@@ -5211,9 +5208,9 @@ mod tests {
 
         let image = Arc::new(image::RgbaImage::new(40, 20));
         let commands = [
-            PaintCommand::PushClip(nickel_ui::Rect::new(15.0, 8.0, 10.0, 5.0)),
+            PaintCommand::PushClip(twinkle::Rect::new(15.0, 8.0, 10.0, 5.0)),
             PaintCommand::Image {
-                bounds: nickel_ui::Rect::new(10.0, 5.0, 20.0, 10.0),
+                bounds: twinkle::Rect::new(10.0, 5.0, 20.0, 10.0),
                 id: 3,
                 generation: 1,
                 image,
@@ -5235,7 +5232,7 @@ mod tests {
         let GpuPrimitive::Texture { rect, source, .. } = &renderer.primitives[0] else {
             panic!("image should produce a texture")
         };
-        assert_eq!(*rect, nickel_ui::Rect::new(15.0, 8.0, 10.0, 5.0));
+        assert_eq!(*rect, twinkle::Rect::new(15.0, 8.0, 10.0, 5.0));
         assert_eq!(
             *source,
             Rectangle::new((10.0, 6.0).into(), (20.0, 10.0).into())
@@ -5250,16 +5247,16 @@ mod tests {
 
         let commands = [
             PaintCommand::Text {
-                bounds: nickel_ui::Rect::new(0.0, 0.0, 30.0, 12.0),
+                bounds: twinkle::Rect::new(0.0, 0.0, 30.0, 12.0),
                 text: "Nickel".into(),
                 scale: 1.0,
                 color: 0x336699,
-                align: nickel_ui::TextAlign::Start,
+                align: twinkle::TextAlign::Start,
                 bold: false,
                 wrap: false,
             },
             PaintCommand::Image {
-                bounds: nickel_ui::Rect::new(30.0, 0.0, 8.0, 8.0),
+                bounds: twinkle::Rect::new(30.0, 0.0, 8.0, 8.0),
                 id: 7,
                 generation: 3,
                 image: Arc::new(image::RgbaImage::from_pixel(
@@ -5306,11 +5303,11 @@ mod tests {
         ));
         let commands = [
             PaintCommand::Fill {
-                rect: nickel_ui::Rect::new(0.0, 0.0, 12.0, 12.0),
+                rect: twinkle::Rect::new(0.0, 0.0, 12.0, 12.0),
                 color: 0x101010,
             },
             PaintCommand::Image {
-                bounds: nickel_ui::Rect::new(4.0, 4.0, 4.0, 4.0),
+                bounds: twinkle::Rect::new(4.0, 4.0, 4.0, 4.0),
                 id: 99,
                 generation: 1,
                 image,
@@ -5351,7 +5348,7 @@ mod tests {
             image::Rgba([20, 40, 60, 255]),
         ));
         let commands = [PaintCommand::Image {
-            bounds: nickel_ui::Rect::new(0.0, 0.0, 4.0, 4.0),
+            bounds: twinkle::Rect::new(0.0, 0.0, 4.0, 4.0),
             id: 7,
             generation: 3,
             image,
@@ -5445,7 +5442,7 @@ mod tests {
         let make = |value, scale| {
             (
                 [PaintCommand::Image {
-                    bounds: nickel_ui::Rect::new(0.0, 0.0, 2.0, 2.0),
+                    bounds: twinkle::Rect::new(0.0, 0.0, 2.0, 2.0),
                     id: 1,
                     generation: 1,
                     image: Arc::new(image::RgbaImage::from_pixel(
@@ -5485,11 +5482,11 @@ mod tests {
         let mut backend = memory_test_renderer::MemoryTestRenderer::default();
         let mut commands = vec![
             PaintCommand::Fill {
-                rect: nickel_ui::Rect::new(0.0, 0.0, 80.0, 60.0),
+                rect: twinkle::Rect::new(0.0, 0.0, 80.0, 60.0),
                 color: 0xff112233,
             },
             PaintCommand::Fill {
-                rect: nickel_ui::Rect::new(2.25, 3.5, 4.5, 5.25),
+                rect: twinkle::Rect::new(2.25, 3.5, 4.5, 5.25),
                 color: 0x80446688,
             },
         ];
@@ -5538,7 +5535,7 @@ mod tests {
         assert!(backend.updates.is_empty(), "unchanged frames do not upload");
         for step in 0..12 {
             commands[1] = PaintCommand::Fill {
-                rect: nickel_ui::Rect::new(2.25 + step as f32, 3.5, 4.5, 5.25),
+                rect: twinkle::Rect::new(2.25 + step as f32, 3.5, 4.5, 5.25),
                 color: 0x40336699 + step,
             };
             renderer.prepare_fallback(frame(&commands));
@@ -5630,7 +5627,7 @@ mod tests {
         use std::sync::Arc;
         let caches = SharedTextureCaches::default();
         let commands = [PaintCommand::Image {
-            bounds: nickel_ui::Rect::new(1.25, 2.5, 4.0, 4.0),
+            bounds: twinkle::Rect::new(1.25, 2.5, 4.0, 4.0),
             id: 7,
             generation: 1,
             image: Arc::new(image::RgbaImage::from_pixel(
@@ -5686,8 +5683,8 @@ mod tests {
     fn fallback_damage_clips_and_rounds_disjoint_regions_outward() {
         let damage = DamageRegion {
             rects: [
-                nickel_ui::Rect::new(-1.2, 2.2, 4.4, 2.1),
-                nickel_ui::Rect::new(8.5, 7.2, 5.0, 5.0),
+                twinkle::Rect::new(-1.2, 2.2, 4.4, 2.1),
+                twinkle::Rect::new(8.5, 7.2, 5.0, 5.0),
             ]
             .into_iter()
             .collect(),
@@ -5704,7 +5701,7 @@ mod tests {
     #[test]
     fn fallback_scale_resize_and_suspend_require_complete_repaint() {
         let commands = [PaintCommand::Fill {
-            rect: nickel_ui::Rect::new(1.0, 1.0, 2.0, 2.0),
+            rect: twinkle::Rect::new(1.0, 1.0, 2.0, 2.0),
             color: 0x804488cc,
         }];
         let mut renderer = SmithayFrameRenderer::new(10, 10, 1.0, InternalUiRendererMode::Software);
@@ -5736,11 +5733,11 @@ mod tests {
             SmithayFrameRenderer::with_caches(1.0, InternalUiRendererMode::Gpu, &caches);
         let mut peer = SmithayFrameRenderer::with_caches(1.0, InternalUiRendererMode::Gpu, &caches);
         let commands = [PaintCommand::Text {
-            bounds: nickel_ui::Rect::new(0.0, 0.0, 1024.0, 256.0),
+            bounds: twinkle::Rect::new(0.0, 0.0, 1024.0, 256.0),
             text: "A persistent menu".into(),
             scale: 1.0,
             color: 0xffffffff,
-            align: nickel_ui::TextAlign::Start,
+            align: twinkle::TextAlign::Start,
             bold: false,
             wrap: false,
         }];
@@ -5775,11 +5772,11 @@ mod tests {
     fn unusually_large_text_scratch_is_retired_while_visible() {
         let mut renderer = SmithayFrameRenderer::new(2048, 1025, 1.0, InternalUiRendererMode::Gpu);
         let commands = [PaintCommand::Text {
-            bounds: nickel_ui::Rect::new(0.0, 0.0, 2048.0, 1025.0),
+            bounds: twinkle::Rect::new(0.0, 0.0, 2048.0, 1025.0),
             text: "One unusually large label".into(),
             scale: 1.0,
             color: 0xffffffff,
-            align: nickel_ui::TextAlign::Start,
+            align: twinkle::TextAlign::Start,
             bold: false,
             wrap: false,
         }];
@@ -5808,11 +5805,11 @@ mod tests {
                 SmithayFrameRenderer::new(width, height, 1.0, InternalUiRendererMode::Software);
             let mut commands = [
                 PaintCommand::Fill {
-                    rect: nickel_ui::Rect::new(0.0, 0.0, width as f32, height as f32),
+                    rect: twinkle::Rect::new(0.0, 0.0, width as f32, height as f32),
                     color: 0xff112233,
                 },
                 PaintCommand::Fill {
-                    rect: nickel_ui::Rect::new(10.0, 10.0, 16.0, 16.0),
+                    rect: twinkle::Rect::new(10.0, 10.0, 16.0, 16.0),
                     color: 0xff445566,
                 },
             ];

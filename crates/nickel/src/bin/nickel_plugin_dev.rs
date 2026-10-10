@@ -709,9 +709,9 @@ mod platform {
         fn connectivity_settings_use_native_controls_and_revision_bound_public_clients() {
             // Package evaluation plus native view construction needs more than the test thread default.
             std::thread::Builder::new().stack_size(16 * 1024 * 1024).spawn(|| {
-            use nickel_plugin_runtime::{JsxModuleGraph, ModuleSource};
-            use nickel_ui::SemanticRole;
-            use nickel_ui::{SemanticAction, SemanticSelector, UiHost};
+            use nickel_jsx_host::{JsxModuleGraph, ModuleSource};
+            use twinkle::SemanticRole;
+            use twinkle::{SemanticAction, SemanticSelector, UiHost};
             let directory = tempfile::tempdir().unwrap();
             std::fs::create_dir(directory.path().join("styles")).unwrap();
             std::fs::write(
@@ -763,7 +763,7 @@ mod platform {
                 "bluetooth":{"available":true,"powered":true,"discovering":false,"revision":"fedcba9876543210","operations":{"setPowered":true,"pair":true,"connect":false,"disconnect":false,"setDiscovery":false},"devices":[{"id":"device-stable","name":"Headset","paired":false,"connected":false}]}
             });
             let mut runtime =
-                nickel_plugin_runtime::JsxRuntime::new_modules(&graph, Some(&data.to_string()))
+                nickel_jsx_host::create_module_runtime(&graph, Some(&data.to_string()))
                     .unwrap();
             let metadata: serde_json::Value =
                 runtime.eval_json("__nickelSettingsMetadata()").unwrap();
@@ -800,7 +800,7 @@ mod platform {
                 .unwrap();
             host.perform_semantic_action(
                 connect.id,
-                SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
+                SemanticAction::Invoke(twinkle::ActionKind::Activate),
             );
             assert!(matches!(
                 host.application_mut().take_effects().as_slice(),
@@ -876,7 +876,7 @@ mod platform {
                 })
                 .is_err()
             );
-            nickel_plugin_presentation::css::StyleSheet::compile(include_str!(
+            twinkle_presentation::css::StyleSheet::compile(include_str!(
                 "../../../../assets/plugins/nickel-default/src/styles/connectivity.css"
             ))
             .unwrap();
@@ -885,7 +885,7 @@ mod platform {
 
         #[test]
         fn ordinary_keyboard_module_uses_public_generation_bound_native_requests() {
-            use nickel_plugin_runtime::{JsxModuleGraph, ModuleSource};
+            use nickel_jsx_host::{JsxModuleGraph, ModuleSource};
             let directory = tempfile::tempdir().unwrap();
             std::fs::create_dir(directory.path().join("styles")).unwrap();
             std::fs::write(
@@ -939,17 +939,17 @@ mod platform {
             let mut app = PluginPanelApplication::from_package(&package).unwrap();
             app.sync_data(&serde_json::json!({"keyboard":snapshot}))
                 .unwrap();
-            let mut host = nickel_ui::UiHost::new(app, 1056, 368);
-            fn invoke(host: &mut nickel_ui::UiHost<PluginPanelApplication>, label: &str) {
+            let mut host = twinkle::UiHost::new(app, 1056, 368);
+            fn invoke(host: &mut twinkle::UiHost<PluginPanelApplication>, label: &str) {
                 let target = host
-                    .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
-                        role: nickel_ui::SemanticRole::Button,
+                    .query_unique(&twinkle::SemanticSelector::RoleAndName {
+                        role: twinkle::SemanticRole::Button,
                         name: label.into(),
                     })
                     .unwrap();
                 host.perform_semantic_action(
                     target.id,
-                    nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
+                    twinkle::SemanticAction::Invoke(twinkle::ActionKind::Activate),
                 );
             }
             invoke(&mut host, "A");
@@ -968,7 +968,7 @@ mod platform {
             resized
                 .sync_data(&serde_json::json!({"keyboard":expanded}))
                 .unwrap();
-            let mut resized = nickel_ui::UiHost::new(resized, 1056, 640);
+            let mut resized = twinkle::UiHost::new(resized, 1056, 640);
             invoke(&mut resized, "Move down");
             assert!(
                 matches!(resized.application_mut().take_effects().as_slice(),[nickel_shell::plugin_panel::PluginEffect::Keyboard{effect,..}] if effect.operation == "keyboard.toggleDock" && effect.generation == 8)
@@ -985,7 +985,7 @@ mod platform {
             denied
                 .sync_data(&serde_json::json!({"keyboard":snapshot}))
                 .unwrap();
-            let mut denied = nickel_ui::UiHost::new(denied, 1056, 368);
+            let mut denied = twinkle::UiHost::new(denied, 1056, 368);
             invoke(&mut denied, "A");
             assert!(denied.application_mut().take_effects().is_empty());
             assert!(
@@ -1000,7 +1000,7 @@ mod platform {
         #[test]
         fn quick_settings_uses_public_revision_bound_workspace_and_display_clients() {
             std::thread::Builder::new().stack_size(16 * 1024 * 1024).spawn(|| {
-                use nickel_plugin_runtime::{JsxModuleGraph, ModuleSource, JsxRuntime};
+                use nickel_jsx_host::{JsxModuleGraph, ModuleSource};
                 let directory=tempfile::tempdir().unwrap();
                 std::fs::create_dir(directory.path().join("styles")).unwrap();
                 std::fs::write(directory.path().join("QuickSettings.jsx"),include_str!("../../../../assets/plugins/nickel-default/src/QuickSettings.tsx")).unwrap();
@@ -1010,7 +1010,7 @@ mod platform {
                 let graph=JsxModuleGraph::new("main.js",modules.iter().map(|module|ModuleSource{path:&module.path,source:&module.source})).unwrap();
                 let revision="a".repeat(64);
                 let data=serde_json::json!({"workspaces":{"available":true,"revision":revision,"workspaces":[{"id":"9","active":true},{"id":"44","active":false}],"activeWorkspace":"9","operations":{"switch":true,"create":true,"remove":true}},"desktop":{"operations":{"toggleShowDesktop":true}},"displays":{"available":true,"revision":"0123456789abcdef","projectionModes":[{"id":"extend","label":"Extend"}],"outputs":[]}});
-                let mut runtime=JsxRuntime::new_modules(&graph,Some(&data.to_string())).unwrap();
+                let mut runtime=nickel_jsx_host::create_module_runtime(&graph,Some(&data.to_string())).unwrap();
                 fn action(node:&serde_json::Value,id:&str)->Option<u64>{if node["id"]==id {return node["action"].as_u64();}node["children"].as_array()?.iter().find_map(|child|action(child,id))}
                 for (id,expected) in [("workspace-44",serde_json::json!({"type":"workspaces.switch","id":"44","revision":revision})),("projection-extend",serde_json::json!({"type":"displays.previewProjection","mode":"extend","revision":"0123456789abcdef"})),("show-desktop",serde_json::json!({"type":"desktop.toggleShowDesktop"}))] {
                     let tree=runtime.render("__nickelRender()",|node|Ok(node.clone())).unwrap();
@@ -1021,9 +1021,9 @@ mod platform {
                 let mut manifest=PluginManifest::from_json(include_str!("../../../../assets/plugins/nickel-default/plugin.json")).unwrap(); manifest.composition=None; manifest.entry="main.js".into(); manifest.surfaces.retain(|surface|surface.id=="quick-settings");
                 let package=PluginPackage{manifest,source,modules,stylesheet:String::new(),images:Default::default()};
                 let mut app=PluginPanelApplication::from_package(&package).unwrap(); app.sync_data(&data).unwrap();
-                let mut host=nickel_ui::UiHost::new(app,420,600);
-                let target=host.query_unique(&nickel_ui::SemanticSelector::RoleAndName {role:nickel_ui::SemanticRole::Button,name:"2".into()}).unwrap();
-                host.perform_semantic_action(target.id,nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate));
+                let mut host=twinkle::UiHost::new(app,420,600);
+                let target=host.query_unique(&twinkle::SemanticSelector::RoleAndName {role:twinkle::SemanticRole::Button,name:"2".into()}).unwrap();
+                host.perform_semantic_action(target.id,twinkle::SemanticAction::Invoke(twinkle::ActionKind::Activate));
                 assert!(matches!(host.application_mut().take_effects().as_slice(),[nickel_shell::plugin_panel::PluginEffect::Workspace{..}]));
             }).unwrap().join().unwrap();
         }
@@ -1031,7 +1031,7 @@ mod platform {
         #[test]
         fn feature_settings_confirm_destructive_preferences_and_render_public_shortcuts() {
             std::thread::Builder::new().stack_size(16 * 1024 * 1024).spawn(|| {
-                use nickel_plugin_runtime::{JsxModuleGraph, ModuleSource, JsxRuntime};
+                use nickel_jsx_host::{JsxModuleGraph, ModuleSource};
                 let directory = tempfile::tempdir().unwrap();
                 std::fs::create_dir(directory.path().join("styles")).unwrap();
                 std::fs::write(directory.path().join("OptionalFeatures.jsx"), include_str!("../../../../assets/plugins/nickel-default/src/OptionalFeatures.tsx")).unwrap();
@@ -1042,7 +1042,7 @@ mod platform {
                 let graph = JsxModuleGraph::new("main.js", modules.iter().map(|module|ModuleSource {path:&module.path,source:&module.source})).unwrap();
                 let revision = "a".repeat(64);
                 let data = serde_json::json!({"features":{"available":true,"revision":revision,"operations":{"setKeyboardMode":true,"setCodexEnabled":true,"retryCodex":true},"keyboard":{"mode":"automatic","runtimeAvailable":true},"codex":{"requestedEnabled":true,"disableConfirmationRequired":true,"state":"enabled","policy":"editable","runtimeCountersAvailable":false}},"shortcuts":{"available":true,"editable":false,"reason":"Shortcut remapping is unsupported","globalAvailable":false,"globalReason":"Native shortcuts unavailable","shortcuts":[{"id":"launcher","action":"Open launcher","keys":"Super","scope":"Global","available":false}]}});
-                let mut runtime = JsxRuntime::new_modules(&graph,Some(&data.to_string())).unwrap();
+                let mut runtime = nickel_jsx_host::create_module_runtime(&graph,Some(&data.to_string())).unwrap();
                 let metadata:serde_json::Value = runtime.eval_json("__nickelSettingsMetadata()").unwrap();
                 for id in ["optional-features","keyboard-shortcuts"] { assert!(metadata["pages"].as_array().unwrap().iter().any(|page|page["id"]==id)); }
                 fn action(node:&serde_json::Value,id:&str)->Option<u64> { if node["id"].as_str()==Some(id) {return node["action"].as_u64();} node["children"].as_array()?.iter().find_map(|child|action(child,id)) }
@@ -1060,16 +1060,16 @@ mod platform {
                 let package = PluginPackage {manifest,source,modules,stylesheet:String::new(),images:Default::default()};
                 let mut app = PluginPanelApplication::from_package(&package).unwrap();
                 app.sync_data(&data).unwrap();
-                let host = nickel_ui::UiHost::new(app,520,340);
-                assert!(host.query_unique(&nickel_ui::SemanticSelector::RoleAndName {role:nickel_ui::SemanticRole::Switch,name:"Enable Codex integration".into()}).is_ok());
-                nickel_plugin_presentation::css::StyleSheet::compile(include_str!("../../../../assets/plugins/nickel-default/src/styles/features.css")).unwrap();
+                let host = twinkle::UiHost::new(app,520,340);
+                assert!(host.query_unique(&twinkle::SemanticSelector::RoleAndName {role:twinkle::SemanticRole::Switch,name:"Enable Codex integration".into()}).is_ok());
+                twinkle_presentation::css::StyleSheet::compile(include_str!("../../../../assets/plugins/nickel-default/src/styles/features.css")).unwrap();
             }).unwrap().join().unwrap();
         }
 
         #[test]
         fn default_launcher_owns_paging_query_and_launches_stable_search_identities() {
             std::thread::Builder::new().stack_size(16 * 1024 * 1024).spawn(|| {
-                use nickel_plugin_runtime::{JsxModuleGraph, ModuleSource, JsxRuntime};
+                use nickel_jsx_host::{JsxModuleGraph, ModuleSource};
                 let directory = tempfile::tempdir().unwrap();
                 std::fs::create_dir(directory.path().join("styles")).unwrap();
                 std::fs::write(directory.path().join("Launcher.jsx"), include_str!("../../../../assets/plugins/nickel-default/src/Launcher.tsx")).unwrap();
@@ -1079,7 +1079,7 @@ mod platform {
                 let graph = JsxModuleGraph::new("main.js", modules.iter().map(|module|ModuleSource {path:&module.path,source:&module.source})).unwrap();
                 let apps = (0..14).map(|index|serde_json::json!({"id":format!("application-{index}"),"name":format!("Editor {index}"),"icon":format!("application:icon-{index}"),"pinned":true,"pinOrder":index,"recentOrder":null,"kind":"application"})).collect::<Vec<_>>();
                 let mut data = serde_json::json!({"applications":apps,"applicationSearch":{"available":true,"query":"","results":[],"total":0}});
-                let mut runtime = JsxRuntime::new_modules(&graph, Some(&data.to_string())).unwrap();
+                let mut runtime = nickel_jsx_host::create_module_runtime(&graph, Some(&data.to_string())).unwrap();
                 fn action(node: &serde_json::Value, id: &str) -> Option<u64> {
                     if node["id"].as_str() == Some(id) {return node["action"].as_u64();}
                     node["children"].as_array()?.iter().find_map(|child|action(child,id))
@@ -1109,25 +1109,25 @@ mod platform {
                 let package = PluginPackage {manifest,source,modules,stylesheet:String::new(),images:Default::default()};
                 let mut app = PluginPanelApplication::from_package(&package).unwrap();
                 app.sync_data(&data).unwrap();
-                let host = nickel_ui::UiHost::new(app,620,548);
-                assert!(host.query_unique(&nickel_ui::SemanticSelector::RoleAndName {role:nickel_ui::SemanticRole::Button,name:"All apps  ›".into()}).is_ok());
+                let host = twinkle::UiHost::new(app,620,548);
+                assert!(host.query_unique(&twinkle::SemanticSelector::RoleAndName {role:twinkle::SemanticRole::Button,name:"All apps  ›".into()}).is_ok());
             }).unwrap().join().unwrap();
         }
 
         #[test]
         fn launcher_reference_layout_selection_categories_and_rasters() {
             std::thread::Builder::new().stack_size(16 * 1024 * 1024).spawn(|| {
-                use nickel_ui::{ActionKind, SemanticAction, SemanticRole, SemanticSelector, SemanticValueInput, UiHost};
+                use twinkle::{ActionKind, SemanticAction, SemanticRole, SemanticSelector, SemanticValueInput, UiHost};
                 use nickel_shell::plugin_panel::PluginEffect;
-                let enter = |order| nickel_input::InputEvent::Key(nickel_input::KeyEvent {
-                    device: nickel_input::DeviceId(1),
-                    order: nickel_input::EventOrder(order),
-                    physical: nickel_input::PhysicalKey::Code(nickel_input::KeyCode::Enter),
-                    logical: nickel_input::LogicalKey::Named(nickel_input::NamedKey::Enter),
-                    location: nickel_input::KeyLocation::Standard,
-                    edge: nickel_input::KeyEdge::Pressed,
+                let enter = |order| twinkle_input::InputEvent::Key(twinkle_input::KeyEvent {
+                    device: twinkle_input::DeviceId(1),
+                    order: twinkle_input::EventOrder(order),
+                    physical: twinkle_input::PhysicalKey::Code(twinkle_input::KeyCode::Enter),
+                    logical: twinkle_input::LogicalKey::Named(twinkle_input::NamedKey::Enter),
+                    location: twinkle_input::KeyLocation::Standard,
+                    edge: twinkle_input::KeyEdge::Pressed,
                     repeat: false,
-                    modifiers: nickel_input::ModifierState::default(),
+                    modifiers: twinkle_input::ModifierState::default(),
                 });
                 let directory = tempfile::tempdir().unwrap();
                 std::fs::create_dir(directory.path().join("styles")).unwrap();
@@ -1183,7 +1183,7 @@ mod platform {
                         let directory = std::path::PathBuf::from(directory);
                         std::fs::create_dir_all(&directory).unwrap();
                         let scale = 3_u32;
-                        let raster = nickel_ui_testkit::render_host(host, width * scale, height * scale, scale as f32);
+                        let raster = twinkle_testkit::render_host(host, width * scale, height * scale, scale as f32);
                         image::RgbaImage::from_raw(raster.width, raster.height, raster.rgba).unwrap().save(directory.join(format!("{name}.png"))).unwrap();
                         std::fs::write(directory.join(format!("{name}.layout.txt")), host.layout_snapshot()).unwrap();
                         std::fs::write(directory.join(format!("{name}.paint.txt")), format!("{:#?}", host.commands())).unwrap();
@@ -1205,7 +1205,7 @@ mod platform {
                 });
                 let dark = nickel_core::theme::ThemePalette::from_appearance(Default::default());
                 host.application_mut().sync_theme_palette(light).unwrap();
-                host.step(nickel_ui::HostBatch { application_changed:true, ..Default::default() });
+                host.step(twinkle::HostBatch { application_changed:true, ..Default::default() });
                 capture(&host, "dashboard-light", 608, 628);
                 let input = target(&host, SemanticRole::TextField, "Search apps, files, settings, or commands");
                 host.perform_semantic_action(input.id, SemanticAction::SetValue(SemanticValueInput::Text("term".into())));
@@ -1213,14 +1213,14 @@ mod platform {
                 host.resize(608, 628);
                 capture(&host, "search-light", 608, 628);
                 host.application_mut().sync_theme_palette(dark).unwrap();
-                host.application_mut().sync_reading_direction(nickel_ui::ReadingDirection::RightToLeft);
-                host.step(nickel_ui::HostBatch { application_changed:true, ..Default::default() });
+                host.application_mut().sync_reading_direction(twinkle::ReadingDirection::RightToLeft);
+                host.step(twinkle::HostBatch { application_changed:true, ..Default::default() });
                 capture(&host, "search-rtl", 608, 628);
                 let rtl_category = target(&host, SemanticRole::Button, "All   4");
                 let rtl_actions = target(&host, SemanticRole::Button, "Actions   1");
                 assert!(rtl_category.bounds.origin.x > rtl_actions.bounds.origin.x, "RTL mirrors the horizontal filters");
-                host.application_mut().sync_reading_direction(nickel_ui::ReadingDirection::LeftToRight);
-                host.step(nickel_ui::HostBatch { application_changed:true, ..Default::default() });
+                host.application_mut().sync_reading_direction(twinkle::ReadingDirection::LeftToRight);
+                host.step(twinkle::HostBatch { application_changed:true, ..Default::default() });
                 capture(&host, "search", 608, 628);
                 let input = target(&host, SemanticRole::TextField, "Search apps, files, settings, or commands");
                 host.request_focus(input.id);
@@ -1275,10 +1275,10 @@ mod platform {
                 host.request_focus(item.id);
                 let more = target(&host, SemanticRole::Button, "More…");
                 host.perform_semantic_action(more.id, SemanticAction::Invoke(ActionKind::Activate));
-                host.shortcut(nickel_ui::Shortcut::Escape);
+                host.shortcut(twinkle::Shortcut::Escape);
                 target(&host, SemanticRole::Button, "Windows Terminal");
                 assert!(host.application_mut().take_effects().is_empty(), "Escape closes compact details without hiding the launcher");
-                host.shortcut(nickel_ui::Shortcut::Escape);
+                host.shortcut(twinkle::Shortcut::Escape);
                 target(&host, SemanticRole::Button, "All apps  ›");
                 assert!(matches!(host.application_mut().take_effects().as_slice(), [PluginEffect::SearchApplications{query,..}] if query.is_empty()));
                 let apps = target(&host, SemanticRole::Button, "All apps  ›");
@@ -1286,7 +1286,7 @@ mod platform {
                 target(&host, SemanticRole::Button, "‹  Back");
                 assert!(host.query(&SemanticSelector::RoleAndName {role:SemanticRole::Button,name:"Unregistered running window".into()}).is_empty(),
                     "All apps must only offer applications with a launch route");
-                host.shortcut(nickel_ui::Shortcut::Escape);
+                host.shortcut(twinkle::Shortcut::Escape);
                 target(&host, SemanticRole::Button, "All apps  ›");
                 assert!(host.application_mut().take_effects().is_empty(), "Escape returns from All apps to the dashboard");
                 let pin = host.query(&SemanticSelector::RoleAndName {role:SemanticRole::Button,name:"Firefox".into()})
@@ -1295,7 +1295,7 @@ mod platform {
                 let retry = target(&host, SemanticRole::MenuItem, "Retry saving favorites");
                 host.perform_semantic_action(retry.id, SemanticAction::Invoke(ActionKind::Activate));
                 assert!(matches!(host.application_mut().take_effects().as_slice(), [PluginEffect::RetryApplicationPinSave]));
-                host.shortcut(nickel_ui::Shortcut::Escape);
+                host.shortcut(twinkle::Shortcut::Escape);
                 assert!(matches!(host.application_mut().take_effects().as_slice(), [PluginEffect::HidePluginSurface{surface_id,..}] if surface_id=="launcher"));
                 compact_data["viewport"]["availableHeight"] = 336.into();
                 host.application_mut().sync_data(&compact_data).unwrap();

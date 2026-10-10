@@ -1,15 +1,15 @@
-//! Safe typed Markdown documents and declarative Nickel UI presentation.
+//! Safe typed Markdown documents and declarative Twinkle presentation.
 
 use std::iter::Peekable;
 
+use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use serde::{Deserialize, Serialize};
 #[cfg(feature = "view")]
-use nickel_ui::{
+use twinkle::{
     Align, AnyView, Button, Color, Column, ComponentBuilderExt, Container, Grid, Insets, Length,
     Overflow, Row, SelectionRegion, SelectionRun, StyledText, StyledTextSpan, Text, TextBoundary,
     Track, UiId, ui,
 };
-use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
-use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct MarkdownDocument {
@@ -577,8 +577,8 @@ impl Default for MarkdownPalette {
 }
 
 #[cfg(feature = "view")]
-fn semantic_theme(palette: MarkdownPalette) -> nickel_ui::SemanticTheme {
-    nickel_ui::SemanticTheme::from_tokens(nickel_ui::SemanticTokenSet::standard(
+fn semantic_theme(palette: MarkdownPalette) -> twinkle::SemanticTheme {
+    twinkle::SemanticTheme::from_tokens(twinkle::SemanticTokenSet::standard(
         palette.surface,
         palette.surface,
         palette.surface,
@@ -593,7 +593,7 @@ fn semantic_theme(palette: MarkdownPalette) -> nickel_ui::SemanticTheme {
     ))
 }
 
-/// Render a parsed document as one selectable, declarative Nickel UI stream.
+/// Render a parsed document as one selectable, declarative Twinkle stream.
 ///
 /// Link labels remain part of selectable prose. Each destination is also exposed
 /// as an explicit typed activation control immediately after its containing block.
@@ -1059,7 +1059,7 @@ fn push_styled_text(
             monospace: style.monospace,
             font_family: None,
             strikethrough: style.strikethrough,
-            underline: nickel_ui::TextUnderlineStyle::None,
+            underline: twinkle::TextUnderlineStyle::None,
             color: style.color,
             background: style.background,
         });
@@ -1139,7 +1139,7 @@ fn heading_scale(level: u8) -> f32 {
 mod tests {
     use super::*;
     #[cfg(feature = "view")]
-    use nickel_ui::{
+    use twinkle::{
         ActionKind, Point, Rect, SemanticAction, SemanticRole, SoftwareRenderer, UiEvent, UiFrame,
         UiStateStore,
     };
@@ -1357,7 +1357,7 @@ mod tests {
             runs.iter()
                 .all(|run| run.id.starts_with("markdown-message-7/body/"))
         );
-        let selection_document = std::sync::Arc::new(nickel_ui::SelectionDocument::new(runs));
+        let selection_document = std::sync::Arc::new(twinkle::SelectionDocument::new(runs));
         let mut state = UiStateStore::default();
         let build = |state: &mut UiStateStore| {
             UiFrame::layout_with_state(
@@ -1425,7 +1425,7 @@ mod tests {
     #[cfg(feature = "view")]
     fn styled_list_prefix_stays_bold_and_inline_when_it_fits() {
         let document = MarkdownDocument::parse(
-            "- **Nickel UI** — the desktop shell, taskbar, launcher, task switcher, and system controls",
+            "- **Twinkle** — the desktop shell, taskbar, launcher, task switcher, and system controls",
         );
         let tree = UiFrame::layout(
             markdown_view(&document, MarkdownPalette::default(), |destination| {
@@ -1448,7 +1448,7 @@ mod tests {
             .rect;
         assert_eq!(
             text,
-            "Nickel UI — the desktop shell, taskbar, launcher, task switcher, and system controls"
+            "Twinkle — the desktop shell, taskbar, launcher, task switcher, and system controls"
         );
         assert!(spans.iter().any(|span| span.range == (0..9) && span.bold));
         assert!(

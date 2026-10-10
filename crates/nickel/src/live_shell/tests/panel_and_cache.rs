@@ -55,7 +55,7 @@
             shell.plugin_registry.set_enabled(&key.plugin_id, true).unwrap();
             shell.plugin_registry.mark_running(&key.plugin_id).unwrap();
             shell.external_plugin_packages.insert(key.plugin_id.clone(), nickel_core::plugins::PluginPackageSource::embedded(package));
-            shell.plugin_surface_hosts.insert(key.clone(), (surface, nickel_ui::UiHost::new(application, 300, 200)));
+            shell.plugin_surface_hosts.insert(key.clone(), (surface, twinkle::UiHost::new(application, 300, 200)));
             shell.plugin_panel_scene(&key, 300, 200).unwrap();
             let entries = shell.launcher_icons.diagnostics().entries;
             assert!(entries > 0 && entries < 24, "resolved {entries} icons before native row admission");
@@ -100,7 +100,7 @@
             shell.plugin_registry.set_enabled(&key.plugin_id, true).unwrap();
             shell.plugin_registry.mark_running(&key.plugin_id).unwrap();
             shell.external_plugin_packages.insert(key.plugin_id.clone(), nickel_core::plugins::PluginPackageSource::embedded(package));
-            shell.plugin_surface_hosts.insert(key.clone(), (surface, nickel_ui::UiHost::new(application, 300, 200)));
+            shell.plugin_surface_hosts.insert(key.clone(), (surface, twinkle::UiHost::new(application, 300, 200)));
             let started = Instant::now();
             let before = crate::allocation_counter::thread_allocation_operations();
             for _ in 0..16 { shell.plugin_panel_scene(&key, 300, 200).unwrap(); }
@@ -108,8 +108,8 @@
             assert_eq!(shell.launcher_icons.diagnostics().entries, 0, "a page without application images must not enqueue or retain inventory icons");
             for expected in [1, 1] {
                 let host = &mut shell.plugin_surface_hosts.get_mut(&key).unwrap().1;
-                let target = host.query_unique(&nickel_ui::SemanticSelector::RoleAndName {role:nickel_ui::SemanticRole::Button,name:"Toggle icon".into()}).unwrap();
-                host.perform_semantic_action(target.id, nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate));
+                let target = host.query_unique(&twinkle::SemanticSelector::RoleAndName {role:twinkle::SemanticRole::Button,name:"Toggle icon".into()}).unwrap();
+                host.perform_semantic_action(target.id, twinkle::SemanticAction::Invoke(twinkle::ActionKind::Activate));
                 shell.plugin_panel_scene(&key, 300, 200).unwrap();
                 assert_eq!(shell.launcher_icons.diagnostics().entries, expected, "only the admitted icon may enter the cache");
             }
@@ -120,7 +120,7 @@
     #[test]
     fn wallpaper_preview_completion_redraws_live_consumer_and_revocation_removes_pixels() {
         with_package_runtime_stack(|| {
-            use nickel_ui::backend::PaintCommand;
+            use twinkle::backend::PaintCommand;
             let directory = tempfile::tempdir().unwrap();
             RgbaImage::from_pixel(160, 90, Rgba([31, 63, 95, 255]))
                 .save(directory.path().join("fixture.png")).unwrap();
@@ -141,7 +141,7 @@
             // its native approved catalog with an isolated fixture catalog.
             shell.appearance_capabilities.snapshot("wallpaper");
             shell.appearance_capabilities.previews.set_catalog(catalog);
-            shell.plugin_surface_hosts.insert(key.clone(), (surface, nickel_ui::UiHost::new(application, 300, 200)));
+            shell.plugin_surface_hosts.insert(key.clone(), (surface, twinkle::UiHost::new(application, 300, 200)));
             let initial = shell.plugin_panel_scene(&key, 300, 200).unwrap();
             assert!(!initial.iter().any(|command| matches!(command, PaintCommand::Image {id,..} if *id >= 64000 && *id < 64128)));
             assert!(shell.host_deadline_sources().iter().any(|(name,_)| *name == "wallpaper-previews"));
@@ -358,7 +358,7 @@
         assert_eq!(rebuilt.frame_generation, initial.frame_generation + 1);
         assert!(
             scene.iter().any(|command| matches!(command,
-                nickel_ui::backend::PaintCommand::Image { id: 1, .. })),
+                twinkle::backend::PaintCommand::Image { id: 1, .. })),
             "the native desktop must paint the arriving wallpaper"
         );
         });

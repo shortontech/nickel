@@ -357,10 +357,7 @@ impl NickelSession {
         });
     }
 
-    pub(super) fn invalidate_remote_shell_surface(
-        &mut self,
-        runtime: nickel_ui::InternalSurfaceId,
-    ) {
+    pub(super) fn invalidate_remote_shell_surface(&mut self, runtime: twinkle::InternalSurfaceId) {
         self.remote_shell_origins
             .retain(|_, entry| entry.origin.generation != runtime.snapshot_token());
     }

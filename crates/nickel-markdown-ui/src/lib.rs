@@ -7,11 +7,6 @@ use nickel_markdown::MarkdownDocument;
 #[cfg(feature = "application")]
 use nickel_markdown::{MarkdownPalette, markdown_view};
 #[cfg(feature = "application")]
-use nickel_ui::{
-    Align, AnyView, Application, Button, ComponentBuilderExt, Container, Insets, Justify, Length,
-    Row, Shortcut, ShortcutOutcome, Spacer, Text, UiId, VerticalScroll, View, ui,
-};
-#[cfg(feature = "application")]
 use std::sync::mpsc::{self, Receiver, Sender};
 #[cfg(feature = "application")]
 use std::sync::{
@@ -20,6 +15,11 @@ use std::sync::{
 };
 #[cfg(feature = "application")]
 use std::thread::JoinHandle;
+#[cfg(feature = "application")]
+use twinkle::{
+    Align, AnyView, Application, Button, ComponentBuilderExt, Container, Insets, Justify, Length,
+    Row, Shortcut, ShortcutOutcome, Spacer, Text, UiId, VerticalScroll, View, ui,
+};
 use url::Url;
 
 pub const MAX_DOCUMENT_BYTES: u64 = 16 * 1024 * 1024;
@@ -673,7 +673,7 @@ pub struct MarkdownViewerFixtureProvider;
 pub struct MarkdownViewerWorkbenchFixture;
 
 #[cfg(feature = "workbench-fixtures")]
-const MARKDOWN_VIEWER_FIXTURE_VARIANTS: &[nickel_ui_testkit::FixtureVariant] = &[
+const MARKDOWN_VIEWER_FIXTURE_VARIANTS: &[twinkle_testkit::FixtureVariant] = &[
     markdown_fixture_variant("loaded", "Loaded document", 960, 720),
     markdown_fixture_variant("loading", "Loading document", 960, 720),
     markdown_fixture_variant("error", "Load error", 960, 720),
@@ -686,31 +686,31 @@ const fn markdown_fixture_variant(
     title: &'static str,
     width: u32,
     height: u32,
-) -> nickel_ui_testkit::FixtureVariant {
-    nickel_ui_testkit::FixtureVariant {
+) -> twinkle_testkit::FixtureVariant {
+    twinkle_testkit::FixtureVariant {
         id,
         title,
-        viewport: nickel_ui_testkit::ViewportPreset {
+        viewport: twinkle_testkit::ViewportPreset {
             id: "markdown-viewer",
             width,
             height,
         },
-        theme: nickel_ui_testkit::FixtureTheme::Dark,
-        locale: nickel_ui_testkit::DEFAULT_LOCALE,
-        scale: nickel_ui_testkit::DEFAULT_SCALE,
-        controller_family: nickel_ui::ControllerFamily::Generic,
-        accessibility: nickel_ui_testkit::DEFAULT_ACCESSIBILITY,
+        theme: twinkle_testkit::FixtureTheme::Dark,
+        locale: twinkle_testkit::DEFAULT_LOCALE,
+        scale: twinkle_testkit::DEFAULT_SCALE,
+        controller_family: twinkle::ControllerFamily::Generic,
+        accessibility: twinkle_testkit::DEFAULT_ACCESSIBILITY,
     }
 }
 
 #[cfg(feature = "workbench-fixtures")]
-static MARKDOWN_VIEWER_FIXTURE_METADATA: nickel_ui_testkit::FixtureMetadata =
-    nickel_ui_testkit::FixtureMetadata {
+static MARKDOWN_VIEWER_FIXTURE_METADATA: twinkle_testkit::FixtureMetadata =
+    twinkle_testkit::FixtureMetadata {
         id: "markdown.viewer",
         title: "Nickel Markdown Viewer",
         description: "Production Markdown viewer with deterministic load and selection states",
         tags: &["markdown", "viewer", "document", "selection", "error"],
-        source: nickel_ui_testkit::FixtureSource {
+        source: twinkle_testkit::FixtureSource {
             crate_name: "nickel-markdown-ui",
             file: file!(),
             line: line!(),
@@ -738,7 +738,7 @@ impl MarkdownViewerWorkbenchFixture {
         model
     }
 
-    fn application(variant: &nickel_ui_testkit::FixtureVariant) -> ViewerApplication {
+    fn application(variant: &twinkle_testkit::FixtureVariant) -> ViewerApplication {
         let mut model = Self::loaded_model();
         match variant.id {
             "loading" => {
@@ -763,10 +763,10 @@ impl MarkdownViewerWorkbenchFixture {
 }
 
 #[cfg(feature = "workbench-fixtures")]
-impl nickel_ui_testkit::Fixture for MarkdownViewerWorkbenchFixture {
+impl twinkle_testkit::Fixture for MarkdownViewerWorkbenchFixture {
     type App = ViewerApplication;
 
-    fn metadata() -> &'static nickel_ui_testkit::FixtureMetadata {
+    fn metadata() -> &'static twinkle_testkit::FixtureMetadata {
         &MARKDOWN_VIEWER_FIXTURE_METADATA
     }
 
@@ -774,7 +774,7 @@ impl nickel_ui_testkit::Fixture for MarkdownViewerWorkbenchFixture {
         Self::application(&MARKDOWN_VIEWER_FIXTURE_VARIANTS[0])
     }
 
-    fn create_variant(variant: &nickel_ui_testkit::FixtureVariant) -> Self::App {
+    fn create_variant(variant: &twinkle_testkit::FixtureVariant) -> Self::App {
         Self::application(variant)
     }
 
@@ -782,20 +782,20 @@ impl nickel_ui_testkit::Fixture for MarkdownViewerWorkbenchFixture {
         (960, 720)
     }
 
-    fn default_activation() -> Option<nickel_ui_testkit::Selector> {
-        Some(nickel_ui_testkit::Selector::role_name(
-            nickel_ui::SemanticRole::Button,
+    fn default_activation() -> Option<twinkle_testkit::Selector> {
+        Some(twinkle_testkit::Selector::role_name(
+            twinkle::SemanticRole::Button,
             "Reload",
         ))
     }
 }
 
 #[cfg(feature = "workbench-fixtures")]
-impl nickel_ui_testkit::FixtureProvider for MarkdownViewerFixtureProvider {
+impl twinkle_testkit::FixtureProvider for MarkdownViewerFixtureProvider {
     fn register(
         &self,
-        registry: &mut nickel_ui_testkit::FixtureRegistry,
-    ) -> Result<(), nickel_ui_testkit::RegistryError> {
+        registry: &mut twinkle_testkit::FixtureRegistry,
+    ) -> Result<(), twinkle_testkit::RegistryError> {
         registry.register::<MarkdownViewerWorkbenchFixture>()
     }
 }
@@ -890,7 +890,7 @@ impl Application for ViewerApplication {
         })
     }
 
-    fn view(&self, _context: nickel_ui::ViewContext) -> impl View<Self::Message> {
+    fn view(&self, _context: twinkle::ViewContext) -> impl View<Self::Message> {
         viewer_view_with_palette(&self.model, self.runtime_error.as_deref(), self.palette)
     }
 
@@ -979,8 +979,8 @@ pub fn viewer_view_with_palette(
     )
     .on_scroll(ViewerMessage::Scroll)
     .controlled(true)
-    .theme(nickel_ui::SemanticTheme::from_tokens(
-        nickel_ui::SemanticTokenSet::standard(
+    .theme(twinkle::SemanticTheme::from_tokens(
+        twinkle::SemanticTokenSet::standard(
             palette.background,
             palette.panel,
             palette.panel,
@@ -1420,8 +1420,8 @@ mod tests {
     #[test]
     #[cfg(feature = "application")]
     fn viewer_states_have_finite_geometry_and_expected_toolbar_authority() {
-        use nickel_ui::{Rect, UiFrame};
-        use nickel_ui_testkit::Scenario;
+        use twinkle::{Rect, UiFrame};
+        use twinkle_testkit::Scenario;
 
         let document = LoadedDocument {
             path: PathBuf::from("/tmp/guide.md"),
@@ -1479,8 +1479,8 @@ mod tests {
     #[test]
     #[cfg(feature = "application")]
     fn long_documents_cannot_collapse_viewer_chrome() {
-        use nickel_ui::{Rect, UiFrame};
-        use nickel_ui_testkit::Scenario;
+        use twinkle::{Rect, UiFrame};
+        use twinkle_testkit::Scenario;
 
         let source = (0..200)
             .map(|index| format!("Paragraph {index} with enough text to make the document tall."))
@@ -1526,7 +1526,7 @@ mod tests {
     #[test]
     #[cfg(feature = "application")]
     fn readme_intrinsic_scroll_extent_stays_bounded() {
-        use nickel_ui::{Rect, UiFrame};
+        use twinkle::{Rect, UiFrame};
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../README.md");
         let request = LoadRequest {
             generation: 1,
@@ -1555,7 +1555,7 @@ mod tests {
     #[test]
     #[cfg(feature = "application")]
     fn viewer_scroll_extent_measures_wrapped_prose_at_the_resolved_document_width() {
-        use nickel_ui::{Rect, UiFrame};
+        use twinkle::{Rect, UiFrame};
 
         let paragraph = "Lorem ipsum dolor sit amet consectetur adipiscing elit deserunt fugiat. \
             Et omnis cillum fugiat sint illum esse fugiat. Minus fuga aut dolor quos cupidatat atque.";
@@ -1600,8 +1600,8 @@ mod tests {
     #[test]
     #[cfg(feature = "application")]
     fn toolbar_activation_survives_reconstruction_between_press_and_release() {
-        use nickel_ui::SemanticRole;
-        use nickel_ui_testkit::{Scenario, Selector};
+        use twinkle::SemanticRole;
+        use twinkle_testkit::{Scenario, Selector};
 
         let document = LoadedDocument {
             path: PathBuf::from("/tmp/guide.md"),
@@ -1619,8 +1619,8 @@ mod tests {
     #[test]
     #[cfg(feature = "application")]
     fn link_reload_back_and_forward_survive_reconstruction() {
-        use nickel_ui::SemanticRole;
-        use nickel_ui_testkit::{Scenario, Selector};
+        use twinkle::SemanticRole;
+        use twinkle_testkit::{Scenario, Selector};
 
         let directory = tempdir().unwrap();
         let first = directory.path().join("first.md");
@@ -1649,8 +1649,8 @@ mod tests {
     #[test]
     #[cfg(feature = "application")]
     fn toolbar_modalities_converge_on_the_same_typed_action() {
-        use nickel_ui::SemanticRole;
-        use nickel_ui_testkit::{ActivationVia, Scenario, Selector, validate_host};
+        use twinkle::SemanticRole;
+        use twinkle_testkit::{ActivationVia, Scenario, Selector, validate_host};
 
         let document = LoadedDocument {
             path: PathBuf::from("/tmp/guide.md"),
@@ -1674,8 +1674,8 @@ mod tests {
     #[test]
     #[cfg(feature = "application")]
     fn recoverable_status_keeps_loaded_document_visible() {
-        use nickel_ui::SemanticRole;
-        use nickel_ui_testkit::{Scenario, Selector};
+        use twinkle::SemanticRole;
+        use twinkle_testkit::{Scenario, Selector};
 
         let document = LoadedDocument {
             path: PathBuf::from("/tmp/guide.md"),
@@ -1714,8 +1714,8 @@ mod tests {
     #[test]
     #[cfg(feature = "application")]
     fn startup_failure_renders_the_path_and_classified_reason() {
-        use nickel_ui::SemanticRole;
-        use nickel_ui_testkit::{Scenario, Selector};
+        use twinkle::SemanticRole;
+        use twinkle_testkit::{Scenario, Selector};
 
         let mut model = ViewerModel::default();
         let missing = PathBuf::from("/definitely/missing/guide.md");
@@ -1773,7 +1773,7 @@ mod tests {
     #[test]
     #[cfg(feature = "application")]
     fn equal_viewer_state_reconstructs_identical_paint_commands() {
-        use nickel_ui::{Rect, UiFrame};
+        use twinkle::{Rect, UiFrame};
 
         let document = LoadedDocument {
             path: PathBuf::from("/tmp/guide.md"),
@@ -1822,8 +1822,8 @@ mod tests {
 
 #[cfg(all(test, feature = "workbench-fixtures"))]
 mod workbench_fixture_tests {
-    use nickel_ui::{ControllerAction, Rect, SemanticRole, UiFrame};
-    use nickel_ui_testkit::{Fixture, FixtureProvider, FixtureRegistry, Scenario};
+    use twinkle::{ControllerAction, Rect, SemanticRole, UiFrame};
+    use twinkle_testkit::{Fixture, FixtureProvider, FixtureRegistry, Scenario};
 
     use super::*;
 

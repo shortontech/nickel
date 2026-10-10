@@ -13,12 +13,12 @@ use nickel_file::{
         SelectionModifiers, SortDirection as DesktopSortDirection, SortKey as DesktopSortKey,
     },
 };
-use nickel_input::KeyCode;
-use nickel_ui::{
+use twinkle::{
     Container, FilePlaneItem, FrameOverlay, Image, ImageFit, Insets, Layer, OverlayAnchor,
     OverlayMenu, OverlayMenuItem, OverlayStyle, Point, Rect, SemanticRole, Size, Text, UiId,
     ViewContext,
 };
+use twinkle_input::KeyCode;
 
 use super::desktop_label_foreground;
 use crate::file_window_host::FileWindowHost;
@@ -802,8 +802,8 @@ impl DesktopApplication {
 
     // Keyboard edges and native pointer snapshots share selection policy; neither
     // path should independently reinterpret Ctrl/Shift additive selection.
-    pub(super) fn set_input_modifiers(&mut self, modifiers: &nickel_input::ModifierState) {
-        use nickel_input::AggregateModifier;
+    pub(super) fn set_input_modifiers(&mut self, modifiers: &twinkle_input::ModifierState) {
+        use twinkle_input::AggregateModifier;
         self.modifiers = SelectionModifiers {
             toggle: modifiers.aggregate(AggregateModifier::Control),
             range: modifiers.aggregate(AggregateModifier::Shift),
@@ -812,10 +812,10 @@ impl DesktopApplication {
         };
     }
 
-    pub(super) fn key(&mut self, key: &nickel_input::KeyEvent) -> bool {
-        use nickel_input::{AggregateModifier, PhysicalKey};
+    pub(super) fn key(&mut self, key: &twinkle_input::KeyEvent) -> bool {
+        use twinkle_input::{AggregateModifier, PhysicalKey};
         self.set_input_modifiers(&key.modifiers);
-        if key.edge != nickel_input::KeyEdge::Pressed {
+        if key.edge != twinkle_input::KeyEdge::Pressed {
             return false;
         }
         let PhysicalKey::Code(code) = key.physical else {
@@ -838,7 +838,7 @@ impl DesktopApplication {
             }
             KeyCode::KeyC | KeyCode::KeyX if self.modifiers.toggle => {
                 if let Some(id) = self.layout.active() {
-                    <Self as nickel_ui::Application>::update(
+                    <Self as twinkle::Application>::update(
                         self,
                         if code == KeyCode::KeyX {
                             DesktopMessage::Cut(id)
@@ -857,7 +857,7 @@ impl DesktopApplication {
             KeyCode::KeyA if self.modifiers.toggle => self.layout.select_all(),
             KeyCode::F2 => {
                 if let Some(id) = self.layout.active() {
-                    <Self as nickel_ui::Application>::update(self, DesktopMessage::Rename(id));
+                    <Self as twinkle::Application>::update(self, DesktopMessage::Rename(id));
                 }
             }
             KeyCode::ArrowLeft if move_selected => self.move_selected_by(-96.0, 0.0),
@@ -1077,7 +1077,7 @@ impl DesktopApplication {
     }
 }
 
-impl nickel_ui::Application for DesktopApplication {
+impl twinkle::Application for DesktopApplication {
     type Message = DesktopMessage;
 
     fn update(&mut self, message: Self::Message) {
@@ -1533,7 +1533,7 @@ impl nickel_ui::Application for DesktopApplication {
         overlays
     }
 
-    fn view(&self, context: ViewContext) -> impl nickel_ui::View<Self::Message> {
+    fn view(&self, context: ViewContext) -> impl twinkle::View<Self::Message> {
         let width = context.viewport.size.width;
         let height = context.viewport.size.height;
         let mut layer = Layer::new().width(width).height(height).child(

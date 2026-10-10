@@ -5,8 +5,8 @@ use std::{fs, path::Path};
 use image::{ImageBuffer, Rgba};
 use nickel_core::theme::{Appearance, ThemeMode};
 use nickel_markdown_ui::{ViewerModel, ViewerPalette, load_document, viewer_view_with_palette};
-use nickel_ui::{Rect, SoftwareRenderer, UiFrame};
 use tempfile::tempdir;
+use twinkle::{Rect, SoftwareRenderer, UiFrame};
 
 fn render_snapshot(
     model: &ViewerModel,

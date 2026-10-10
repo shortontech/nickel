@@ -1,0 +1,16 @@
+{
+  "surfaces": [
+    {
+      "id": "home",
+      "kind": "window",
+      "width": 400,
+      "height": 240
+    },
+    {
+      "id": "details",
+      "kind": "window",
+      "width": 450,
+      "height": 260
+    }
+  ]
+}

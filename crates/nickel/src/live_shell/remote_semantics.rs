@@ -2,7 +2,7 @@
 use super::*;
 use nickel_remote_control::semantics::{MAX_PAYLOAD_BYTES, MAX_RESOLVED_NODES};
 
-type Projection = (u64, Vec<nickel_ui::SemanticNodeSnapshot>);
+type Projection = (u64, Vec<twinkle::SemanticNodeSnapshot>);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RemoteActionDisposition {
@@ -11,10 +11,10 @@ enum RemoteActionDisposition {
 }
 
 fn action_disposition(
-    action: nickel_ui::ActionKind,
+    action: twinkle::ActionKind,
     callback: RemoteActionDisposition,
 ) -> RemoteActionDisposition {
-    use nickel_ui::ActionKind;
+    use twinkle::ActionKind;
     match action {
         ActionKind::Activate | ActionKind::ContextMenu => callback,
         ActionKind::Increment
@@ -32,7 +32,7 @@ fn action_disposition(
 }
 
 fn project<A: UiApplication>(
-    host: &nickel_ui::UiHost<A>,
+    host: &twinkle::UiHost<A>,
     activate: impl Fn(&A::Message) -> RemoteActionDisposition,
 ) -> Result<Projection, String> {
     let mut nodes = host
@@ -60,8 +60,8 @@ fn observe_only(mut projection: Projection) -> Projection {
 }
 
 fn plugin_projection(
-    host: &nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>,
-    allowed: impl Fn(&str, nickel_ui::ActionKind) -> bool,
+    host: &twinkle::UiHost<crate::plugin_panel::PluginPanelApplication>,
+    allowed: impl Fn(&str, twinkle::ActionKind) -> bool,
 ) -> Result<Projection, String> {
     let mut nodes = host
         .bounded_semantic_nodes(MAX_RESOLVED_NODES, MAX_PAYLOAD_BYTES)
@@ -70,7 +70,7 @@ fn plugin_projection(
         let leaf = node.id.as_str().rsplit('/').next().unwrap_or_default();
         node.actions.retain(|action| {
             allowed(leaf, *action)
-                && (*action == nickel_ui::ActionKind::SetValue
+                && (*action == twinkle::ActionKind::SetValue
                     || host
                         .message_for_semantic_action(&node.id, *action)
                         .is_some())
@@ -195,17 +195,17 @@ pub(crate) enum RemoteShellEffect {
 }
 
 pub(crate) struct RemoteShellOutcome {
-    pub(crate) host: nickel_ui::HostEventOutcome,
+    pub(crate) host: twinkle::HostEventOutcome,
     pub(crate) effects: Vec<RemoteShellEffect>,
 }
 
 fn mutate<A: UiApplication>(
-    host: &mut nickel_ui::UiHost<A>,
+    host: &mut twinkle::UiHost<A>,
     generation: u64,
     node: usize,
-    action: nickel_ui::SemanticAction,
+    action: twinkle::SemanticAction,
     clipboard_limit: usize,
-) -> Result<nickel_ui::HostEventOutcome, String> {
+) -> Result<twinkle::HostEventOutcome, String> {
     host.perform_bounded_semantic_action(
         generation,
         node,
@@ -216,13 +216,11 @@ fn mutate<A: UiApplication>(
     )
     .map_err(|error| {
         match error {
-            nickel_ui::BoundedSemanticActionError::StaleGeneration => "stale semantic tree",
-            nickel_ui::BoundedSemanticActionError::InputBusy => "local surface input is held",
-            nickel_ui::BoundedSemanticActionError::MissingTarget => "semantic target unavailable",
-            nickel_ui::BoundedSemanticActionError::ActionUnavailable => {
-                "semantic action unavailable"
-            }
-            nickel_ui::BoundedSemanticActionError::Snapshot(_) => {
+            twinkle::BoundedSemanticActionError::StaleGeneration => "stale semantic tree",
+            twinkle::BoundedSemanticActionError::InputBusy => "local surface input is held",
+            twinkle::BoundedSemanticActionError::MissingTarget => "semantic target unavailable",
+            twinkle::BoundedSemanticActionError::ActionUnavailable => "semantic action unavailable",
+            twinkle::BoundedSemanticActionError::Snapshot(_) => {
                 "semantic projection is protected or exceeds budget"
             }
         }
@@ -237,7 +235,7 @@ impl LiveShell {
         output: Option<&str>,
         generation: u64,
         node: usize,
-        action: nickel_ui::SemanticAction,
+        action: twinkle::SemanticAction,
         clipboard_limit: usize,
     ) -> Result<RemoteShellOutcome, String> {
         let _ = (key, output, generation, node, action, clipboard_limit);
@@ -250,7 +248,7 @@ impl LiveShell {
         output: Option<&str>,
         generation: u64,
         node: usize,
-        action: nickel_ui::SemanticAction,
+        action: twinkle::SemanticAction,
         clipboard_limit: usize,
     ) -> Result<RemoteShellOutcome, String> {
         if role == SurfaceRole::Taskbar {
@@ -260,8 +258,8 @@ impl LiveShell {
             return Err("stale semantic tree".into());
         }
         let kind = match &action {
-            nickel_ui::SemanticAction::Invoke(kind) => *kind,
-            nickel_ui::SemanticAction::SetValue(_) => nickel_ui::ActionKind::SetValue,
+            twinkle::SemanticAction::Invoke(kind) => *kind,
+            twinkle::SemanticAction::SetValue(_) => twinkle::ActionKind::SetValue,
         };
         let projection = self.bounded_shell_semantics(role, output)?.1;
         if projection
@@ -355,7 +353,7 @@ mod tests {
     use super::*;
 
     fn assert_advertised_actions_are_guarded<A: UiApplication>(
-        host: &nickel_ui::UiHost<A>,
+        host: &twinkle::UiHost<A>,
         classify: impl Fn(&A::Message) -> RemoteActionDisposition,
     ) {
         let (_, nodes) = project(host, &classify).expect("bounded production semantics");

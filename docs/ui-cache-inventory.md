@@ -28,7 +28,7 @@ boundary action is unknown.
 Run routine validation while admission measurements and lifecycle work are in progress:
 
 ```text
-cargo run -p nickel-ui-workbench -- validate
+cargo run -p nickel-workbench -- validate
 ```
 
 Routine validation checks the schema, unique IDs, allowed statuses, measured-cache bounds, and a
@@ -39,7 +39,7 @@ inventory row.
 Final specification completion uses the stricter gate:
 
 ```text
-cargo run -p nickel-ui-workbench -- validate --final-completion
+cargo run -p nickel-workbench -- validate --final-completion
 ```
 
 That command accepts only `removed`, `admitted_measured`, `measured_admitted`, and

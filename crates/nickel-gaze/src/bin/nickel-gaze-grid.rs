@@ -5,10 +5,6 @@ use nickel_gaze::{
     grid::{COLUMNS, GridLayout, GridObservation, GridTracker, ROWS},
     model::GazeModel,
 };
-use nickel_ui::{
-    Align, AnyView, Application, Button, Column, ComponentBuilderExt, Container, Grid, Image,
-    Justify, Row, SemanticRole, Shortcut, ShortcutOutcome, Spacer, Text, TextAlign, ViewContext,
-};
 use std::{
     error::Error,
     sync::{
@@ -17,6 +13,10 @@ use std::{
     },
     thread,
     time::{Duration, Instant},
+};
+use twinkle::{
+    Align, AnyView, Application, Button, Column, ComponentBuilderExt, Container, Grid, Image,
+    Justify, Row, SemanticRole, Shortcut, ShortcutOutcome, Spacer, Text, TextAlign, ViewContext,
 };
 
 const BACKGROUND: u32 = 0xff121722;
@@ -56,7 +56,7 @@ fn main() {
 fn run() -> Result<(), Box<dyn Error>> {
     let camera = argument("--camera");
     let receiver = start_tracking(camera)?;
-    nickel_ui::run(GazeGridApplication::new(receiver))
+    nickel_ui_host::run(GazeGridApplication::new(receiver))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -157,36 +157,36 @@ pub struct GazeGridFixtureProvider;
 
 struct GazeGridFixture;
 
-const GAZE_VARIANTS: &[nickel_ui_testkit::FixtureVariant] = &[
+const GAZE_VARIANTS: &[twinkle_testkit::FixtureVariant] = &[
     gaze_variant("disconnected", "Disconnected"),
     gaze_variant("connected", "Connected"),
     gaze_variant("empty", "No face detected"),
     gaze_variant("populated", "Tracking gaze"),
 ];
 
-const fn gaze_variant(id: &'static str, title: &'static str) -> nickel_ui_testkit::FixtureVariant {
-    nickel_ui_testkit::FixtureVariant {
+const fn gaze_variant(id: &'static str, title: &'static str) -> twinkle_testkit::FixtureVariant {
+    twinkle_testkit::FixtureVariant {
         id,
         title,
-        viewport: nickel_ui_testkit::ViewportPreset {
+        viewport: twinkle_testkit::ViewportPreset {
             id: "gaze-grid",
             width: 1120,
             height: 720,
         },
-        theme: nickel_ui_testkit::FixtureTheme::Dark,
-        locale: nickel_ui_testkit::DEFAULT_LOCALE,
-        scale: nickel_ui_testkit::DEFAULT_SCALE,
-        controller_family: nickel_ui::ControllerFamily::Generic,
-        accessibility: nickel_ui_testkit::DEFAULT_ACCESSIBILITY,
+        theme: twinkle_testkit::FixtureTheme::Dark,
+        locale: twinkle_testkit::DEFAULT_LOCALE,
+        scale: twinkle_testkit::DEFAULT_SCALE,
+        controller_family: twinkle::ControllerFamily::Generic,
+        accessibility: twinkle_testkit::DEFAULT_ACCESSIBILITY,
     }
 }
 
-static GAZE_METADATA: nickel_ui_testkit::FixtureMetadata = nickel_ui_testkit::FixtureMetadata {
+static GAZE_METADATA: twinkle_testkit::FixtureMetadata = twinkle_testkit::FixtureMetadata {
     id: "gaze.grid",
     title: "Gaze calibration grid",
     description: "Production gaze-grid UI with deterministic, simulated tracking states.",
     tags: &["gaze", "grid", "accessibility", "controller"],
-    source: nickel_ui_testkit::FixtureSource {
+    source: twinkle_testkit::FixtureSource {
         crate_name: "nickel-gaze",
         file: file!(),
         line: line!(),
@@ -196,10 +196,10 @@ static GAZE_METADATA: nickel_ui_testkit::FixtureMetadata = nickel_ui_testkit::Fi
     simulated_effects: &[],
 };
 
-impl nickel_ui_testkit::Fixture for GazeGridFixture {
+impl twinkle_testkit::Fixture for GazeGridFixture {
     type App = GazeGridApplication;
 
-    fn metadata() -> &'static nickel_ui_testkit::FixtureMetadata {
+    fn metadata() -> &'static twinkle_testkit::FixtureMetadata {
         &GAZE_METADATA
     }
 
@@ -207,7 +207,7 @@ impl nickel_ui_testkit::Fixture for GazeGridFixture {
         Self::create_variant(&GAZE_VARIANTS[0])
     }
 
-    fn create_variant(variant: &nickel_ui_testkit::FixtureVariant) -> Self::App {
+    fn create_variant(variant: &twinkle_testkit::FixtureVariant) -> Self::App {
         let state = match variant.id {
             "connected" => GazeGridFixtureState::Connected,
             "empty" => GazeGridFixtureState::Empty,
@@ -221,19 +221,19 @@ impl nickel_ui_testkit::Fixture for GazeGridFixture {
         (1120, 720)
     }
 
-    fn default_activation() -> Option<nickel_ui_testkit::Selector> {
-        Some(nickel_ui_testkit::Selector::RoleAndName {
+    fn default_activation() -> Option<twinkle_testkit::Selector> {
+        Some(twinkle_testkit::Selector::RoleAndName {
             role: SemanticRole::Button,
             name: "Recenter".to_owned(),
         })
     }
 }
 
-impl nickel_ui_testkit::FixtureProvider for GazeGridFixtureProvider {
+impl twinkle_testkit::FixtureProvider for GazeGridFixtureProvider {
     fn register(
         &self,
-        registry: &mut nickel_ui_testkit::FixtureRegistry,
-    ) -> Result<(), nickel_ui_testkit::RegistryError> {
+        registry: &mut twinkle_testkit::FixtureRegistry,
+    ) -> Result<(), twinkle_testkit::RegistryError> {
         registry.register::<GazeGridFixture>()
     }
 }
@@ -247,7 +247,7 @@ impl Application for GazeGridApplication {
         }
     }
 
-    fn view(&self, context: ViewContext) -> impl nickel_ui::View<Self::Message> {
+    fn view(&self, context: ViewContext) -> impl twinkle::View<Self::Message> {
         scene(
             context.viewport.size.width,
             context.viewport.size.height,
@@ -386,7 +386,7 @@ fn scene(
     tracker: &GridTracker,
     live: Option<&LiveObservation>,
     now: Duration,
-) -> impl nickel_ui::View<Message> {
+) -> impl twinkle::View<Message> {
     let header = 132.0;
     let layout = GridLayout::fit(width, height, header);
     let cursor = tracker.cursor(now);
@@ -575,7 +575,7 @@ fn scene(
         .child(
             Container::new()
                 .height(header)
-                .padding(nickel_ui::Insets {
+                .padding(twinkle::Insets {
                     top: 12.0,
                     right: 20.0,
                     bottom: 12.0,
@@ -647,8 +647,8 @@ fn argument(name: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nickel_ui::{ActionKind, SemanticAction, SemanticSelector, UiHost};
-    use nickel_ui_testkit::{ActivationVia, FixtureProvider, FixtureRegistry};
+    use twinkle::{ActionKind, SemanticAction, SemanticSelector, UiHost};
+    use twinkle_testkit::{ActivationVia, FixtureProvider, FixtureRegistry};
 
     fn host() -> UiHost<GazeGridApplication> {
         let (_sender, receiver) = mpsc::sync_channel(1);

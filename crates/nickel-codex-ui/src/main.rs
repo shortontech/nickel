@@ -95,7 +95,7 @@ fn main() -> ExitCode {
         eprintln!("cannot resume Codex thread: {error}");
         return ExitCode::from(2);
     }
-    match nickel_ui::run(application) {
+    match nickel_ui_host::run(application) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("Nickel Codex UI failed: {error}");

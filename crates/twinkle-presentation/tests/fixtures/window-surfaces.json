@@ -1,0 +1,10 @@
+{
+  "surfaces": [
+    {
+      "id": "main",
+      "kind": "window",
+      "width": 520,
+      "height": 340
+    }
+  ]
+}

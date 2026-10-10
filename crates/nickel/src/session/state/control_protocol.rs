@@ -390,7 +390,7 @@ impl NickelSession {
                 }
                 self.internal_ui.step(
                     id,
-                    nickel_ui::HostBatch {
+                    twinkle::HostBatch {
                         application_changed: true,
                         ..Default::default()
                     },
@@ -464,7 +464,7 @@ impl NickelSession {
                 if let Err(error) = self.internal_ui.perform_accessibility_action(
                     id,
                     target,
-                    nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
+                    twinkle::SemanticAction::Invoke(twinkle::ActionKind::Activate),
                 ) {
                     accessibility_failure = Some(error);
                     break;

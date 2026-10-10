@@ -11,12 +11,13 @@ name = "nickel-terminal"
 path = "src/bin/nickel-terminal.rs"
 
 [dependencies]
+nickel-ui-host = { path = "../nickel-ui-host" }
 nickel-i18n = { path = "../nickel-i18n" }
-nickel-input = { path = "../nickel-input" }
+twinkle-input = { path = "../twinkle-input" }
 nickel-core = { path = "../nickel-core" }
 nickel-terminal = { path = "../nickel-terminal" }
-nickel-ui = { path = "../nickel-ui" }
+twinkle = { path = "../twinkle" }
 nickel-logging = { path = "../nickel-logging" }
-nickel-render-assets = { path = "../nickel-render-assets" }
+twinkle-render-assets = { path = "../twinkle-render-assets" }
 winit.workspace = true
 arboard = { version = "3.6.1", default-features = false, features = ["wayland-data-control"] }

@@ -8,7 +8,6 @@ use std::{error::Error, fmt};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DependencyOwnerKind {
-    CosmicTextFontSystem,
     SmithayRenderer,
 }
 
@@ -32,13 +31,11 @@ impl OwnerCounters {
     }
 }
 
-static COSMIC_TEXT_FONT_SYSTEMS: OwnerCounters = OwnerCounters::new();
 static SMITHAY_RENDERERS: OwnerCounters = OwnerCounters::new();
 const MAX_SMITHAY_RENDERER_OWNERS: usize = 1;
 
 fn counters(kind: DependencyOwnerKind) -> &'static OwnerCounters {
     match kind {
-        DependencyOwnerKind::CosmicTextFontSystem => &COSMIC_TEXT_FONT_SYSTEMS,
         DependencyOwnerKind::SmithayRenderer => &SMITHAY_RENDERERS,
     }
 }
@@ -47,17 +44,6 @@ fn counters(kind: DependencyOwnerKind) -> &'static OwnerCounters {
 #[derive(Debug)]
 pub struct DependencyOwnerToken {
     kind: DependencyOwnerKind,
-}
-
-impl DependencyOwnerToken {
-    #[must_use]
-    pub fn new_cosmic_text_font_system() -> Self {
-        let kind = DependencyOwnerKind::CosmicTextFontSystem;
-        let counters = counters(kind);
-        let active = counters.active.fetch_add(1, Ordering::Relaxed) + 1;
-        counters.peak.fetch_max(active, Ordering::Relaxed);
-        Self { kind }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

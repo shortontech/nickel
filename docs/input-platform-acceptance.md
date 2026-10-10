@@ -135,13 +135,13 @@ These observations cover the reported regressions. They do not silently promote 
 physical-controller, Windows, primary-selection, DnD, or full mixed-output rows to pass.
 
 ```sh
-cargo test -p nickel-core -p nickel-session-protocol -p nickel-ui -p nickel-file \
-  -p nickel-ui-testkit --lib -- --test-threads=1
+cargo test -p nickel-core -p nickel-session-protocol -p twinkle -p nickel-file \
+  -p twinkle-testkit --lib -- --test-threads=1
 ```
 
 Pass. Reported library totals include `nickel-core` 183/0, `nickel-file` 181/0,
-`nickel-session-protocol` 59/0, `nickel-ui` 407/0 with 2 ignored, and
-`nickel-ui-testkit` 29/0. The `nickel-ui` suite includes the modal accessibility dispatch
+`nickel-session-protocol` 59/0, `twinkle` 407/0 with 2 ignored, and
+`twinkle-testkit` 29/0. The `twinkle` suite includes the modal accessibility dispatch
 regression. The testkit touch scenario exercises separately supplied normalized authority rather
 than envelope self-certification.
 

@@ -64,19 +64,19 @@ use nickel_core::optional_features::{
     CodexAvailabilityProjection, CodexSource, FeatureEffectiveState, FeatureHealth,
     FeatureInstallation, FeatureSupport, OptionalFeatureRuntime, OptionalFeatureSettings,
 };
-use nickel_input::{
-    AggregateModifier, InputEvent, KeyEdge, LogicalKey, PointerButton, PointerEvent,
-};
-#[cfg(any(test, target_os = "linux"))]
-use nickel_ui::ControllerAction;
-use nickel_ui::{
-    Application, HostBatch, HostChangeToken, HostEvent, HostEventOutcome, HostFailure,
-    HostFailureStage, UiHost,
-};
 use std::{
     collections::HashSet,
     path::{Component, Path},
     time::{Duration, Instant},
+};
+#[cfg(any(test, target_os = "linux"))]
+use twinkle::ControllerAction;
+use twinkle::{
+    Application, HostBatch, HostChangeToken, HostEvent, HostEventOutcome, HostFailure,
+    HostFailureStage, UiHost,
+};
+use twinkle_input::{
+    AggregateModifier, InputEvent, KeyEdge, LogicalKey, PointerButton, PointerEvent,
 };
 
 #[doc(hidden)]
@@ -447,7 +447,7 @@ struct CodexSurfaces {
     chats: Vec<CodexChatSurface>,
     writer_leases: WriterLeases,
     installation: FeatureInstallation,
-    theme: nickel_ui::SemanticTheme,
+    theme: twinkle::SemanticTheme,
 }
 
 struct CodexChatSurface {
@@ -557,20 +557,20 @@ impl<A: Application> EmbeddedUiSurface<A> {
         self.host.application_mut()
     }
 
-    fn commands(&self) -> &[nickel_ui::backend::PaintCommand] {
+    fn commands(&self) -> &[twinkle::backend::PaintCommand] {
         self.host.commands()
     }
 
-    fn retained_paint_damage(&self) -> Option<&[nickel_ui::Rect]> {
+    fn retained_paint_damage(&self) -> Option<&[twinkle::Rect]> {
         self.host.retained_paint_damage()
     }
 
     #[cfg(test)]
-    fn accessibility_nodes(&self) -> &[nickel_ui::AccessibilityNode] {
+    fn accessibility_nodes(&self) -> &[twinkle::AccessibilityNode] {
         self.host.accessibility_nodes()
     }
 
-    fn inspection(&self) -> nickel_ui::HostInspection {
+    fn inspection(&self) -> twinkle::HostInspection {
         self.host.inspect()
     }
 
@@ -592,7 +592,7 @@ impl<A: Application> EmbeddedUiSurface<A> {
     fn normalized_ingress(
         &mut self,
         event: HostEvent,
-        authority: nickel_ui::NormalizedIngressAuthority,
+        authority: twinkle::NormalizedIngressAuthority,
     ) -> HostEventOutcome {
         self.step(HostBatch {
             events: vec![event],
@@ -614,7 +614,7 @@ impl<A: Application> EmbeddedUiSurface<A> {
 
     fn suspend(&mut self) -> HostEventOutcome {
         self.step(HostBatch {
-            events: vec![HostEvent::Ui(nickel_ui::UiEvent::Suspended)],
+            events: vec![HostEvent::Ui(twinkle::UiEvent::Suspended)],
             ..HostBatch::default()
         })
     }
@@ -725,7 +725,7 @@ impl CodexSurfaces {
         self.installation
     }
 
-    fn set_theme(&mut self, theme: nickel_ui::SemanticTheme) -> bool {
+    fn set_theme(&mut self, theme: twinkle::SemanticTheme) -> bool {
         if self.theme == theme {
             return false;
         }
@@ -793,7 +793,7 @@ impl CodexSurfaces {
 
     fn new(
         settings: &OptionalFeatureSettings,
-        theme: nickel_ui::SemanticTheme,
+        theme: twinkle::SemanticTheme,
     ) -> Result<Self, String> {
         Ok(Self {
             enabled: settings.codex_enabled,
@@ -1205,8 +1205,8 @@ fn scene_for_native_surface(
     width: u32,
     height: u32,
 ) -> Option<(
-    Vec<nickel_ui::backend::PaintCommand>,
-    Option<Vec<nickel_ui::Rect>>,
+    Vec<twinkle::backend::PaintCommand>,
+    Option<Vec<twinkle::Rect>>,
 )> {
     let surface = shell.surface(id)?;
     let plugin_key = surface.plugin_key().cloned();
@@ -1904,7 +1904,7 @@ fn handle_shell_input(
                 InputEvent::Pointer(PointerEvent::Button {
                     edge: KeyEdge::Pressed,
                     ..
-                }) | InputEvent::Touch(nickel_input::TouchEvent::Ended { .. })
+                }) | InputEvent::Touch(twinkle_input::TouchEvent::Ended { .. })
             ) {
                 shell.set_active_output_from_surface(surface);
             }
@@ -1973,16 +1973,16 @@ fn handle_shell_input(
         return Ok(());
     }
     match event {
-        InputEvent::Text(nickel_input::TextEvent::Commit { .. }) => {
+        InputEvent::Text(twinkle_input::TextEvent::Commit { .. }) => {
             log_unroutable_launcher_input(role, "text-commit", "non-launcher-surface");
         }
-        InputEvent::Text(nickel_input::TextEvent::Preedit { .. }) => {
+        InputEvent::Text(twinkle_input::TextEvent::Preedit { .. }) => {
             log_unroutable_launcher_input(role, "text-preedit", "non-launcher-surface");
         }
         InputEvent::Key(key) if key.edge == KeyEdge::Pressed => {
             let keycode = match key.physical {
-                nickel_input::PhysicalKey::Code(key) => Some(key),
-                nickel_input::PhysicalKey::Native(_) => None,
+                twinkle_input::PhysicalKey::Code(key) => Some(key),
+                twinkle_input::PhysicalKey::Native(_) => None,
             };
             let (width, height) = shell
                 .surface(surface)
@@ -2181,7 +2181,7 @@ fn handle_controller_action(
     state: &mut LiveShell,
     codex: &mut CodexSurfaces,
     action: ControllerAction,
-    _family: nickel_ui::ControllerFamily,
+    _family: twinkle::ControllerFamily,
 ) -> Result<(), String> {
     if !state.surface_visible(SurfaceRole::Screenshot)
         && controller_launcher_shortcut(action).is_some()
@@ -2506,7 +2506,7 @@ pub fn run() -> Result<(), String> {
     #[cfg(target_os = "windows")]
     if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--nickel-file-window")) {
         let launch = nickel_file::FileLaunch::from_args_os(std::env::args_os().skip(2));
-        return nickel_ui::run_with_adapter(
+        return nickel_ui_host::run_with_adapter(
             launch.into_app(),
             nickel_file::FileHostAdapter::default(),
         )
@@ -2667,9 +2667,9 @@ pub fn run() -> Result<(), String> {
     );
     let mut hover_repaint: Option<(SurfaceRole, Instant)> = None;
     #[cfg(not(target_os = "windows"))]
-    let mut controller = nickel_ui::ControllerInput::new();
+    let mut controller = twinkle::ControllerInput::new();
     #[cfg(not(target_os = "windows"))]
-    let mut controller_schedule = nickel_ui::ControllerPollSchedule::new(Instant::now());
+    let mut controller_schedule = twinkle::ControllerPollSchedule::new(Instant::now());
     let mut diagnostic_loop_started = Instant::now();
     let mut diagnostic_loop_iterations = 0_u64;
     let mut diagnostic_overdue_after_poll = Vec::new();
@@ -3563,8 +3563,8 @@ mod tests {
         CodexRuntimeInput, FeatureEffectiveState, FeatureHealth, FeatureInstallation,
         codex_runtime_from,
     };
-    use nickel_ui::ControllerAction;
     use std::time::{Duration, Instant};
+    use twinkle::ControllerAction;
 
     #[test]
     fn mixed_scale_desktop_origins_preserve_physical_adjacency() {
@@ -3671,8 +3671,8 @@ mod tests {
 
     fn pointer_button(
         order: u64,
-        button: nickel_input::PointerButton,
-        edge: nickel_input::KeyEdge,
+        button: twinkle_input::PointerButton,
+        edge: twinkle_input::KeyEdge,
         point: InputPoint,
     ) -> InputEvent {
         InputEvent::Pointer(PointerEvent::Button {
@@ -3684,7 +3684,7 @@ mod tests {
         })
     }
 
-    fn center(node: &nickel_ui::AccessibilityNode) -> InputPoint {
+    fn center(node: &twinkle::AccessibilityNode) -> InputPoint {
         InputPoint {
             x: f64::from(node.rect.origin.x + node.rect.size.width / 2.0),
             y: f64::from(node.rect.origin.y + node.rect.size.height / 2.0),
@@ -3725,8 +3725,8 @@ mod tests {
         surface.normalized_input(
             pointer_button(
                 1,
-                nickel_input::PointerButton::Primary,
-                nickel_input::KeyEdge::Pressed,
+                twinkle_input::PointerButton::Primary,
+                twinkle_input::KeyEdge::Pressed,
                 point,
             ),
             None,
@@ -3734,8 +3734,8 @@ mod tests {
         surface.normalized_input(
             pointer_button(
                 2,
-                nickel_input::PointerButton::Primary,
-                nickel_input::KeyEdge::Released,
+                twinkle_input::PointerButton::Primary,
+                twinkle_input::KeyEdge::Released,
                 point,
             ),
             None,
@@ -3820,8 +3820,8 @@ mod tests {
         let menu = surface.normalized_input(
             pointer_button(
                 2,
-                nickel_input::PointerButton::Secondary,
-                nickel_input::KeyEdge::Pressed,
+                twinkle_input::PointerButton::Secondary,
+                twinkle_input::KeyEdge::Pressed,
                 center(&file_menu),
             ),
             None,
@@ -3834,8 +3834,8 @@ mod tests {
 
         let primary = pointer_button(
             3,
-            nickel_input::PointerButton::Primary,
-            nickel_input::KeyEdge::Pressed,
+            twinkle_input::PointerButton::Primary,
+            twinkle_input::KeyEdge::Pressed,
             center(&file_menu),
         );
         surface.normalized_input(primary, None);
@@ -4030,10 +4030,10 @@ mod tests {
 
     use nickel_codex::{ReplayBackend, ThreadId};
     use nickel_codex_ui::{BackendMode, ChatApplication, ChatItem, ChatItemKind, ConnectionStatus};
-    use nickel_input::{
+    use twinkle::{ActionKind, HostBatch, HostEvent, SemanticRole, UiEvent};
+    use twinkle_input::{
         DeviceId, EventOrder, InputEvent, Point as InputPoint, PointerEvent, TextEvent, Vector,
     };
-    use nickel_ui::{ActionKind, HostBatch, HostEvent, SemanticRole, UiEvent};
 
     use super::{EmbeddedUiSurface, WriterLeases, codex_project_application_id};
 

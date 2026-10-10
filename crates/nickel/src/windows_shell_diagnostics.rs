@@ -530,7 +530,7 @@ mod tests {
             23,
             crate::winit_shell::ShellMemoryDiagnostics {
                 presenter_cache_generation: 11,
-                presenter_caches: nickel_ui::AggregatePresenterCacheDiagnostics {
+                presenter_caches: twinkle::AggregatePresenterCacheDiagnostics {
                     presenters: 1,
                     live_entries: 7,
                     live_bytes: 80,

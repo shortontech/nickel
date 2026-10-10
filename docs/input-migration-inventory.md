@@ -10,13 +10,13 @@ It does not mean that the path has been exercised in an installed Linux or Windo
 
 | Producer | Production boundary | Identity and order carried forward | Routing / cancellation capability | Status |
 | --- | --- | --- | --- | --- |
-| Focused winit keyboard, text/IME, pointer, wheel, touch and focus events | `nickel_input::winit::Adapter` | generated `DeviceId`, monotonic `EventOrder`, key identity, pointer/touch device and contact | focus loss and device removal reset held state; host dispatch returns an explicit disposition | migrated |
+| Focused winit keyboard, text/IME, pointer, wheel, touch and focus events | `twinkle_input::winit::Adapter` | generated `DeviceId`, monotonic `EventOrder`, key identity, pointer/touch device and contact | focus loss and device removal reset held state; host dispatch returns an explicit disposition | migrated |
 | Smithay libinput keyboard, pointer and touch | `session::input`, Smithay seat, then `InputEvent` for compositor UI | seat/device lifetime, serial/time, button or contact | seat-wide cancel, focus/device/target cancellation; output removal cancels native client contacts without clearing surviving internal domains; completed-frame touch cancel is forwarded unconditionally | migrated; vendor fix carried in `vendor/smithay` |
 | Smithay compositor shortcuts | `CompositorShortcutAdapter` | normalized key and modifier state | typed shell action; lock/focus teardown cancels repeats and interactions | migrated boundary |
 | Win32 focused winit input | shared winit adapter and `UiHost` | normalized identity as on other winit hosts | focus/device reset and explicit host disposition | migrated |
 | Win32 `RegisterHotKey` and keyboard hook | `WindowsInputAdapter` in `platform::windows` | physical key/scan code and shared modifiers | synchronous hook suppression; typed outcomes delivered once | migrated boundary |
 | Win32 low-level pointer hook | `WindowDragCoordinator` plus `WindowOperationReducer` | window lifetime/generation, source generation, initiating button, operation/acquisition | source tests present; foreign geometry admission and native effects are disabled because no bounded identity-bearing completion mechanism is available | unavailable; source fail-closed, Windows tests/native unrun |
-| Gilrs controller reader | `nickel_input::gilrs`, `ControllerNormalizer`, `ControllerInput` | controller lifetime, backend/native identity, fingerprint, family, edge, time | focus fence suppresses held input; disconnect/neutral reset; drain bounded to 256 events/poll | migrated |
+| Gilrs controller reader | `twinkle_input::gilrs`, `ControllerNormalizer`, `ControllerInput` | controller lifetime, backend/native identity, fingerprint, family, edge, time | focus fence suppresses held input; disconnect/neutral reset; drain bounded to 256 events/poll | migrated |
 | Unix session controller worker | `ControllerBroker` through local transport | host connection, lease, stream generation, route epoch and event ID | revoke cutoff, recipient-change cutoff across queued batches, transfer deadline, overflow reset and owner-thread neutral recovery barrier | migrated |
 | Windows session controller worker | `server_windows::WindowsPipeServer`, `client_windows::AsyncControllerConnection`, and `ControllerBroker` source | correlated bounded frames plus broker host/connection/lease/stream/event identity | adapter source exists, but no production `WindowsPipeServer` construction publishes the broker feed and the direct shell reader is disabled on Windows | unavailable; production integration missing |
 | Authenticated semantic/test input | session protocol, `session::test_input`, production hit testing/reducers | authenticated scope and semantic target | explicit press/release/cancel and lease teardown; no alternate reducer | intentional test boundary |
@@ -106,5 +106,5 @@ rg -n 'WindowOperationReducer|WindowPointerOperation|ControlMode::' crates/nicke
 rg -n 'cancel_all|CancellationReason::|cancel_normalized_touches|\.cancel\(self\)' \
   crates/nickel-core crates/nickel/src/session crates/nickel/src/platform/windows.rs
 rg -n 'MAX_.*(TRACE|EVENT|DIAGNOSTIC)|DEFAULT_.*(LIMIT|DEADLINE)|VecDeque' \
-  crates/nickel-core crates/nickel-ui crates/nickel-session-protocol crates/nickel-remote-control
+  crates/nickel-core crates/twinkle crates/nickel-session-protocol crates/nickel-remote-control
 ```

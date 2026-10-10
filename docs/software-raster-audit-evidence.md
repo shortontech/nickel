@@ -1,6 +1,6 @@
 # Software raster cache evidence (0212, 0217, 0219 scale)
 
-Measured on Linux, 2026-09-07, with the optimized `nickel-ui` unit-test binary.
+Measured on Linux, 2026-09-07, with the optimized `twinkle` unit-test binary.
 The predeclared targets were 40% less per-sample storage, candidate and retained
 raster allocations within 2 MiB, and no more than 25% additional cold raster work
 against the previous tuple algorithm. These are payload and microbenchmark
@@ -8,7 +8,7 @@ targets, not claims about whole-session RSS savings.
 
 ## Reproduction and observations
 
-Run `cargo test --release -p nickel-ui --lib software_raster_memory_and_timing_evidence -- --ignored --nocapture`.
+Run `cargo test --release -p twinkle --lib software_raster_memory_and_timing_evidence -- --ignored --nocapture`.
 The benchmark also contains the previous 20-byte tuple collection/drawing
 algorithm, using identical shaped text, pixels, clipping, and warm glyph images.
 

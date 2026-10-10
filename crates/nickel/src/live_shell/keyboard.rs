@@ -3,7 +3,7 @@ use nickel_core::on_screen_keyboard::{
     KeyboardKey, Latch, TouchscreenPresence, VirtualModifiers, resolve_enablement,
 };
 use nickel_session_protocol::OnScreenKeyboardInput;
-use nickel_ui::on_screen_keyboard::KeyboardEffect;
+use twinkle::on_screen_keyboard::KeyboardEffect;
 
 impl LiveShell {
     pub(crate) fn keyboard_placement_preferences(&self) -> (bool, u32) {
@@ -31,7 +31,7 @@ impl LiveShell {
         epoch: Option<u64>,
     ) -> bool {
         use crate::plugin_panel::PluginEffect;
-        use nickel_ui::on_screen_keyboard::KeyboardMessage;
+        use twinkle::on_screen_keyboard::KeyboardMessage;
         let PluginEffect::Keyboard { plugin_id, effect } = effect else {
             return false;
         };
@@ -296,7 +296,7 @@ impl LiveShell {
 
     pub fn keyboard_host_input(
         &mut self,
-        input: nickel_input::InputEvent,
+        input: twinkle_input::InputEvent,
         width: u32,
         height: u32,
     ) -> bool {
@@ -315,16 +315,16 @@ impl LiveShell {
         ingress: HostEvent,
         width: u32,
         height: u32,
-        authority: Option<nickel_ui::NormalizedIngressAuthority>,
+        authority: Option<twinkle::NormalizedIngressAuthority>,
     ) -> bool {
-        use nickel_input::{InputEvent, KeyEdge, PointerEvent, TouchEvent};
+        use twinkle_input::{InputEvent, KeyEdge, PointerEvent, TouchEvent};
         let input = normalized_input(&ingress)
             .expect("keyboard host event must be normalized")
             .clone();
         // Only primary clicks activate keyboard keys. Other buttons must neither
         // replace the primary lease nor consume its release-time recipient epoch.
         if matches!(&input, InputEvent::Pointer(PointerEvent::Button { button, .. })
-            if *button != nickel_input::PointerButton::Primary)
+            if *button != twinkle_input::PointerButton::Primary)
         {
             return false;
         }
@@ -333,7 +333,7 @@ impl LiveShell {
         let resize_event = match &input {
             InputEvent::Pointer(PointerEvent::Button {
                 device,
-                button: nickel_input::PointerButton::Primary,
+                button: twinkle_input::PointerButton::Primary,
                 edge,
                 position: Some(position),
                 ..
@@ -417,9 +417,9 @@ impl LiveShell {
 
     pub(super) fn keyboard_gesture_epoch(
         &mut self,
-        input: &nickel_input::InputEvent,
+        input: &twinkle_input::InputEvent,
     ) -> Option<u64> {
-        use nickel_input::{InputEvent, KeyEdge, PointerEvent, TouchEvent};
+        use twinkle_input::{InputEvent, KeyEdge, PointerEvent, TouchEvent};
         let current = self
             .keyboard_recipient
             .as_ref()
@@ -427,7 +427,7 @@ impl LiveShell {
         match input {
             InputEvent::Pointer(PointerEvent::Button {
                 device,
-                button: nickel_input::PointerButton::Primary,
+                button: twinkle_input::PointerButton::Primary,
                 edge: KeyEdge::Pressed,
                 ..
             }) => {
@@ -438,7 +438,7 @@ impl LiveShell {
             }
             InputEvent::Pointer(PointerEvent::Button {
                 device,
-                button: nickel_input::PointerButton::Primary,
+                button: twinkle_input::PointerButton::Primary,
                 edge: KeyEdge::Released,
                 ..
             }) => self.keyboard_gesture_leases.remove(&(*device, None)),
@@ -542,7 +542,7 @@ impl LiveShell {
 }
 
 fn keyboard_input(key: KeyboardKey, modifiers: VirtualModifiers) -> Option<OnScreenKeyboardInput> {
-    use nickel_input::NamedKey::*;
+    use twinkle_input::NamedKey::*;
     let chord = modifiers.control != Latch::Off
         || modifiers.alt != Latch::Off
         || modifiers.super_key != Latch::Off
@@ -694,9 +694,9 @@ mod windows_tests {
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
-    use nickel_input::{DeviceId, EventOrder, InputEvent, KeyEdge, PointerButton, PointerEvent};
     use nickel_session_protocol::{OnScreenKeyboardSnapshot, ShellSemanticTarget, WindowId};
     use std::sync::{Arc, Mutex};
+    use twinkle_input::{DeviceId, EventOrder, InputEvent, KeyEdge, PointerButton, PointerEvent};
 
     #[derive(Default)]
     struct Host(Mutex<Vec<(u64, OnScreenKeyboardInput)>>);
@@ -754,7 +754,7 @@ mod tests {
                     order: EventOrder(1),
                     button,
                     edge,
-                    position: Some(nickel_input::Point {
+                    position: Some(twinkle_input::Point {
                         x: f64::from(target.x),
                         y: f64::from(target.y),
                     }),
@@ -823,7 +823,7 @@ mod tests {
                     order: EventOrder(1),
                     button: PointerButton::Primary,
                     edge,
-                    position: Some(nickel_input::Point { x: 50.0, y: 50.0 }),
+                    position: Some(twinkle_input::Point { x: 50.0, y: 50.0 }),
                 })
             };
             assert_eq!(

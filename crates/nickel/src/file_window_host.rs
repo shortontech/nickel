@@ -106,7 +106,7 @@ impl FileWindowHost for InProcessFileWindowHost {
                         crate::platform::unregister_native_application_window,
                     );
                 if let Err(error) =
-                    nickel_ui::run_with_adapter_on_any_thread(launch.into_app(), adapter)
+                    nickel_ui_host::run_with_adapter_on_any_thread(launch.into_app(), adapter)
                 {
                     tracing::error!(%error, "in-process file window failed");
                 }
