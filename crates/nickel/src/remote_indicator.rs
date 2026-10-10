@@ -3,7 +3,7 @@
 //! The platform owner must protect placement, capture and input routing. This
 //! module supplies the semantic tree; platform owners project it through
 //! dedicated AccessKit UI Automation or AT-SPI adapters.
-use twinkle::{
+use twinkle_ui::{
     Application, Button, ButtonPresentation, Column, Component, Insets, Row, SemanticTheme, Text,
     VerticalScroll, View, ViewContext,
 };
@@ -251,7 +251,7 @@ mod tests {
 #[cfg(test)]
 mod host_tests {
     use super::*;
-    use twinkle::{ActionKind, HostBatch, HostEvent, SemanticAction, UiHost};
+    use twinkle_ui::{ActionKind, HostBatch, HostEvent, SemanticAction, UiHost};
 
     fn host() -> UiHost<RemoteIndicator> {
         UiHost::new_at(
@@ -342,7 +342,7 @@ mod host_tests {
     #[test]
     fn production_indicator_paints_readable_text_in_light_and_dark_themes() {
         use nickel_core::theme::{Appearance, ThemeMode, ThemePalette};
-        use twinkle::backend::PaintCommand;
+        use twinkle_ui::backend::PaintCommand;
         fn luminance(color: u32) -> f64 {
             let linear = |shift| {
                 let component = f64::from((color >> shift) & 255_u32) / 255.0;

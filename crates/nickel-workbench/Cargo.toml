@@ -15,7 +15,7 @@ nickel-gaze = { path = "../nickel-gaze", optional = true }
 nickel-markdown = { path = "../nickel-markdown" }
 nickel-markdown-ui = { path = "../nickel-markdown-ui", optional = true, features = ["workbench-fixtures"] }
 nickel-shell = { package = "nickel", path = "../nickel", optional = true, features = ["workbench-fixtures"] }
-twinkle = { workspace = true }
+twinkle_ui = { workspace = true }
 twinkle-testkit = { workspace = true }
 serde.workspace = true
 serde_json.workspace = true

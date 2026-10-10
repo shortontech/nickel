@@ -35,7 +35,7 @@ dirs.workspace = true
 jiff.workspace = true
 sha2.workspace = true
 url.workspace = true
-twinkle = { workspace = true }
+twinkle_ui = { workspace = true }
 nickel-core = { path = "../nickel-core" }
 nickel-file = { path = "../nickel-file" }
 nickel-codex = { path = "../nickel-codex" }

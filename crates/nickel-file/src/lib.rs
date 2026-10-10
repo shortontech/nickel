@@ -36,8 +36,11 @@ pub use watch::DirectoryWatch;
 
 /// Shared file-drag threshold in logical pixels. Hosts choose placement or
 /// native transfer, but small pointer jitter must never start either operation.
-pub fn file_drag_offset(origin: twinkle::Point, cursor: twinkle::Point) -> Option<twinkle::Point> {
-    let offset = twinkle::Point {
+pub fn file_drag_offset(
+    origin: twinkle_ui::Point,
+    cursor: twinkle_ui::Point,
+) -> Option<twinkle_ui::Point> {
+    let offset = twinkle_ui::Point {
         x: cursor.x - origin.x,
         y: cursor.y - origin.y,
     };

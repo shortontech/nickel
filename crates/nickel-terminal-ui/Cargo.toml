@@ -16,7 +16,7 @@ nickel-i18n = { path = "../nickel-i18n" }
 twinkle-input = { workspace = true }
 nickel-core = { path = "../nickel-core" }
 nickel-terminal = { path = "../nickel-terminal" }
-twinkle = { workspace = true }
+twinkle_ui = { workspace = true }
 nickel-logging = { path = "../nickel-logging" }
 twinkle-render-assets = { workspace = true }
 winit-next.workspace = true

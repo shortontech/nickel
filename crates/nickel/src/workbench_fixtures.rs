@@ -1,12 +1,12 @@
 use std::sync::Arc;
 
 use nickel_core::theme::{Appearance, ThemePalette};
-use twinkle::{ActionKind, ControllerFamily, SemanticRole};
 use twinkle_testkit::{
     DEFAULT_ACCESSIBILITY, DEFAULT_LOCALE, DEFAULT_SCALE, Fixture, FixtureMetadata,
     FixtureProvider, FixtureRegistry, FixtureSource, FixtureTheme, FixtureVariant, RegistryError,
     Selector, ViewportPreset,
 };
+use twinkle_ui::{ActionKind, ControllerFamily, SemanticRole};
 
 use nickel_codex_ui::ChatApplication;
 
@@ -339,7 +339,7 @@ impl Fixture for ProjectionRecoveryFixture {
         }
         app.show_projection_chooser();
         if v.id == "confirmation" {
-            twinkle::Application::update(
+            twinkle_ui::Application::update(
                 &mut app,
                 crate::control_view::ControlAction::PreviewProjection(
                     nickel_core::display_projection::ProjectionMode::Extend,

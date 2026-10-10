@@ -10,13 +10,13 @@ use std::{
     time::Instant,
 };
 
-use twinkle::{
-    HostBatch, HostEvent, InternalSurfaceId, NormalizedAdmissionBinding,
-    NormalizedIngressAuthority, NormalizedInputEnvelope, NormalizedSourceBinding,
-};
 use twinkle_input::{
     DeviceId, EventOrder, InputEvent, KeyEdge, ModifierState, PointerButton, PointerEvent,
     TouchEvent, TouchId,
+};
+use twinkle_ui::{
+    HostBatch, HostEvent, InternalSurfaceId, NormalizedAdmissionBinding,
+    NormalizedIngressAuthority, NormalizedInputEnvelope, NormalizedSourceBinding,
 };
 
 use super::{InternalSurfaceRole, InternalUiRuntime};
@@ -43,19 +43,19 @@ mod tests {
         axes: usize,
     }
 
-    impl twinkle::Application for PointerProbe {
+    impl twinkle_ui::Application for PointerProbe {
         type Message = ();
 
         fn update(&mut self, (): ()) {}
 
-        fn view(&self, _: twinkle::ViewContext) -> impl twinkle::View<Self::Message> {
-            twinkle::Text::new("pointer probe")
+        fn view(&self, _: twinkle_ui::ViewContext) -> impl twinkle_ui::View<Self::Message> {
+            twinkle_ui::Text::new("pointer probe")
         }
 
         fn adapt_input(
-            host: &mut twinkle::UiHost<Self>,
+            host: &mut twinkle_ui::UiHost<Self>,
             input: &InputEvent,
-        ) -> twinkle::AdapterOutcome {
+        ) -> twinkle_ui::AdapterOutcome {
             match input {
                 InputEvent::Pointer(PointerEvent::Button { .. }) => {
                     host.application_mut().buttons += 1;
@@ -63,9 +63,9 @@ mod tests {
                 InputEvent::Pointer(PointerEvent::Axis { .. }) => {
                     host.application_mut().axes += 1;
                 }
-                _ => return twinkle::AdapterOutcome::default(),
+                _ => return twinkle_ui::AdapterOutcome::default(),
             }
-            twinkle::AdapterOutcome {
+            twinkle_ui::AdapterOutcome {
                 changed: true,
                 ..Default::default()
             }
@@ -214,7 +214,7 @@ mod tests {
             .drain_routed_events()
             .into_iter()
             .flat_map(|(_, batch, _)| batch.events)
-            .filter(|event| matches!(event, HostEvent::Ui(twinkle::UiEvent::PointerCancelled)))
+            .filter(|event| matches!(event, HostEvent::Ui(twinkle_ui::UiEvent::PointerCancelled)))
             .count();
         assert_eq!(cancelled, 2);
     }
@@ -567,22 +567,22 @@ mod tests {
         assert!(
             events
                 .iter()
-                .any(|event| matches!(event, HostEvent::Ui(twinkle::UiEvent::PointerMoved(_))))
+                .any(|event| matches!(event, HostEvent::Ui(twinkle_ui::UiEvent::PointerMoved(_))))
         );
         assert!(
-            events
-                .iter()
-                .any(|event| matches!(event, HostEvent::Ui(twinkle::UiEvent::PointerPressed(_))))
-        );
-        assert!(
-            events
-                .iter()
-                .any(|event| matches!(event, HostEvent::Ui(twinkle::UiEvent::PointerReleased(_))))
+            events.iter().any(|event| matches!(
+                event,
+                HostEvent::Ui(twinkle_ui::UiEvent::PointerPressed(_))
+            ))
         );
         assert!(events.iter().any(|event| matches!(
             event,
-            HostEvent::Ui(twinkle::UiEvent::PointerContext(point))
-                if *point == twinkle::Point { x: 20.0, y: 20.0 }
+            HostEvent::Ui(twinkle_ui::UiEvent::PointerReleased(_))
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            HostEvent::Ui(twinkle_ui::UiEvent::PointerContext(point))
+                if *point == twinkle_ui::Point { x: 20.0, y: 20.0 }
         )));
         assert!(!events.iter().any(|event| {
             matches!(
@@ -620,7 +620,7 @@ mod tests {
         assert_eq!(batches[0].0, panel);
         assert!(matches!(
             &batches[0].1.events[..],
-            [HostEvent::Ui(twinkle::UiEvent::PointerCancelled)]
+            [HostEvent::Ui(twinkle_ui::UiEvent::PointerCancelled)]
         ));
         assert_eq!(runtime.hovered, Some(id));
         // The session falls through to generic routing only when desktop routing
@@ -1368,7 +1368,7 @@ impl InternalUiRuntime {
             if *edge == KeyEdge::Pressed {
                 self.dispatch_ui(
                     id,
-                    twinkle::UiEvent::PointerContext(twinkle::Point {
+                    twinkle_ui::UiEvent::PointerContext(twinkle_ui::Point {
                         x: (position.0 - f64::from(placement.geometry.0)) as f32,
                         y: (position.1 - f64::from(placement.geometry.1)) as f32,
                     }),
@@ -1403,7 +1403,7 @@ impl InternalUiRuntime {
         // a normalized surface must cancel the panel before delivering motion.
         if placement.is_some() && self.hovered != Some(id) {
             if let Some(previous) = self.hovered {
-                self.dispatch_ui(previous, twinkle::UiEvent::PointerCancelled);
+                self.dispatch_ui(previous, twinkle_ui::UiEvent::PointerCancelled);
             }
             self.hovered = Some(id);
         }

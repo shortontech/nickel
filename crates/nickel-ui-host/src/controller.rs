@@ -1,6 +1,6 @@
 //! Nickel session discovery, nonblocking transport and authenticated controller leases.
 use std::time::{Duration, Instant};
-use twinkle::{
+use twinkle_ui::{
     ControllerAction, ControllerExecutionAuthority, ControllerExecutionBinding, ControllerFamily,
     ControllerSource,
 };
@@ -478,11 +478,11 @@ fn controller_family_from_message(
     }
 }
 
-impl twinkle::HostedControllerSource for SessionControllerSource {
+impl twinkle_ui::HostedControllerSource for SessionControllerSource {
     fn connected(&self) -> bool {
         matches!(self, Self::Connecting { .. } | Self::Attached { .. })
     }
-    fn poll_actions(&mut self) -> Vec<twinkle::HostedControllerDelivery> {
+    fn poll_actions(&mut self) -> Vec<twinkle_ui::HostedControllerDelivery> {
         Self::poll_actions(self)
     }
     fn report_execution_overflow(&mut self, binding: ControllerExecutionBinding) {

@@ -244,7 +244,7 @@ impl NickelSession {
 
     pub(crate) fn record_remote_internal_focus_event(
         &mut self,
-        runtime: twinkle::InternalSurfaceId,
+        runtime: twinkle_ui::InternalSurfaceId,
     ) {
         let state = self
             .internal_shell_surfaces
@@ -1439,7 +1439,7 @@ impl NickelSession {
                 pointer_hit_test: None,
             };
         }
-        let ordinary_shell = |surface: twinkle::InternalSurfaceId| {
+        let ordinary_shell = |surface: twinkle_ui::InternalSurfaceId| {
             let identity = nickel_remote_control::leases::ResourceId {
                 id: format!("internal:{}", surface.snapshot_token()),
                 generation: surface.snapshot_token(),
@@ -1662,7 +1662,7 @@ fn internal_decoration_hit(
 }
 
 fn semantic_projection(
-    projection: Vec<twinkle::SemanticNodeSnapshot>,
+    projection: Vec<twinkle_ui::SemanticNodeSnapshot>,
 ) -> Result<Vec<nickel_remote_control::semantics::SemanticNode>, String> {
     use nickel_remote_control::semantics::*;
     projection
@@ -1679,13 +1679,13 @@ fn semantic_projection(
                 return Err("semantic geometry unavailable".to_owned());
             }
             let value = match node.value {
-                Some(twinkle::SemanticValueSnapshot::Boolean(value)) => {
+                Some(twinkle_ui::SemanticValueSnapshot::Boolean(value)) => {
                     Some(SemanticValue::Boolean(value))
                 }
-                Some(twinkle::SemanticValueSnapshot::Text(value)) => {
+                Some(twinkle_ui::SemanticValueSnapshot::Text(value)) => {
                     Some(SemanticValue::Text(value))
                 }
-                Some(twinkle::SemanticValueSnapshot::Number {
+                Some(twinkle_ui::SemanticValueSnapshot::Number {
                     value,
                     minimum,
                     maximum,
@@ -1704,7 +1704,7 @@ fn semantic_projection(
                         step,
                     })
                 }
-                Some(twinkle::SemanticValueSnapshot::ProtectedText { .. }) => {
+                Some(twinkle_ui::SemanticValueSnapshot::ProtectedText { .. }) => {
                     return Err("protected surface".into());
                 }
                 None => None,
@@ -1730,31 +1730,31 @@ fn semantic_projection(
 
 fn semantic_mutation_action(
     action: nickel_remote_control::semantics::SemanticMutation,
-) -> twinkle::SemanticAction {
+) -> twinkle_ui::SemanticAction {
     use nickel_remote_control::semantics::*;
     match action {
         SemanticMutation::SetBoolean(value) => {
-            twinkle::SemanticAction::SetValue(twinkle::SemanticValueInput::Boolean(value))
+            twinkle_ui::SemanticAction::SetValue(twinkle_ui::SemanticValueInput::Boolean(value))
         }
         SemanticMutation::SetNumber(value) => {
-            twinkle::SemanticAction::SetValue(twinkle::SemanticValueInput::Number(value))
+            twinkle_ui::SemanticAction::SetValue(twinkle_ui::SemanticValueInput::Number(value))
         }
         SemanticMutation::SetText(value) => {
-            twinkle::SemanticAction::SetValue(twinkle::SemanticValueInput::Text(value))
+            twinkle_ui::SemanticAction::SetValue(twinkle_ui::SemanticValueInput::Text(value))
         }
-        SemanticMutation::Invoke(value) => twinkle::SemanticAction::Invoke(match value {
-            SemanticInvocation::Activate => twinkle::ActionKind::Activate,
-            SemanticInvocation::Cancel => twinkle::ActionKind::Cancel,
-            SemanticInvocation::ContextMenu => twinkle::ActionKind::ContextMenu,
-            SemanticInvocation::Increment => twinkle::ActionKind::Increment,
-            SemanticInvocation::Decrement => twinkle::ActionKind::Decrement,
-            SemanticInvocation::Expand => twinkle::ActionKind::Expand,
-            SemanticInvocation::Collapse => twinkle::ActionKind::Collapse,
-            SemanticInvocation::Select => twinkle::ActionKind::Select,
-            SemanticInvocation::Dismiss => twinkle::ActionKind::Dismiss,
-            SemanticInvocation::Scroll => twinkle::ActionKind::Scroll,
-            SemanticInvocation::EnterNavigation => twinkle::ActionKind::EnterNavigation,
-            SemanticInvocation::ExitNavigation => twinkle::ActionKind::ExitNavigation,
+        SemanticMutation::Invoke(value) => twinkle_ui::SemanticAction::Invoke(match value {
+            SemanticInvocation::Activate => twinkle_ui::ActionKind::Activate,
+            SemanticInvocation::Cancel => twinkle_ui::ActionKind::Cancel,
+            SemanticInvocation::ContextMenu => twinkle_ui::ActionKind::ContextMenu,
+            SemanticInvocation::Increment => twinkle_ui::ActionKind::Increment,
+            SemanticInvocation::Decrement => twinkle_ui::ActionKind::Decrement,
+            SemanticInvocation::Expand => twinkle_ui::ActionKind::Expand,
+            SemanticInvocation::Collapse => twinkle_ui::ActionKind::Collapse,
+            SemanticInvocation::Select => twinkle_ui::ActionKind::Select,
+            SemanticInvocation::Dismiss => twinkle_ui::ActionKind::Dismiss,
+            SemanticInvocation::Scroll => twinkle_ui::ActionKind::Scroll,
+            SemanticInvocation::EnterNavigation => twinkle_ui::ActionKind::EnterNavigation,
+            SemanticInvocation::ExitNavigation => twinkle_ui::ActionKind::ExitNavigation,
         }),
     }
 }

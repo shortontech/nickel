@@ -594,7 +594,7 @@ impl NickelSession {
 
     fn begin_internal_surface_move(
         &mut self,
-        surface: twinkle::InternalSurfaceId,
+        surface: twinkle_ui::InternalSurfaceId,
         button: u32,
         serial: smithay::utils::Serial,
     ) -> Option<WindowPointerOperation> {
@@ -635,7 +635,7 @@ impl NickelSession {
 
     fn begin_internal_surface_resize(
         &mut self,
-        surface: twinkle::InternalSurfaceId,
+        surface: twinkle_ui::InternalSurfaceId,
         edges: ResizeEdge,
         button: u32,
         serial: smithay::utils::Serial,
@@ -2932,10 +2932,10 @@ fn vt_from_keysym(sym: Keysym) -> Option<i32> {
     }
 }
 
-fn recovery_shortcut_from_keysym(sym: Keysym) -> Option<twinkle::Shortcut> {
+fn recovery_shortcut_from_keysym(sym: Keysym) -> Option<twinkle_ui::Shortcut> {
     match sym.raw() {
-        keysyms::KEY_Return | keysyms::KEY_KP_Enter => Some(twinkle::Shortcut::Submit),
-        keysyms::KEY_Escape => Some(twinkle::Shortcut::Escape),
+        keysyms::KEY_Return | keysyms::KEY_KP_Enter => Some(twinkle_ui::Shortcut::Submit),
+        keysyms::KEY_Escape => Some(twinkle_ui::Shortcut::Escape),
         _ => None,
     }
 }
@@ -3334,15 +3334,15 @@ mod tests {
     fn recovery_keys_offer_retry_and_safe_exit_without_forwarding_text() {
         assert_eq!(
             recovery_shortcut_from_keysym(Keysym::new(keysyms::KEY_Return)),
-            Some(twinkle::Shortcut::Submit)
+            Some(twinkle_ui::Shortcut::Submit)
         );
         assert_eq!(
             recovery_shortcut_from_keysym(Keysym::new(keysyms::KEY_KP_Enter)),
-            Some(twinkle::Shortcut::Submit)
+            Some(twinkle_ui::Shortcut::Submit)
         );
         assert_eq!(
             recovery_shortcut_from_keysym(Keysym::new(keysyms::KEY_Escape)),
-            Some(twinkle::Shortcut::Escape)
+            Some(twinkle_ui::Shortcut::Escape)
         );
         assert_eq!(
             recovery_shortcut_from_keysym(Keysym::new(keysyms::KEY_a)),

@@ -11,12 +11,12 @@ use crate::platform::{self, SecureStorageState, SessionRequestError, ShellComman
 #[cfg(target_os = "linux")]
 pub(crate) fn record_clipboard_outcome(
     slot: &mut Option<Result<String, String>>,
-    outcome: &mut twinkle::HostEventOutcome,
+    outcome: &mut twinkle_ui::HostEventOutcome,
 ) {
     for failure in outcome
         .failures
         .iter()
-        .filter(|failure| failure.stage == twinkle::HostFailureStage::Clipboard)
+        .filter(|failure| failure.stage == twinkle_ui::HostFailureStage::Clipboard)
     {
         tracing::warn!(detail = failure.detail, "host clipboard operation rejected");
         if !matches!(slot, Some(Ok(_))) {

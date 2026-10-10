@@ -1,6 +1,6 @@
 use crate::model::{OpenWindow, WindowId};
 use nickel_core::theme::ThemePalette;
-use twinkle::SemanticTheme;
+use twinkle_ui::SemanticTheme;
 
 pub const CARD_WIDTH: f32 = 276.0;
 pub const TASK_SWITCHER_CARD_WIDTH: f32 = 220.0;
@@ -9,7 +9,7 @@ const GAP: f32 = 10.0;
 const PADDING: f32 = 12.0;
 
 pub(crate) fn semantic_theme_from_palette(palette: ThemePalette) -> SemanticTheme {
-    SemanticTheme::from_tokens(twinkle::SemanticTokenSet::standard(
+    SemanticTheme::from_tokens(twinkle_ui::SemanticTokenSet::standard(
         palette.background,
         palette.panel,
         palette.surface,

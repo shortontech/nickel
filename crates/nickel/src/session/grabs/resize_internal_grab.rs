@@ -6,7 +6,7 @@ use smithay::input::pointer::{
     ButtonEvent, GrabStartData, MotionEvent, PointerGrab, PointerInnerHandle,
 };
 use smithay::utils::{Logical, Point};
-use twinkle::InternalSurfaceId;
+use twinkle_ui::InternalSurfaceId;
 
 pub struct ResizeInternalSurfaceGrab {
     pub start_data: GrabStartData<NickelSession>,

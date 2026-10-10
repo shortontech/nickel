@@ -10,7 +10,7 @@ nickel-ui-host = { path = "../nickel-ui-host" }
 nickel-i18n = { path = "../nickel-i18n" }
 ctrlc.workspace = true
 image.workspace = true
-twinkle = { workspace = true }
+twinkle_ui = { workspace = true }
 twinkle-testkit = { workspace = true }
 ort.workspace = true
 serde.workspace = true

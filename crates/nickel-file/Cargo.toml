@@ -13,7 +13,7 @@ path = "src/bin/nickel-file.rs"
 [dependencies]
 nickel-ui-host = { path = "../nickel-ui-host" }
 image.workspace = true
-twinkle = { workspace = true }
+twinkle_ui = { workspace = true }
 nucleo-matcher.workspace = true
 nickel-core = { path = "../nickel-core" }
 twinkle-input = { workspace = true, features = ["winit"] }

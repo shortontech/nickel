@@ -6,8 +6,8 @@ use raw_window_handle::{
     DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawDisplayHandle,
     RawWindowHandle, WindowHandle,
 };
-use twinkle::backend::PaintCommand;
-use twinkle::{DamageRegion, PresenterCacheDiagnostics, Rect, SoftwareRenderer};
+use twinkle_ui::backend::PaintCommand;
+use twinkle_ui::{DamageRegion, PresenterCacheDiagnostics, Rect, SoftwareRenderer};
 
 #[derive(Clone, Copy, Debug)]
 struct DisplayHandleSource(RawDisplayHandle);

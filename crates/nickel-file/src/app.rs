@@ -36,7 +36,7 @@ use nucleo_matcher::{
     Config, Matcher,
     pattern::{AtomKind, CaseMatching, Normalization, Pattern},
 };
-use twinkle::{
+use twinkle_ui::{
     AnyView, Application, CollectionSource, FrameOverlay, Insets, OverlayAnchor, OverlayMenu,
     OverlayMenuItem, OverlayStyle, Point, ReadingDirection, Size, TextField, TransientSurface,
     UiId, ViewContext, ui,
@@ -109,7 +109,7 @@ pub(crate) struct FileClick {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum FileMessage {
-    EntryDrag(usize, twinkle::DragGesture),
+    EntryDrag(usize, twinkle_ui::DragGesture),
     ContextEntry(usize),
     ContextBackground,
     ContextOpen,
@@ -179,7 +179,7 @@ pub enum FileMessage {
     OpenFolder(PathBuf),
     Entry(usize),
     SelectionSurface,
-    SelectionSurfaceDrag(twinkle::DragGesture),
+    SelectionSurfaceDrag(twinkle_ui::DragGesture),
     FileScroll(f32),
     SidebarScroll(f32),
 }
@@ -592,8 +592,8 @@ impl FileApp {
             .unwrap_or_else(|| "file-background-context".into());
         let menu = self
             .frame_overlays(ViewContext::new(
-                twinkle::Rect::new(0.0, 0.0, width as f32, height as f32),
-                twinkle::InputModality::Pointer,
+                twinkle_ui::Rect::new(0.0, 0.0, width as f32, height as f32),
+                twinkle_ui::InputModality::Pointer,
             ))
             .into_iter()
             .find_map(|overlay| match overlay {
@@ -797,7 +797,7 @@ impl FileApp {
             .unwrap_or_else(|| path.clone());
         let mut app = Self::new(location);
         app.context_target = Some(path);
-        <Self as twinkle::Application>::update(&mut app, FileMessage::ContextProperties);
+        <Self as twinkle_ui::Application>::update(&mut app, FileMessage::ContextProperties);
         app
     }
 
@@ -815,7 +815,7 @@ impl FileApp {
         {
             app.selected = app.identity_at(index);
             app.selected_entries.extend(app.identity_at(index));
-            <Self as twinkle::Application>::update(&mut app, FileMessage::BeginRename);
+            <Self as twinkle_ui::Application>::update(&mut app, FileMessage::BeginRename);
         }
         app
     }
@@ -2663,7 +2663,7 @@ impl FileApp {
                 self.navigate_to(path);
             }
             FileMessage::EntryDrag(index, gesture) => {
-                use twinkle::DragPhase;
+                use twinkle_ui::DragPhase;
                 match gesture.phase {
                     DragPhase::Started => {
                         // Directory watch updates can reorder indices during a
@@ -2691,11 +2691,13 @@ impl FileApp {
                             .is_some_and(|path| path != self.browser.current())
                             && let Some(offer) = self.outbound_drag.take()
                         {
-                            self.file_drag_event(twinkle::FileDragEvent::ActionChanged(
-                                twinkle::FileDragAction::Copy,
+                            self.file_drag_event(twinkle_ui::FileDragEvent::ActionChanged(
+                                twinkle_ui::FileDragAction::Copy,
                             ));
                             for source in offer.sources {
-                                self.file_drag_event(twinkle::FileDragEvent::Dropped(source.path));
+                                self.file_drag_event(twinkle_ui::FileDragEvent::Dropped(
+                                    source.path,
+                                ));
                             }
                         }
                         self.file_drag_origin = None;
@@ -2778,7 +2780,7 @@ impl FileApp {
                 }
             }
             FileMessage::SelectionSurfaceDrag(gesture) => {
-                use twinkle::DragPhase;
+                use twinkle_ui::DragPhase;
                 match gesture.phase {
                     DragPhase::Started => {
                         self.selection_drag = Some(gesture.position);
@@ -3356,9 +3358,9 @@ impl FileApp {
 
 impl Application for FileApp {
     fn adapt_input(
-        host: &mut twinkle::UiHost<Self>,
+        host: &mut twinkle_ui::UiHost<Self>,
         input: &twinkle_input::InputEvent,
-    ) -> twinkle::AdapterOutcome {
+    ) -> twinkle_ui::AdapterOutcome {
         // All file windows, including embedded ones, use this policy boundary.
         Self::application_input(host, input)
     }
@@ -3369,7 +3371,7 @@ impl Application for FileApp {
         self.update_message(message);
     }
 
-    fn view(&self, context: ViewContext) -> impl twinkle::View<Self::Message> {
+    fn view(&self, context: ViewContext) -> impl twinkle_ui::View<Self::Message> {
         let viewport_size = (context.viewport.size.width, context.viewport.size.height);
         if self.viewport_size.get() != viewport_size {
             self.viewport_size.set(viewport_size);
@@ -3394,26 +3396,26 @@ impl Application for FileApp {
         self.pending_focus.take()
     }
 
-    fn file_drag_event(&mut self, event: twinkle::FileDragEvent) -> bool {
+    fn file_drag_event(&mut self, event: twinkle_ui::FileDragEvent) -> bool {
         match event {
-            twinkle::FileDragEvent::Hovered(path) => self.drag_hover = Some(path),
-            twinkle::FileDragEvent::HoverCancelled => {
+            twinkle_ui::FileDragEvent::Hovered(path) => self.drag_hover = Some(path),
+            twinkle_ui::FileDragEvent::HoverCancelled => {
                 self.drag_hover = None;
                 self.native_drop_destination = None;
                 self.native_drop_hover_started = None;
                 self.native_drop_intent = TransferIntent::Copy;
             }
-            twinkle::FileDragEvent::ActionChanged(action) => {
+            twinkle_ui::FileDragEvent::ActionChanged(action) => {
                 // Native backends can negotiate an action before URI payload
                 // transfer; this also marks the hover lifecycle active so
                 // semantic target affordances and delayed navigation work.
                 self.drag_hover.get_or_insert_with(PathBuf::new);
                 self.native_drop_intent = match action {
-                    twinkle::FileDragAction::Copy => TransferIntent::Copy,
-                    twinkle::FileDragAction::Move => TransferIntent::Move,
+                    twinkle_ui::FileDragAction::Copy => TransferIntent::Copy,
+                    twinkle_ui::FileDragAction::Move => TransferIntent::Move,
                 };
             }
-            twinkle::FileDragEvent::Dropped(path) => {
+            twinkle_ui::FileDragEvent::Dropped(path) => {
                 self.drag_hover = None;
                 if path.file_name().is_none() {
                     return false;
@@ -3432,9 +3434,9 @@ impl Application for FileApp {
         true
     }
 
-    fn take_outbound_file_drag(&mut self) -> Option<twinkle::OutboundFileDrag> {
+    fn take_outbound_file_drag(&mut self) -> Option<twinkle_ui::OutboundFileDrag> {
         let offer = self.outbound_drag.take()?;
-        Some(twinkle::OutboundFileDrag {
+        Some(twinkle_ui::OutboundFileDrag {
             paths: offer
                 .sources
                 .into_iter()
@@ -3453,16 +3455,16 @@ impl Application for FileApp {
             ShellSettings::load_default().resolve_appearance(nickel_platform::appearance());
         let palette = ThemePalette::from_appearance(appearance);
         let invocation_anchor = |target: UiId| match context.modality {
-            twinkle::InputModality::Pointer if self.context_anchor.is_some() => {
+            twinkle_ui::InputModality::Pointer if self.context_anchor.is_some() => {
                 OverlayAnchor::Point {
                     invocation_target: target,
                     point: self.context_anchor.unwrap(),
                 }
             }
-            twinkle::InputModality::Pointer => OverlayAnchor::InvocationTargetCenter(target),
-            twinkle::InputModality::Keyboard
-            | twinkle::InputModality::Controller
-            | twinkle::InputModality::Accessibility => {
+            twinkle_ui::InputModality::Pointer => OverlayAnchor::InvocationTargetCenter(target),
+            twinkle_ui::InputModality::Keyboard
+            | twinkle_ui::InputModality::Controller
+            | twinkle_ui::InputModality::Accessibility => {
                 OverlayAnchor::InvocationTargetCenter(target)
             }
         };
@@ -3651,7 +3653,7 @@ impl Application for FileApp {
             );
             let count = pending.conflicts.len();
             overlays.push(FrameOverlay::surface(surface, ui! {
-                <Container semantic_role={twinkle::SemanticRole::Dialog}
+                <Container semantic_role={twinkle_ui::SemanticRole::Dialog}
                     accessibility_label={format!("Resolve {count} file transfer conflicts")}
                     background={palette.surface} padding={Insets::all(18.0)}>
                     <Column gap={12.0}>
@@ -3915,20 +3917,20 @@ impl Application for FileApp {
         .min()
     }
 
-    fn shortcut_outcome(&mut self, shortcut: twinkle::Shortcut) -> twinkle::ShortcutOutcome {
+    fn shortcut_outcome(&mut self, shortcut: twinkle_ui::Shortcut) -> twinkle_ui::ShortcutOutcome {
         #[cfg(target_os = "windows")]
-        if shortcut == twinkle::Shortcut::Delete {
+        if shortcut == twinkle_ui::Shortcut::Delete {
             let paths = self.ordered_selection_snapshot();
             let available = !paths.is_empty() && self.trash_rx.is_none();
             self.start_trash(paths);
-            return twinkle::ShortcutOutcome::handled(available);
+            return twinkle_ui::ShortcutOutcome::handled(available);
         }
-        if shortcut == twinkle::Shortcut::Rename {
+        if shortcut == twinkle_ui::Shortcut::Rename {
             let available = self.selected_entries.len() == 1;
             self.update_message(FileMessage::BeginRename);
-            return twinkle::ShortcutOutcome::handled(available);
+            return twinkle_ui::ShortcutOutcome::handled(available);
         }
-        twinkle::ShortcutOutcome::from_changed(false)
+        twinkle_ui::ShortcutOutcome::from_changed(false)
     }
 
     fn scale_factor_changed(&mut self, scale_factor: f32) -> bool {
@@ -4358,13 +4360,13 @@ mod live_reconciliation_tests {
         fs::write(source.path().join("b.txt"), b"b").unwrap();
         let destination = tempfile::tempdir().unwrap();
         let mut app = FileApp::new(destination.path().to_path_buf());
-        <FileApp as twinkle::Application>::file_drag_event(
+        <FileApp as twinkle_ui::Application>::file_drag_event(
             &mut app,
-            twinkle::FileDragEvent::Dropped(source.path().join("a.txt")),
+            twinkle_ui::FileDragEvent::Dropped(source.path().join("a.txt")),
         );
-        <FileApp as twinkle::Application>::file_drag_event(
+        <FileApp as twinkle_ui::Application>::file_drag_event(
             &mut app,
-            twinkle::FileDragEvent::Dropped(source.path().join("b.txt")),
+            twinkle_ui::FileDragEvent::Dropped(source.path().join("b.txt")),
         );
         app.native_drop_deadline = Some(Instant::now());
         assert!(app.poll_native_drop());
@@ -4383,13 +4385,13 @@ mod live_reconciliation_tests {
         fs::write(&source_path, b"move").unwrap();
         let destination = tempfile::tempdir().unwrap();
         let mut app = FileApp::new(destination.path().to_path_buf());
-        <FileApp as twinkle::Application>::file_drag_event(
+        <FileApp as twinkle_ui::Application>::file_drag_event(
             &mut app,
-            twinkle::FileDragEvent::ActionChanged(twinkle::FileDragAction::Move),
+            twinkle_ui::FileDragEvent::ActionChanged(twinkle_ui::FileDragAction::Move),
         );
-        <FileApp as twinkle::Application>::file_drag_event(
+        <FileApp as twinkle_ui::Application>::file_drag_event(
             &mut app,
-            twinkle::FileDragEvent::Dropped(source_path.clone()),
+            twinkle_ui::FileDragEvent::Dropped(source_path.clone()),
         );
         app.native_drop_deadline = Some(Instant::now());
         assert!(app.poll_native_drop());

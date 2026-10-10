@@ -14,7 +14,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-use twinkle::{
+use twinkle_ui::{
     Align, AnyView, Application, Button, Column, ComponentBuilderExt, Container, Grid, Image,
     Justify, Row, SemanticRole, Shortcut, ShortcutOutcome, Spacer, Text, TextAlign, ViewContext,
 };
@@ -176,7 +176,7 @@ const fn gaze_variant(id: &'static str, title: &'static str) -> twinkle_testkit:
         theme: twinkle_testkit::FixtureTheme::Dark,
         locale: twinkle_testkit::DEFAULT_LOCALE,
         scale: twinkle_testkit::DEFAULT_SCALE,
-        controller_family: twinkle::ControllerFamily::Generic,
+        controller_family: twinkle_ui::ControllerFamily::Generic,
         accessibility: twinkle_testkit::DEFAULT_ACCESSIBILITY,
     }
 }
@@ -247,7 +247,7 @@ impl Application for GazeGridApplication {
         }
     }
 
-    fn view(&self, context: ViewContext) -> impl twinkle::View<Self::Message> {
+    fn view(&self, context: ViewContext) -> impl twinkle_ui::View<Self::Message> {
         scene(
             context.viewport.size.width,
             context.viewport.size.height,
@@ -386,7 +386,7 @@ fn scene(
     tracker: &GridTracker,
     live: Option<&LiveObservation>,
     now: Duration,
-) -> impl twinkle::View<Message> {
+) -> impl twinkle_ui::View<Message> {
     let header = 132.0;
     let layout = GridLayout::fit(width, height, header);
     let cursor = tracker.cursor(now);
@@ -575,7 +575,7 @@ fn scene(
         .child(
             Container::new()
                 .height(header)
-                .padding(twinkle::Insets {
+                .padding(twinkle_ui::Insets {
                     top: 12.0,
                     right: 20.0,
                     bottom: 12.0,
@@ -647,8 +647,8 @@ fn argument(name: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use twinkle::{ActionKind, SemanticAction, SemanticSelector, UiHost};
     use twinkle_testkit::{ActivationVia, FixtureProvider, FixtureRegistry};
+    use twinkle_ui::{ActionKind, SemanticAction, SemanticSelector, UiHost};
 
     fn host() -> UiHost<GazeGridApplication> {
         let (_sender, receiver) = mpsc::sync_channel(1);

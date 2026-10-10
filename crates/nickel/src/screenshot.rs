@@ -7,9 +7,9 @@ use std::{
 
 use image::RgbaImage;
 #[cfg(any(target_os = "linux", test))]
-use twinkle::ActionKind;
-use twinkle::backend::PaintCommand;
-use twinkle::{
+use twinkle_ui::ActionKind;
+use twinkle_ui::backend::PaintCommand;
+use twinkle_ui::{
     Align, Application, Button, ButtonPresentation, Column, Completion, CompletionFailure,
     CompletionFailureKind, Container, EffectEvidence, FrameOverlay, HostBatch, HostEvent, Image,
     ImageFit, Insets, Point, Rect, Row, SemanticTheme, Spacer, Text, UiEvent, UiHost, ViewContext,
@@ -110,8 +110,8 @@ impl ScreenshotApp {
                     image::Rgba([38, 46, 66, 255]),
                 )));
                 app.selection = Some(Rect {
-                    origin: twinkle::Point { x: 64.0, y: 72.0 },
-                    size: twinkle::Size {
+                    origin: twinkle_ui::Point { x: 64.0, y: 72.0 },
+                    size: twinkle_ui::Size {
                         width: 240.0,
                         height: 160.0,
                     },
@@ -305,7 +305,7 @@ impl Application for ScreenshotApp {
         })
     }
 
-    fn view(&self, context: ViewContext) -> impl twinkle::View<Self::Message> {
+    fn view(&self, context: ViewContext) -> impl twinkle_ui::View<Self::Message> {
         screenshot_view(self, context)
     }
 
@@ -329,9 +329,10 @@ impl Application for ScreenshotApp {
         std::mem::take(&mut self.dirty)
     }
 
-    fn shortcut_outcome(&mut self, shortcut: twinkle::Shortcut) -> twinkle::ShortcutOutcome {
-        twinkle::ShortcutOutcome::from_changed(
-            if shortcut == twinkle::Shortcut::Escape && (self.image.is_some() || self.error_visible)
+    fn shortcut_outcome(&mut self, shortcut: twinkle_ui::Shortcut) -> twinkle_ui::ShortcutOutcome {
+        twinkle_ui::ShortcutOutcome::from_changed(
+            if shortcut == twinkle_ui::Shortcut::Escape
+                && (self.image.is_some() || self.error_visible)
             {
                 self.push_effect(ScreenshotEffect::Cancel);
                 true
@@ -367,7 +368,7 @@ impl ScreenshotTool {
         &self,
         max_nodes: usize,
         max_bytes: usize,
-    ) -> Result<Vec<twinkle::SemanticNodeSnapshot>, twinkle::BoundedSemanticError> {
+    ) -> Result<Vec<twinkle_ui::SemanticNodeSnapshot>, twinkle_ui::BoundedSemanticError> {
         self.host.bounded_semantic_nodes(max_nodes, max_bytes)
     }
 }
@@ -392,9 +393,9 @@ impl ScreenshotTool {
         self.session_host = host;
         self
     }
-    pub fn change_token(&self) -> twinkle::HostChangeToken {
+    pub fn change_token(&self) -> twinkle_ui::HostChangeToken {
         let inspection = self.host.inspect();
-        twinkle::HostChangeToken {
+        twinkle_ui::HostChangeToken {
             frame_generation: inspection.frame_generation,
             semantic_generation: inspection.semantic_generation,
             native_correlation: inspection.native_correlation,
@@ -478,7 +479,7 @@ impl ScreenshotTool {
         event: HostEvent,
         width: u32,
         height: u32,
-        authority: Option<twinkle::NormalizedIngressAuthority>,
+        authority: Option<twinkle_ui::NormalizedIngressAuthority>,
     ) -> bool {
         use twinkle_input::{InputEvent, KeyEdge, PointerButton, PointerEvent};
         match event {
@@ -617,14 +618,14 @@ impl ScreenshotTool {
 
     pub fn escape(&mut self) -> bool {
         let outcome = self.host.step(HostBatch {
-            events: vec![HostEvent::Shortcut(twinkle::Shortcut::Escape)],
+            events: vec![HostEvent::Shortcut(twinkle_ui::Shortcut::Escape)],
             ..HostBatch::default()
         });
         outcome.changed | self.apply_effects()
     }
 
-    pub fn controller_action(&mut self, action: twinkle::ControllerAction) -> bool {
-        if action == twinkle::ControllerAction::Cancel {
+    pub fn controller_action(&mut self, action: twinkle_ui::ControllerAction) -> bool {
+        if action == twinkle_ui::ControllerAction::Cancel {
             return self.escape();
         }
         let outcome = self.host.step(HostBatch {
@@ -662,7 +663,7 @@ impl ScreenshotTool {
             };
             self.host.perform_semantic_action(
                 target.id,
-                twinkle::SemanticAction::Invoke(ActionKind::Activate),
+                twinkle_ui::SemanticAction::Invoke(ActionKind::Activate),
             )
         } else {
             self.host.step(HostBatch {
@@ -821,10 +822,10 @@ impl ScreenshotTool {
 fn screenshot_view(
     app: &ScreenshotApp,
     context: ViewContext,
-) -> impl twinkle::View<ScreenshotMessage> {
+) -> impl twinkle_ui::View<ScreenshotMessage> {
     let width = context.viewport.size.width as u32;
     let palette = app.palette;
-    let theme = SemanticTheme::from_tokens(twinkle::SemanticTokenSet::standard(
+    let theme = SemanticTheme::from_tokens(twinkle_ui::SemanticTokenSet::standard(
         palette.background,
         palette.panel,
         palette.surface,
@@ -989,15 +990,15 @@ mod tests {
     fn controller_cancel_dismisses_capture_before_a_selection_exists() {
         let mut tool = ScreenshotTool::default();
         tool.show(RgbaImage::new(1280, 720));
-        assert!(tool.controller_action(twinkle::ControllerAction::Cancel));
+        assert!(tool.controller_action(twinkle_ui::ControllerAction::Cancel));
         assert!(!tool.visible());
     }
 
-    fn toolbar_host() -> twinkle::UiHost<ScreenshotApp> {
+    fn toolbar_host() -> twinkle_ui::UiHost<ScreenshotApp> {
         let mut app = ScreenshotApp::new(1200, 760);
         app.confirmed = true;
         app.status = "SELECTION CONFIRMED".into();
-        twinkle::UiHost::new(app, 1200, 760)
+        twinkle_ui::UiHost::new(app, 1200, 760)
     }
 
     #[test]
@@ -1016,10 +1017,10 @@ mod tests {
                             .unique_semantic_target_for_message(&ScreenshotMessage::Toolbar(action))
                             .expect("toolbar action target")
                             .id,
-                        twinkle::SemanticAction::Invoke(twinkle::ActionKind::Activate),
+                        twinkle_ui::SemanticAction::Invoke(twinkle_ui::ActionKind::Activate),
                     )
                     .messages,
-                vec![twinkle::MessageEvidence {
+                vec![twinkle_ui::MessageEvidence {
                     type_name: std::any::type_name::<ScreenshotMessage>(),
                     label: None,
                 }]
@@ -1046,8 +1047,8 @@ mod tests {
                 .find(|node| node.id == target.id)
                 .expect("toolbar action has a semantic node");
             assert_eq!(node.name.as_deref(), Some(label));
-            assert_eq!(node.role, Some(twinkle::SemanticRole::Button));
-            assert_eq!(node.actions, vec![twinkle::ActionKind::Activate]);
+            assert_eq!(node.role, Some(twinkle_ui::SemanticRole::Button));
+            assert_eq!(node.actions, vec![twinkle_ui::ActionKind::Activate]);
         }
     }
 
@@ -1085,7 +1086,7 @@ mod tests {
             .application()
             .selection
             .expect("reverse selection");
-        assert_eq!(selection.origin, twinkle::Point { x: end.0, y: end.1 });
+        assert_eq!(selection.origin, twinkle_ui::Point { x: end.0, y: end.1 });
         assert!((selection.size.width - (start.0 - end.0)).abs() < 0.01);
         assert!((selection.size.height - (start.1 - end.1)).abs() < 0.01);
     }
@@ -1102,7 +1103,7 @@ mod tests {
         tool.show(image);
         tool.host.application_mut().viewport = (1200, 760);
         let preview = tool.host.application().image_rect();
-        tool.host.application_mut().selection = Some(twinkle::Rect::new(
+        tool.host.application_mut().selection = Some(twinkle_ui::Rect::new(
             preview.origin.x + preview.size.width / 4.0,
             preview.origin.y,
             preview.size.width / 2.0,
@@ -1149,35 +1150,37 @@ mod tests {
     fn host_batch_owns_selection_completions_effects_failures_and_escape() {
         let mut app = ScreenshotApp::new(800, 600);
         app.image = Some(std::sync::Arc::new(RgbaImage::new(400, 200)));
-        let mut host = twinkle::UiHost::new(app, 800, 600);
+        let mut host = twinkle_ui::UiHost::new(app, 800, 600);
         let preview = host.application().image_rect();
-        let outcome = host.step(twinkle::HostBatch {
-            completions: vec![twinkle::Completion::new(
+        let outcome = host.step(twinkle_ui::HostBatch {
+            completions: vec![twinkle_ui::Completion::new(
                 "screenshot-pointer",
                 super::ScreenshotCompletion::PointerPressed {
                     x: preview.origin.x + 10.0,
                     y: preview.origin.y + 10.0,
                 },
             )],
-            ..twinkle::HostBatch::default()
+            ..twinkle_ui::HostBatch::default()
         });
         assert!(outcome.changed);
         assert!(outcome.telemetry.rebuilt);
         assert_eq!(outcome.telemetry.completions_processed, 1);
 
-        let failure = host.step(twinkle::HostBatch {
-            completions: vec![twinkle::Completion::new("screenshot-pointer", 42_u32)],
-            ..twinkle::HostBatch::default()
+        let failure = host.step(twinkle_ui::HostBatch {
+            completions: vec![twinkle_ui::Completion::new("screenshot-pointer", 42_u32)],
+            ..twinkle_ui::HostBatch::default()
         });
         assert_eq!(failure.completion_failures.len(), 1);
         assert_eq!(
             failure.completion_failures[0].kind,
-            twinkle::CompletionFailureKind::TypeMismatch
+            twinkle_ui::CompletionFailureKind::TypeMismatch
         );
 
-        let escaped = host.step(twinkle::HostBatch {
-            events: vec![twinkle::HostEvent::Shortcut(twinkle::Shortcut::Escape)],
-            ..twinkle::HostBatch::default()
+        let escaped = host.step(twinkle_ui::HostBatch {
+            events: vec![twinkle_ui::HostEvent::Shortcut(
+                twinkle_ui::Shortcut::Escape,
+            )],
+            ..twinkle_ui::HostBatch::default()
         });
         assert!(escaped.changed);
         assert_eq!(escaped.effects.len(), 1);
@@ -1196,17 +1199,17 @@ mod tests {
         ] {
             let mut app = ScreenshotApp::new(800, 600);
             app.image = Some(std::sync::Arc::new(RgbaImage::new(400, 200)));
-            app.selection = Some(twinkle::Rect::new(0.0, 0.0, 100.0, 100.0));
-            let mut host = twinkle::UiHost::new(app, 800, 600);
-            host.step(twinkle::HostBatch {
-                completions: vec![twinkle::Completion::new(
+            app.selection = Some(twinkle_ui::Rect::new(0.0, 0.0, 100.0, 100.0));
+            let mut host = twinkle_ui::UiHost::new(app, 800, 600);
+            host.step(twinkle_ui::HostBatch {
+                completions: vec![twinkle_ui::Completion::new(
                     "screenshot-platform",
                     super::ScreenshotCompletion::Platform {
                         effect,
                         result: Ok("done".into()),
                     },
                 )],
-                ..twinkle::HostBatch::default()
+                ..twinkle_ui::HostBatch::default()
             });
 
             assert!(host.application().image.is_none());

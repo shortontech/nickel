@@ -14,7 +14,7 @@ use nickel_codex::{
     TurnId,
 };
 use nickel_markdown::{MarkdownDocument, markdown_selection_runs};
-use twinkle::{SelectionDocument, SelectionRun};
+use twinkle_ui::{SelectionDocument, SelectionRun};
 
 use crate::ControllerEvent;
 use crate::{AttachmentError, AttachmentId, AttachmentLimits, PendingAttachment};

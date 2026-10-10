@@ -11,7 +11,7 @@ use std::{
     time::Instant,
 };
 
-use twinkle::{
+use twinkle_ui::{
     AnyView, Application, HostBatch, InternalSurfaceId, InternalSurfaceSet, Text, ViewContext,
     backend::PaintCommand,
 };
@@ -32,11 +32,11 @@ use crate::{
 /// lease. Source, admission, operation, transform, and text bindings remain
 /// owned by the producer and must pass through unchanged.
 fn internal_ingress_matches_route(
-    event: &twinkle::HostEvent,
-    authorities: &[twinkle::NormalizedIngressAuthority],
+    event: &twinkle_ui::HostEvent,
+    authorities: &[twinkle_ui::NormalizedIngressAuthority],
     lifetime: u64,
 ) -> bool {
-    let twinkle::HostEvent::NormalizedIngress(envelope) = event else {
+    let twinkle_ui::HostEvent::NormalizedIngress(envelope) = event else {
         return true;
     };
     envelope.recipient.lifetime == lifetime
@@ -113,7 +113,7 @@ impl Application for ShellSurfaceSlot {
 
     fn update(&mut self, (): Self::Message) {}
 
-    fn view(&self, _context: ViewContext) -> impl twinkle::View<Self::Message> {
+    fn view(&self, _context: ViewContext) -> impl twinkle_ui::View<Self::Message> {
         AnyView::new(Text::new(""))
     }
 
@@ -146,7 +146,7 @@ pub(crate) struct InternalShellCoordinator {
     file_actions: Vec<nickel_file::FileWindowAction>,
     clipboard_result: Option<Result<String, String>>,
     preview_generation: Option<u64>,
-    controller_family: twinkle::ControllerFamily,
+    controller_family: twinkle_ui::ControllerFamily,
 }
 
 impl InternalShellCoordinator {
@@ -217,15 +217,15 @@ impl InternalShellCoordinator {
             file_actions: Vec::new(),
             clipboard_result: None,
             preview_generation: None,
-            controller_family: twinkle::ControllerFamily::default(),
+            controller_family: twinkle_ui::ControllerFamily::default(),
         })
     }
 
-    pub(crate) fn set_controller_family(&mut self, family: twinkle::ControllerFamily) {
+    pub(crate) fn set_controller_family(&mut self, family: twinkle_ui::ControllerFamily) {
         self.controller_family = family;
     }
 
-    pub fn semantic_theme(&self) -> twinkle::SemanticTheme {
+    pub fn semantic_theme(&self) -> twinkle_ui::SemanticTheme {
         self.shell.semantic_theme()
     }
 
@@ -529,7 +529,7 @@ impl InternalShellCoordinator {
     pub(crate) fn bounded_shell_semantics(
         &self,
         id: InternalSurfaceId,
-    ) -> Result<(u64, Vec<twinkle::SemanticNodeSnapshot>), String> {
+    ) -> Result<(u64, Vec<twinkle_ui::SemanticNodeSnapshot>), String> {
         let entry = self
             .entries
             .iter()
@@ -556,7 +556,7 @@ impl InternalShellCoordinator {
         id: InternalSurfaceId,
         generation: u64,
         node: usize,
-        action: twinkle::SemanticAction,
+        action: twinkle_ui::SemanticAction,
         clipboard_limit: usize,
     ) -> Result<crate::live_shell::remote_semantics::RemoteShellOutcome, String> {
         let entry = self
@@ -1077,9 +1077,9 @@ impl InternalShellCoordinator {
             )
         {
             let event = if focused {
-                twinkle::UiEvent::FocusGained
+                twinkle_ui::UiEvent::FocusGained
             } else {
-                twinkle::UiEvent::FocusLost
+                twinkle_ui::UiEvent::FocusLost
             };
             changed |= if let Some(key) = entry.plugin.as_ref() {
                 self.shell.plugin_panel_host_window_focus_for(
@@ -1122,7 +1122,7 @@ impl InternalShellCoordinator {
         let controller_authority = batch.controller_authority;
         for event in batch.events {
             let normalized_authority = match &event {
-                twinkle::HostEvent::NormalizedIngress(envelope) => batch
+                twinkle_ui::HostEvent::NormalizedIngress(envelope) => batch
                     .normalized_authorities
                     .iter()
                     .find(|authority| authority.recipient == envelope.recipient)
@@ -1130,13 +1130,13 @@ impl InternalShellCoordinator {
                 _ => None,
             };
             let controller_action = match &event {
-                twinkle::HostEvent::Controller(action) => Some(*action),
-                twinkle::HostEvent::AdmittedController { action, binding }
+                twinkle_ui::HostEvent::Controller(action) => Some(*action),
+                twinkle_ui::HostEvent::AdmittedController { action, binding }
                     if controller_authority.is_some_and(|authority| authority.admits(*binding)) =>
                 {
                     *action
                 }
-                twinkle::HostEvent::AdmittedController { .. } => None,
+                twinkle_ui::HostEvent::AdmittedController { .. } => None,
                 _ => None,
             };
             if let Some(action) = controller_action {
@@ -1192,8 +1192,8 @@ impl InternalShellCoordinator {
             if entry.role == SurfaceRole::ControlCenter
                 && matches!(
                     &event,
-                    twinkle::HostEvent::Normalized { .. }
-                        | twinkle::HostEvent::NormalizedIngress(_)
+                    twinkle_ui::HostEvent::Normalized { .. }
+                        | twinkle_ui::HostEvent::NormalizedIngress(_)
                 )
             {
                 dependent_roles.extend([SurfaceRole::Taskbar, SurfaceRole::OnScreenKeyboard]);
@@ -1213,8 +1213,8 @@ impl InternalShellCoordinator {
             if entry.role == SurfaceRole::OnScreenKeyboard
                 && matches!(
                     &event,
-                    twinkle::HostEvent::Normalized { .. }
-                        | twinkle::HostEvent::NormalizedIngress(_)
+                    twinkle_ui::HostEvent::Normalized { .. }
+                        | twinkle_ui::HostEvent::NormalizedIngress(_)
                 )
             {
                 // Preserve the press-time recipient lease through native release.
@@ -1231,8 +1231,8 @@ impl InternalShellCoordinator {
             if entry.role == SurfaceRole::Desktop {
                 if matches!(
                     &event,
-                    twinkle::HostEvent::Normalized { .. }
-                        | twinkle::HostEvent::NormalizedIngress(_)
+                    twinkle_ui::HostEvent::Normalized { .. }
+                        | twinkle_ui::HostEvent::NormalizedIngress(_)
                 ) && desktop_surface
                 {
                     changed |= self
@@ -1243,12 +1243,13 @@ impl InternalShellCoordinator {
             }
             if matches!(
                 &event,
-                twinkle::HostEvent::Normalized { .. } | twinkle::HostEvent::NormalizedIngress(_)
+                twinkle_ui::HostEvent::Normalized { .. }
+                    | twinkle_ui::HostEvent::NormalizedIngress(_)
             ) {
                 if let Some(key) = entry.plugin.as_ref() {
                     let input = match event {
-                        twinkle::HostEvent::Normalized { input, .. } => input,
-                        twinkle::HostEvent::NormalizedIngress(envelope) => envelope.input,
+                        twinkle_ui::HostEvent::Normalized { input, .. } => input,
+                        twinkle_ui::HostEvent::NormalizedIngress(envelope) => envelope.input,
                         _ => unreachable!(),
                     };
                     changed |= self.shell.plugin_panel_host_input_for(
@@ -1263,8 +1264,8 @@ impl InternalShellCoordinator {
                     SurfaceRole::Panel => {}
                     SurfaceRole::Lock => {
                         let input = match event {
-                            twinkle::HostEvent::Normalized { input, .. } => input,
-                            twinkle::HostEvent::NormalizedIngress(envelope) => envelope.input,
+                            twinkle_ui::HostEvent::Normalized { input, .. } => input,
+                            twinkle_ui::HostEvent::NormalizedIngress(envelope) => envelope.input,
                             _ => unreachable!(),
                         };
                         changed |= self.shell.lock_host_input(
@@ -1293,13 +1294,13 @@ impl InternalShellCoordinator {
                 }
                 continue;
             }
-            if let twinkle::HostEvent::Shortcut(shortcut) = event {
+            if let twinkle_ui::HostEvent::Shortcut(shortcut) = event {
                 if let Some(key) = entry.plugin.as_ref() {
                     changed |= self
                         .shell
                         .plugin_surface_host_event(
                             key,
-                            twinkle::HostEvent::Shortcut(shortcut),
+                            twinkle_ui::HostEvent::Shortcut(shortcut),
                             entry.viewport_size,
                             batch.clipboard_text_limit,
                             None,
@@ -1315,7 +1316,7 @@ impl InternalShellCoordinator {
                 }
                 continue;
             }
-            let twinkle::HostEvent::Ui(event) = event else {
+            let twinkle_ui::HostEvent::Ui(event) = event else {
                 continue;
             };
             // Pointer-only panel/launcher navigation cannot change sibling
@@ -1323,18 +1324,18 @@ impl InternalShellCoordinator {
             // popover or OSD even when its visibility stays unchanged.
             let action = matches!(
                 event,
-                twinkle::UiEvent::PointerPressed(_)
-                    | twinkle::UiEvent::PointerReleased(_)
-                    | twinkle::UiEvent::PointerContext(_)
-                    | twinkle::UiEvent::TouchLongPress(_)
-                    | twinkle::UiEvent::KeyboardActivate
-                    | twinkle::UiEvent::KeyboardNavigateActivate
-                    | twinkle::UiEvent::ActivateFocused
-                    | twinkle::UiEvent::ControllerActivate
-                    | twinkle::UiEvent::ControllerContextMenu
-                    | twinkle::UiEvent::KeyboardContextMenu
-                    | twinkle::UiEvent::ControllerBack
-                    | twinkle::UiEvent::KeyboardNavigateBack
+                twinkle_ui::UiEvent::PointerPressed(_)
+                    | twinkle_ui::UiEvent::PointerReleased(_)
+                    | twinkle_ui::UiEvent::PointerContext(_)
+                    | twinkle_ui::UiEvent::TouchLongPress(_)
+                    | twinkle_ui::UiEvent::KeyboardActivate
+                    | twinkle_ui::UiEvent::KeyboardNavigateActivate
+                    | twinkle_ui::UiEvent::ActivateFocused
+                    | twinkle_ui::UiEvent::ControllerActivate
+                    | twinkle_ui::UiEvent::ControllerContextMenu
+                    | twinkle_ui::UiEvent::KeyboardContextMenu
+                    | twinkle_ui::UiEvent::ControllerBack
+                    | twinkle_ui::UiEvent::KeyboardNavigateBack
             );
             match entry.role {
                 SurfaceRole::Panel if taskbar_surface && action => {
@@ -1352,7 +1353,7 @@ impl InternalShellCoordinator {
             // pre-edit admission and ownership transport as normalized keys.
             let outcome = match entry.role {
                 SurfaceRole::ControlCenter => Some(self.shell.control_host_event(
-                    twinkle::HostEvent::Ui(event),
+                    twinkle_ui::HostEvent::Ui(event),
                     entry.viewport_size,
                     batch.clipboard_text_limit,
                 )),
@@ -1443,7 +1444,7 @@ impl InternalShellCoordinator {
     pub(crate) fn focused_field_lease(
         &self,
         id: InternalSurfaceId,
-    ) -> Option<(twinkle::UiId, u64)> {
+    ) -> Option<(twinkle_ui::UiId, u64)> {
         let entry = self.entries.iter().find(|entry| entry.id == id)?;
         if let Some(key) = &entry.plugin {
             self.shell.plugin_surface_field_lease(key)
@@ -1771,11 +1772,11 @@ mod tests {
 
     #[test]
     fn internal_route_rejects_mismatched_recipient_without_rebinding() {
-        let recipient = twinkle::NormalizedRecipientBinding {
+        let recipient = twinkle_ui::NormalizedRecipientBinding {
             lease: 41,
             lifetime: 42,
         };
-        let source = twinkle::NormalizedSourceBinding {
+        let source = twinkle_ui::NormalizedSourceBinding {
             seat: 1,
             backend_stream: "session:test".into(),
             stream_generation: 2,
@@ -1783,7 +1784,7 @@ mod tests {
             identity_capability: "session-device-name".into(),
             reconnect_generation: 3,
         };
-        let authority = twinkle::NormalizedIngressAuthority {
+        let authority = twinkle_ui::NormalizedIngressAuthority {
             source: source.clone(),
             recipient,
             transfer_cutoff: None,
@@ -1795,13 +1796,13 @@ mod tests {
             role: "session-internal-surface".into(),
             coordinate_meaning: "surface-logical".into(),
         };
-        let event = twinkle::HostEvent::NormalizedIngress(twinkle::NormalizedInputEnvelope {
+        let event = twinkle_ui::HostEvent::NormalizedIngress(twinkle_ui::NormalizedInputEnvelope {
             input: twinkle_input::InputEvent::FocusLost {
                 order: twinkle_input::EventOrder(1),
             },
             clipboard_text: None,
             source,
-            admission: twinkle::NormalizedAdmissionBinding {
+            admission: twinkle_ui::NormalizedAdmissionBinding {
                 order: 1,
                 monotonic_micros: 1,
             },
@@ -1824,7 +1825,7 @@ mod tests {
             42
         ));
         assert!(!internal_ingress_matches_route(&event, &[authority], 43));
-        let twinkle::HostEvent::NormalizedIngress(envelope) = event else {
+        let twinkle_ui::HostEvent::NormalizedIngress(envelope) = event else {
             unreachable!()
         };
         assert_eq!(envelope.recipient, recipient);
@@ -2098,7 +2099,9 @@ mod tests {
             assert!(!shell.step_slot(
                 stale_id,
                 HostBatch {
-                    events: vec![twinkle::HostEvent::Ui(twinkle::UiEvent::KeyboardActivate)],
+                    events: vec![twinkle_ui::HostEvent::Ui(
+                        twinkle_ui::UiEvent::KeyboardActivate
+                    )],
                     ..HostBatch::default()
                 },
             ));
@@ -2193,7 +2196,7 @@ mod tests {
                 y: f64::from(button.bounds.origin.y + button.bounds.size.height / 2.0),
             };
             let event = |edge| HostBatch {
-                events: vec![twinkle::HostEvent::Normalized {
+                events: vec![twinkle_ui::HostEvent::Normalized {
                     input: InputEvent::Pointer(PointerEvent::Button {
                         device: DeviceId(1),
                         order: EventOrder(1),
@@ -2456,7 +2459,7 @@ mod tests {
             coordinator.step_slot(
                 launcher,
                 HostBatch {
-                    events: vec![twinkle::HostEvent::Ui(twinkle::UiEvent::TextInput(
+                    events: vec![twinkle_ui::HostEvent::Ui(twinkle_ui::UiEvent::TextInput(
                         "konsole".into(),
                     ))],
                     ..HostBatch::default()
@@ -2524,8 +2527,8 @@ mod tests {
                     .shell
                     .plugin_panel_host_ref(&key)
                     .unwrap()
-                    .query_unique(&twinkle::SemanticSelector::RoleAndName {
-                        role: twinkle::SemanticRole::Button,
+                    .query_unique(&twinkle_ui::SemanticSelector::RoleAndName {
+                        role: twinkle_ui::SemanticRole::Button,
                         name: "Appearance".into(),
                     })
                     .unwrap();
@@ -2538,7 +2541,7 @@ mod tests {
                     let changes = coordinator.step_slot_changes(
                         entry.id,
                         HostBatch {
-                            events: vec![twinkle::HostEvent::Normalized {
+                            events: vec![twinkle_ui::HostEvent::Normalized {
                                 input: InputEvent::Pointer(PointerEvent::Motion {
                                     device: DeviceId(1),
                                     order: EventOrder(tick + 1),
@@ -2654,8 +2657,8 @@ mod tests {
                 .shell
                 .plugin_panel_host_ref(&key)
                 .unwrap()
-                .query_unique(&twinkle::SemanticSelector::RoleAndName {
-                    role: twinkle::SemanticRole::Button,
+                .query_unique(&twinkle_ui::SemanticSelector::RoleAndName {
+                    role: twinkle_ui::SemanticRole::Button,
                     name: "Settings".into(),
                 })
                 .unwrap();
@@ -2667,7 +2670,7 @@ mod tests {
                 coordinator.step_slot_changes(
                     launcher,
                     HostBatch {
-                        events: vec![twinkle::HostEvent::Normalized {
+                        events: vec![twinkle_ui::HostEvent::Normalized {
                             input: InputEvent::Pointer(PointerEvent::Button {
                                 device: DeviceId(1),
                                 order: EventOrder(order),
@@ -2708,8 +2711,8 @@ mod tests {
                 .shell
                 .plugin_panel_host_ref(&settings)
                 .unwrap()
-                .query_unique(&twinkle::SemanticSelector::RoleAndName {
-                    role: twinkle::SemanticRole::Button,
+                .query_unique(&twinkle_ui::SemanticSelector::RoleAndName {
+                    role: twinkle_ui::SemanticRole::Button,
                     name: "Appearance".into(),
                 })
                 .unwrap();
@@ -2734,7 +2737,7 @@ mod tests {
             coordinator.step_slot_changes(
                 settings_id,
                 HostBatch {
-                    events: vec![twinkle::HostEvent::Normalized {
+                    events: vec![twinkle_ui::HostEvent::Normalized {
                         input: InputEvent::Pointer(PointerEvent::Motion {
                             device: DeviceId(1),
                             order: EventOrder(3),
@@ -2750,7 +2753,7 @@ mod tests {
                 coordinator.step_slot_changes(
                     settings_id,
                     HostBatch {
-                        events: vec![twinkle::HostEvent::Normalized {
+                        events: vec![twinkle_ui::HostEvent::Normalized {
                             input: InputEvent::Pointer(PointerEvent::Button {
                                 device: DeviceId(1),
                                 order: EventOrder(order),
@@ -2776,8 +2779,8 @@ mod tests {
                     .shell
                     .plugin_panel_host_ref(&settings)
                     .unwrap()
-                    .query_unique(&twinkle::SemanticSelector::RoleAndName {
-                        role: twinkle::SemanticRole::Slider,
+                    .query_unique(&twinkle_ui::SemanticSelector::RoleAndName {
+                        role: twinkle_ui::SemanticRole::Slider,
                         name: "Interface hue".into(),
                     })
                     .is_ok(),
@@ -2817,7 +2820,7 @@ mod tests {
             coordinator.step_slot_changes(
                 lock,
                 HostBatch {
-                    events: vec![twinkle::HostEvent::Normalized {
+                    events: vec![twinkle_ui::HostEvent::Normalized {
                         input: InputEvent::Text(TextEvent::Commit {
                             device: DeviceId(1),
                             order: EventOrder(1),
@@ -2906,7 +2909,9 @@ mod tests {
             coordinator.step_slot(
                 menu,
                 HostBatch {
-                    events: vec![twinkle::HostEvent::Shortcut(twinkle::Shortcut::Escape)],
+                    events: vec![twinkle_ui::HostEvent::Shortcut(
+                        twinkle_ui::Shortcut::Escape,
+                    )],
                     ..Default::default()
                 },
             );
@@ -3026,7 +3031,7 @@ mod tests {
                 NamedKey, PhysicalKey,
             };
             for event in [
-                twinkle::HostEvent::Normalized {
+                twinkle_ui::HostEvent::Normalized {
                     input: InputEvent::Key(KeyEvent {
                         device: DeviceId(1),
                         order: EventOrder(1),
@@ -3039,8 +3044,8 @@ mod tests {
                     }),
                     clipboard_text: None,
                 },
-                twinkle::HostEvent::Shortcut(twinkle::Shortcut::Escape),
-                twinkle::HostEvent::Controller(twinkle::ControllerAction::Cancel),
+                twinkle_ui::HostEvent::Shortcut(twinkle_ui::Shortcut::Escape),
+                twinkle_ui::HostEvent::Controller(twinkle_ui::ControllerAction::Cancel),
             ] {
                 let (mut coordinator, id) = opened_screenshot();
                 coordinator.step_slot_changes(
@@ -3079,13 +3084,13 @@ mod tests {
                 .id;
 
             assert!(coordinator.visible(launcher));
-            coordinator.set_controller_family(twinkle::ControllerFamily::Xbox);
+            coordinator.set_controller_family(twinkle_ui::ControllerFamily::Xbox);
             coordinator.step_slot_changes(
                 launcher,
                 HostBatch {
                     window_focused: Some(true),
-                    events: vec![twinkle::HostEvent::Controller(
-                        twinkle::ControllerAction::Cancel,
+                    events: vec![twinkle_ui::HostEvent::Controller(
+                        twinkle_ui::ControllerAction::Cancel,
                     )],
                     ..HostBatch::default()
                 },
@@ -3118,7 +3123,7 @@ mod tests {
                 coordinator.step_slot_changes(
                     id,
                     HostBatch {
-                        events: vec![twinkle::HostEvent::Normalized {
+                        events: vec![twinkle_ui::HostEvent::Normalized {
                             input: InputEvent::Pointer(PointerEvent::Button {
                                 device: DeviceId(1),
                                 order: EventOrder(order),
@@ -3228,7 +3233,7 @@ mod tests {
                 coordinator.step_slot_changes(
                     id,
                     HostBatch {
-                        events: vec![twinkle::HostEvent::Normalized {
+                        events: vec![twinkle_ui::HostEvent::Normalized {
                             input: InputEvent::Pointer(PointerEvent::Button {
                                 device: DeviceId(1),
                                 order: EventOrder(order),

@@ -67,7 +67,7 @@ fn decode_clipboard_png(bytes: Vec<u8>) -> Result<(u32, u32, Vec<u8>), &'static 
 impl super::state::NickelSession {
     pub(super) fn request_native_image_paste(
         &mut self,
-        recipient: twinkle::InternalSurfaceId,
+        recipient: twinkle_ui::InternalSurfaceId,
     ) -> Result<bool, &'static str> {
         use smithay::wayland::selection::data_device::{
             current_data_device_selection_userdata, request_data_device_client_selection,
@@ -114,7 +114,7 @@ impl super::state::NickelSession {
     pub(super) fn begin_native_image_read(
         &mut self,
         reader: std::os::fd::OwnedFd,
-        recipient: twinkle::InternalSurfaceId,
+        recipient: twinkle_ui::InternalSurfaceId,
         permit: super::clipboard_transfer::TransferPermit,
     ) -> Result<(), &'static str> {
         use smithay::reexports::calloop::channel;
@@ -206,8 +206,8 @@ impl super::state::NickelSession {
 
     fn native_field_lease(
         &self,
-        recipient: twinkle::InternalSurfaceId,
-    ) -> Option<(twinkle::UiId, u64)> {
+        recipient: twinkle_ui::InternalSurfaceId,
+    ) -> Option<(twinkle_ui::UiId, u64)> {
         if let Some((shell_id, _)) = self
             .internal_shell_surfaces
             .iter()
@@ -242,7 +242,7 @@ impl super::state::NickelSession {
 
     fn dispatch_native_key_to(
         &mut self,
-        id: twinkle::InternalSurfaceId,
+        id: twinkle_ui::InternalSurfaceId,
         event: twinkle_input::KeyEvent,
         clipboard: Option<String>,
     ) -> Result<(), &'static str> {
@@ -264,11 +264,11 @@ impl super::state::NickelSession {
         } else {
             routed_recipient.lease
         };
-        let recipient = twinkle::NormalizedRecipientBinding {
+        let recipient = twinkle_ui::NormalizedRecipientBinding {
             lease: recipient_lease,
             lifetime: surface_lifetime,
         };
-        let source = twinkle::NormalizedSourceBinding {
+        let source = twinkle_ui::NormalizedSourceBinding {
             seat: 1,
             backend_stream: "session-native-clipboard".into(),
             stream_generation: 1,
@@ -276,7 +276,7 @@ impl super::state::NickelSession {
             identity_capability: "session-device-generation".into(),
             reconnect_generation: event.device.0,
         };
-        let authority = twinkle::NormalizedIngressAuthority {
+        let authority = twinkle_ui::NormalizedIngressAuthority {
             source: source.clone(),
             recipient,
             transfer_cutoff: None,
@@ -295,7 +295,7 @@ impl super::state::NickelSession {
             .internal_ui
             .register_normalized_authority(&source, authority);
         let ingress = |event: twinkle_input::KeyEvent, clipboard_text, admission| {
-            twinkle::HostEvent::NormalizedIngress(twinkle::NormalizedInputEnvelope {
+            twinkle_ui::HostEvent::NormalizedIngress(twinkle_ui::NormalizedInputEnvelope {
                 input: twinkle_input::InputEvent::Key(event),
                 clipboard_text,
                 source: source.clone(),
@@ -315,7 +315,7 @@ impl super::state::NickelSession {
         };
         self.internal_ui.step(
             id,
-            twinkle::HostBatch {
+            twinkle_ui::HostBatch {
                 events: vec![
                     ingress(event, clipboard, pressed_admission),
                     ingress(released, None, released_admission),
@@ -353,7 +353,7 @@ impl super::state::NickelSession {
 
     pub(super) fn request_native_direct_text_paste(
         &mut self,
-        recipient: twinkle::InternalSurfaceId,
+        recipient: twinkle_ui::InternalSurfaceId,
         event: twinkle_input::KeyEvent,
     ) -> Result<(), &'static str> {
         self.request_native_text_paste(NativePasteAuthority::Direct, event, recipient)
@@ -363,7 +363,7 @@ impl super::state::NickelSession {
         &mut self,
         authority: NativePasteAuthority,
         event: twinkle_input::KeyEvent,
-        recipient: twinkle::InternalSurfaceId,
+        recipient: twinkle_ui::InternalSurfaceId,
     ) -> Result<(), &'static str> {
         use smithay::wayland::selection::data_device::{
             current_data_device_selection_userdata, request_data_device_client_selection,
@@ -431,7 +431,7 @@ impl super::state::NickelSession {
         reader: std::os::fd::OwnedFd,
         epoch: u64,
         event: twinkle_input::KeyEvent,
-        recipient: twinkle::InternalSurfaceId,
+        recipient: twinkle_ui::InternalSurfaceId,
         maximum: usize,
         permit: super::clipboard_transfer::TransferPermit,
     ) -> Result<(), &'static str> {
@@ -450,7 +450,7 @@ impl super::state::NickelSession {
         &mut self,
         reader: std::os::fd::OwnedFd,
         event: twinkle_input::KeyEvent,
-        recipient: twinkle::InternalSurfaceId,
+        recipient: twinkle_ui::InternalSurfaceId,
         maximum: usize,
         permit: super::clipboard_transfer::TransferPermit,
     ) -> Result<(), &'static str> {
@@ -469,7 +469,7 @@ impl super::state::NickelSession {
         reader: std::os::fd::OwnedFd,
         authority: NativePasteAuthority,
         event: twinkle_input::KeyEvent,
-        recipient: twinkle::InternalSurfaceId,
+        recipient: twinkle_ui::InternalSurfaceId,
         maximum: usize,
         permit: super::clipboard_transfer::TransferPermit,
     ) -> Result<(), &'static str> {

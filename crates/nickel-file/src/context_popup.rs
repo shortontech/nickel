@@ -1,6 +1,6 @@
 //! Compositor-hosted presentation of Nickel File's shared context menu.
 
-use twinkle::{
+use twinkle_ui::{
     Application, Container, FrameOverlay, HostedApplication, OverlayAnchor, OverlayMenu,
     OverlayMenuItem, Point, Shortcut, ShortcutOutcome, UiId, View, ViewContext,
 };
@@ -73,7 +73,7 @@ impl FileContextPopup {
             height,
         );
         host.host_mut().open_transient(
-            twinkle::OverlayId::new("file-detached-context"),
+            twinkle_ui::OverlayId::new("file-detached-context"),
             UiId::from("popup-anchor"),
         );
         host
@@ -130,7 +130,7 @@ mod tests {
                 .iter()
                 .any(|node| { node.name.as_deref() == Some("Rename") })
         );
-        host.host_mut().handle_event(twinkle::UiEvent::Dismiss);
+        host.host_mut().handle_event(twinkle_ui::UiEvent::Dismiss);
         assert!(host.host().inspect().open_overlay.is_none());
     }
 }

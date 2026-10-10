@@ -3477,11 +3477,11 @@ dependencies = [
  "thiserror 2.0.20",
  "toml 0.9.12+spec-1.1.0",
  "tracing",
- "twinkle",
  "twinkle-input",
  "twinkle-presentation",
  "twinkle-render-assets",
  "twinkle-testkit",
+ "twinkle-ui",
  "uds_windows",
  "url",
  "wayland-scanner",
@@ -3556,8 +3556,8 @@ dependencies = [
  "serde_json",
  "tempfile",
  "toml 0.9.12+spec-1.1.0",
- "twinkle",
  "twinkle-testkit",
+ "twinkle-ui",
  "url",
 ]
 
@@ -3600,9 +3600,9 @@ dependencies = [
  "sys-locale",
  "tempfile",
  "tracing",
- "twinkle",
  "twinkle-input",
  "twinkle-testkit",
+ "twinkle-ui",
  "url",
  "windows",
  "winit 0.31.0-beta.3",
@@ -3624,8 +3624,8 @@ dependencies = [
  "sha2",
  "thiserror 2.0.20",
  "toml 0.9.12+spec-1.1.0",
- "twinkle",
  "twinkle-testkit",
+ "twinkle-ui",
  "ureq",
  "v4l",
 ]
@@ -3677,7 +3677,7 @@ dependencies = [
  "pulldown-cmark",
  "serde",
  "serde_json",
- "twinkle",
+ "twinkle-ui",
 ]
 
 [[package]]
@@ -3691,8 +3691,8 @@ dependencies = [
  "nickel-platform",
  "nickel-ui-host",
  "tempfile",
- "twinkle",
  "twinkle-testkit",
+ "twinkle-ui",
  "url",
 ]
 
@@ -3810,9 +3810,9 @@ dependencies = [
  "nickel-logging",
  "nickel-terminal",
  "nickel-ui-host",
- "twinkle",
  "twinkle-input",
  "twinkle-render-assets",
+ "twinkle-ui",
  "winit 0.31.0-beta.3",
 ]
 
@@ -3824,8 +3824,8 @@ dependencies = [
  "nickel-i18n",
  "nickel-session-protocol",
  "tracing",
- "twinkle",
  "twinkle-input",
+ "twinkle-ui",
  "winit 0.31.0-beta.3",
 ]
 
@@ -3886,8 +3886,8 @@ dependencies = [
  "serde_json",
  "sha2",
  "toml 0.9.12+spec-1.1.0",
- "twinkle",
  "twinkle-testkit",
+ "twinkle-ui",
  "twinkle-workbench",
 ]
 
@@ -7397,9 +7397,97 @@ dependencies = [
 ]
 
 [[package]]
-name = "twinkle"
+name = "twinkle-input"
 version = "0.2.0"
-source = "git+https://github.com/shortontech/twinkle.git?rev=d6875aa4d1bd36246a4a50153cd2041f8fa9395f#d6875aa4d1bd36246a4a50153cd2041f8fa9395f"
+source = "git+https://github.com/shortontech/twinkle.git?rev=d835822566fb6d448d88baccfcbe8e76b73a7b9d#d835822566fb6d448d88baccfcbe8e76b73a7b9d"
+dependencies = [
+ "gilrs",
+ "serde",
+ "windows",
+ "winit 0.30.13",
+ "winit 0.31.0-beta.3",
+]
+
+[[package]]
+name = "twinkle-jsx-runtime"
+version = "0.2.0"
+source = "git+https://github.com/shortontech/twinkle.git?rev=d835822566fb6d448d88baccfcbe8e76b73a7b9d#d835822566fb6d448d88baccfcbe8e76b73a7b9d"
+dependencies = [
+ "oxc_allocator",
+ "oxc_codegen",
+ "oxc_parser",
+ "oxc_semantic",
+ "oxc_span",
+ "oxc_transformer",
+ "serde",
+ "serde_json",
+ "twinkle-protocol",
+ "v8",
+]
+
+[[package]]
+name = "twinkle-macros"
+version = "0.2.0"
+source = "git+https://github.com/shortontech/twinkle.git?rev=d835822566fb6d448d88baccfcbe8e76b73a7b9d#d835822566fb6d448d88baccfcbe8e76b73a7b9d"
+dependencies = [
+ "proc-macro-crate",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "twinkle-presentation"
+version = "0.2.0"
+source = "git+https://github.com/shortontech/twinkle.git?rev=d835822566fb6d448d88baccfcbe8e76b73a7b9d#d835822566fb6d448d88baccfcbe8e76b73a7b9d"
+dependencies = [
+ "cssparser",
+ "image",
+ "serde_json",
+ "twinkle-jsx-runtime",
+ "twinkle-protocol",
+ "twinkle-theme",
+ "twinkle-ui",
+]
+
+[[package]]
+name = "twinkle-protocol"
+version = "0.2.0"
+source = "git+https://github.com/shortontech/twinkle.git?rev=d835822566fb6d448d88baccfcbe8e76b73a7b9d#d835822566fb6d448d88baccfcbe8e76b73a7b9d"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "twinkle-render-assets"
+version = "0.2.0"
+source = "git+https://github.com/shortontech/twinkle.git?rev=d835822566fb6d448d88baccfcbe8e76b73a7b9d#d835822566fb6d448d88baccfcbe8e76b73a7b9d"
+dependencies = [
+ "cosmic-text",
+ "image",
+]
+
+[[package]]
+name = "twinkle-testkit"
+version = "0.2.0"
+source = "git+https://github.com/shortontech/twinkle.git?rev=d835822566fb6d448d88baccfcbe8e76b73a7b9d#d835822566fb6d448d88baccfcbe8e76b73a7b9d"
+dependencies = [
+ "serde",
+ "serde_json",
+ "twinkle-input",
+ "twinkle-ui",
+]
+
+[[package]]
+name = "twinkle-theme"
+version = "0.2.0"
+source = "git+https://github.com/shortontech/twinkle.git?rev=d835822566fb6d448d88baccfcbe8e76b73a7b9d#d835822566fb6d448d88baccfcbe8e76b73a7b9d"
+
+[[package]]
+name = "twinkle-ui"
+version = "0.2.0"
+source = "git+https://github.com/shortontech/twinkle.git?rev=d835822566fb6d448d88baccfcbe8e76b73a7b9d#d835822566fb6d448d88baccfcbe8e76b73a7b9d"
 dependencies = [
  "arboard",
  "cosmic-text",
@@ -7418,101 +7506,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "twinkle-input"
-version = "0.2.0"
-source = "git+https://github.com/shortontech/twinkle.git?rev=d6875aa4d1bd36246a4a50153cd2041f8fa9395f#d6875aa4d1bd36246a4a50153cd2041f8fa9395f"
-dependencies = [
- "gilrs",
- "serde",
- "windows",
- "winit 0.30.13",
- "winit 0.31.0-beta.3",
-]
-
-[[package]]
-name = "twinkle-jsx-runtime"
-version = "0.2.0"
-source = "git+https://github.com/shortontech/twinkle.git?rev=d6875aa4d1bd36246a4a50153cd2041f8fa9395f#d6875aa4d1bd36246a4a50153cd2041f8fa9395f"
-dependencies = [
- "oxc_allocator",
- "oxc_codegen",
- "oxc_parser",
- "oxc_semantic",
- "oxc_span",
- "oxc_transformer",
- "serde",
- "serde_json",
- "twinkle-protocol",
- "v8",
-]
-
-[[package]]
-name = "twinkle-macros"
-version = "0.2.0"
-source = "git+https://github.com/shortontech/twinkle.git?rev=d6875aa4d1bd36246a4a50153cd2041f8fa9395f#d6875aa4d1bd36246a4a50153cd2041f8fa9395f"
-dependencies = [
- "proc-macro-crate",
- "proc-macro2",
- "quote",
- "syn 2.0.119",
-]
-
-[[package]]
-name = "twinkle-presentation"
-version = "0.2.0"
-source = "git+https://github.com/shortontech/twinkle.git?rev=d6875aa4d1bd36246a4a50153cd2041f8fa9395f#d6875aa4d1bd36246a4a50153cd2041f8fa9395f"
-dependencies = [
- "cssparser",
- "image",
- "serde_json",
- "twinkle",
- "twinkle-jsx-runtime",
- "twinkle-protocol",
- "twinkle-theme",
-]
-
-[[package]]
-name = "twinkle-protocol"
-version = "0.2.0"
-source = "git+https://github.com/shortontech/twinkle.git?rev=d6875aa4d1bd36246a4a50153cd2041f8fa9395f#d6875aa4d1bd36246a4a50153cd2041f8fa9395f"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "twinkle-render-assets"
-version = "0.2.0"
-source = "git+https://github.com/shortontech/twinkle.git?rev=d6875aa4d1bd36246a4a50153cd2041f8fa9395f#d6875aa4d1bd36246a4a50153cd2041f8fa9395f"
-dependencies = [
- "cosmic-text",
- "image",
-]
-
-[[package]]
-name = "twinkle-testkit"
-version = "0.2.0"
-source = "git+https://github.com/shortontech/twinkle.git?rev=d6875aa4d1bd36246a4a50153cd2041f8fa9395f#d6875aa4d1bd36246a4a50153cd2041f8fa9395f"
-dependencies = [
- "serde",
- "serde_json",
- "twinkle",
- "twinkle-input",
-]
-
-[[package]]
-name = "twinkle-theme"
-version = "0.2.0"
-source = "git+https://github.com/shortontech/twinkle.git?rev=d6875aa4d1bd36246a4a50153cd2041f8fa9395f#d6875aa4d1bd36246a4a50153cd2041f8fa9395f"
-
-[[package]]
 name = "twinkle-workbench"
 version = "0.2.0"
-source = "git+https://github.com/shortontech/twinkle.git?rev=d6875aa4d1bd36246a4a50153cd2041f8fa9395f#d6875aa4d1bd36246a4a50153cd2041f8fa9395f"
+source = "git+https://github.com/shortontech/twinkle.git?rev=d835822566fb6d448d88baccfcbe8e76b73a7b9d#d835822566fb6d448d88baccfcbe8e76b73a7b9d"
 dependencies = [
  "image",
- "twinkle",
  "twinkle-testkit",
+ "twinkle-ui",
 ]
 
 [[package]]

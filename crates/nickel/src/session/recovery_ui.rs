@@ -1,4 +1,4 @@
-use twinkle::{
+use twinkle_ui::{
     ActionKind, Application, Border, Button, Column, Insets, Point, Row, SemanticTheme, Shortcut,
     SoftwareRenderer, Text, UiEvent, UiHost, ViewContext,
 };
@@ -36,16 +36,16 @@ impl Application for RecoveryApplication {
         self.pending = Some(message);
     }
 
-    fn shortcut_outcome(&mut self, shortcut: Shortcut) -> twinkle::ShortcutOutcome {
+    fn shortcut_outcome(&mut self, shortcut: Shortcut) -> twinkle_ui::ShortcutOutcome {
         self.pending = match shortcut {
             Shortcut::Submit => Some(RecoveryAction::Retry),
             Shortcut::Escape => Some(RecoveryAction::Exit),
             _ => None,
         };
-        twinkle::ShortcutOutcome::from_changed(self.pending.is_some())
+        twinkle_ui::ShortcutOutcome::from_changed(self.pending.is_some())
     }
 
-    fn view(&self, _context: ViewContext) -> impl twinkle::View<Self::Message> {
+    fn view(&self, _context: ViewContext) -> impl twinkle_ui::View<Self::Message> {
         let theme = self.theme;
         Column::new()
             .width(WIDTH as f32)
@@ -165,7 +165,7 @@ impl RecoveryUi {
             return;
         }
         self.host.application_mut().theme = theme;
-        self.host.step(twinkle::HostBatch {
+        self.host.step(twinkle_ui::HostBatch {
             application_changed: true,
             ..Default::default()
         });
@@ -238,7 +238,7 @@ impl RecoveryUi {
             .id;
         self.host.perform_semantic_action(
             target,
-            twinkle::SemanticAction::Invoke(ActionKind::Activate),
+            twinkle_ui::SemanticAction::Invoke(ActionKind::Activate),
         );
         self.invalidate_raster();
         self.take_action()
@@ -330,7 +330,7 @@ impl RecoveryUi {
 
 #[cfg(test)]
 mod tests {
-    use twinkle::{SemanticRole, SemanticSelector};
+    use twinkle_ui::{SemanticRole, SemanticSelector};
 
     use super::*;
 

@@ -16,12 +16,12 @@ use nickel_terminal_ui::{
     CellMetrics, PasteDecision, TerminalInputCommand, TerminalPalette, TerminalPointerTranslator,
     TerminalViewport, confirm_paste, prepare_paste, translate_input_with_modes,
 };
-use twinkle::{
+use twinkle_input::{AggregateModifier, InputEvent, KeyCode, KeyEdge, PhysicalKey};
+use twinkle_ui::{
     AdapterOutcome, AnyView, Application, Button, Column, Container, FrameOverlay, HostAdapter,
     HostServices, Insets, Justify, OverlayAnchor, OverlayMenu, OverlayMenuItem, Row, SemanticRole,
     Text, TextField, UiHost, UiId, View, ViewContext,
 };
-use twinkle_input::{AggregateModifier, InputEvent, KeyCode, KeyEdge, PhysicalKey};
 use winit_next::event::WindowEvent;
 
 const INITIAL_COLUMNS: u16 = 100;
@@ -817,7 +817,7 @@ impl Application for TerminalApp {
         }
         let body = if let Some(preferences) = &self.preferences {
             AnyView::new(
-                twinkle::VerticalScroll::new(Message::PreferencesScroll, 0.0)
+                twinkle_ui::VerticalScroll::new(Message::PreferencesScroll, 0.0)
                     .grow(1.0)
                     .child(preferences_view(preferences)),
             )
@@ -852,11 +852,11 @@ impl Application for TerminalApp {
         }
         if self.paste_confirmation.is_some() {
             root = root
-                .child(twinkle::Button::new(
+                .child(twinkle_ui::Button::new(
                     Message::ConfirmPaste,
                     nickel_i18n::system_text("ui-nickel-terminal-paste-multiple-lines"),
                 ))
-                .child(twinkle::Button::new(
+                .child(twinkle_ui::Button::new(
                     Message::CancelPaste,
                     nickel_i18n::system_text("ui-nickel-terminal-cancel-2"),
                 ));
@@ -1018,7 +1018,7 @@ impl HostAdapter<TerminalApp> for TerminalAdapter {
             };
             return Ok(AdapterOutcome {
                 changed,
-                disposition: twinkle::EventDisposition::Handled,
+                disposition: twinkle_ui::EventDisposition::Handled,
                 exit: host.application().exit_requested,
             });
         }
@@ -1028,7 +1028,7 @@ impl HostAdapter<TerminalApp> for TerminalAdapter {
             let changed = host.application_mut().close_tab(id);
             return Ok(AdapterOutcome {
                 changed,
-                disposition: twinkle::EventDisposition::Handled,
+                disposition: twinkle_ui::EventDisposition::Handled,
                 exit: host.application().exit_requested,
             });
         }
@@ -1050,7 +1050,7 @@ impl HostAdapter<TerminalApp> for TerminalAdapter {
         let changed = host.application_mut().apply_input(command);
         Ok(AdapterOutcome {
             changed,
-            disposition: twinkle::EventDisposition::Handled,
+            disposition: twinkle_ui::EventDisposition::Handled,
             exit: false,
         })
     }
@@ -1278,7 +1278,7 @@ mod tests {
             .expect("terminal context target");
         let opened = host.perform_semantic_action(
             target.id,
-            twinkle::SemanticAction::Invoke(twinkle::ActionKind::ContextMenu),
+            twinkle_ui::SemanticAction::Invoke(twinkle_ui::ActionKind::ContextMenu),
         );
         assert!(opened.changed);
         let names = host

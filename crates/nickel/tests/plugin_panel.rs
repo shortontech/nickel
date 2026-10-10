@@ -267,8 +267,8 @@ fn rejected_native_tree_keeps_previous_jsx_handlers() {
     host.perform_semantic_action(reset, SemanticAction::Invoke(ActionKind::Activate));
     assert!(host.application().last_error().is_none());
 }
-use twinkle::backend::PaintCommand;
-use twinkle::{
+use twinkle_ui::backend::PaintCommand;
+use twinkle_ui::{
     ActionKind, SemanticAction, SemanticRole, SemanticSelector, SemanticValueSnapshot, UiEvent,
     UiHost,
 };

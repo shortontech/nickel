@@ -1042,8 +1042,8 @@ fn desktop_motion_burst_rebuilds_once_at_frame_boundary_and_focus_cancels_immedi
         // test drag into the user's desktop layout or activate a real file.
         session.internal_ui.step(
             runtime,
-            twinkle::HostBatch {
-                events: vec![twinkle::HostEvent::Normalized {
+            twinkle_ui::HostBatch {
+                events: vec![twinkle_ui::HostEvent::Normalized {
                     input: InputEvent::FocusLost {
                         order: twinkle_input::EventOrder(2000),
                     },
@@ -1418,13 +1418,13 @@ fn output_capture_rejects_excessive_physical_pixel_bounds() {
 fn removing_internal_surface_cancels_its_active_move_authority() {
     #[derive(Default)]
     struct App;
-    impl twinkle::Application for App {
+    impl twinkle_ui::Application for App {
         type Message = ();
 
         fn update(&mut self, _: ()) {}
 
-        fn view(&self, _: twinkle::ViewContext) -> impl twinkle::View<()> {
-            twinkle::Text::new("move target")
+        fn view(&self, _: twinkle_ui::ViewContext) -> impl twinkle_ui::View<()> {
+            twinkle_ui::Text::new("move target")
         }
     }
 
@@ -1577,11 +1577,11 @@ fn x11_unmaximize_fence_cancels_active_resize_baseline_and_late_motion() {
 fn internal_move_compensation_restores_only_the_last_owned_placement() {
     #[derive(Default)]
     struct App;
-    impl twinkle::Application for App {
+    impl twinkle_ui::Application for App {
         type Message = ();
         fn update(&mut self, _: ()) {}
-        fn view(&self, _: twinkle::ViewContext) -> impl twinkle::View<()> {
-            twinkle::Text::new("compensation target")
+        fn view(&self, _: twinkle_ui::ViewContext) -> impl twinkle_ui::View<()> {
+            twinkle_ui::Text::new("compensation target")
         }
     }
 
@@ -1626,11 +1626,11 @@ fn internal_move_compensation_restores_only_the_last_owned_placement() {
 fn internal_application_move_crosses_output_without_losing_presentation() {
     #[derive(Default)]
     struct App;
-    impl twinkle::Application for App {
+    impl twinkle_ui::Application for App {
         type Message = ();
         fn update(&mut self, _: ()) {}
-        fn view(&self, _: twinkle::ViewContext) -> impl twinkle::View<()> {
-            twinkle::Text::new("cross-output target")
+        fn view(&self, _: twinkle_ui::ViewContext) -> impl twinkle_ui::View<()> {
+            twinkle_ui::Text::new("cross-output target")
         }
     }
 
@@ -1769,11 +1769,11 @@ fn internal_application_move_crosses_output_without_losing_presentation() {
 fn removed_output_rescues_internal_window_without_replacing_its_surface() {
     #[derive(Default)]
     struct App;
-    impl twinkle::Application for App {
+    impl twinkle_ui::Application for App {
         type Message = ();
         fn update(&mut self, _: ()) {}
-        fn view(&self, _: twinkle::ViewContext) -> impl twinkle::View<()> {
-            twinkle::Text::new("output removal target")
+        fn view(&self, _: twinkle_ui::ViewContext) -> impl twinkle_ui::View<()> {
+            twinkle_ui::Text::new("output removal target")
         }
     }
 
@@ -1886,11 +1886,11 @@ fn removed_output_rescues_internal_window_without_replacing_its_surface() {
 fn internal_resize_updates_placement_and_compensates_owned_geometry() {
     #[derive(Default)]
     struct App;
-    impl twinkle::Application for App {
+    impl twinkle_ui::Application for App {
         type Message = ();
         fn update(&mut self, _: ()) {}
-        fn view(&self, _: twinkle::ViewContext) -> impl twinkle::View<()> {
-            twinkle::Text::new("resizable")
+        fn view(&self, _: twinkle_ui::ViewContext) -> impl twinkle_ui::View<()> {
+            twinkle_ui::Text::new("resizable")
         }
     }
 
@@ -1924,11 +1924,11 @@ fn internal_resize_updates_placement_and_compensates_owned_geometry() {
 fn exposed_internal_frame_corners_use_effective_scene_hit_authority() {
     #[derive(Default)]
     struct App;
-    impl twinkle::Application for App {
+    impl twinkle_ui::Application for App {
         type Message = ();
         fn update(&mut self, _: ()) {}
-        fn view(&self, _: twinkle::ViewContext) -> impl twinkle::View<()> {
-            twinkle::Text::new("corner target")
+        fn view(&self, _: twinkle_ui::ViewContext) -> impl twinkle_ui::View<()> {
+            twinkle_ui::Text::new("corner target")
         }
     }
 
@@ -2168,11 +2168,11 @@ fn native_client_touch_cancel_preserves_internal_touch_domains() {
 fn internal_maximize_supersedes_active_titlebar_move() {
     #[derive(Default)]
     struct App;
-    impl twinkle::Application for App {
+    impl twinkle_ui::Application for App {
         type Message = ();
         fn update(&mut self, _: ()) {}
-        fn view(&self, _: twinkle::ViewContext) -> impl twinkle::View<()> {
-            twinkle::Text::new("internal move target")
+        fn view(&self, _: twinkle_ui::ViewContext) -> impl twinkle_ui::View<()> {
+            twinkle_ui::Text::new("internal move target")
         }
     }
 
@@ -2257,7 +2257,7 @@ fn output_capture_rejects_visible_protected_application_content() {
     struct CaptureApp {
         protected: bool,
     }
-    impl twinkle::Application for CaptureApp {
+    impl twinkle_ui::Application for CaptureApp {
         type Message = ();
 
         fn update(&mut self, _: ()) {}
@@ -2266,8 +2266,8 @@ fn output_capture_rejects_visible_protected_application_content() {
             self.protected
         }
 
-        fn view(&self, _: twinkle::ViewContext) -> impl twinkle::View<()> {
-            twinkle::Text::new("private capture fixture")
+        fn view(&self, _: twinkle_ui::ViewContext) -> impl twinkle_ui::View<()> {
+            twinkle_ui::Text::new("private capture fixture")
         }
     }
 
@@ -3141,13 +3141,13 @@ fn active_remote_lease_owns_one_overlay_per_output_and_revoke_removes_it() {
             .into_iter()
             .find(|node| node.name.as_deref() == Some("Stop"))
             .expect("trusted indicator exposes an accessible Stop button");
-        assert!(stop.actions.contains(&twinkle::ActionKind::Activate));
+        assert!(stop.actions.contains(&twinkle_ui::ActionKind::Activate));
         session
             .internal_ui
             .perform_accessibility_action(
                 indicator,
                 stop.id,
-                twinkle::SemanticAction::Invoke(twinkle::ActionKind::Activate),
+                twinkle_ui::SemanticAction::Invoke(twinkle_ui::ActionKind::Activate),
             )
             .unwrap();
         assert!(
@@ -3643,8 +3643,8 @@ fn integrated_file_context_menu_is_a_detached_clickable_overlay() {
     let parent_geometry = session.internal_ui.placement(parent).unwrap().geometry;
     session.internal_ui.step(
         parent,
-        twinkle::HostBatch {
-            events: vec![twinkle::HostEvent::Normalized {
+        twinkle_ui::HostBatch {
+            events: vec![twinkle_ui::HostEvent::Normalized {
                 input: twinkle_input::InputEvent::Pointer(twinkle_input::PointerEvent::Motion {
                     device: twinkle_input::DeviceId(1),
                     order: twinkle_input::EventOrder(1),
@@ -3658,10 +3658,10 @@ fn integrated_file_context_menu_is_a_detached_clickable_overlay() {
     );
     session.internal_ui.step(
         parent,
-        twinkle::HostBatch {
-            events: vec![twinkle::HostEvent::Semantic {
+        twinkle_ui::HostBatch {
+            events: vec![twinkle_ui::HostEvent::Semantic {
                 target: entry.id,
-                action: twinkle::SemanticAction::Invoke(twinkle::ActionKind::ContextMenu),
+                action: twinkle_ui::SemanticAction::Invoke(twinkle_ui::ActionKind::ContextMenu),
             }],
             ..Default::default()
         },
@@ -3748,13 +3748,13 @@ fn integrated_file_initial_location_completes_on_shell_timer() {
     assert!(!loading(&session), "file navigation did not finish");
 }
 
-impl twinkle::Application for InternalWindowTestApp {
+impl twinkle_ui::Application for InternalWindowTestApp {
     type Message = ();
 
     fn update(&mut self, (): ()) {}
 
-    fn view(&self, _: twinkle::ViewContext) -> impl twinkle::View<Self::Message> {
-        twinkle::Text::new("internal window")
+    fn view(&self, _: twinkle_ui::ViewContext) -> impl twinkle_ui::View<Self::Message> {
+        twinkle_ui::Text::new("internal window")
     }
 
     fn title(&self) -> &str {
@@ -3762,13 +3762,13 @@ impl twinkle::Application for InternalWindowTestApp {
     }
 }
 
-impl twinkle::Application for InternalHitTestApp {
+impl twinkle_ui::Application for InternalHitTestApp {
     type Message = ();
 
     fn update(&mut self, (): ()) {}
 
-    fn view(&self, _: twinkle::ViewContext) -> impl twinkle::View<Self::Message> {
-        twinkle::Button::new((), "internal action")
+    fn view(&self, _: twinkle_ui::ViewContext) -> impl twinkle_ui::View<Self::Message> {
+        twinkle_ui::Button::new((), "internal action")
     }
 
     fn title(&self) -> &str {
@@ -4032,13 +4032,13 @@ fn hosted_app_clipboard_limit_is_ready_before_first_input() {
 fn asynchronous_native_paste_rejects_field_transfer_and_return() {
     use image::ImageEncoder;
     use std::io::Write;
-    use twinkle::{UiEvent, id, ui};
+    use twinkle_ui::{UiEvent, id, ui};
     #[derive(Default)]
     struct Fields {
         first: String,
         second: String,
     }
-    impl twinkle::Application for Fields {
+    impl twinkle_ui::Application for Fields {
         type Message = (bool, String);
         fn update(&mut self, (second, text): Self::Message) {
             if second {
@@ -4047,7 +4047,7 @@ fn asynchronous_native_paste_rejects_field_transfer_and_return() {
                 self.first = text;
             }
         }
-        fn view(&self, _: twinkle::ViewContext) -> impl twinkle::View<Self::Message> {
+        fn view(&self, _: twinkle_ui::ViewContext) -> impl twinkle_ui::View<Self::Message> {
             ui! { <Column>
                 <TextField id={id!(first)} value={&self.first} on_change={|text| (false, text)} />
                 <TextField id={id!(second)} value={&self.second} on_change={|text| (true, text)} />
@@ -4163,16 +4163,16 @@ fn asynchronous_native_paste_rejects_field_transfer_and_return() {
 fn native_keyboard_leases_follow_internal_recipients_without_seat_focus() {
     use nickel_session_protocol::OnScreenKeyboardInput;
     use std::io::Write;
-    use twinkle::{UiEvent, id, ui};
+    use twinkle_ui::{UiEvent, id, ui};
 
     #[derive(Default)]
     struct TypingApp(String);
-    impl twinkle::Application for TypingApp {
+    impl twinkle_ui::Application for TypingApp {
         type Message = String;
         fn update(&mut self, text: String) {
             self.0 = text;
         }
-        fn view(&self, _: twinkle::ViewContext) -> impl twinkle::View<String> {
+        fn view(&self, _: twinkle_ui::ViewContext) -> impl twinkle_ui::View<String> {
             ui! { <TextField id={id!(query)} value={&self.0} on_change={|text| text} /> }
         }
         fn title(&self) -> &str {
@@ -4417,14 +4417,14 @@ fn native_keyboard_leases_follow_internal_recipients_without_seat_focus() {
 #[test]
 fn internal_protection_hides_remote_inventory_without_hiding_local_window() {
     struct ProtectedApp(bool);
-    impl twinkle::Application for ProtectedApp {
+    impl twinkle_ui::Application for ProtectedApp {
         type Message = ();
         fn update(&mut self, _: ()) {}
         fn remote_access_protected(&self) -> bool {
             self.0
         }
-        fn view(&self, _: twinkle::ViewContext) -> impl twinkle::View<()> {
-            twinkle::Text::new("fixture")
+        fn view(&self, _: twinkle_ui::ViewContext) -> impl twinkle_ui::View<()> {
+            twinkle_ui::Text::new("fixture")
         }
     }
     let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
@@ -4518,9 +4518,9 @@ fn internal_protection_hides_remote_inventory_without_hiding_local_window() {
 
     assert!(session.internal_ui.step(
         surface,
-        twinkle::HostBatch {
+        twinkle_ui::HostBatch {
             application_changed: true,
-            ..twinkle::HostBatch::default()
+            ..twinkle_ui::HostBatch::default()
         },
     ));
     assert!(
@@ -4546,9 +4546,9 @@ fn internal_protection_hides_remote_inventory_without_hiding_local_window() {
     assert!(pending.pointer_hit_test.is_none());
     assert!(session.internal_ui.step(
         surface,
-        twinkle::HostBatch {
+        twinkle_ui::HostBatch {
             application_changed: true,
-            ..twinkle::HostBatch::default()
+            ..twinkle_ui::HostBatch::default()
         },
     ));
     assert!(!session.remote_window_is_protected(window));
@@ -4703,9 +4703,9 @@ fn internal_diagnostics_follow_production_visibility_and_frame_lifecycle() {
     );
     session.internal_ui.step(
         surface,
-        twinkle::HostBatch {
+        twinkle_ui::HostBatch {
             application_changed: true,
-            ..twinkle::HostBatch::default()
+            ..twinkle_ui::HostBatch::default()
         },
     );
     let next = session.remote_internal_application_diagnostics(&windows);
@@ -7403,20 +7403,20 @@ fn controller_batch_drops_old_route_tail_after_launcher_changes_recipient() {
         let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
         let (_event_loop, mut session) = internal_shell_test_session();
         assert!(!session.internal_shell.as_ref().unwrap().launcher_visible());
-        let event = twinkle::ControllerEnvelope {
+        let event = twinkle_ui::ControllerEnvelope {
             device: twinkle_input::controller::ControllerId(7),
-            action: Some(twinkle::ControllerAction::HostMenu),
+            action: Some(twinkle_ui::ControllerAction::HostMenu),
             edge: twinkle_input::KeyEdge::Pressed,
             repeat: false,
-            family: twinkle::ControllerFamily::Xbox,
-            evidence: twinkle::ControllerSourceEvidence {
+            family: twinkle_ui::ControllerFamily::Xbox,
+            evidence: twinkle_ui::ControllerSourceEvidence {
                 seat: 0,
                 source_namespace: "test".into(),
                 backend: "test".into(),
                 native: twinkle_input::NativeCode::Numeric(7),
                 fingerprint: None,
                 identity_capability: "native",
-                physical: twinkle::ControllerPhysicalControl::Button(
+                physical: twinkle_ui::ControllerPhysicalControl::Button(
                     twinkle_input::controller::ControllerButton::Guide,
                 ),
                 backend_order: 1,
@@ -7427,7 +7427,7 @@ fn controller_batch_drops_old_route_tail_after_launcher_changes_recipient() {
         session.handle_brokered_controller_batch(
             vec![
                 event.clone(),
-                twinkle::ControllerEnvelope {
+                twinkle_ui::ControllerEnvelope {
                     repeat: true,
                     ..event
                 },
@@ -7449,31 +7449,31 @@ fn queued_confirm_keeps_pre_launcher_recipient_epoch_across_batches() {
         let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
         let (_event_loop, mut session) = internal_shell_test_session();
         let queued_epoch = session.refresh_controller_route().0;
-        let launcher = twinkle::ControllerEnvelope {
+        let launcher = twinkle_ui::ControllerEnvelope {
             device: twinkle_input::controller::ControllerId(7),
-            action: Some(twinkle::ControllerAction::HostMenu),
+            action: Some(twinkle_ui::ControllerAction::HostMenu),
             edge: twinkle_input::KeyEdge::Pressed,
             repeat: false,
-            family: twinkle::ControllerFamily::Xbox,
-            evidence: twinkle::ControllerSourceEvidence {
+            family: twinkle_ui::ControllerFamily::Xbox,
+            evidence: twinkle_ui::ControllerSourceEvidence {
                 seat: 0,
                 source_namespace: "test".into(),
                 backend: "test".into(),
                 native: twinkle_input::NativeCode::Numeric(7),
                 fingerprint: None,
                 identity_capability: "native",
-                physical: twinkle::ControllerPhysicalControl::Button(
+                physical: twinkle_ui::ControllerPhysicalControl::Button(
                     twinkle_input::controller::ControllerButton::Guide,
                 ),
                 backend_order: 1,
                 produced_unix_ms: 1,
             },
         };
-        let confirm = twinkle::ControllerEnvelope {
-            action: Some(twinkle::ControllerAction::Confirm),
-            evidence: twinkle::ControllerSourceEvidence {
+        let confirm = twinkle_ui::ControllerEnvelope {
+            action: Some(twinkle_ui::ControllerAction::Confirm),
+            evidence: twinkle_ui::ControllerSourceEvidence {
                 native: twinkle_input::NativeCode::Numeric(0),
-                physical: twinkle::ControllerPhysicalControl::Button(
+                physical: twinkle_ui::ControllerPhysicalControl::Button(
                     twinkle_input::controller::ControllerButton::South,
                 ),
                 backend_order: 2,
@@ -7523,20 +7523,20 @@ fn broker_overflow_requests_neutral_probe_and_rearms_internal_owner() {
     with_package_runtime_stack(|| {
         let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
         let (_event_loop, mut session) = internal_shell_test_session();
-        let event = twinkle::ControllerEnvelope {
+        let event = twinkle_ui::ControllerEnvelope {
             device: twinkle_input::controller::ControllerId(7),
             action: None,
             edge: twinkle_input::KeyEdge::Pressed,
             repeat: false,
-            family: twinkle::ControllerFamily::Xbox,
-            evidence: twinkle::ControllerSourceEvidence {
+            family: twinkle_ui::ControllerFamily::Xbox,
+            evidence: twinkle_ui::ControllerSourceEvidence {
                 seat: 0,
                 source_namespace: "test".into(),
                 backend: "test".into(),
                 native: twinkle_input::NativeCode::Numeric(7),
                 fingerprint: None,
                 identity_capability: "native",
-                physical: twinkle::ControllerPhysicalControl::Button(
+                physical: twinkle_ui::ControllerPhysicalControl::Button(
                     twinkle_input::controller::ControllerButton::Guide,
                 ),
                 backend_order: 1,
@@ -7866,7 +7866,7 @@ fn ordinary_shell_semantics_reject_legacy_plugin_launcher_mutation() {
     assert!(shell.bounded_shell_semantics(id).is_err());
     let before = shell.scene(id).unwrap();
     let action = |text: &str| {
-        twinkle::SemanticAction::SetValue(twinkle::SemanticValueInput::Text(text.into()))
+        twinkle_ui::SemanticAction::SetValue(twinkle_ui::SemanticValueInput::Text(text.into()))
     };
     assert!(
         shell
@@ -8314,7 +8314,7 @@ fn native_screenshot_captures_and_opens_on_the_invoking_pointer_output() {
         .unwrap()
         .into_iter()
         .find_map(|command| match command {
-            twinkle::backend::PaintCommand::Image { image, .. }
+            twinkle_ui::backend::PaintCommand::Image { image, .. }
                 if image.dimensions() == (1000, 800) =>
             {
                 Some(image)
@@ -8609,7 +8609,7 @@ fn opening_control_center_while_launcher_is_open_does_not_reenter_output_reconci
 #[test]
 fn launcher_sidebar_press_is_not_dismissed_for_a_client_underneath() {
     use nickel_session_protocol::{InputState, TestInput, TestPointerButton};
-    use twinkle::backend::PaintCommand;
+    use twinkle_ui::backend::PaintCommand;
     let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
     let (_event_loop, mut session) = internal_shell_test_session();
     assert!(session.toggle_internal_launcher());

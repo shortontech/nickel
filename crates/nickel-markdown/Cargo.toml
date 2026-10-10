@@ -8,11 +8,11 @@ description = "Safe typed Markdown documents and declarative Twinkle presentatio
 
 [features]
 default = ["view"]
-view = ["dep:twinkle"]
+view = ["dep:twinkle_ui"]
 
 [dependencies]
 nickel-i18n = { path = "../nickel-i18n" }
-twinkle = { workspace = true, optional = true }
+twinkle_ui = { workspace = true, optional = true }
 pulldown-cmark.workspace = true
 serde.workspace = true
 

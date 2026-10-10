@@ -1,5 +1,5 @@
 //! Native keyboard/controller ownership probe. Run inside an isolated Nickel test session.
-use twinkle::{
+use twinkle_ui::{
     Application, Button, Column, ComponentBuilderExt, Container, ControllerFence, HostAdapter,
     HostServices, Insets, Text, TextField, ViewContext,
 };
@@ -23,13 +23,13 @@ struct SessionAdapter {
 impl HostAdapter<Recipient> for SessionAdapter {
     fn event(
         &mut self,
-        _host: &mut twinkle::UiHost<Recipient>,
+        _host: &mut twinkle_ui::UiHost<Recipient>,
         event: &winit_next::event::WindowEvent,
         _services: HostServices<'_>,
-    ) -> Result<twinkle::AdapterOutcome, Box<dyn std::error::Error>> {
+    ) -> Result<twinkle_ui::AdapterOutcome, Box<dyn std::error::Error>> {
         if self.hold_receipts {
             use winit_next::{
-                event::{ElementState, MouseButton, WindowEvent},
+                event::{ButtonSource, ElementState, MouseButton, WindowEvent},
                 keyboard::{KeyCode, PhysicalKey},
             };
             let receipt = match event {
@@ -42,9 +42,9 @@ impl HostAdapter<Recipient> for SessionAdapter {
                 {
                     Some(("key", event.state))
                 }
-                WindowEvent::MouseInput {
+                WindowEvent::PointerButton {
                     state,
-                    button: MouseButton::Left,
+                    button: ButtonSource::Mouse(MouseButton::Left),
                     ..
                 } => Some(("button", *state)),
                 _ => None,
@@ -60,7 +60,7 @@ impl HostAdapter<Recipient> for SessionAdapter {
                 println!("recipient-hold-{kind}={edge}");
             }
         }
-        Ok(twinkle::AdapterOutcome::default())
+        Ok(twinkle_ui::AdapterOutcome::default())
     }
 
     fn controller_fence(&mut self, _services: HostServices<'_>) -> ControllerFence {
@@ -117,7 +117,7 @@ impl Application for Recipient {
             }
         }
     }
-    fn view(&self, _: ViewContext) -> impl twinkle::View<Message> {
+    fn view(&self, _: ViewContext) -> impl twinkle_ui::View<Message> {
         Container::new().padding(Insets::all(16.0)).child(
             Column::new()
                 .gap(16.0)

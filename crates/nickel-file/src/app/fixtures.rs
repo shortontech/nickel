@@ -20,7 +20,7 @@ macro_rules! file_fixture_variant {
             theme: twinkle_testkit::FixtureTheme::$theme,
             locale: twinkle_testkit::DEFAULT_LOCALE,
             scale: twinkle_testkit::DEFAULT_SCALE,
-            controller_family: twinkle::ControllerFamily::Generic,
+            controller_family: twinkle_ui::ControllerFamily::Generic,
             accessibility: twinkle_testkit::DEFAULT_ACCESSIBILITY,
         }
     };
@@ -205,7 +205,7 @@ pub(crate) const FILE_FIXTURE_VARIANTS: &[twinkle_testkit::FixtureVariant] = &[
             direction: twinkle_testkit::FixtureDirection::RightToLeft,
         },
         scale: twinkle_testkit::DEFAULT_SCALE,
-        controller_family: twinkle::ControllerFamily::Generic,
+        controller_family: twinkle_ui::ControllerFamily::Generic,
         accessibility: twinkle_testkit::DEFAULT_ACCESSIBILITY,
     },
     twinkle_testkit::FixtureVariant {
@@ -222,7 +222,7 @@ pub(crate) const FILE_FIXTURE_VARIANTS: &[twinkle_testkit::FixtureVariant] = &[
             id: "1.25x",
             factor: 1.25,
         },
-        controller_family: twinkle::ControllerFamily::Generic,
+        controller_family: twinkle_ui::ControllerFamily::Generic,
         accessibility: twinkle_testkit::DEFAULT_ACCESSIBILITY,
     },
     twinkle_testkit::FixtureVariant {
@@ -239,7 +239,7 @@ pub(crate) const FILE_FIXTURE_VARIANTS: &[twinkle_testkit::FixtureVariant] = &[
             id: "2x",
             factor: 2.0,
         },
-        controller_family: twinkle::ControllerFamily::Generic,
+        controller_family: twinkle_ui::ControllerFamily::Generic,
         accessibility: twinkle_testkit::DEFAULT_ACCESSIBILITY,
     },
 ];
@@ -386,7 +386,7 @@ impl twinkle_testkit::Fixture for FileWorkbenchFixture {
     }
     fn default_activation() -> Option<twinkle_testkit::Selector> {
         Some(twinkle_testkit::Selector::role_name(
-            twinkle::SemanticRole::Button,
+            twinkle_ui::SemanticRole::Button,
             "report.txt",
         ))
     }

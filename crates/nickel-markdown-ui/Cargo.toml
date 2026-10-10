@@ -8,7 +8,7 @@ description = "Standalone read-only Nickel Markdown viewer"
 
 [features]
 default = ["application"]
-application = ["dep:nickel-core", "dep:nickel-platform", "dep:twinkle", "nickel-markdown/view"]
+application = ["dep:nickel-core", "dep:nickel-platform", "dep:twinkle_ui", "nickel-markdown/view"]
 workbench-fixtures = ["application", "dep:twinkle-testkit"]
 
 [[bin]]
@@ -22,7 +22,7 @@ nickel-i18n = { path = "../nickel-i18n" }
 nickel-markdown = { path = "../nickel-markdown", default-features = false }
 nickel-core = { path = "../nickel-core", optional = true }
 nickel-platform = { path = "../nickel-platform", optional = true }
-twinkle = { workspace = true, optional = true }
+twinkle_ui = { workspace = true, optional = true }
 twinkle-testkit = { workspace = true, optional = true }
 url.workspace = true
 

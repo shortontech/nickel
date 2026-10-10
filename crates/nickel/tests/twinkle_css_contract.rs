@@ -1,7 +1,7 @@
 //! Nickel's shipped CSS contracts exercised through generic Twinkle presentation.
 use nickel_core::theme::{Appearance, ThemePalette};
-use twinkle::Length;
 use twinkle_presentation::css::StyleSheet;
+use twinkle_ui::Length;
 
 #[test]
 fn stock_shell_taskbar_follows_host_accent_and_mode() {

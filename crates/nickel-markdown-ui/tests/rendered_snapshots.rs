@@ -6,7 +6,7 @@ use image::{ImageBuffer, Rgba};
 use nickel_core::theme::{Appearance, ThemeMode};
 use nickel_markdown_ui::{ViewerModel, ViewerPalette, load_document, viewer_view_with_palette};
 use tempfile::tempdir;
-use twinkle::{Rect, SoftwareRenderer, UiFrame};
+use twinkle_ui::{Rect, SoftwareRenderer, UiFrame};
 
 fn render_snapshot(
     model: &ViewerModel,

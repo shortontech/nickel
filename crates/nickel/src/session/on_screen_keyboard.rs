@@ -25,7 +25,7 @@ pub(crate) struct OnScreenKeyboardState {
     generation: u64,
     environment_override: bool,
     epoch: u64,
-    internal_recipient: Option<twinkle::InternalSurfaceId>,
+    internal_recipient: Option<twinkle_ui::InternalSurfaceId>,
     enabled: bool,
     pub(crate) visible: bool,
     source: KeyboardSource,
@@ -104,7 +104,7 @@ impl NickelSession {
         }
     }
 
-    fn keyboard_internal_recipient(&self) -> Option<twinkle::InternalSurfaceId> {
+    fn keyboard_internal_recipient(&self) -> Option<twinkle_ui::InternalSurfaceId> {
         let id = self.internal_ui.focused()?;
         let placement = self.internal_ui.placement(id)?;
         (self.internal_ui.is_visible(id)
@@ -265,7 +265,7 @@ impl NickelSession {
                     {
                         return Err("invalid on-screen keyboard text");
                     }
-                    twinkle::UiEvent::TextInput(text)
+                    twinkle_ui::UiEvent::TextInput(text)
                 }
                 OnScreenKeyboardInput::Key { keysym, modifiers } => {
                     self.on_screen_keyboard.virtual_order =

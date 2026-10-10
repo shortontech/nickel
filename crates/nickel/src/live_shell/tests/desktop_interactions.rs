@@ -223,7 +223,7 @@
             .icon_cache
             .insert(PathBuf::from("/desktop/first.txt"), Arc::clone(&artwork));
         let before_commands = shell.scene(SurfaceRole::Desktop, 400, 600);
-        assert!(twinkle::backend::contains_image_pixels(
+        assert!(twinkle_ui::backend::contains_image_pixels(
             &before_commands,
             &artwork
         ));
@@ -257,7 +257,7 @@
         )));
         let selected_commands = shell.scene(SurfaceRole::Desktop, 400, 600);
         assert!(shell.desktop_host.application().layout.icons_visible());
-        assert!(twinkle::backend::contains_image_pixels(
+        assert!(twinkle_ui::backend::contains_image_pixels(
             &selected_commands,
             &artwork
         ));
@@ -331,7 +331,7 @@
             .icon_cache
             .insert(path.clone(), Arc::clone(&artwork));
         let initial = shell.scene(SurfaceRole::Desktop, 400, 600);
-        assert!(twinkle::backend::contains_image_pixels(
+        assert!(twinkle_ui::backend::contains_image_pixels(
             &initial, &artwork
         ));
 
@@ -365,7 +365,7 @@
         assert!(shell.desktop_application_dirty);
         let dragging = shell.scene(SurfaceRole::Desktop, 400, 600);
         assert!(!shell.desktop_application_dirty);
-        assert!(twinkle::backend::contains_image_pixels(
+        assert!(twinkle_ui::backend::contains_image_pixels(
             &dragging, &artwork
         ));
         let dragging_overlays = shell
@@ -390,7 +390,7 @@
         let due = Instant::now() + Duration::from_millis(300);
         let _ = shell.poll_host_deadlines(due);
         let after_poll = shell.scene(SurfaceRole::Desktop, 400, 600);
-        assert!(twinkle::backend::contains_image_pixels(
+        assert!(twinkle_ui::backend::contains_image_pixels(
             &after_poll,
             &artwork
         ));
@@ -418,7 +418,7 @@
             },
         )));
         let released = shell.scene(SurfaceRole::Desktop, 400, 600);
-        assert!(twinkle::backend::contains_image_pixels(
+        assert!(twinkle_ui::backend::contains_image_pixels(
             &released, &artwork
         ));
         assert!(
@@ -1018,9 +1018,9 @@
             item.position.x,
             "preview motion must not mutate persisted layout"
         );
-        let bounds = twinkle::Rect::new(0.0, 0.0, 1920.0, 1024.0);
-        let frame = twinkle::UiFrame::layout(
-            desktop.view(twinkle::ViewContext::new(bounds, Default::default())), bounds);
+        let bounds = twinkle_ui::Rect::new(0.0, 0.0, 1920.0, 1024.0);
+        let frame = twinkle_ui::UiFrame::layout(
+            desktop.view(twinkle_ui::ViewContext::new(bounds, Default::default())), bounds);
         let target = frame.semantic_targets_for_message(&super::DesktopMessage::Activate(item.id));
         assert_eq!(target[0].bounds.origin.x, item.position.x + 49.0,
             "the visible icon must track unsnapped pointer motion");
@@ -1233,7 +1233,7 @@ fn desktop_settings_destinations_are_typed_and_keep_the_invoking_output() {
     let palette = nickel_core::theme::ThemePalette::from_appearance(Default::default());
     let mut desktop = super::DesktopApplication::fixture(None, palette);
     desktop.open_background_context(None);
-    twinkle::Application::update(
+    twinkle_ui::Application::update(
         &mut desktop,
         super::desktop::DesktopMessage::Command(super::desktop::DesktopCommand::Personalize),
     );
@@ -1243,7 +1243,7 @@ fn desktop_settings_destinations_are_typed_and_keep_the_invoking_output() {
     );
     desktop.set_active_output("DP-2".into(), nickel_file::desktop::Point::default(), 1.0);
     desktop.open_background_context(None);
-    twinkle::Application::update(
+    twinkle_ui::Application::update(
         &mut desktop,
         super::desktop::DesktopMessage::Command(super::desktop::DesktopCommand::DisplaySettings),
     );

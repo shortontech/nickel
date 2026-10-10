@@ -1,5 +1,5 @@
 use nickel_core::theme::ThemePalette;
-use twinkle::{
+use twinkle_ui::{
     AnyView, Application, Button, ButtonLabel, Column, ComponentBuilderExt, Container, DragGesture,
     DragPhase, EffectEvidence, Insets, Point, Row, SemanticRole, Shortcut, Text, TextAlign, UiHost,
     VerticalScroll, ViewContext,
@@ -195,8 +195,8 @@ impl Application for NotificationApp {
         std::mem::take(&mut self.effect_evidence)
     }
 
-    fn shortcut_outcome(&mut self, shortcut: Shortcut) -> twinkle::ShortcutOutcome {
-        twinkle::ShortcutOutcome::from_changed(
+    fn shortcut_outcome(&mut self, shortcut: Shortcut) -> twinkle_ui::ShortcutOutcome {
+        twinkle_ui::ShortcutOutcome::from_changed(
             if shortcut == Shortcut::Escape && self.history_mode {
                 self.effects.push(NotificationEffect::CloseHistory);
                 true
@@ -223,7 +223,7 @@ impl Application for NotificationApp {
         std::mem::take(&mut self.dirty)
     }
 
-    fn view(&self, context: ViewContext) -> impl twinkle::View<Self::Message> {
+    fn view(&self, context: ViewContext) -> impl twinkle_ui::View<Self::Message> {
         if self.history_mode {
             let entries = self.history.iter().map(|notification| {
                 let heading = if notification.summary.trim().is_empty() {
@@ -450,7 +450,7 @@ pub(crate) fn preferred_notification_surface_size(
     let mut host = NotificationHost::new(application, width, height);
     host.poll();
     let measured = host
-        .query_unique(&twinkle::SemanticSelector::RoleAndName {
+        .query_unique(&twinkle_ui::SemanticSelector::RoleAndName {
             role: SemanticRole::Group,
             name: "Notification content end".into(),
         })
@@ -465,7 +465,7 @@ mod tests {
     use std::time::Instant;
 
     use nickel_core::theme::{Appearance, ThemePalette};
-    use twinkle::{
+    use twinkle_ui::{
         ActionKind, Application, HostBatch, HostEvent, SemanticAction, SemanticRole,
         SemanticSelector, Shortcut,
     };
@@ -607,7 +607,7 @@ mod tests {
             .unwrap();
         keyboard.request_focus(open.id);
         keyboard.step(HostBatch {
-            events: vec![HostEvent::Ui(twinkle::UiEvent::KeyboardActivate)],
+            events: vec![HostEvent::Ui(twinkle_ui::UiEvent::KeyboardActivate)],
             ..HostBatch::default()
         });
         assert_eq!(
@@ -678,7 +678,7 @@ mod tests {
             .unwrap();
         keyboard.request_focus(close.id);
         keyboard.step(HostBatch {
-            events: vec![HostEvent::Ui(twinkle::UiEvent::KeyboardActivate)],
+            events: vec![HostEvent::Ui(twinkle_ui::UiEvent::KeyboardActivate)],
             ..HostBatch::default()
         });
         assert_eq!(
@@ -715,14 +715,14 @@ mod tests {
                 name: "Dismiss".into(),
             })
             .unwrap();
-        let point = twinkle::Point {
+        let point = twinkle_ui::Point {
             x: close.bounds.origin.x + close.bounds.size.width / 2.0,
             y: close.bounds.origin.y + close.bounds.size.height / 2.0,
         };
         host.step(HostBatch {
             events: vec![
-                HostEvent::Ui(twinkle::UiEvent::PointerPressed(point)),
-                HostEvent::Ui(twinkle::UiEvent::PointerReleased(point)),
+                HostEvent::Ui(twinkle_ui::UiEvent::PointerPressed(point)),
+                HostEvent::Ui(twinkle_ui::UiEvent::PointerReleased(point)),
             ],
             ..HostBatch::default()
         });
@@ -738,14 +738,14 @@ mod tests {
         let dialog = host
             .query_unique(&SemanticSelector::Role(SemanticRole::Dialog))
             .unwrap();
-        let point = twinkle::Point {
+        let point = twinkle_ui::Point {
             x: dialog.bounds.origin.x + 30.0,
             y: dialog.bounds.origin.y + 100.0,
         };
         host.step(HostBatch {
             events: vec![
-                HostEvent::Ui(twinkle::UiEvent::PointerPressed(point)),
-                HostEvent::Ui(twinkle::UiEvent::PointerReleased(point)),
+                HostEvent::Ui(twinkle_ui::UiEvent::PointerPressed(point)),
+                HostEvent::Ui(twinkle_ui::UiEvent::PointerReleased(point)),
             ],
             ..HostBatch::default()
         });

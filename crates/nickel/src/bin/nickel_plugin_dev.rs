@@ -710,8 +710,8 @@ mod platform {
             // Package evaluation plus native view construction needs more than the test thread default.
             std::thread::Builder::new().stack_size(16 * 1024 * 1024).spawn(|| {
             use nickel_jsx_host::{JsxModuleGraph, ModuleSource};
-            use twinkle::SemanticRole;
-            use twinkle::{SemanticAction, SemanticSelector, UiHost};
+            use twinkle_ui::SemanticRole;
+            use twinkle_ui::{SemanticAction, SemanticSelector, UiHost};
             let directory = tempfile::tempdir().unwrap();
             std::fs::create_dir(directory.path().join("styles")).unwrap();
             std::fs::write(
@@ -800,7 +800,7 @@ mod platform {
                 .unwrap();
             host.perform_semantic_action(
                 connect.id,
-                SemanticAction::Invoke(twinkle::ActionKind::Activate),
+                SemanticAction::Invoke(twinkle_ui::ActionKind::Activate),
             );
             assert!(matches!(
                 host.application_mut().take_effects().as_slice(),
@@ -939,17 +939,17 @@ mod platform {
             let mut app = PluginPanelApplication::from_package(&package).unwrap();
             app.sync_data(&serde_json::json!({"keyboard":snapshot}))
                 .unwrap();
-            let mut host = twinkle::UiHost::new(app, 1056, 368);
-            fn invoke(host: &mut twinkle::UiHost<PluginPanelApplication>, label: &str) {
+            let mut host = twinkle_ui::UiHost::new(app, 1056, 368);
+            fn invoke(host: &mut twinkle_ui::UiHost<PluginPanelApplication>, label: &str) {
                 let target = host
-                    .query_unique(&twinkle::SemanticSelector::RoleAndName {
-                        role: twinkle::SemanticRole::Button,
+                    .query_unique(&twinkle_ui::SemanticSelector::RoleAndName {
+                        role: twinkle_ui::SemanticRole::Button,
                         name: label.into(),
                     })
                     .unwrap();
                 host.perform_semantic_action(
                     target.id,
-                    twinkle::SemanticAction::Invoke(twinkle::ActionKind::Activate),
+                    twinkle_ui::SemanticAction::Invoke(twinkle_ui::ActionKind::Activate),
                 );
             }
             invoke(&mut host, "A");
@@ -968,7 +968,7 @@ mod platform {
             resized
                 .sync_data(&serde_json::json!({"keyboard":expanded}))
                 .unwrap();
-            let mut resized = twinkle::UiHost::new(resized, 1056, 640);
+            let mut resized = twinkle_ui::UiHost::new(resized, 1056, 640);
             invoke(&mut resized, "Move down");
             assert!(
                 matches!(resized.application_mut().take_effects().as_slice(),[nickel_shell::plugin_panel::PluginEffect::Keyboard{effect,..}] if effect.operation == "keyboard.toggleDock" && effect.generation == 8)
@@ -985,7 +985,7 @@ mod platform {
             denied
                 .sync_data(&serde_json::json!({"keyboard":snapshot}))
                 .unwrap();
-            let mut denied = twinkle::UiHost::new(denied, 1056, 368);
+            let mut denied = twinkle_ui::UiHost::new(denied, 1056, 368);
             invoke(&mut denied, "A");
             assert!(denied.application_mut().take_effects().is_empty());
             assert!(
@@ -1021,9 +1021,9 @@ mod platform {
                 let mut manifest=PluginManifest::from_json(include_str!("../../../../assets/plugins/nickel-default/plugin.json")).unwrap(); manifest.composition=None; manifest.entry="main.js".into(); manifest.surfaces.retain(|surface|surface.id=="quick-settings");
                 let package=PluginPackage{manifest,source,modules,stylesheet:String::new(),images:Default::default()};
                 let mut app=PluginPanelApplication::from_package(&package).unwrap(); app.sync_data(&data).unwrap();
-                let mut host=twinkle::UiHost::new(app,420,600);
-                let target=host.query_unique(&twinkle::SemanticSelector::RoleAndName {role:twinkle::SemanticRole::Button,name:"2".into()}).unwrap();
-                host.perform_semantic_action(target.id,twinkle::SemanticAction::Invoke(twinkle::ActionKind::Activate));
+                let mut host=twinkle_ui::UiHost::new(app,420,600);
+                let target=host.query_unique(&twinkle_ui::SemanticSelector::RoleAndName {role:twinkle_ui::SemanticRole::Button,name:"2".into()}).unwrap();
+                host.perform_semantic_action(target.id,twinkle_ui::SemanticAction::Invoke(twinkle_ui::ActionKind::Activate));
                 assert!(matches!(host.application_mut().take_effects().as_slice(),[nickel_shell::plugin_panel::PluginEffect::Workspace{..}]));
             }).unwrap().join().unwrap();
         }
@@ -1060,8 +1060,8 @@ mod platform {
                 let package = PluginPackage {manifest,source,modules,stylesheet:String::new(),images:Default::default()};
                 let mut app = PluginPanelApplication::from_package(&package).unwrap();
                 app.sync_data(&data).unwrap();
-                let host = twinkle::UiHost::new(app,520,340);
-                assert!(host.query_unique(&twinkle::SemanticSelector::RoleAndName {role:twinkle::SemanticRole::Switch,name:"Enable Codex integration".into()}).is_ok());
+                let host = twinkle_ui::UiHost::new(app,520,340);
+                assert!(host.query_unique(&twinkle_ui::SemanticSelector::RoleAndName {role:twinkle_ui::SemanticRole::Switch,name:"Enable Codex integration".into()}).is_ok());
                 twinkle_presentation::css::StyleSheet::compile(include_str!("../../../../assets/plugins/nickel-default/src/styles/features.css")).unwrap();
             }).unwrap().join().unwrap();
         }
@@ -1109,15 +1109,15 @@ mod platform {
                 let package = PluginPackage {manifest,source,modules,stylesheet:String::new(),images:Default::default()};
                 let mut app = PluginPanelApplication::from_package(&package).unwrap();
                 app.sync_data(&data).unwrap();
-                let host = twinkle::UiHost::new(app,620,548);
-                assert!(host.query_unique(&twinkle::SemanticSelector::RoleAndName {role:twinkle::SemanticRole::Button,name:"All apps  ›".into()}).is_ok());
+                let host = twinkle_ui::UiHost::new(app,620,548);
+                assert!(host.query_unique(&twinkle_ui::SemanticSelector::RoleAndName {role:twinkle_ui::SemanticRole::Button,name:"All apps  ›".into()}).is_ok());
             }).unwrap().join().unwrap();
         }
 
         #[test]
         fn launcher_reference_layout_selection_categories_and_rasters() {
             std::thread::Builder::new().stack_size(16 * 1024 * 1024).spawn(|| {
-                use twinkle::{ActionKind, SemanticAction, SemanticRole, SemanticSelector, SemanticValueInput, UiHost};
+                use twinkle_ui::{ActionKind, SemanticAction, SemanticRole, SemanticSelector, SemanticValueInput, UiHost};
                 use nickel_shell::plugin_panel::PluginEffect;
                 let enter = |order| twinkle_input::InputEvent::Key(twinkle_input::KeyEvent {
                     device: twinkle_input::DeviceId(1),
@@ -1205,7 +1205,7 @@ mod platform {
                 });
                 let dark = nickel_core::theme::ThemePalette::from_appearance(Default::default());
                 host.application_mut().sync_theme_palette(light).unwrap();
-                host.step(twinkle::HostBatch { application_changed:true, ..Default::default() });
+                host.step(twinkle_ui::HostBatch { application_changed:true, ..Default::default() });
                 capture(&host, "dashboard-light", 608, 628);
                 let input = target(&host, SemanticRole::TextField, "Search apps, files, settings, or commands");
                 host.perform_semantic_action(input.id, SemanticAction::SetValue(SemanticValueInput::Text("term".into())));
@@ -1213,14 +1213,14 @@ mod platform {
                 host.resize(608, 628);
                 capture(&host, "search-light", 608, 628);
                 host.application_mut().sync_theme_palette(dark).unwrap();
-                host.application_mut().sync_reading_direction(twinkle::ReadingDirection::RightToLeft);
-                host.step(twinkle::HostBatch { application_changed:true, ..Default::default() });
+                host.application_mut().sync_reading_direction(twinkle_ui::ReadingDirection::RightToLeft);
+                host.step(twinkle_ui::HostBatch { application_changed:true, ..Default::default() });
                 capture(&host, "search-rtl", 608, 628);
                 let rtl_category = target(&host, SemanticRole::Button, "All   4");
                 let rtl_actions = target(&host, SemanticRole::Button, "Actions   1");
                 assert!(rtl_category.bounds.origin.x > rtl_actions.bounds.origin.x, "RTL mirrors the horizontal filters");
-                host.application_mut().sync_reading_direction(twinkle::ReadingDirection::LeftToRight);
-                host.step(twinkle::HostBatch { application_changed:true, ..Default::default() });
+                host.application_mut().sync_reading_direction(twinkle_ui::ReadingDirection::LeftToRight);
+                host.step(twinkle_ui::HostBatch { application_changed:true, ..Default::default() });
                 capture(&host, "search", 608, 628);
                 let input = target(&host, SemanticRole::TextField, "Search apps, files, settings, or commands");
                 host.request_focus(input.id);
@@ -1275,10 +1275,10 @@ mod platform {
                 host.request_focus(item.id);
                 let more = target(&host, SemanticRole::Button, "More…");
                 host.perform_semantic_action(more.id, SemanticAction::Invoke(ActionKind::Activate));
-                host.shortcut(twinkle::Shortcut::Escape);
+                host.shortcut(twinkle_ui::Shortcut::Escape);
                 target(&host, SemanticRole::Button, "Windows Terminal");
                 assert!(host.application_mut().take_effects().is_empty(), "Escape closes compact details without hiding the launcher");
-                host.shortcut(twinkle::Shortcut::Escape);
+                host.shortcut(twinkle_ui::Shortcut::Escape);
                 target(&host, SemanticRole::Button, "All apps  ›");
                 assert!(matches!(host.application_mut().take_effects().as_slice(), [PluginEffect::SearchApplications{query,..}] if query.is_empty()));
                 let apps = target(&host, SemanticRole::Button, "All apps  ›");
@@ -1286,7 +1286,7 @@ mod platform {
                 target(&host, SemanticRole::Button, "‹  Back");
                 assert!(host.query(&SemanticSelector::RoleAndName {role:SemanticRole::Button,name:"Unregistered running window".into()}).is_empty(),
                     "All apps must only offer applications with a launch route");
-                host.shortcut(twinkle::Shortcut::Escape);
+                host.shortcut(twinkle_ui::Shortcut::Escape);
                 target(&host, SemanticRole::Button, "All apps  ›");
                 assert!(host.application_mut().take_effects().is_empty(), "Escape returns from All apps to the dashboard");
                 let pin = host.query(&SemanticSelector::RoleAndName {role:SemanticRole::Button,name:"Firefox".into()})
@@ -1295,7 +1295,7 @@ mod platform {
                 let retry = target(&host, SemanticRole::MenuItem, "Retry saving favorites");
                 host.perform_semantic_action(retry.id, SemanticAction::Invoke(ActionKind::Activate));
                 assert!(matches!(host.application_mut().take_effects().as_slice(), [PluginEffect::RetryApplicationPinSave]));
-                host.shortcut(twinkle::Shortcut::Escape);
+                host.shortcut(twinkle_ui::Shortcut::Escape);
                 assert!(matches!(host.application_mut().take_effects().as_slice(), [PluginEffect::HidePluginSurface{surface_id,..}] if surface_id=="launcher"));
                 compact_data["viewport"]["availableHeight"] = 336.into();
                 host.application_mut().sync_data(&compact_data).unwrap();

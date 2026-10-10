@@ -126,14 +126,14 @@ fn embedded_package_visibility_preserves_shared_runtime_until_disable() {
         let button = shell
             .plugin_panel_host_for(&first)
             .unwrap()
-            .query_unique(&twinkle::SemanticSelector::RoleAndName {
-                role: twinkle::SemanticRole::Button,
+            .query_unique(&twinkle_ui::SemanticSelector::RoleAndName {
+                role: twinkle_ui::SemanticRole::Button,
                 name: "Increment".into(),
             })
             .unwrap();
         assert!(shell.plugin_panel_host_ui_for(
             &first,
-            twinkle::UiEvent::AccessibilityActivate(button.id),
+            twinkle_ui::UiEvent::AccessibilityActivate(button.id),
             400,
             240
         ));
@@ -335,14 +335,14 @@ fn stock_shell_package_handles_semantic_taskbar_input_and_global_surface_intents
         let button = shell
             .plugin_panel_host_for(&taskbar)
             .unwrap()
-            .query_unique(&twinkle::SemanticSelector::RoleAndName {
-                role: twinkle::SemanticRole::Button,
+            .query_unique(&twinkle_ui::SemanticSelector::RoleAndName {
+                role: twinkle_ui::SemanticRole::Button,
                 name: "Open Nickel Start".into(),
             })
             .unwrap();
         assert!(shell.plugin_panel_host_ui_for(
             &taskbar,
-            twinkle::UiEvent::AccessibilityActivate(button.id),
+            twinkle_ui::UiEvent::AccessibilityActivate(button.id),
             1280,
             56
         ));
@@ -472,18 +472,18 @@ fn zero_surface_composition_provider_runs_once_and_rejoins_the_active_shell() {
         shell.launch_settings(None);
         let settings = shell.active_shell_surface_key("settings");
         shell.plugin_panel_scene(&settings, 1100, 800).unwrap();
-        let selector = |role, name: &str| twinkle::SemanticSelector::RoleAndName {
+        let selector = |role, name: &str| twinkle_ui::SemanticSelector::RoleAndName {
             role,
             name: name.into(),
         };
         let destination = shell
             .plugin_panel_host_for(&settings)
             .unwrap()
-            .query_unique(&selector(twinkle::SemanticRole::Button, "Independent"))
+            .query_unique(&selector(twinkle_ui::SemanticRole::Button, "Independent"))
             .unwrap();
         assert!(shell.plugin_panel_host_ui_for(
             &settings,
-            twinkle::UiEvent::AccessibilityActivate(destination.id),
+            twinkle_ui::UiEvent::AccessibilityActivate(destination.id),
             1100,
             800
         ));
@@ -492,14 +492,14 @@ fn zero_surface_composition_provider_runs_once_and_rejoins_the_active_shell() {
             .plugin_panel_host_for(&settings)
             .unwrap()
             .query_unique(&selector(
-                twinkle::SemanticRole::Button,
+                twinkle_ui::SemanticRole::Button,
                 "Activate provider window",
             ))
             .unwrap();
         session.take_commands();
         assert!(shell.plugin_panel_host_ui_for(
             &settings,
-            twinkle::UiEvent::AccessibilityActivate(button.id),
+            twinkle_ui::UiEvent::AccessibilityActivate(button.id),
             1100,
             800
         ));
@@ -535,13 +535,13 @@ fn zero_surface_composition_provider_runs_once_and_rejoins_the_active_shell() {
             .plugin_panel_host_for(&settings)
             .unwrap()
             .query_unique(&selector(
-                twinkle::SemanticRole::Button,
+                twinkle_ui::SemanticRole::Button,
                 "Denied provider close",
             ))
             .unwrap();
         shell.plugin_panel_host_ui_for(
             &settings,
-            twinkle::UiEvent::AccessibilityActivate(denied.id),
+            twinkle_ui::UiEvent::AccessibilityActivate(denied.id),
             1100,
             800,
         );
@@ -560,7 +560,7 @@ fn zero_surface_composition_provider_runs_once_and_rejoins_the_active_shell() {
                 .plugin_panel_host_for(&settings)
                 .unwrap()
                 .query_unique(&selector(
-                    twinkle::SemanticRole::Text,
+                    twinkle_ui::SemanticRole::Text,
                     "Provider activations 1"
                 ))
                 .is_ok()
@@ -591,13 +591,13 @@ fn zero_surface_composition_provider_runs_once_and_rejoins_the_active_shell() {
         let settings_host = shell.plugin_panel_host_for(&settings).unwrap();
         assert!(
             settings_host
-                .query_unique(&selector(twinkle::SemanticRole::Button, "Independent"))
+                .query_unique(&selector(twinkle_ui::SemanticRole::Button, "Independent"))
                 .is_err()
         );
         assert!(
             settings_host
                 .query_unique(&selector(
-                    twinkle::SemanticRole::Button,
+                    twinkle_ui::SemanticRole::Button,
                     "Activate provider window"
                 ))
                 .is_err()
@@ -708,13 +708,13 @@ use std::{
 
 use crate::platform::NotificationSource;
 use image::{Rgba, RgbaImage};
-use twinkle::{
+use twinkle_input::KeyCode;
+use twinkle_testkit::{Scenario, Selector};
+use twinkle_ui::{
     ActionKind, Application as _, ControllerAction, FrameOverlay, HostBatch, HostEvent,
     HostTelemetry, InputModality, Point, Rect, SemanticAction, SemanticRole, SemanticSelector,
     SemanticValueInput, SemanticValueSnapshot, UiEvent, UiHost, ViewContext,
 };
-use twinkle_input::KeyCode;
-use twinkle_testkit::{Scenario, Selector};
 
 use super::{
     HostRuntimeSamples, LiveShell, desktop_label_foreground, initial_wallpaper, panel_tray_icons,
@@ -1273,7 +1273,7 @@ fn internal_shell_presents_two_surfaces_from_one_package_on_one_output() {
                     .unwrap()
                     .iter()
                     .any(|command| matches!(command,
-                        twinkle::backend::PaintCommand::Text { text, .. } if text == &label
+                        twinkle_ui::backend::PaintCommand::Text { text, .. } if text == &label
                     ))
             );
         }
@@ -1343,10 +1343,10 @@ fn codex_notification_reviews_large_source_decision_set_without_truncating_it() 
     with_package_runtime_stack(|| {
         use nickel_codex::{ApprovalContext, CommandDecision, ServerRequestId};
         use nickel_codex_ui::{CodexApprovalNotification, PendingInteraction};
-        use twinkle::approval::{ApprovalPresentation, RequesterIdentity};
+        use twinkle_ui::approval::{ApprovalPresentation, RequesterIdentity};
 
         let mut shell = LiveShell::new().expect("live shell");
-        let mut surfaces = twinkle::InternalSurfaceSet::new();
+        let mut surfaces = twinkle_ui::InternalSurfaceSet::new();
         let id = surfaces.insert(
             crate::notification_view::NotificationApp::new(shell.palette),
             1,
@@ -1414,7 +1414,7 @@ fn simultaneous_codex_and_remote_approvals_keep_distinct_request_owners() {
         use nickel_session_protocol::{
             RemoteLeaseRequest, RemoteLeaseRequestChanges, RemotePendingLease, RemoteResourceScope,
         };
-        use twinkle::approval::{ApprovalPresentation, RequesterIdentity};
+        use twinkle_ui::approval::{ApprovalPresentation, RequesterIdentity};
 
         let mut shell = LiveShell::new().expect("live shell");
         let remote = RemotePendingLease {
@@ -1434,7 +1434,7 @@ fn simultaneous_codex_and_remote_approvals_keep_distinct_request_owners() {
         shell.sync_remote_lease_notifications_from(vec![remote.clone()]);
         let remote_id = *shell.remote_lease_notifications.keys().next().unwrap();
 
-        let mut surfaces = twinkle::InternalSurfaceSet::new();
+        let mut surfaces = twinkle_ui::InternalSurfaceSet::new();
         let surface = surfaces.insert(
             crate::notification_view::NotificationApp::new(shell.palette),
             1,
@@ -1501,10 +1501,10 @@ fn codex_approval_feed_overflow_queues_one_explicit_decline() {
     with_package_runtime_stack(|| {
         use nickel_codex::{ApprovalContext, CommandDecision, ServerRequestId, ThreadId};
         use nickel_codex_ui::{CodexApprovalChoice, CodexApprovalNotification, PendingInteraction};
-        use twinkle::approval::{ApprovalPresentation, RequesterIdentity};
+        use twinkle_ui::approval::{ApprovalPresentation, RequesterIdentity};
 
         let mut shell = LiveShell::new().expect("live shell");
-        let mut surfaces = twinkle::InternalSurfaceSet::new();
+        let mut surfaces = twinkle_ui::InternalSurfaceSet::new();
         let id = surfaces.insert(
             crate::notification_view::NotificationApp::new(shell.palette),
             1,
@@ -1735,14 +1735,14 @@ fn scheduled_settings_traversal_reports_retained_lifetimes() {
                 let target = shell
                     .plugin_panel_host_for(&key)
                     .unwrap()
-                    .query_unique(&twinkle::SemanticSelector::RoleAndName {
-                        role: twinkle::SemanticRole::Button,
+                    .query_unique(&twinkle_ui::SemanticSelector::RoleAndName {
+                        role: twinkle_ui::SemanticRole::Button,
                         name: page.into(),
                     })
                     .unwrap();
                 shell.plugin_panel_host_ui_for(
                     &key,
-                    twinkle::UiEvent::AccessibilityActivate(target.id),
+                    twinkle_ui::UiEvent::AccessibilityActivate(target.id),
                     1100,
                     800,
                 );
@@ -1752,8 +1752,8 @@ fn scheduled_settings_traversal_reports_retained_lifetimes() {
                         if sweep_previews {
                             shell.plugin_panel_host_ui_for(
                                 &key,
-                                twinkle::UiEvent::Scroll {
-                                    point: twinkle::Point { x: 700.0, y: 600.0 },
+                                twinkle_ui::UiEvent::Scroll {
+                                    point: twinkle_ui::Point { x: 700.0, y: 600.0 },
                                     delta_y: -100_000.0,
                                 },
                                 1100,
@@ -1763,8 +1763,8 @@ fn scheduled_settings_traversal_reports_retained_lifetimes() {
                         }
                         shell.plugin_panel_host_ui_for(
                             &key,
-                            twinkle::UiEvent::Scroll {
-                                point: twinkle::Point { x: 700.0, y: 600.0 },
+                            twinkle_ui::UiEvent::Scroll {
+                                point: twinkle_ui::Point { x: 700.0, y: 600.0 },
                                 delta_y: if sweep_previews {
                                     (cycle % 64) as f32 * 500.0
                                 } else if cycle % 2 == 0 {
@@ -1943,7 +1943,7 @@ fn cooperative_platform_maintenance_reconciles_only_dirty_sibling_hosts() {
             )
             .unwrap();
             let resolved = application.resolved_surface(surface).unwrap();
-            let host = twinkle::UiHost::new(application, resolved.width, resolved.height);
+            let host = twinkle_ui::UiHost::new(application, resolved.width, resolved.height);
             let key = nickel_core::plugins::PluginSurfaceKey {
                 plugin_id: package.manifest.id.clone(),
                 surface_id: surface.id.clone(),
@@ -2275,8 +2275,8 @@ fn pending_remote_lease_becomes_persistent_shell_notification() {
         shell.sync_notification_host(420, 180);
         let approve = shell
             .notification_host
-            .query_unique(&twinkle::SemanticSelector::RoleAndName {
-                role: twinkle::SemanticRole::Button,
+            .query_unique(&twinkle_ui::SemanticSelector::RoleAndName {
+                role: twinkle_ui::SemanticRole::Button,
                 name: "Approve".into(),
             })
             .unwrap();
@@ -2361,7 +2361,7 @@ fn pending_remote_lease_becomes_persistent_shell_notification() {
 
         let mut oversized = pending;
         oversized.pending_generation = 5;
-        oversized.client_label = "x".repeat(twinkle::approval::MAX_APPROVAL_PRESENTATION_BYTES);
+        oversized.client_label = "x".repeat(twinkle_ui::approval::MAX_APPROVAL_PRESENTATION_BYTES);
         let mut overflow = oversized.clone();
         overflow.pending_generation = 6;
         shell.sync_remote_lease_notifications_from(vec![oversized]);
@@ -2824,7 +2824,7 @@ fn desktop_settings_requests_open_shared_surface_and_preserve_navigation_identit
             .desktop_host
             .application_mut()
             .open_background_context(None);
-        twinkle::Application::update(
+        twinkle_ui::Application::update(
             shell.desktop_host.application_mut(),
             super::desktop::DesktopMessage::Command(
                 super::desktop::DesktopCommand::DisplaySettings,
@@ -3058,14 +3058,14 @@ fn composed_shell_keeps_each_host_identity_when_launcher_opens_settings() {
         let button = shell
             .plugin_panel_host_for(&launcher)
             .unwrap()
-            .query_unique(&twinkle::SemanticSelector::RoleAndName {
-                role: twinkle::SemanticRole::Button,
+            .query_unique(&twinkle_ui::SemanticSelector::RoleAndName {
+                role: twinkle_ui::SemanticRole::Button,
                 name: "Settings".into(),
             })
             .unwrap();
         assert!(shell.plugin_panel_host_ui_for(
             &launcher,
-            twinkle::UiEvent::AccessibilityActivate(button.id),
+            twinkle_ui::UiEvent::AccessibilityActivate(button.id),
             width,
             height
         ));
@@ -3140,8 +3140,8 @@ fn launcher_reopen_remounts_factory_state_in_shared_runtime() {
         assert_ne!(host.application().diagnostic_mount(), mount);
         assert!(composition.borrow().mount_count() > mount_count);
         assert!(
-            host.query_unique(&twinkle::SemanticSelector::RoleAndName {
-                role: twinkle::SemanticRole::TextField,
+            host.query_unique(&twinkle_ui::SemanticSelector::RoleAndName {
+                role: twinkle_ui::SemanticRole::TextField,
                 name: "Search apps, files, settings, or commands".into(),
             })
             .is_ok()
@@ -3209,25 +3209,30 @@ fn launcher_passive_pointer_motion_never_creates_component_mounts_or_wakeups() {
         let button = shell
             .plugin_panel_host_ref(&launcher)
             .unwrap()
-            .query_unique(&twinkle::SemanticSelector::RoleAndName {
-                role: twinkle::SemanticRole::Button,
+            .query_unique(&twinkle_ui::SemanticSelector::RoleAndName {
+                role: twinkle_ui::SemanticRole::Button,
                 name: "Settings".into(),
             })
             .unwrap();
-        let first = twinkle::Point {
+        let first = twinkle_ui::Point {
             x: button.bounds.origin.x + button.bounds.size.width * 0.25,
             y: button.bounds.origin.y + button.bounds.size.height * 0.5,
         };
-        shell.plugin_panel_host_ui_for(&launcher, twinkle::UiEvent::PointerMoved(first), 608, 628);
+        shell.plugin_panel_host_ui_for(
+            &launcher,
+            twinkle_ui::UiEvent::PointerMoved(first),
+            608,
+            628,
+        );
         for index in 0..256 {
-            let point = twinkle::Point {
+            let point = twinkle_ui::Point {
                 x: button.bounds.origin.x
                     + button.bounds.size.width * (0.3 + (index % 20) as f32 / 100.0),
                 y: button.bounds.origin.y + button.bounds.size.height * 0.5,
             };
             assert!(!shell.plugin_panel_host_ui_for(
                 &launcher,
-                twinkle::UiEvent::PointerMoved(point),
+                twinkle_ui::UiEvent::PointerMoved(point),
                 608,
                 628,
             ));
@@ -3357,14 +3362,14 @@ fn window_menu_hotkey_uses_selected_package_and_native_window_policy() {
         let button = shell
             .plugin_panel_host_for(&key)
             .unwrap()
-            .query_unique(&twinkle::SemanticSelector::RoleAndName {
-                role: twinkle::SemanticRole::Button,
+            .query_unique(&twinkle_ui::SemanticSelector::RoleAndName {
+                role: twinkle_ui::SemanticRole::Button,
                 name: "Minimize".into(),
             })
             .unwrap();
         assert!(shell.plugin_panel_host_ui_for(
             &key,
-            twinkle::UiEvent::AccessibilityActivate(button.id),
+            twinkle_ui::UiEvent::AccessibilityActivate(button.id),
             320,
             400
         ));
@@ -3381,8 +3386,8 @@ fn window_menu_hotkey_uses_selected_package_and_native_window_policy() {
         let stale = shell
             .plugin_panel_host_for(&key)
             .unwrap()
-            .query_unique(&twinkle::SemanticSelector::RoleAndName {
-                role: twinkle::SemanticRole::Button,
+            .query_unique(&twinkle_ui::SemanticSelector::RoleAndName {
+                role: twinkle_ui::SemanticRole::Button,
                 name: "Minimize".into(),
             })
             .unwrap();
@@ -3390,7 +3395,7 @@ fn window_menu_hotkey_uses_selected_package_and_native_window_policy() {
         shell.windows[0].state.capabilities.minimize = false;
         assert!(shell.plugin_panel_host_ui_for(
             &key,
-            twinkle::UiEvent::AccessibilityActivate(stale.id),
+            twinkle_ui::UiEvent::AccessibilityActivate(stale.id),
             320,
             400
         ));
@@ -3625,14 +3630,14 @@ fn shipped_example_shell_composes_owned_taskbar_default_controls_and_registered_
         let button = shell
             .plugin_panel_host_for(&taskbar)
             .unwrap()
-            .query_unique(&twinkle::SemanticSelector::RoleAndName {
-                role: twinkle::SemanticRole::Button,
+            .query_unique(&twinkle_ui::SemanticSelector::RoleAndName {
+                role: twinkle_ui::SemanticRole::Button,
                 name: "Quick Settings".into(),
             })
             .unwrap();
         shell.plugin_panel_host_ui_for(
             &taskbar,
-            twinkle::UiEvent::AccessibilityActivate(button.id),
+            twinkle_ui::UiEvent::AccessibilityActivate(button.id),
             1280,
             56,
         );
@@ -3676,8 +3681,8 @@ fn shipped_example_shell_composes_owned_taskbar_default_controls_and_registered_
             shell
                 .plugin_panel_host_for(&quick)
                 .unwrap()
-                .query_unique(&twinkle::SemanticSelector::RoleAndName {
-                    role: twinkle::SemanticRole::Button,
+                .query_unique(&twinkle_ui::SemanticSelector::RoleAndName {
+                    role: twinkle_ui::SemanticRole::Button,
                     name: "Lock".into()
                 })
                 .is_ok()
@@ -3697,14 +3702,14 @@ fn shipped_example_shell_composes_owned_taskbar_default_controls_and_registered_
         let toggle = shell
             .plugin_panel_host_for(&settings)
             .unwrap()
-            .query_unique(&twinkle::SemanticSelector::RoleAndName {
-                role: twinkle::SemanticRole::Switch,
+            .query_unique(&twinkle_ui::SemanticSelector::RoleAndName {
+                role: twinkle_ui::SemanticRole::Switch,
                 name: "Show shell title".into(),
             })
             .unwrap();
         assert!(shell.plugin_panel_host_ui_for(
             &settings,
-            twinkle::UiEvent::AccessibilityActivate(toggle.id),
+            twinkle_ui::UiEvent::AccessibilityActivate(toggle.id),
             1100,
             800
         ));
@@ -3761,14 +3766,14 @@ fn admitted_native_application_windows_reach_granted_public_resources() {
         let button = shell
             .plugin_panel_host_for(&key)
             .unwrap()
-            .query_unique(&twinkle::SemanticSelector::RoleAndName {
-                role: twinkle::SemanticRole::Button,
+            .query_unique(&twinkle_ui::SemanticSelector::RoleAndName {
+                role: twinkle_ui::SemanticRole::Button,
                 name: "Native project chat".into(),
             })
             .unwrap();
         assert!(shell.plugin_panel_host_ui_for(
             &key,
-            twinkle::UiEvent::AccessibilityContextMenu(button.id),
+            twinkle_ui::UiEvent::AccessibilityContextMenu(button.id),
             1280,
             40
         ));
@@ -3776,8 +3781,8 @@ fn admitted_native_application_windows_reach_granted_public_resources() {
             shell
                 .plugin_panel_host_for(&key)
                 .unwrap()
-                .query_unique(&twinkle::SemanticSelector::RoleAndName {
-                    role: twinkle::SemanticRole::MenuItem,
+                .query_unique(&twinkle_ui::SemanticSelector::RoleAndName {
+                    role: twinkle_ui::SemanticRole::MenuItem,
                     name: "Pin".into(),
                 })
                 .is_err()
@@ -3786,8 +3791,8 @@ fn admitted_native_application_windows_reach_granted_public_resources() {
             shell
                 .plugin_panel_host_for(&key)
                 .unwrap()
-                .query_unique(&twinkle::SemanticSelector::RoleAndName {
-                    role: twinkle::SemanticRole::MenuItem,
+                .query_unique(&twinkle_ui::SemanticSelector::RoleAndName {
+                    role: twinkle_ui::SemanticRole::MenuItem,
                     name: "Close Native project chat".into(),
                 })
                 .is_ok()
@@ -3984,7 +3989,7 @@ fn built_in_running_applications_publish_their_taskbar_artwork() {
 fn committed_appearance_recolors_retained_settings_and_taskbar_surfaces() {
     with_package_runtime_stack(|| {
         use nickel_core::shell_settings::{ShellSettings, ThemePreference};
-        use twinkle::backend::PaintCommand;
+        use twinkle_ui::backend::PaintCommand;
         let mut shell = LiveShell::new().unwrap();
         shell.launch_settings(None);
         let taskbar = shell.active_shell_surface_key("taskbar");

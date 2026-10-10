@@ -1,8 +1,8 @@
 #![cfg(feature = "workbench-fixtures")]
 
 use nickel_shell::ShellFixtureProvider;
-use twinkle::{ActionKind, SemanticRole, Size};
 use twinkle_testkit::{ActivationVia, FixtureProvider, FixtureRegistry};
+use twinkle_ui::{ActionKind, SemanticRole, Size};
 
 #[test]
 fn registers_every_shell_surface_fixture() {
@@ -56,7 +56,7 @@ fn registers_every_shell_surface_fixture() {
                 let has_activate = session
                     .semantic_nodes()
                     .iter()
-                    .any(|node| node.actions.contains(&twinkle::ActionKind::Activate));
+                    .any(|node| node.actions.contains(&twinkle_ui::ActionKind::Activate));
                 assert_eq!(
                     has_activate,
                     variant.id == "confirmed",

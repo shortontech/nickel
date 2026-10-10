@@ -5,7 +5,7 @@ use std::iter::Peekable;
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "view")]
-use twinkle::{
+use twinkle_ui::{
     Align, AnyView, Button, Color, Column, ComponentBuilderExt, Container, Grid, Insets, Length,
     Overflow, Row, SelectionRegion, SelectionRun, StyledText, StyledTextSpan, Text, TextBoundary,
     Track, UiId, ui,
@@ -577,8 +577,8 @@ impl Default for MarkdownPalette {
 }
 
 #[cfg(feature = "view")]
-fn semantic_theme(palette: MarkdownPalette) -> twinkle::SemanticTheme {
-    twinkle::SemanticTheme::from_tokens(twinkle::SemanticTokenSet::standard(
+fn semantic_theme(palette: MarkdownPalette) -> twinkle_ui::SemanticTheme {
+    twinkle_ui::SemanticTheme::from_tokens(twinkle_ui::SemanticTokenSet::standard(
         palette.surface,
         palette.surface,
         palette.surface,
@@ -1059,7 +1059,7 @@ fn push_styled_text(
             monospace: style.monospace,
             font_family: None,
             strikethrough: style.strikethrough,
-            underline: twinkle::TextUnderlineStyle::None,
+            underline: twinkle_ui::TextUnderlineStyle::None,
             color: style.color,
             background: style.background,
         });
@@ -1139,7 +1139,7 @@ fn heading_scale(level: u8) -> f32 {
 mod tests {
     use super::*;
     #[cfg(feature = "view")]
-    use twinkle::{
+    use twinkle_ui::{
         ActionKind, Point, Rect, SemanticAction, SemanticRole, SoftwareRenderer, UiEvent, UiFrame,
         UiStateStore,
     };
@@ -1357,7 +1357,7 @@ mod tests {
             runs.iter()
                 .all(|run| run.id.starts_with("markdown-message-7/body/"))
         );
-        let selection_document = std::sync::Arc::new(twinkle::SelectionDocument::new(runs));
+        let selection_document = std::sync::Arc::new(twinkle_ui::SelectionDocument::new(runs));
         let mut state = UiStateStore::default();
         let build = |state: &mut UiStateStore| {
             UiFrame::layout_with_state(

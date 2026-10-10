@@ -59,7 +59,7 @@ pub(crate) use state::InternalCaptureState;
 pub use state::NickelSession;
 
 struct NativeControllerBatch {
-    events: Vec<twinkle::ControllerEnvelope>,
+    events: Vec<twinkle_ui::ControllerEnvelope>,
     neutral: bool,
     ingress_generation: u64,
     routing_epoch: u64,
@@ -94,7 +94,7 @@ fn publish_native_controller_batch(
 }
 
 fn should_publish_native_controller_batch(
-    events: &[twinkle::ControllerEnvelope],
+    events: &[twinkle_ui::ControllerEnvelope],
     neutral: bool,
     last_neutral: &mut bool,
 ) -> bool {
@@ -313,7 +313,7 @@ fn run_with_arguments(
     thread::Builder::new()
         .name("nickel-controller-events".into())
         .spawn(move || {
-            let mut controller = twinkle::ControllerInput::new();
+            let mut controller = twinkle_ui::ControllerInput::new();
             let mut last_neutral = true;
             let mut force_observation = false;
             loop {

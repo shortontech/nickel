@@ -15,19 +15,19 @@ use std::{
 use nickel_markdown::{MarkdownDocument, MarkdownPalette, markdown_view};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use twinkle::{
-    ActionKind, AnyView, Application, Button, ButtonLabel, Collection, CollectionPresentation,
-    CollectionState, Column, ComponentBuilderExt, Container, Dropdown, Grid, Image, ImageFit,
-    Insets, Menu, MenuBar, MenuItem, RadioButton, ReadingDirection, ResponsiveNavigation,
-    ResponsiveNavigationDestination, Row, SemanticRole, SemanticTheme, Slider, SoftwareRenderer,
-    Surface, SurfaceRole, Switch, Text, TextField, UiHost, VerticalScroll, ViewContext,
-};
 use twinkle_testkit::{
     AccessibilityPreset, ActivationVia, ErasedFixtureSession, Fixture, FixtureAsset,
     FixtureDirection, FixtureMetadata, FixtureProvider, FixtureRegistry, FixtureRegistryEntry,
     FixtureSource, FixtureTheme, FixtureVariant, LocalePreset, ReachabilityPolicy, ScalePreset,
     Selector, SimulatedEffectKind, TraceDocument, ViewportPreset, audit_registry_reachability,
     open, render_host, validate_host,
+};
+use twinkle_ui::{
+    ActionKind, AnyView, Application, Button, ButtonLabel, Collection, CollectionPresentation,
+    CollectionState, Column, ComponentBuilderExt, Container, Dropdown, Grid, Image, ImageFit,
+    Insets, Menu, MenuBar, MenuItem, RadioButton, ReadingDirection, ResponsiveNavigation,
+    ResponsiveNavigationDestination, Row, SemanticRole, SemanticTheme, Slider, SoftwareRenderer,
+    Surface, SurfaceRole, Switch, Text, TextField, UiHost, VerticalScroll, ViewContext,
 };
 
 use twinkle_workbench as fixture_inventory;
@@ -103,7 +103,7 @@ const FILE_VARIANTS: &[FixtureVariant] = &[
         theme: FixtureTheme::Dark,
         locale: twinkle_testkit::DEFAULT_LOCALE,
         scale: twinkle_testkit::DEFAULT_SCALE,
-        controller_family: twinkle::ControllerFamily::Generic,
+        controller_family: twinkle_ui::ControllerFamily::Generic,
         accessibility: twinkle_testkit::DEFAULT_ACCESSIBILITY,
     },
     FixtureVariant {
@@ -120,7 +120,7 @@ const FILE_VARIANTS: &[FixtureVariant] = &[
             id: "2x",
             factor: 2.0,
         },
-        controller_family: twinkle::ControllerFamily::Generic,
+        controller_family: twinkle_ui::ControllerFamily::Generic,
         accessibility: twinkle_testkit::DEFAULT_ACCESSIBILITY,
     },
 ];
@@ -501,7 +501,7 @@ const fn external_variant(
         theme: FixtureTheme::Dark,
         locale: twinkle_testkit::DEFAULT_LOCALE,
         scale: twinkle_testkit::DEFAULT_SCALE,
-        controller_family: twinkle::ControllerFamily::Generic,
+        controller_family: twinkle_ui::ControllerFamily::Generic,
         accessibility: twinkle_testkit::DEFAULT_ACCESSIBILITY,
     }
 }
@@ -1354,7 +1354,7 @@ impl Application for CounterApp {
         }
     }
 
-    fn view(&self, _context: ViewContext) -> impl twinkle::View<Self::Message> {
+    fn view(&self, _context: ViewContext) -> impl twinkle_ui::View<Self::Message> {
         Column::new()
             .gap(12.0)
             .child(Button::new(CounterMessage::Increment, "Increment").id("increment"))
@@ -1400,7 +1400,7 @@ impl Fixture for CounterFixture {
                     id: "1x",
                     factor: 1.0,
                 },
-                controller_family: twinkle::ControllerFamily::Generic,
+                controller_family: twinkle_ui::ControllerFamily::Generic,
                 accessibility: AccessibilityPreset {
                     id: "default",
                     high_contrast: false,
@@ -1455,7 +1455,7 @@ impl Application for MarkdownApp {
         }
     }
 
-    fn view(&self, _context: ViewContext) -> impl twinkle::View<Self::Message> {
+    fn view(&self, _context: ViewContext) -> impl twinkle_ui::View<Self::Message> {
         AnyView::new(markdown_view(
             &self.document,
             MarkdownPalette::default(),
@@ -1497,7 +1497,7 @@ impl Fixture for MarkdownFixture {
                     id: "1x",
                     factor: 1.0,
                 },
-                controller_family: twinkle::ControllerFamily::Generic,
+                controller_family: twinkle_ui::ControllerFamily::Generic,
                 accessibility: AccessibilityPreset {
                     id: "default",
                     high_contrast: false,
@@ -1548,7 +1548,7 @@ struct GalleryApp {
     kind: GalleryKind,
     fixture_theme: FixtureTheme,
     fixture_direction: FixtureDirection,
-    controller_family: twinkle::ControllerFamily,
+    controller_family: twinkle_ui::ControllerFamily,
     accessibility: AccessibilityPreset,
     text: String,
     selected: &'static str,
@@ -1563,7 +1563,7 @@ impl GalleryApp {
             kind,
             fixture_theme: FixtureTheme::Dark,
             fixture_direction: FixtureDirection::LeftToRight,
-            controller_family: twinkle::ControllerFamily::Generic,
+            controller_family: twinkle_ui::ControllerFamily::Generic,
             accessibility: AccessibilityPreset {
                 id: "default",
                 high_contrast: false,
@@ -1589,12 +1589,14 @@ impl GalleryApp {
 
     fn theme(&self) -> SemanticTheme {
         match self.fixture_theme {
-            FixtureTheme::Light => SemanticTheme::from_tokens(twinkle::SemanticTokenSet::standard(
-                0xf5f7fb, 0xe8edf5, 0xffffff, 0xdce5f1, 0xcbd7e6, 0x17202e, 0x52647a, 0x5641d8,
-                0xded9ff, 0x156db8, 0x217a50,
-            )),
+            FixtureTheme::Light => {
+                SemanticTheme::from_tokens(twinkle_ui::SemanticTokenSet::standard(
+                    0xf5f7fb, 0xe8edf5, 0xffffff, 0xdce5f1, 0xcbd7e6, 0x17202e, 0x52647a, 0x5641d8,
+                    0xded9ff, 0x156db8, 0x217a50,
+                ))
+            }
             FixtureTheme::HighContrast => {
-                SemanticTheme::from_tokens(twinkle::SemanticTokenSet::standard(
+                SemanticTheme::from_tokens(twinkle_ui::SemanticTokenSet::standard(
                     0x000000, 0x090909, 0x111111, 0x1c1c1c, 0x292929, 0xffffff, 0xe8e8e8, 0xffd400,
                     0x4a3d00, 0x00e5ff, 0x7dff8a,
                 ))
@@ -1845,7 +1847,7 @@ impl Application for GalleryApp {
             GalleryMessage::Activate(_) => {}
         }
     }
-    fn view(&self, context: ViewContext) -> impl twinkle::View<Self::Message> {
+    fn view(&self, context: ViewContext) -> impl twinkle_ui::View<Self::Message> {
         match self.kind {
             GalleryKind::Primitives => self.primitives(),
             GalleryKind::CollectionStates => self.collections(),
@@ -1923,7 +1925,7 @@ impl Application for GalleryApp {
 }
 
 fn workbench_theme() -> SemanticTheme {
-    SemanticTheme::from_tokens(twinkle::SemanticTokenSet::standard(
+    SemanticTheme::from_tokens(twinkle_ui::SemanticTokenSet::standard(
         0x101722, 0x151f2d, 0x1c2838, 0x243247, 0x2d405a, 0xf2f6fb, 0x9cacc0, 0x7b61ff, 0x332c61,
         0x67b7ff, 0x61c993,
     ))
@@ -2030,7 +2032,7 @@ gallery_fixture!(
             520,
             FixtureTheme::Dark,
             FixtureDirection::LeftToRight,
-            twinkle::ControllerFamily::Generic,
+            twinkle_ui::ControllerFamily::Generic,
             false,
             false
         ),
@@ -2041,7 +2043,7 @@ gallery_fixture!(
             520,
             FixtureTheme::HighContrast,
             FixtureDirection::LeftToRight,
-            twinkle::ControllerFamily::Generic,
+            twinkle_ui::ControllerFamily::Generic,
             true,
             true
         ),
@@ -2062,7 +2064,7 @@ gallery_fixture!(
                 id: "150-percent",
                 factor: 1.5,
             },
-            controller_family: twinkle::ControllerFamily::Generic,
+            controller_family: twinkle_ui::ControllerFamily::Generic,
             accessibility: AccessibilityPreset {
                 id: "default",
                 high_contrast: false,
@@ -2089,7 +2091,7 @@ gallery_fixture!(
         520,
         FixtureTheme::Dark,
         FixtureDirection::LeftToRight,
-        twinkle::ControllerFamily::Generic,
+        twinkle_ui::ControllerFamily::Generic,
         false,
         false
     )],
@@ -2111,7 +2113,7 @@ gallery_fixture!(
         620,
         FixtureTheme::Dark,
         FixtureDirection::LeftToRight,
-        twinkle::ControllerFamily::Xbox,
+        twinkle_ui::ControllerFamily::Xbox,
         false,
         false
     )],
@@ -2133,7 +2135,7 @@ gallery_fixture!(
         720,
         FixtureTheme::Dark,
         FixtureDirection::RightToLeft,
-        twinkle::ControllerFamily::PlayStation,
+        twinkle_ui::ControllerFamily::PlayStation,
         false,
         false
     )],
@@ -2156,7 +2158,7 @@ gallery_fixture!(
             620,
             FixtureTheme::Dark,
             FixtureDirection::LeftToRight,
-            twinkle::ControllerFamily::Xbox,
+            twinkle_ui::ControllerFamily::Xbox,
             false,
             false
         ),
@@ -2167,7 +2169,7 @@ gallery_fixture!(
             720,
             FixtureTheme::Dark,
             FixtureDirection::LeftToRight,
-            twinkle::ControllerFamily::PlayStation,
+            twinkle_ui::ControllerFamily::PlayStation,
             false,
             false
         ),
@@ -2178,7 +2180,7 @@ gallery_fixture!(
             620,
             FixtureTheme::Light,
             FixtureDirection::RightToLeft,
-            twinkle::ControllerFamily::Switch,
+            twinkle_ui::ControllerFamily::Switch,
             false,
             false
         ),
@@ -2189,7 +2191,7 @@ gallery_fixture!(
             620,
             FixtureTheme::HighContrast,
             FixtureDirection::LeftToRight,
-            twinkle::ControllerFamily::Generic,
+            twinkle_ui::ControllerFamily::Generic,
             true,
             true
         ),
@@ -2221,7 +2223,7 @@ gallery_fixture!(
         420,
         FixtureTheme::Dark,
         FixtureDirection::LeftToRight,
-        twinkle::ControllerFamily::Generic,
+        twinkle_ui::ControllerFamily::Generic,
         false,
         false
     )],
@@ -2243,7 +2245,7 @@ gallery_fixture!(
         360,
         FixtureTheme::Dark,
         FixtureDirection::LeftToRight,
-        twinkle::ControllerFamily::Generic,
+        twinkle_ui::ControllerFamily::Generic,
         false,
         false
     )],
@@ -2259,7 +2261,7 @@ enum WorkbenchMessage {
     SetDirection(FixtureDirection),
     SetScale(f32),
     SetViewport(u32, u32),
-    SetControllerFamily(twinkle::ControllerFamily),
+    SetControllerFamily(twinkle_ui::ControllerFamily),
     ToggleHighContrast(bool),
     ToggleReducedEffects(bool),
     CompareVariant(String),
@@ -2666,7 +2668,7 @@ impl Application for WorkbenchApp {
         }
     }
 
-    fn view(&self, context: ViewContext) -> impl twinkle::View<Self::Message> {
+    fn view(&self, context: ViewContext) -> impl twinkle_ui::View<Self::Message> {
         let viewport_width = context.viewport.size.width.max(640.0);
         let viewport_height = context.viewport.size.height.max(420.0);
         let compact = viewport_width < 960.0 || viewport_height < 700.0;
@@ -2801,11 +2803,13 @@ impl Application for WorkbenchApp {
                 Row::new()
                     .gap(6.0)
                     .child(Button::new(
-                        WorkbenchMessage::SetControllerFamily(twinkle::ControllerFamily::Generic),
+                        WorkbenchMessage::SetControllerFamily(
+                            twinkle_ui::ControllerFamily::Generic,
+                        ),
                         "Generic controller",
                     ))
                     .child(Button::new(
-                        WorkbenchMessage::SetControllerFamily(twinkle::ControllerFamily::Xbox),
+                        WorkbenchMessage::SetControllerFamily(twinkle_ui::ControllerFamily::Xbox),
                         "Xbox",
                     ))
                     .child(Button::new(
@@ -5091,7 +5095,7 @@ mod tests {
         let (width, height) = app.initial_size();
         let mut host = UiHost::new(app, width, height);
         let before = render_host(&host, width, height, 1.0);
-        let focused = twinkle::focused_surface_with_foreground(0x243957, 0xffd166, 0xf5f9ff);
+        let focused = twinkle_ui::focused_surface_with_foreground(0x243957, 0xffd166, 0xf5f9ff);
         let focused_pixel = [
             ((focused >> 16) & 0xff) as u8,
             ((focused >> 8) & 0xff) as u8,
@@ -5101,7 +5105,7 @@ mod tests {
 
         let mut after = before.clone();
         for _ in 0..32 {
-            let outcome = host.handle_controller_action(twinkle::ControllerAction::Down);
+            let outcome = host.handle_controller_action(twinkle_ui::ControllerAction::Down);
             assert!(outcome.semantic_failures.is_empty());
             after = render_host(&host, width, height, 1.0);
             if after.rgba.as_chunks::<4>().0.contains(&focused_pixel) {
@@ -5122,15 +5126,15 @@ mod tests {
     #[test]
     fn compact_workbench_viewport_keeps_rows_separate_and_scrollable() {
         fn named<'a>(
-            nodes: &'a [twinkle::AccessibilityNode],
+            nodes: &'a [twinkle_ui::AccessibilityNode],
             name: &str,
-        ) -> &'a twinkle::AccessibilityNode {
+        ) -> &'a twinkle_ui::AccessibilityNode {
             nodes
                 .iter()
                 .find(|node| node.label.as_deref() == Some(name))
                 .unwrap_or_else(|| panic!("missing semantic node `{name}`"))
         }
-        fn bottom(node: &twinkle::AccessibilityNode) -> f32 {
+        fn bottom(node: &twinkle_ui::AccessibilityNode) -> f32 {
             node.rect.origin.y + node.rect.size.height
         }
 
@@ -5150,8 +5154,8 @@ mod tests {
 
         let mut live_scroll_host =
             UiHost::new(WorkbenchApp::new().expect("workbench app"), 900, 534);
-        let outcome = live_scroll_host.handle_event(twinkle::UiEvent::Scroll {
-            point: twinkle::Point { x: 650.0, y: 300.0 },
+        let outcome = live_scroll_host.handle_event(twinkle_ui::UiEvent::Scroll {
+            point: twinkle_ui::Point { x: 650.0, y: 300.0 },
             delta_y: 420.0,
         });
         assert!(

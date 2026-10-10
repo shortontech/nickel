@@ -13,12 +13,12 @@ use nickel_file::{
         SelectionModifiers, SortDirection as DesktopSortDirection, SortKey as DesktopSortKey,
     },
 };
-use twinkle::{
+use twinkle_input::KeyCode;
+use twinkle_ui::{
     Container, FilePlaneItem, FrameOverlay, Image, ImageFit, Insets, Layer, OverlayAnchor,
     OverlayMenu, OverlayMenuItem, OverlayStyle, Point, Rect, SemanticRole, Size, Text, UiId,
     ViewContext,
 };
-use twinkle_input::KeyCode;
 
 use super::desktop_label_foreground;
 use crate::file_window_host::FileWindowHost;
@@ -838,7 +838,7 @@ impl DesktopApplication {
             }
             KeyCode::KeyC | KeyCode::KeyX if self.modifiers.toggle => {
                 if let Some(id) = self.layout.active() {
-                    <Self as twinkle::Application>::update(
+                    <Self as twinkle_ui::Application>::update(
                         self,
                         if code == KeyCode::KeyX {
                             DesktopMessage::Cut(id)
@@ -857,7 +857,7 @@ impl DesktopApplication {
             KeyCode::KeyA if self.modifiers.toggle => self.layout.select_all(),
             KeyCode::F2 => {
                 if let Some(id) = self.layout.active() {
-                    <Self as twinkle::Application>::update(self, DesktopMessage::Rename(id));
+                    <Self as twinkle_ui::Application>::update(self, DesktopMessage::Rename(id));
                 }
             }
             KeyCode::ArrowLeft if move_selected => self.move_selected_by(-96.0, 0.0),
@@ -1077,7 +1077,7 @@ impl DesktopApplication {
     }
 }
 
-impl twinkle::Application for DesktopApplication {
+impl twinkle_ui::Application for DesktopApplication {
     type Message = DesktopMessage;
 
     fn update(&mut self, message: Self::Message) {
@@ -1533,7 +1533,7 @@ impl twinkle::Application for DesktopApplication {
         overlays
     }
 
-    fn view(&self, context: ViewContext) -> impl twinkle::View<Self::Message> {
+    fn view(&self, context: ViewContext) -> impl twinkle_ui::View<Self::Message> {
         let width = context.viewport.size.width;
         let height = context.viewport.size.height;
         let mut layer = Layer::new().width(width).height(height).child(

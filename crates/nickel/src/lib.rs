@@ -69,14 +69,14 @@ use std::{
     path::{Component, Path},
     time::{Duration, Instant},
 };
-#[cfg(any(test, target_os = "linux"))]
-use twinkle::ControllerAction;
-use twinkle::{
-    Application, HostBatch, HostChangeToken, HostEvent, HostEventOutcome, HostFailure,
-    HostFailureStage, UiHost,
-};
 use twinkle_input::{
     AggregateModifier, InputEvent, KeyEdge, LogicalKey, PointerButton, PointerEvent,
+};
+#[cfg(any(test, target_os = "linux"))]
+use twinkle_ui::ControllerAction;
+use twinkle_ui::{
+    Application, HostBatch, HostChangeToken, HostEvent, HostEventOutcome, HostFailure,
+    HostFailureStage, UiHost,
 };
 
 #[doc(hidden)]
@@ -447,7 +447,7 @@ struct CodexSurfaces {
     chats: Vec<CodexChatSurface>,
     writer_leases: WriterLeases,
     installation: FeatureInstallation,
-    theme: twinkle::SemanticTheme,
+    theme: twinkle_ui::SemanticTheme,
 }
 
 struct CodexChatSurface {
@@ -557,20 +557,20 @@ impl<A: Application> EmbeddedUiSurface<A> {
         self.host.application_mut()
     }
 
-    fn commands(&self) -> &[twinkle::backend::PaintCommand] {
+    fn commands(&self) -> &[twinkle_ui::backend::PaintCommand] {
         self.host.commands()
     }
 
-    fn retained_paint_damage(&self) -> Option<&[twinkle::Rect]> {
+    fn retained_paint_damage(&self) -> Option<&[twinkle_ui::Rect]> {
         self.host.retained_paint_damage()
     }
 
     #[cfg(test)]
-    fn accessibility_nodes(&self) -> &[twinkle::AccessibilityNode] {
+    fn accessibility_nodes(&self) -> &[twinkle_ui::AccessibilityNode] {
         self.host.accessibility_nodes()
     }
 
-    fn inspection(&self) -> twinkle::HostInspection {
+    fn inspection(&self) -> twinkle_ui::HostInspection {
         self.host.inspect()
     }
 
@@ -592,7 +592,7 @@ impl<A: Application> EmbeddedUiSurface<A> {
     fn normalized_ingress(
         &mut self,
         event: HostEvent,
-        authority: twinkle::NormalizedIngressAuthority,
+        authority: twinkle_ui::NormalizedIngressAuthority,
     ) -> HostEventOutcome {
         self.step(HostBatch {
             events: vec![event],
@@ -614,7 +614,7 @@ impl<A: Application> EmbeddedUiSurface<A> {
 
     fn suspend(&mut self) -> HostEventOutcome {
         self.step(HostBatch {
-            events: vec![HostEvent::Ui(twinkle::UiEvent::Suspended)],
+            events: vec![HostEvent::Ui(twinkle_ui::UiEvent::Suspended)],
             ..HostBatch::default()
         })
     }
@@ -725,7 +725,7 @@ impl CodexSurfaces {
         self.installation
     }
 
-    fn set_theme(&mut self, theme: twinkle::SemanticTheme) -> bool {
+    fn set_theme(&mut self, theme: twinkle_ui::SemanticTheme) -> bool {
         if self.theme == theme {
             return false;
         }
@@ -793,7 +793,7 @@ impl CodexSurfaces {
 
     fn new(
         settings: &OptionalFeatureSettings,
-        theme: twinkle::SemanticTheme,
+        theme: twinkle_ui::SemanticTheme,
     ) -> Result<Self, String> {
         Ok(Self {
             enabled: settings.codex_enabled,
@@ -1205,8 +1205,8 @@ fn scene_for_native_surface(
     width: u32,
     height: u32,
 ) -> Option<(
-    Vec<twinkle::backend::PaintCommand>,
-    Option<Vec<twinkle::Rect>>,
+    Vec<twinkle_ui::backend::PaintCommand>,
+    Option<Vec<twinkle_ui::Rect>>,
 )> {
     let surface = shell.surface(id)?;
     let plugin_key = surface.plugin_key().cloned();
@@ -2181,7 +2181,7 @@ fn handle_controller_action(
     state: &mut LiveShell,
     codex: &mut CodexSurfaces,
     action: ControllerAction,
-    _family: twinkle::ControllerFamily,
+    _family: twinkle_ui::ControllerFamily,
 ) -> Result<(), String> {
     if !state.surface_visible(SurfaceRole::Screenshot)
         && controller_launcher_shortcut(action).is_some()
@@ -2667,9 +2667,9 @@ pub fn run() -> Result<(), String> {
     );
     let mut hover_repaint: Option<(SurfaceRole, Instant)> = None;
     #[cfg(not(target_os = "windows"))]
-    let mut controller = twinkle::ControllerInput::new();
+    let mut controller = twinkle_ui::ControllerInput::new();
     #[cfg(not(target_os = "windows"))]
-    let mut controller_schedule = twinkle::ControllerPollSchedule::new(Instant::now());
+    let mut controller_schedule = twinkle_ui::ControllerPollSchedule::new(Instant::now());
     let mut diagnostic_loop_started = Instant::now();
     let mut diagnostic_loop_iterations = 0_u64;
     let mut diagnostic_overdue_after_poll = Vec::new();
@@ -3564,7 +3564,7 @@ mod tests {
         codex_runtime_from,
     };
     use std::time::{Duration, Instant};
-    use twinkle::ControllerAction;
+    use twinkle_ui::ControllerAction;
 
     #[test]
     fn mixed_scale_desktop_origins_preserve_physical_adjacency() {
@@ -3684,7 +3684,7 @@ mod tests {
         })
     }
 
-    fn center(node: &twinkle::AccessibilityNode) -> InputPoint {
+    fn center(node: &twinkle_ui::AccessibilityNode) -> InputPoint {
         InputPoint {
             x: f64::from(node.rect.origin.x + node.rect.size.width / 2.0),
             y: f64::from(node.rect.origin.y + node.rect.size.height / 2.0),
@@ -4030,10 +4030,10 @@ mod tests {
 
     use nickel_codex::{ReplayBackend, ThreadId};
     use nickel_codex_ui::{BackendMode, ChatApplication, ChatItem, ChatItemKind, ConnectionStatus};
-    use twinkle::{ActionKind, HostBatch, HostEvent, SemanticRole, UiEvent};
     use twinkle_input::{
         DeviceId, EventOrder, InputEvent, Point as InputPoint, PointerEvent, TextEvent, Vector,
     };
+    use twinkle_ui::{ActionKind, HostBatch, HostEvent, SemanticRole, UiEvent};
 
     use super::{EmbeddedUiSurface, WriterLeases, codex_project_application_id};
 

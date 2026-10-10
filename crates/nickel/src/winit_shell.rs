@@ -14,9 +14,9 @@ use std::time::Duration;
 use std::time::Instant;
 
 use nickel_session_protocol::ShellRole as SessionShellRole;
-use twinkle::backend::PaintCommand;
-use twinkle::{AggregatePresenterCacheDiagnostics, DamageRegion, HostChangeToken};
 use twinkle_input::InputEvent;
+use twinkle_ui::backend::PaintCommand;
+use twinkle_ui::{AggregatePresenterCacheDiagnostics, DamageRegion, HostChangeToken};
 use winit::dpi::{LogicalPosition, LogicalSize};
 use winit::event::{Event, WindowEvent};
 #[cfg(not(target_os = "windows"))]
@@ -400,7 +400,7 @@ fn surface_runtime_diagnostics(
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct NativePresentSample {
-    pub correlation: twinkle::NativeFrameCorrelation,
+    pub correlation: twinkle_ui::NativeFrameCorrelation,
     pub present_us: u64,
     pub input_to_present_us: Option<u64>,
 }
@@ -2173,7 +2173,7 @@ impl WinitShell {
         &mut self,
         id: SurfaceId,
         commands: &[PaintCommand],
-        damage: Option<&[twinkle::Rect]>,
+        damage: Option<&[twinkle_ui::Rect]>,
     ) -> Result<DamageRegion, String> {
         let index = *self
             .surface_indices
@@ -2313,7 +2313,7 @@ impl WinitShell {
         id: SurfaceId,
         token: HostChangeToken,
         commands: &[PaintCommand],
-        damage: Option<&[twinkle::Rect]>,
+        damage: Option<&[twinkle_ui::Rect]>,
     ) -> Result<Option<DamageRegion>, String> {
         let index = *self
             .surface_indices
@@ -3570,10 +3570,10 @@ mod tests {
 
     use std::collections::{BTreeMap, HashSet, VecDeque};
     use std::time::{Duration, Instant};
-    use twinkle::AggregatePresenterCacheDiagnostics;
     use twinkle_input::{
         DeviceId, EventOrder, InputEvent, KeyEdge, Point, PointerButton, PointerEvent, Vector,
     };
+    use twinkle_ui::AggregatePresenterCacheDiagnostics;
     use winit::platform::pump_events::PumpStatus;
 
     #[test]

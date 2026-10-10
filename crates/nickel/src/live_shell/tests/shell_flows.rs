@@ -31,7 +31,7 @@
             key.clone(),
             (
                 surface.clone(),
-                twinkle::UiHost::new(application, surface.width, surface.height),
+                twinkle_ui::UiHost::new(application, surface.width, surface.height),
             ),
         );
         assert_eq!(shell.plugin_panel_title(&key), Some("Home"));
@@ -394,25 +394,25 @@
             let button = shell
                 .plugin_panel_host_for(&launcher)
                 .unwrap()
-                .query_unique(&twinkle::SemanticSelector::RoleAndName {
-                    role: twinkle::SemanticRole::Button,
+                .query_unique(&twinkle_ui::SemanticSelector::RoleAndName {
+                    role: twinkle_ui::SemanticRole::Button,
                     name: "Blocked application".into(),
                 })
                 .unwrap();
-            let point = twinkle::Point {
+            let point = twinkle_ui::Point {
                 x: button.bounds.origin.x + button.bounds.size.width / 2.0,
                 y: button.bounds.origin.y + button.bounds.size.height / 2.0,
             };
 
             assert!(shell.plugin_panel_host_ui_for(
                 &launcher,
-                twinkle::UiEvent::PointerPressed(point),
+                twinkle_ui::UiEvent::PointerPressed(point),
                 608,
                 628,
             ));
             assert!(shell.plugin_panel_host_ui_for(
                 &launcher,
-                twinkle::UiEvent::PointerReleased(point),
+                twinkle_ui::UiEvent::PointerReleased(point),
                 608,
                 628,
             ));
@@ -630,7 +630,7 @@
         assert!(shell.open_window_menu_at(window.id.0,120,200));
         let key=shell.active_shell_surface_key("window-menu");
         shell.plugin_panel_scene(&key,320,400);
-        let target=shell.plugin_panel_host_ref(&key).unwrap().query_unique(&twinkle::SemanticSelector::RoleAndName{role:twinkle::SemanticRole::Button,name:"Close window".into()}).unwrap();
+        let target=shell.plugin_panel_host_ref(&key).unwrap().query_unique(&twinkle_ui::SemanticSelector::RoleAndName{role:twinkle_ui::SemanticRole::Button,name:"Close window".into()}).unwrap();
         host.take_commands();
         shell.plugin_surface_host_event(&key,HostEvent::Ui(UiEvent::AccessibilityActivate(target.id)),(320,400),None,None);
         assert!(shell.window_menu.is_none());
@@ -675,13 +675,13 @@
             ),
             effects: Vec::new(),
         };
-        twinkle::Application::update(
+        twinkle_ui::Application::update(
             &mut application,
             super::LockMessage::Password("secret".into()),
         );
-        assert!(twinkle::Application::shortcut_outcome(
+        assert!(twinkle_ui::Application::shortcut_outcome(
             &mut application,
-            twinkle::Shortcut::Submit
+            twinkle_ui::Shortcut::Submit
         )
         .changed);
         assert!(application.password.is_empty());
@@ -760,8 +760,8 @@
 
         assert!(shell.global_shortcut(GlobalShortcut::ProjectDisplays));
         assert!(shell.control_visible);
-        assert!(shell.control_host.query_unique(&twinkle::SemanticSelector::RoleAndName {
-            role: twinkle::SemanticRole::Button,
+        assert!(shell.control_host.query_unique(&twinkle_ui::SemanticSelector::RoleAndName {
+            role: twinkle_ui::SemanticRole::Button,
             name: "Show desktop".into(),
         }).is_err());
         });

@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 
-use twinkle::{Application, HostedApplication, InternalSurfaceId, InternalSurfaceSet};
+use twinkle_ui::{Application, HostedApplication, InternalSurfaceId, InternalSurfaceSet};
 
 use crate::{FileApp, FileLaunch};
 
@@ -74,7 +74,7 @@ impl FileWindowCoordinator {
     pub fn take_surface(
         &mut self,
         id: InternalSurfaceId,
-    ) -> Option<Box<dyn twinkle::InternalUiSurface>> {
+    ) -> Option<Box<dyn twinkle_ui::InternalUiSurface>> {
         self.surfaces.remove(id)
     }
 

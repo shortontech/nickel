@@ -59,12 +59,12 @@ use nickel_terminal::{
     TerminalCell, TerminalColor, TerminalNamedColor, TerminalPoint, TerminalScroll,
     TerminalSelectionKind, TerminalSnapshot, TerminalUnderline,
 };
-use twinkle::{
-    CustomPaint, Rect, SemanticRole, StyledTextSpan, TextAlign, View, backend::PaintCommand,
-};
 use twinkle_input::{
     AggregateModifier, InputEvent, KeyCode, KeyEdge, ModifierState, PhysicalKey, PointerButton,
     PointerEvent, TextEvent,
+};
+use twinkle_ui::{
+    CustomPaint, Rect, SemanticRole, StyledTextSpan, TextAlign, View, backend::PaintCommand,
 };
 
 pub const MAX_PASTE_BYTES: usize = 1024 * 1024;
@@ -750,12 +750,12 @@ impl<'a> TerminalViewport<'a> {
                     font_family: Some(std::sync::Arc::clone(&self.palette.font_family)),
                     strikethrough: cell.strikethrough,
                     underline: match cell.underline {
-                        TerminalUnderline::None => twinkle::TextUnderlineStyle::None,
-                        TerminalUnderline::Single => twinkle::TextUnderlineStyle::Single,
-                        TerminalUnderline::Double => twinkle::TextUnderlineStyle::Double,
-                        TerminalUnderline::Curly => twinkle::TextUnderlineStyle::Curly,
-                        TerminalUnderline::Dotted => twinkle::TextUnderlineStyle::Dotted,
-                        TerminalUnderline::Dashed => twinkle::TextUnderlineStyle::Dashed,
+                        TerminalUnderline::None => twinkle_ui::TextUnderlineStyle::None,
+                        TerminalUnderline::Single => twinkle_ui::TextUnderlineStyle::Single,
+                        TerminalUnderline::Double => twinkle_ui::TextUnderlineStyle::Double,
+                        TerminalUnderline::Curly => twinkle_ui::TextUnderlineStyle::Curly,
+                        TerminalUnderline::Dotted => twinkle_ui::TextUnderlineStyle::Dotted,
+                        TerminalUnderline::Dashed => twinkle_ui::TextUnderlineStyle::Dashed,
                     },
                     color: Some(foreground),
                     background: None,
@@ -917,11 +917,11 @@ fn blend(foreground: u32, background: u32, amount: f32) -> u32 {
 mod tests {
     use super::*;
     use nickel_terminal::{TerminalDimensions, TerminalEngine};
-    use twinkle::{Rect, SoftwareRenderer, UiFrame};
     use twinkle_input::{
         DeviceId, EventOrder, KeyEvent, KeyLocation, LogicalKey, Modifier, ModifierState,
         Point as InputPoint,
     };
+    use twinkle_ui::{Rect, SoftwareRenderer, UiFrame};
 
     fn snapshot(bytes: &[u8]) -> TerminalSnapshot {
         let dimensions = TerminalDimensions::new(10, 3, 8, 16).unwrap();

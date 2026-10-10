@@ -77,11 +77,11 @@ mod tests {
         CodexBackend, CodexEvent, CodexSettings, EventKind, Model, ReplayBackend, ServerRequestId,
         Thread, ThreadId, TurnId,
     };
-    use twinkle::{
+    use twinkle_testkit::{ActivationVia, Scenario, Selector};
+    use twinkle_ui::{
         Application, DocumentSelection, HostBatch, HostEvent, Rect, SelectionEndpoint,
         SemanticRole, Shortcut, SoftwareRenderer, UiEvent, UiFrame, UiHost, UiId, UiStateStore,
     };
-    use twinkle_testkit::{ActivationVia, Scenario, Selector};
 
     fn open_run_settings(scenario: &mut Scenario<ChatApplication>) {
         scenario
@@ -613,7 +613,7 @@ mod tests {
                     && node.allocated.size.height >= 0.0
             }));
             assert!(
-                tree.query_unique(&twinkle::SemanticSelector::RoleAndName {
+                tree.query_unique(&twinkle_ui::SemanticSelector::RoleAndName {
                     role: SemanticRole::Button,
                     name: "Nickel".into(),
                 })
@@ -642,7 +642,7 @@ mod tests {
             assert!(
                 scenario
                     .host()
-                    .query_unique(&twinkle::SemanticSelector::RoleAndName {
+                    .query_unique(&twinkle_ui::SemanticSelector::RoleAndName {
                         role: SemanticRole::Button,
                         name: "Integrate Codex with the shell".into(),
                     })
@@ -715,7 +715,7 @@ mod tests {
             scenario
                 .assert_action_available(
                     &Selector::role_name(SemanticRole::MenuItem, name),
-                    twinkle::ActionKind::Activate,
+                    twinkle_ui::ActionKind::Activate,
                 )
                 .expect("expanded menu item is semantic and actionable");
         }
@@ -726,7 +726,7 @@ mod tests {
             scenario
                 .assert_action_available(
                     &Selector::role_name(SemanticRole::MenuItem, name),
-                    twinkle::ActionKind::Activate,
+                    twinkle_ui::ActionKind::Activate,
                 )
                 .expect("expanded Codex action is semantic and actionable");
         }
@@ -752,7 +752,7 @@ mod tests {
         scenario
             .assert_action_available(
                 &Selector::role_name(SemanticRole::Button, "Pair a phone"),
-                twinkle::ActionKind::Activate,
+                twinkle_ui::ActionKind::Activate,
             )
             .unwrap();
     }
@@ -798,7 +798,7 @@ mod tests {
         assert!(
             scenario
                 .host()
-                .query_unique(&twinkle::SemanticSelector::RoleAndName {
+                .query_unique(&twinkle_ui::SemanticSelector::RoleAndName {
                     role: SemanticRole::Button,
                     name: "Save host".into(),
                 })
@@ -959,12 +959,14 @@ mod tests {
                 complete: index != 23,
             });
         }
-        app.update(ChatMessage::ConversationScrolled(twinkle::ScrollExtent {
-            viewport: twinkle::Size::new(900.0, 400.0),
-            content: twinkle::Size::new(900.0, 3000.0),
-            offset_x: 0.0,
-            offset: 0.0,
-        }));
+        app.update(ChatMessage::ConversationScrolled(
+            twinkle_ui::ScrollExtent {
+                viewport: twinkle_ui::Size::new(900.0, 400.0),
+                content: twinkle_ui::Size::new(900.0, 3000.0),
+                offset_x: 0.0,
+                offset: 0.0,
+            },
+        ));
         assert!(!app.state.conversation_pinned);
         assert!(!app.state.new_content_while_unpinned);
         app.state.apply(
@@ -991,9 +993,9 @@ mod tests {
                 .state
                 .new_content_while_unpinned
         );
-        let measured = twinkle::ScrollExtent {
-            viewport: twinkle::Size::new(900.0, 400.0),
-            content: twinkle::Size::new(900.0, 3000.0),
+        let measured = twinkle_ui::ScrollExtent {
+            viewport: twinkle_ui::Size::new(900.0, 400.0),
+            content: twinkle_ui::Size::new(900.0, 3000.0),
             offset_x: 0.0,
             offset: 2579.0,
         };
@@ -1005,10 +1007,12 @@ mod tests {
         scenario
             .host_mut()
             .application_mut()
-            .update(ChatMessage::ConversationScrolled(twinkle::ScrollExtent {
-                offset: 2580.0,
-                ..measured
-            }));
+            .update(ChatMessage::ConversationScrolled(
+                twinkle_ui::ScrollExtent {
+                    offset: 2580.0,
+                    ..measured
+                },
+            ));
         assert!(scenario.host().application().state.conversation_pinned);
     }
 
@@ -1035,9 +1039,9 @@ mod tests {
         let rect = Rect::new(0.0, 0.0, 640.0, 480.0);
         let layout = |app: &ChatApplication| {
             UiFrame::layout(
-                app.view(twinkle::ViewContext::new(
+                app.view(twinkle_ui::ViewContext::new(
                     rect,
-                    twinkle::InputModality::Keyboard,
+                    twinkle_ui::InputModality::Keyboard,
                 )),
                 rect,
             )
@@ -1097,9 +1101,9 @@ mod tests {
         ] {
             let area = Rect::new(0.0, 0.0, width, height);
             let frame = UiFrame::layout(
-                app.view(twinkle::ViewContext::new(
+                app.view(twinkle_ui::ViewContext::new(
                     area,
-                    twinkle::InputModality::Keyboard,
+                    twinkle_ui::InputModality::Keyboard,
                 )),
                 area,
             );
@@ -1186,7 +1190,7 @@ mod tests {
         assert!(scenario.host().application().model_picker_generation > 0);
         let wide_option = scenario
             .host()
-            .query_unique(&twinkle::SemanticSelector::RoleAndName {
+            .query_unique(&twinkle_ui::SemanticSelector::RoleAndName {
                 role: SemanticRole::MenuItem,
                 name: "Alternative model".into(),
             })
@@ -1200,7 +1204,7 @@ mod tests {
         // choice must be rehomed within the smaller client area.
         let resized_option = scenario
             .host()
-            .query_unique(&twinkle::SemanticSelector::RoleAndName {
+            .query_unique(&twinkle_ui::SemanticSelector::RoleAndName {
                 role: SemanticRole::MenuItem,
                 name: "Alternative model".into(),
             })
@@ -1212,7 +1216,7 @@ mod tests {
         assert!(
             scenario
                 .host()
-                .query_unique(&twinkle::SemanticSelector::RoleAndName {
+                .query_unique(&twinkle_ui::SemanticSelector::RoleAndName {
                     role: SemanticRole::Button,
                     name: "Send".into()
                 })
@@ -1225,7 +1229,7 @@ mod tests {
         assert!(
             scenario
                 .host()
-                .query_unique(&twinkle::SemanticSelector::RoleAndName {
+                .query_unique(&twinkle_ui::SemanticSelector::RoleAndName {
                     role: SemanticRole::Button,
                     name: "Model selector".into()
                 })
@@ -1233,7 +1237,7 @@ mod tests {
         );
         let compact_option = scenario
             .host()
-            .query_unique(&twinkle::SemanticSelector::RoleAndName {
+            .query_unique(&twinkle_ui::SemanticSelector::RoleAndName {
                 role: SemanticRole::MenuItem,
                 name: "Alternative model".into(),
             })
@@ -1290,7 +1294,7 @@ mod tests {
         assert_eq!(host.inspect().scale_factor, 2.0);
         assert_eq!(host.render_frame().logical_size, (960, 540));
         let send = host
-            .query_unique(&twinkle::SemanticSelector::RoleAndName {
+            .query_unique(&twinkle_ui::SemanticSelector::RoleAndName {
                 role: SemanticRole::Button,
                 name: "Send".into(),
             })
@@ -1374,9 +1378,9 @@ mod tests {
         ] {
             let area = Rect::new(0.0, 0.0, width, height);
             let frame = UiFrame::layout(
-                app.view(twinkle::ViewContext::new(
+                app.view(twinkle_ui::ViewContext::new(
                     area,
-                    twinkle::InputModality::Keyboard,
+                    twinkle_ui::InputModality::Keyboard,
                 )),
                 area,
             );
@@ -1453,7 +1457,7 @@ mod tests {
             assert!(
                 scenario
                     .host()
-                    .query_unique(&twinkle::SemanticSelector::RoleAndName {
+                    .query_unique(&twinkle_ui::SemanticSelector::RoleAndName {
                         role: SemanticRole::Button,
                         name: "Approve".into(),
                     })
@@ -1463,7 +1467,7 @@ mod tests {
             assert!(
                 scenario
                     .host()
-                    .query_unique(&twinkle::SemanticSelector::RoleAndName {
+                    .query_unique(&twinkle_ui::SemanticSelector::RoleAndName {
                         role: SemanticRole::Button,
                         name: "Decline".into(),
                     })
@@ -1566,9 +1570,9 @@ mod tests {
         assert!(app.model_picker_generation > generation);
         assert!(app.state.draft.is_empty());
         let model_frame = UiFrame::layout(
-            app.view(twinkle::ViewContext::new(
+            app.view(twinkle_ui::ViewContext::new(
                 Rect::new(0.0, 0.0, 900.0, 640.0),
-                twinkle::InputModality::Keyboard,
+                twinkle_ui::InputModality::Keyboard,
             )),
             Rect::new(0.0, 0.0, 900.0, 640.0),
         );
@@ -1595,9 +1599,9 @@ mod tests {
         app.update(ChatMessage::SelectCommand("/permissions".into()));
         assert!(app.state.draft.is_empty());
         let permissions_frame = UiFrame::layout(
-            app.view(twinkle::ViewContext::new(
+            app.view(twinkle_ui::ViewContext::new(
                 Rect::new(0.0, 0.0, 900.0, 640.0),
-                twinkle::InputModality::Keyboard,
+                twinkle_ui::InputModality::Keyboard,
             )),
             Rect::new(0.0, 0.0, 900.0, 640.0),
         );
@@ -1612,9 +1616,9 @@ mod tests {
         app.update(ChatMessage::SelectCommand("/status".into()));
         assert!(app.state.draft.is_empty());
         let status_frame = UiFrame::layout(
-            app.view(twinkle::ViewContext::new(
+            app.view(twinkle_ui::ViewContext::new(
                 Rect::new(0.0, 0.0, 900.0, 640.0),
-                twinkle::InputModality::Keyboard,
+                twinkle_ui::InputModality::Keyboard,
             )),
             Rect::new(0.0, 0.0, 900.0, 640.0),
         );
@@ -1749,9 +1753,9 @@ mod tests {
             Some(25)
         );
         let frame = UiFrame::layout(
-            app.view(twinkle::ViewContext::new(
+            app.view(twinkle_ui::ViewContext::new(
                 Rect::new(0.0, 0.0, 900.0, 640.0),
-                twinkle::InputModality::Keyboard,
+                twinkle_ui::InputModality::Keyboard,
             )),
             Rect::new(0.0, 0.0, 900.0, 640.0),
         );
@@ -1821,7 +1825,7 @@ mod tests {
         assert!(
             scenario
                 .host()
-                .query_unique(&twinkle::SemanticSelector::Id(UiId::from(
+                .query_unique(&twinkle_ui::SemanticSelector::Id(UiId::from(
                     "model-selector/option-1"
                 )))
                 .is_err()
@@ -1829,7 +1833,7 @@ mod tests {
         assert!(
             scenario
                 .host()
-                .query_unique(&twinkle::SemanticSelector::RoleAndName {
+                .query_unique(&twinkle_ui::SemanticSelector::RoleAndName {
                     role: SemanticRole::Button,
                     name: "Model selector".into(),
                 })
@@ -2017,7 +2021,7 @@ mod tests {
             } else {
                 app
             };
-            assert!(twinkle::Application::paste_clipboard_image(
+            assert!(twinkle_ui::Application::paste_clipboard_image(
                 &mut app,
                 1,
                 1,
@@ -2110,10 +2114,10 @@ mod tests {
                 // the generic spatial route otherwise enters File's submenu.
                 scenario
                     .host_mut()
-                    .handle_controller_action(twinkle::ControllerAction::Down);
+                    .handle_controller_action(twinkle_ui::ControllerAction::Down);
                 scenario
                     .host_mut()
-                    .handle_controller_action(twinkle::ControllerAction::Down);
+                    .handle_controller_action(twinkle_ui::ControllerAction::Down);
                 scenario
                     .activate_via(via, &Selector::id("root/menu-bar/codex-menu"))
                     .unwrap();
@@ -2135,10 +2139,10 @@ mod tests {
             if via == ActivationVia::Controller {
                 scenario
                     .host_mut()
-                    .handle_controller_action(twinkle::ControllerAction::Down);
+                    .handle_controller_action(twinkle_ui::ControllerAction::Down);
                 scenario
                     .host_mut()
-                    .handle_controller_action(twinkle::ControllerAction::Confirm);
+                    .handle_controller_action(twinkle_ui::ControllerAction::Confirm);
             } else {
                 scenario
                     .activate_via(
@@ -2300,9 +2304,9 @@ mod tests {
 
         app.state.draft = "/".into();
         let commands = UiFrame::layout(
-            app.view(twinkle::ViewContext::new(
+            app.view(twinkle_ui::ViewContext::new(
                 Rect::new(0.0, 0.0, 900.0, 640.0),
-                twinkle::InputModality::Keyboard,
+                twinkle_ui::InputModality::Keyboard,
             )),
             Rect::new(0.0, 0.0, 900.0, 640.0),
         );
@@ -2315,9 +2319,9 @@ mod tests {
         app.update(ChatMessage::ToggleRunSettings);
         app.update(ChatMessage::ToggleModelPicker);
         let models = UiFrame::layout(
-            app.view(twinkle::ViewContext::new(
+            app.view(twinkle_ui::ViewContext::new(
                 Rect::new(0.0, 0.0, 900.0, 640.0),
-                twinkle::InputModality::Keyboard,
+                twinkle_ui::InputModality::Keyboard,
             )),
             Rect::new(0.0, 0.0, 900.0, 640.0),
         );
@@ -2327,16 +2331,16 @@ mod tests {
         app.update(ChatMessage::ToggleResumePicker);
         app.resume_picker_loading = false;
         let resume_tree = UiFrame::layout(
-            app.view(twinkle::ViewContext::new(
+            app.view(twinkle_ui::ViewContext::new(
                 Rect::new(0.0, 0.0, 900.0, 640.0),
-                twinkle::InputModality::Keyboard,
+                twinkle_ui::InputModality::Keyboard,
             )),
             Rect::new(0.0, 0.0, 900.0, 640.0),
         );
         assert!(has_accessible_text(&resume_tree, "Already active"));
         assert!(has_accessible_text(&resume_tree, "latest preview text"));
         let mut scenario = Scenario::new(app, 900, 640);
-        let button = |name: &str| twinkle::SemanticSelector::RoleAndName {
+        let button = |name: &str| twinkle_ui::SemanticSelector::RoleAndName {
             role: SemanticRole::Button,
             name: name.into(),
         };
@@ -2477,9 +2481,9 @@ mod tests {
         app.resume_picker_open = true;
         app.resume_picker_loading = true;
         let frame = UiFrame::layout(
-            app.view(twinkle::ViewContext::new(
+            app.view(twinkle_ui::ViewContext::new(
                 Rect::new(0.0, 0.0, 900.0, 640.0),
-                twinkle::InputModality::Keyboard,
+                twinkle_ui::InputModality::Keyboard,
             )),
             Rect::new(0.0, 0.0, 900.0, 640.0),
         );
@@ -2487,9 +2491,9 @@ mod tests {
 
         app.resume_picker_loading = false;
         let frame = UiFrame::layout(
-            app.view(twinkle::ViewContext::new(
+            app.view(twinkle_ui::ViewContext::new(
                 Rect::new(0.0, 0.0, 900.0, 640.0),
-                twinkle::InputModality::Keyboard,
+                twinkle_ui::InputModality::Keyboard,
             )),
             Rect::new(0.0, 0.0, 900.0, 640.0),
         );
@@ -2497,9 +2501,9 @@ mod tests {
 
         app.state.thread_error = Some("offline".into());
         let frame = UiFrame::layout(
-            app.view(twinkle::ViewContext::new(
+            app.view(twinkle_ui::ViewContext::new(
                 Rect::new(0.0, 0.0, 900.0, 640.0),
-                twinkle::InputModality::Keyboard,
+                twinkle_ui::InputModality::Keyboard,
             )),
             Rect::new(0.0, 0.0, 900.0, 640.0),
         );
@@ -2525,7 +2529,7 @@ mod tests {
         let mut scenario = Scenario::new(app, 1120, 760);
         let draft = scenario
             .host()
-            .query_unique(&twinkle::SemanticSelector::Role(SemanticRole::TextField))
+            .query_unique(&twinkle_ui::SemanticSelector::Role(SemanticRole::TextField))
             .unwrap();
         scenario
             .host_mut()
@@ -2537,7 +2541,7 @@ mod tests {
         scenario
             .assert_value(
                 &Selector::Role(SemanticRole::TextField),
-                &twinkle::SemanticValueSnapshot::Text(expected.into()),
+                &twinkle_ui::SemanticValueSnapshot::Text(expected.into()),
             )
             .unwrap();
 
@@ -2548,17 +2552,17 @@ mod tests {
         scenario
             .set_value(
                 &Selector::Role(SemanticRole::TextField),
-                twinkle::SemanticValueInput::Text(long_draft.clone()),
+                twinkle_ui::SemanticValueInput::Text(long_draft.clone()),
             )
             .unwrap()
             .assert_value(
                 &Selector::Role(SemanticRole::TextField),
-                &twinkle::SemanticValueSnapshot::Text(long_draft),
+                &twinkle_ui::SemanticValueSnapshot::Text(long_draft),
             )
             .unwrap();
         let composer = scenario
             .host()
-            .query_unique(&twinkle::SemanticSelector::RoleAndName {
+            .query_unique(&twinkle_ui::SemanticSelector::RoleAndName {
                 role: SemanticRole::Group,
                 name: "Message composer".into(),
             })
@@ -2582,7 +2586,7 @@ mod tests {
         let mut scenario = Scenario::new(app, 1024, 720);
         let composer = scenario
             .host()
-            .query_unique(&twinkle::SemanticSelector::Role(SemanticRole::TextField))
+            .query_unique(&twinkle_ui::SemanticSelector::Role(SemanticRole::TextField))
             .expect("composer field");
         scenario
             .host_mut()
@@ -2600,7 +2604,7 @@ mod tests {
         assert!(
             scenario
                 .host()
-                .query_unique(&twinkle::SemanticSelector::RoleAndName {
+                .query_unique(&twinkle_ui::SemanticSelector::RoleAndName {
                     role: SemanticRole::Button,
                     name: "Send".into(),
                 })
@@ -2674,8 +2678,8 @@ mod tests {
             "First half second half"
         );
         assert!(host.commands().iter().any(|command| match command {
-            twinkle::backend::PaintCommand::Text { text, .. }
-            | twinkle::backend::PaintCommand::StyledText { text, .. } => {
+            twinkle_ui::backend::PaintCommand::Text { text, .. }
+            | twinkle_ui::backend::PaintCommand::StyledText { text, .. } => {
                 text.contains("First half second half")
             }
             _ => false,

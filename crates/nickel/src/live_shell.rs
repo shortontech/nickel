@@ -18,15 +18,15 @@ pub(crate) fn internal_normalized_ingress(
     input: twinkle_input::InputEvent,
     clipboard_text: Option<String>,
     owner: &'static str,
-    recipient: impl Into<twinkle::HostInputLease>,
+    recipient: impl Into<twinkle_ui::HostInputLease>,
     transform_generation: Option<u64>,
-) -> (HostEvent, twinkle::NormalizedIngressAuthority) {
+) -> (HostEvent, twinkle_ui::NormalizedIngressAuthority) {
     let recipient = recipient.into();
     let device = input.device();
     let device_generation = device.map_or(0, |device| device.0);
     let order = INTERNAL_INGRESS_ORDER.fetch_add(1, Ordering::Relaxed);
     let epoch = INTERNAL_INGRESS_EPOCH.get_or_init(Instant::now);
-    let source = twinkle::NormalizedSourceBinding {
+    let source = twinkle_ui::NormalizedSourceBinding {
         seat: 0,
         backend_stream: if device.is_some() {
             format!("routed-native-input:{owner}")
@@ -42,7 +42,7 @@ pub(crate) fn internal_normalized_ingress(
         },
         reconnect_generation: device_generation,
     };
-    let recipient = twinkle::NormalizedRecipientBinding {
+    let recipient = twinkle_ui::NormalizedRecipientBinding {
         // A focus-gained event is the authority that restores this host's input
         // lease. Rejecting it while the previous lease is zero would leave a
         // window unable to accept input after its first focus loss.
@@ -52,7 +52,7 @@ pub(crate) fn internal_normalized_ingress(
         ),
         lifetime: recipient.frame_generation,
     };
-    let authority = twinkle::NormalizedIngressAuthority {
+    let authority = twinkle_ui::NormalizedIngressAuthority {
         source: source.clone(),
         recipient,
         transfer_cutoff: None,
@@ -64,11 +64,11 @@ pub(crate) fn internal_normalized_ingress(
         composition_recipient_epoch: None,
         coordinate_meaning: "host-logical".into(),
     };
-    let event = HostEvent::NormalizedIngress(twinkle::NormalizedInputEnvelope {
+    let event = HostEvent::NormalizedIngress(twinkle_ui::NormalizedInputEnvelope {
         input,
         clipboard_text,
         source,
-        admission: twinkle::NormalizedAdmissionBinding {
+        admission: twinkle_ui::NormalizedAdmissionBinding {
             order,
             monotonic_micros: epoch.elapsed().as_micros() as u64,
         },
@@ -108,10 +108,10 @@ use nickel_session_protocol::{AnchorSide, Geometry, ShellPopoverAnchor};
 use nickel_session_protocol::{
     PointerInteraction, PreviewTargetAction, ResolvedShellTarget, ShellSemanticTarget,
 };
-use twinkle::InternalSurfaceId;
-use twinkle::Rect;
-use twinkle::backend::PaintCommand;
-use twinkle::{
+use twinkle_ui::InternalSurfaceId;
+use twinkle_ui::Rect;
+use twinkle_ui::backend::PaintCommand;
+use twinkle_ui::{
     Application as UiApplication, Column, Container, ControllerAction, HostBatch, HostChangeToken,
     HostEvent, Insets, Point, SemanticRole, Shortcut, Size, Spacer, Text, TextAlign, TextField,
     UiEvent, UiHostViewport, ViewContext,
@@ -242,7 +242,7 @@ impl LockApplication {
     }
 }
 
-impl twinkle::Application for LockApplication {
+impl twinkle_ui::Application for LockApplication {
     type Message = LockMessage;
 
     fn update(&mut self, message: Self::Message) {
@@ -255,16 +255,16 @@ impl twinkle::Application for LockApplication {
         }
     }
 
-    fn shortcut_outcome(&mut self, shortcut: Shortcut) -> twinkle::ShortcutOutcome {
+    fn shortcut_outcome(&mut self, shortcut: Shortcut) -> twinkle_ui::ShortcutOutcome {
         if shortcut != Shortcut::Submit {
-            return twinkle::ShortcutOutcome::from_changed(false);
+            return twinkle_ui::ShortcutOutcome::from_changed(false);
         }
         self.effects
             .push(LockEffect::Authenticate(std::mem::take(&mut self.password)));
-        twinkle::ShortcutOutcome::handled(true)
+        twinkle_ui::ShortcutOutcome::handled(true)
     }
 
-    fn view(&self, context: ViewContext) -> impl twinkle::View<Self::Message> {
+    fn view(&self, context: ViewContext) -> impl twinkle_ui::View<Self::Message> {
         let width = context.viewport.size.width;
         let height = context.viewport.size.height;
         let username = std::env::var("USER").unwrap_or_else(|_| "Session locked".into());
@@ -301,7 +301,7 @@ impl twinkle::Application for LockApplication {
                     .accessibility_label("Password")
                     .width(340.0)
                     .height(46.0)
-                    .align_self(twinkle::Align::Center)
+                    .align_self(twinkle_ui::Align::Center)
                     .background(self.palette.surface)
                     .radius(10.0)
                     .padding(Insets {
@@ -595,7 +595,7 @@ pub struct LiveShell {
     wallpaper_loaded_source_fingerprint: Option<WallpaperSourceFingerprint>,
     wallpaper: Option<Arc<image::RgbaImage>>,
     wallpaper_size: (u32, u32),
-    desktop_host: twinkle::UiHost<DesktopApplication>,
+    desktop_host: twinkle_ui::UiHost<DesktopApplication>,
     desktop_viewports: HashMap<String, DesktopSurfaceViewport>,
     desktop_active_viewport: String,
     desktop_change_token: HostChangeToken,
@@ -626,7 +626,7 @@ pub struct LiveShell {
     launcher_visible: bool,
     run_status: HashMap<String, String>,
     locked: bool,
-    lock_host: twinkle::UiHost<LockApplication>,
+    lock_host: twinkle_ui::UiHost<LockApplication>,
     lock_change_token: HostChangeToken,
     lock_deadline: Option<Instant>,
     control_visible: bool,
@@ -662,7 +662,7 @@ pub struct LiveShell {
         nickel_core::plugins::PluginSurfaceKey,
         (
             nickel_core::plugins::PluginSurface,
-            twinkle::UiHost<crate::plugin_panel::PluginPanelApplication>,
+            twinkle_ui::UiHost<crate::plugin_panel::PluginPanelApplication>,
         ),
     >,
     plugin_image_deadlines:
@@ -673,7 +673,7 @@ pub struct LiveShell {
         nickel_core::plugins::PluginSurfaceKey,
         (
             nickel_core::plugins::PluginSurface,
-            twinkle::UiHost<crate::plugin_panel::PluginPanelApplication>,
+            twinkle_ui::UiHost<crate::plugin_panel::PluginPanelApplication>,
             u64,
             u64,
         ),
@@ -734,7 +734,7 @@ pub struct LiveShell {
     secure_storage_query_error: Option<(platform::SessionRequestError, Instant)>,
     requested_codex_project: Option<String>,
     screenshot: ScreenshotTool,
-    keyboard_host: twinkle::UiHost<twinkle::on_screen_keyboard::KeyboardApp>,
+    keyboard_host: twinkle_ui::UiHost<twinkle_ui::on_screen_keyboard::KeyboardApp>,
     keyboard_service_generation: u64,
     keyboard_visible: bool,
     keyboard_enabled: bool,
@@ -829,7 +829,7 @@ struct HostRuntimeSamples {
 }
 
 impl HostRuntimeSamples {
-    fn record(&mut self, telemetry: twinkle::HostTelemetry) {
+    fn record(&mut self, telemetry: twinkle_ui::HostTelemetry) {
         for (samples, value) in [
             (&mut self.input_to_message_us, telemetry.input_to_message_us),
             (&mut self.input_to_frame_us, telemetry.input_to_frame_us),
@@ -897,9 +897,9 @@ fn external_plugin_settings(
 }
 
 fn taskbar_plugin_control_bounds(
-    host: &twinkle::UiHost<crate::plugin_panel::PluginPanelApplication>,
+    host: &twinkle_ui::UiHost<crate::plugin_panel::PluginPanelApplication>,
     control: &str,
-) -> Option<twinkle::Rect> {
+) -> Option<twinkle_ui::Rect> {
     let mut matches = host
         .accessibility_nodes()
         .iter()
@@ -942,10 +942,10 @@ pub(crate) fn passive_pointer_batch(batch: &HostBatch) -> bool {
 }
 
 pub(crate) fn step_plugin_host(
-    host: &mut twinkle::UiHost<crate::plugin_panel::PluginPanelApplication>,
+    host: &mut twinkle_ui::UiHost<crate::plugin_panel::PluginPanelApplication>,
     data: Option<String>,
     mut batch: HostBatch,
-) -> Result<(twinkle::HostEventOutcome, u64), String> {
+) -> Result<(twinkle_ui::HostEventOutcome, u64), String> {
     let geometry_or_data_changed = batch.application_changed
         || batch
             .surface_size
@@ -1001,7 +1001,7 @@ pub(crate) fn step_plugin_host(
         return Ok((outcome, retained_bytes));
     }
     let now = batch.now;
-    let mut before_update: Vec<twinkle::ScrollAnchor> = Vec::new();
+    let mut before_update: Vec<twinkle_ui::ScrollAnchor> = Vec::new();
     let mut virtual_targets = Vec::new();
     // Projection may already have admitted a new tree. Its row keys cannot
     // measure the previous native view. Resolve that tree in host.step below
@@ -1010,7 +1010,7 @@ pub(crate) fn step_plugin_host(
     if geometry_or_data_changed && host.application().native_view_matches_accepted() {
         if host.application().has_virtual_collections() {
             let inspection = host.inspect();
-            let targets = if inspection.modality == twinkle::InputModality::Controller {
+            let targets = if inspection.modality == twinkle_ui::InputModality::Controller {
                 [inspection.controller_target, inspection.keyboard_focus]
             } else {
                 [inspection.keyboard_focus, inspection.controller_target]
@@ -1070,7 +1070,7 @@ pub(crate) fn step_plugin_host(
     let mut virtual_work_pending = false;
     for pass in 0..8 {
         let (width, height) = host.render_frame().logical_size;
-        let viewport = twinkle::Rect::new(0.0, 0.0, width as f32, height as f32);
+        let viewport = twinkle_ui::Rect::new(0.0, 0.0, width as f32, height as f32);
         let scale = host.render_frame().scale_factor;
         let generation = host.resolved_frame_generation();
         let measurements = host.application().virtual_measurements(
@@ -1082,7 +1082,7 @@ pub(crate) fn step_plugin_host(
         // Keep a surviving transaction anchor through estimate refinement.
         // Anchoring a different first-visible row here can move the focused
         // row back offscreen as preceding estimates become measured heights.
-        let mut anchors: Vec<twinkle::ScrollAnchor> = before_update
+        let mut anchors: Vec<twinkle_ui::ScrollAnchor> = before_update
             .iter()
             .filter(|anchor| {
                 host.capture_scroll_anchor(anchor.target())
@@ -1128,7 +1128,7 @@ pub(crate) fn step_plugin_host(
         let feedback = host.application().virtual_collection_feedback(
             host.resolved_frame_generation(),
             host.resolved_layout(),
-            twinkle::Rect::new(0.0, 0.0, width as f32, height as f32),
+            twinkle_ui::Rect::new(0.0, 0.0, width as f32, height as f32),
         )?;
         if feedback.is_empty() {
             break;
@@ -1170,7 +1170,7 @@ pub(crate) fn step_plugin_host(
 }
 
 fn render_plugin_host(
-    host: &mut twinkle::UiHost<crate::plugin_panel::PluginPanelApplication>,
+    host: &mut twinkle_ui::UiHost<crate::plugin_panel::PluginPanelApplication>,
     data: Option<String>,
     batch: HostBatch,
 ) -> Result<(Vec<PaintCommand>, u64), String> {
@@ -1423,12 +1423,12 @@ impl LiveShell {
         let secure_storage_state = platform::SecureStorageState::Ready;
         let control_host = ProjectionRecoveryHost::new(ProjectionRecoveryApp::new(), 380, 650);
         let notification_host = NotificationHost::new(NotificationApp::new(palette), 420, 180);
-        let desktop_host = twinkle::UiHost::new(
+        let desktop_host = twinkle_ui::UiHost::new(
             DesktopApplication::new(wallpaper.clone(), palette, file_window_host.clone()),
             1920,
             1080,
         );
-        let lock_host = twinkle::UiHost::new(
+        let lock_host = twinkle_ui::UiHost::new(
             LockApplication {
                 password: Zeroizing::new(String::new()),
                 status: None,
@@ -1515,7 +1515,7 @@ impl LiveShell {
             match crate::plugin_panel::PluginPanelApplication::bundled() {
                 Ok(application) => {
                     plugin_registry.mark_running(id)?;
-                    Some(twinkle::UiHost::new(
+                    Some(twinkle_ui::UiHost::new(
                         application,
                         crate::plugin_panel::surface().width,
                         crate::plugin_panel::surface().height,
@@ -1706,7 +1706,7 @@ impl LiveShell {
             secure_storage_query_error,
             requested_codex_project: None,
             screenshot: ScreenshotTool::default().with_session_host(session_host),
-            keyboard_host: twinkle::UiHost::new(
+            keyboard_host: twinkle_ui::UiHost::new(
                 nickel_ui_host::keyboard_app(palette),
                 1280,
                 nickel_core::on_screen_keyboard::KEYBOARD_HEIGHT,
@@ -2346,7 +2346,7 @@ impl LiveShell {
         true
     }
 
-    pub fn semantic_theme(&self) -> twinkle::SemanticTheme {
+    pub fn semantic_theme(&self) -> twinkle_ui::SemanticTheme {
         semantic_theme_from_palette(self.palette)
     }
 
@@ -2484,9 +2484,9 @@ impl LiveShell {
                 self.keyboard_host
                     .application_mut()
                     .set_tokens(nickel_ui_host::semantic_tokens(self.palette));
-                self.keyboard_host.step(twinkle::HostBatch {
+                self.keyboard_host.step(twinkle_ui::HostBatch {
                     surface_size: Some((width, height)),
-                    events: vec![twinkle::HostEvent::Poll],
+                    events: vec![twinkle_ui::HostEvent::Poll],
                     ..Default::default()
                 });
                 self.keyboard_host.commands().to_vec()
@@ -2615,7 +2615,7 @@ impl LiveShell {
     pub(crate) fn desktop_host_event_authorized(
         &mut self,
         ingress: HostEvent,
-        authority: Option<twinkle::NormalizedIngressAuthority>,
+        authority: Option<twinkle_ui::NormalizedIngressAuthority>,
     ) -> bool {
         let event = normalized_input(&ingress)
             .expect("desktop host event must be normalized")
@@ -3341,7 +3341,7 @@ impl LiveShell {
     pub(crate) fn plugin_surface_semantic_nodes(
         &self,
         key: &nickel_core::plugins::PluginSurfaceKey,
-    ) -> Option<Vec<twinkle::SemanticNodeSnapshot>> {
+    ) -> Option<Vec<twinkle_ui::SemanticNodeSnapshot>> {
         self.plugin_surface_hosts
             .get(key)
             .map(|(_, host)| host.semantic_nodes())
@@ -3357,7 +3357,7 @@ impl LiveShell {
     pub(crate) fn plugin_surface_retained_paint_damage(
         &self,
         key: &nickel_core::plugins::PluginSurfaceKey,
-    ) -> Option<&[twinkle::Rect]> {
+    ) -> Option<&[twinkle_ui::Rect]> {
         self.plugin_panel_host_ref(key)?.retained_paint_damage()
     }
 
@@ -4922,7 +4922,7 @@ impl LiveShell {
             }
         };
         let surface = application.resolved_surface(&surface)?;
-        let host = twinkle::UiHost::new(application, surface.width, surface.height);
+        let host = twinkle_ui::UiHost::new(application, surface.width, surface.height);
         if self.primary_panel_host_ref().is_none() {
             self.primary_panel_key = key.clone();
         }
@@ -5427,7 +5427,8 @@ impl LiveShell {
                     }
                     if let Some((surface, host)) = self.plugin_surface_hosts.get_mut(&key) {
                         *surface = resolved.clone();
-                        *host = twinkle::UiHost::new(application, resolved.width, resolved.height);
+                        *host =
+                            twinkle_ui::UiHost::new(application, resolved.width, resolved.height);
                     }
                 }
             }
@@ -5957,7 +5958,7 @@ impl LiveShell {
                     if self.is_shell_package(id) && !self.shell_package_selected(id) {
                         continue;
                     }
-                    let host = twinkle::UiHost::new(application, surface.width, surface.height);
+                    let host = twinkle_ui::UiHost::new(application, surface.width, surface.height);
                     let key = nickel_core::plugins::PluginSurfaceKey {
                         plugin_id: id.to_owned(),
                         surface_id: surface.id.clone(),
@@ -5971,7 +5972,7 @@ impl LiveShell {
         } else if id == crate::plugin_panel::manifest().id {
             crate::plugin_panel::PluginPanelApplication::bundled().map(|application| {
                 let surface = crate::plugin_panel::surface().clone();
-                let host = twinkle::UiHost::new(application, surface.width, surface.height);
+                let host = twinkle_ui::UiHost::new(application, surface.width, surface.height);
                 if self.primary_panel_host_ref().is_none() {
                     self.primary_panel_key = crate::plugin_panel::surface_key();
                 }
@@ -6043,7 +6044,7 @@ impl LiveShell {
                     return None;
                 }
                 let frame = host.render_frame();
-                let viewport = twinkle::Rect::new(
+                let viewport = twinkle_ui::Rect::new(
                     0.0,
                     0.0,
                     frame.logical_size.0 as f32,
@@ -6125,7 +6126,7 @@ impl LiveShell {
     }
 
     pub fn scene_change_token(&self, role: SurfaceRole) -> Option<HostChangeToken> {
-        let host_token = |inspection: twinkle::HostInspection| HostChangeToken {
+        let host_token = |inspection: twinkle_ui::HostInspection| HostChangeToken {
             frame_generation: inspection.frame_generation,
             semantic_generation: inspection.semantic_generation,
             native_correlation: inspection.native_correlation,
@@ -6428,7 +6429,7 @@ impl LiveShell {
             // wallpaper selection. Redraw the live admitted consumers only.
             for (key, (_, host)) in &self.plugin_surface_hosts {
                 let frame = host.render_frame();
-                let viewport = twinkle::Rect::new(
+                let viewport = twinkle_ui::Rect::new(
                     0.0,
                     0.0,
                     frame.logical_size.0 as f32,
@@ -6570,7 +6571,7 @@ impl LiveShell {
         ingress: HostEvent,
         width: u32,
         height: u32,
-        authority: Option<twinkle::NormalizedIngressAuthority>,
+        authority: Option<twinkle_ui::NormalizedIngressAuthority>,
     ) -> bool {
         if !self.surface_visible(SurfaceRole::Notification) {
             return false;
@@ -6637,27 +6638,27 @@ impl LiveShell {
 
     fn primary_panel_host_ref(
         &self,
-    ) -> Option<&twinkle::UiHost<crate::plugin_panel::PluginPanelApplication>> {
+    ) -> Option<&twinkle_ui::UiHost<crate::plugin_panel::PluginPanelApplication>> {
         self.plugin_panel_host_ref(&self.primary_panel_key())
     }
 
     fn plugin_panel_host_for(
         &mut self,
         key: &nickel_core::plugins::PluginSurfaceKey,
-    ) -> Option<&mut twinkle::UiHost<crate::plugin_panel::PluginPanelApplication>> {
+    ) -> Option<&mut twinkle_ui::UiHost<crate::plugin_panel::PluginPanelApplication>> {
         self.plugin_surface_hosts.get_mut(key).map(|(_, host)| host)
     }
 
     pub(crate) fn plugin_panel_host_ref(
         &self,
         key: &nickel_core::plugins::PluginSurfaceKey,
-    ) -> Option<&twinkle::UiHost<crate::plugin_panel::PluginPanelApplication>> {
+    ) -> Option<&twinkle_ui::UiHost<crate::plugin_panel::PluginPanelApplication>> {
         self.plugin_surface_hosts.get(key).map(|(_, host)| host)
     }
 
     fn preview_plugin_host_ref(
         &self,
-    ) -> Option<&twinkle::UiHost<crate::plugin_panel::PluginPanelApplication>> {
+    ) -> Option<&twinkle_ui::UiHost<crate::plugin_panel::PluginPanelApplication>> {
         self.plugin_panel_host_ref(&self.active_shell_surface_key("window-preview"))
     }
 
@@ -6751,7 +6752,7 @@ impl LiveShell {
                     && outcome.messages.is_empty()
                     && matches!(
                         outcome.invalidation,
-                        twinkle::Invalidation::None | twinkle::Invalidation::Paint
+                        twinkle_ui::Invalidation::None | twinkle_ui::Invalidation::Paint
                     );
                 Ok((
                     outcome.changed,
@@ -7707,7 +7708,7 @@ impl LiveShell {
         event: HostEvent,
         size: (u32, u32),
         limit: Option<usize>,
-    ) -> twinkle::HostEventOutcome {
+    ) -> twinkle_ui::HostEventOutcome {
         self.control_host_event_authorized(event, size, limit, None)
     }
 
@@ -7716,8 +7717,8 @@ impl LiveShell {
         event: HostEvent,
         size: (u32, u32),
         limit: Option<usize>,
-        authority: Option<twinkle::NormalizedIngressAuthority>,
-    ) -> twinkle::HostEventOutcome {
+        authority: Option<twinkle_ui::NormalizedIngressAuthority>,
+    ) -> twinkle_ui::HostEventOutcome {
         if !self.control_visible {
             return Default::default();
         }
@@ -7758,7 +7759,7 @@ impl LiveShell {
     pub(crate) fn plugin_surface_field_lease(
         &self,
         key: &nickel_core::plugins::PluginSurfaceKey,
-    ) -> Option<(twinkle::UiId, u64)> {
+    ) -> Option<(twinkle_ui::UiId, u64)> {
         let inspection = self.plugin_panel_host_ref(key)?.inspect();
         Some((
             inspection.keyboard_focus?,
@@ -7767,7 +7768,7 @@ impl LiveShell {
     }
 
     #[cfg(target_os = "linux")]
-    pub(crate) fn shell_field_lease(&self, role: SurfaceRole) -> Option<(twinkle::UiId, u64)> {
+    pub(crate) fn shell_field_lease(&self, role: SurfaceRole) -> Option<(twinkle_ui::UiId, u64)> {
         let inspection = match role {
             SurfaceRole::ControlCenter => self
                 .quick_settings_surface_active()
@@ -7935,7 +7936,7 @@ impl LiveShell {
     fn semantic_panel_host(
         &self,
         _output: &Option<String>,
-    ) -> Option<&twinkle::UiHost<crate::plugin_panel::PluginPanelApplication>> {
+    ) -> Option<&twinkle_ui::UiHost<crate::plugin_panel::PluginPanelApplication>> {
         self.taskbar_surface_key()
             .as_ref()
             .and_then(|key| self.plugin_panel_host_ref(key))
@@ -7976,7 +7977,7 @@ impl LiveShell {
                 use nickel_core::on_screen_keyboard::{
                     KeyboardPanel, compact_us_keyboard_rows, us_keyboard_rows,
                 };
-                use twinkle::on_screen_keyboard::KeyboardMessage;
+                use twinkle_ui::on_screen_keyboard::KeyboardMessage;
                 let message = if key == "osk-hide" {
                     KeyboardMessage::Hide
                 } else if key == "osk-larger" {
@@ -8334,7 +8335,7 @@ impl LiveShell {
     pub fn preview_host_input(
         &mut self,
         input: twinkle_input::InputEvent,
-    ) -> twinkle::HostEventOutcome {
+    ) -> twinkle_ui::HostEventOutcome {
         if self.preview_plugin_active() {
             let Some(host) = self.preview_plugin_host_ref() else {
                 return Default::default();
@@ -8354,8 +8355,8 @@ impl LiveShell {
     pub(crate) fn preview_host_event_authorized(
         &mut self,
         ingress: HostEvent,
-        authority: Option<twinkle::NormalizedIngressAuthority>,
-    ) -> twinkle::HostEventOutcome {
+        authority: Option<twinkle_ui::NormalizedIngressAuthority>,
+    ) -> twinkle_ui::HostEventOutcome {
         if self.preview_plugin_active() {
             let Some(size) = self.preview_plugin_size() else {
                 return Default::default();
@@ -9232,7 +9233,7 @@ impl LiveShell {
         event: HostEvent,
         width: u32,
         height: u32,
-        authority: Option<twinkle::NormalizedIngressAuthority>,
+        authority: Option<twinkle_ui::NormalizedIngressAuthority>,
     ) -> bool {
         if !self.screenshot.visible() {
             return false;
@@ -9899,7 +9900,7 @@ impl LiveShell {
         if !self.lock_host.input_context().text_focused
             && let Ok(target) = self
                 .lock_host
-                .query_unique(&twinkle::SemanticSelector::Role(SemanticRole::TextField))
+                .query_unique(&twinkle_ui::SemanticSelector::Role(SemanticRole::TextField))
         {
             let point = Point {
                 x: target.bounds.origin.x + target.bounds.size.width / 2.0,
@@ -10441,9 +10442,9 @@ impl LiveShell {
             if request.request.renewal.is_some() {
                 warnings.push("This renews an existing lease; it does not extend until approved.");
             }
-            let presentation = twinkle::approval::ApprovalPresentation {
+            let presentation = twinkle_ui::approval::ApprovalPresentation {
                 requester: request.client_label.clone(),
-                identity: twinkle::approval::RequesterIdentity::SelfReportedRemote,
+                identity: twinkle_ui::approval::RequesterIdentity::SelfReportedRemote,
                 action: "Control desktop resources".into(),
                 scope: Some(scope),
                 duration,
@@ -10746,8 +10747,8 @@ impl LiveShell {
         &mut self,
         event: HostEvent,
         size: (u32, u32),
-        authority: Option<twinkle::NormalizedIngressAuthority>,
-    ) -> twinkle::HostEventOutcome {
+        authority: Option<twinkle_ui::NormalizedIngressAuthority>,
+    ) -> twinkle_ui::HostEventOutcome {
         self.plugin_surface_host_event(
             &self.active_shell_surface_key("window-preview"),
             event,
@@ -10909,8 +10910,8 @@ impl LiveShell {
         event: HostEvent,
         size: (u32, u32),
         limit: Option<usize>,
-        authority: Option<twinkle::NormalizedIngressAuthority>,
-    ) -> twinkle::HostEventOutcome {
+        authority: Option<twinkle_ui::NormalizedIngressAuthority>,
+    ) -> twinkle_ui::HostEventOutcome {
         let batch = HostBatch {
             surface_size: Some(size),
             clipboard_text_limit: limit,
@@ -10922,13 +10923,13 @@ impl LiveShell {
             let _ = self.plugin_panel_scene(key, size.0, size.1);
         }
         let Some(host) = self.plugin_panel_host_for(key) else {
-            return twinkle::HostEventOutcome::default();
+            return twinkle_ui::HostEventOutcome::default();
         };
         let mut outcome = host.step(batch);
         let effects = host.application_mut().take_effects();
         if let Some(error) = host.application_mut().take_runtime_failure() {
             self.fail_plugin_panel_runtime(&key.plugin_id, error);
-            return twinkle::HostEventOutcome::default();
+            return twinkle_ui::HostEventOutcome::default();
         }
         outcome.changed |= self.apply_plugin_effects(effects);
         outcome
@@ -11451,11 +11452,11 @@ fn desktop_label_foreground(
     wallpaper: Option<&image::RgbaImage>,
     viewport: Size,
     label: Rect,
-    desktop_base: twinkle::Color,
-    interaction_surface: Option<twinkle::Color>,
-) -> twinkle::Color {
-    const DARK_INK: twinkle::Color = 0x111111;
-    const LIGHT_INK: twinkle::Color = 0xffffff;
+    desktop_base: twinkle_ui::Color,
+    interaction_surface: Option<twinkle_ui::Color>,
+) -> twinkle_ui::Color {
+    const DARK_INK: twinkle_ui::Color = 0x111111;
+    const LIGHT_INK: twinkle_ui::Color = 0xffffff;
     const SAMPLE_COLUMNS: usize = 9;
     const SAMPLE_ROWS: usize = 5;
 
@@ -11510,7 +11511,7 @@ fn desktop_label_foreground(
     }
 }
 
-fn color_channels(color: twinkle::Color) -> [u8; 4] {
+fn color_channels(color: twinkle_ui::Color) -> [u8; 4] {
     let encoded_alpha = ((color >> 24) & 0xff) as u8;
     [
         ((color >> 16) & 0xff) as u8,

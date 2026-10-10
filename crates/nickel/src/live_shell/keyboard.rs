@@ -3,7 +3,7 @@ use nickel_core::on_screen_keyboard::{
     KeyboardKey, Latch, TouchscreenPresence, VirtualModifiers, resolve_enablement,
 };
 use nickel_session_protocol::OnScreenKeyboardInput;
-use twinkle::on_screen_keyboard::KeyboardEffect;
+use twinkle_ui::on_screen_keyboard::KeyboardEffect;
 
 impl LiveShell {
     pub(crate) fn keyboard_placement_preferences(&self) -> (bool, u32) {
@@ -31,7 +31,7 @@ impl LiveShell {
         epoch: Option<u64>,
     ) -> bool {
         use crate::plugin_panel::PluginEffect;
-        use twinkle::on_screen_keyboard::KeyboardMessage;
+        use twinkle_ui::on_screen_keyboard::KeyboardMessage;
         let PluginEffect::Keyboard { plugin_id, effect } = effect else {
             return false;
         };
@@ -315,7 +315,7 @@ impl LiveShell {
         ingress: HostEvent,
         width: u32,
         height: u32,
-        authority: Option<twinkle::NormalizedIngressAuthority>,
+        authority: Option<twinkle_ui::NormalizedIngressAuthority>,
     ) -> bool {
         use twinkle_input::{InputEvent, KeyEdge, PointerEvent, TouchEvent};
         let input = normalized_input(&ingress)

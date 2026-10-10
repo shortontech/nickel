@@ -16,7 +16,7 @@ use std::sync::{
 #[cfg(feature = "application")]
 use std::thread::JoinHandle;
 #[cfg(feature = "application")]
-use twinkle::{
+use twinkle_ui::{
     Align, AnyView, Application, Button, ComponentBuilderExt, Container, Insets, Justify, Length,
     Row, Shortcut, ShortcutOutcome, Spacer, Text, UiId, VerticalScroll, View, ui,
 };
@@ -698,7 +698,7 @@ const fn markdown_fixture_variant(
         theme: twinkle_testkit::FixtureTheme::Dark,
         locale: twinkle_testkit::DEFAULT_LOCALE,
         scale: twinkle_testkit::DEFAULT_SCALE,
-        controller_family: twinkle::ControllerFamily::Generic,
+        controller_family: twinkle_ui::ControllerFamily::Generic,
         accessibility: twinkle_testkit::DEFAULT_ACCESSIBILITY,
     }
 }
@@ -784,7 +784,7 @@ impl twinkle_testkit::Fixture for MarkdownViewerWorkbenchFixture {
 
     fn default_activation() -> Option<twinkle_testkit::Selector> {
         Some(twinkle_testkit::Selector::role_name(
-            twinkle::SemanticRole::Button,
+            twinkle_ui::SemanticRole::Button,
             "Reload",
         ))
     }
@@ -890,7 +890,7 @@ impl Application for ViewerApplication {
         })
     }
 
-    fn view(&self, _context: twinkle::ViewContext) -> impl View<Self::Message> {
+    fn view(&self, _context: twinkle_ui::ViewContext) -> impl View<Self::Message> {
         viewer_view_with_palette(&self.model, self.runtime_error.as_deref(), self.palette)
     }
 
@@ -979,8 +979,8 @@ pub fn viewer_view_with_palette(
     )
     .on_scroll(ViewerMessage::Scroll)
     .controlled(true)
-    .theme(twinkle::SemanticTheme::from_tokens(
-        twinkle::SemanticTokenSet::standard(
+    .theme(twinkle_ui::SemanticTheme::from_tokens(
+        twinkle_ui::SemanticTokenSet::standard(
             palette.background,
             palette.panel,
             palette.panel,
@@ -1420,8 +1420,8 @@ mod tests {
     #[test]
     #[cfg(feature = "application")]
     fn viewer_states_have_finite_geometry_and_expected_toolbar_authority() {
-        use twinkle::{Rect, UiFrame};
         use twinkle_testkit::Scenario;
+        use twinkle_ui::{Rect, UiFrame};
 
         let document = LoadedDocument {
             path: PathBuf::from("/tmp/guide.md"),
@@ -1479,8 +1479,8 @@ mod tests {
     #[test]
     #[cfg(feature = "application")]
     fn long_documents_cannot_collapse_viewer_chrome() {
-        use twinkle::{Rect, UiFrame};
         use twinkle_testkit::Scenario;
+        use twinkle_ui::{Rect, UiFrame};
 
         let source = (0..200)
             .map(|index| format!("Paragraph {index} with enough text to make the document tall."))
@@ -1526,7 +1526,7 @@ mod tests {
     #[test]
     #[cfg(feature = "application")]
     fn readme_intrinsic_scroll_extent_stays_bounded() {
-        use twinkle::{Rect, UiFrame};
+        use twinkle_ui::{Rect, UiFrame};
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../README.md");
         let request = LoadRequest {
             generation: 1,
@@ -1555,7 +1555,7 @@ mod tests {
     #[test]
     #[cfg(feature = "application")]
     fn viewer_scroll_extent_measures_wrapped_prose_at_the_resolved_document_width() {
-        use twinkle::{Rect, UiFrame};
+        use twinkle_ui::{Rect, UiFrame};
 
         let paragraph = "Lorem ipsum dolor sit amet consectetur adipiscing elit deserunt fugiat. \
             Et omnis cillum fugiat sint illum esse fugiat. Minus fuga aut dolor quos cupidatat atque.";
@@ -1600,8 +1600,8 @@ mod tests {
     #[test]
     #[cfg(feature = "application")]
     fn toolbar_activation_survives_reconstruction_between_press_and_release() {
-        use twinkle::SemanticRole;
         use twinkle_testkit::{Scenario, Selector};
+        use twinkle_ui::SemanticRole;
 
         let document = LoadedDocument {
             path: PathBuf::from("/tmp/guide.md"),
@@ -1619,8 +1619,8 @@ mod tests {
     #[test]
     #[cfg(feature = "application")]
     fn link_reload_back_and_forward_survive_reconstruction() {
-        use twinkle::SemanticRole;
         use twinkle_testkit::{Scenario, Selector};
+        use twinkle_ui::SemanticRole;
 
         let directory = tempdir().unwrap();
         let first = directory.path().join("first.md");
@@ -1649,8 +1649,8 @@ mod tests {
     #[test]
     #[cfg(feature = "application")]
     fn toolbar_modalities_converge_on_the_same_typed_action() {
-        use twinkle::SemanticRole;
         use twinkle_testkit::{ActivationVia, Scenario, Selector, validate_host};
+        use twinkle_ui::SemanticRole;
 
         let document = LoadedDocument {
             path: PathBuf::from("/tmp/guide.md"),
@@ -1674,8 +1674,8 @@ mod tests {
     #[test]
     #[cfg(feature = "application")]
     fn recoverable_status_keeps_loaded_document_visible() {
-        use twinkle::SemanticRole;
         use twinkle_testkit::{Scenario, Selector};
+        use twinkle_ui::SemanticRole;
 
         let document = LoadedDocument {
             path: PathBuf::from("/tmp/guide.md"),
@@ -1714,8 +1714,8 @@ mod tests {
     #[test]
     #[cfg(feature = "application")]
     fn startup_failure_renders_the_path_and_classified_reason() {
-        use twinkle::SemanticRole;
         use twinkle_testkit::{Scenario, Selector};
+        use twinkle_ui::SemanticRole;
 
         let mut model = ViewerModel::default();
         let missing = PathBuf::from("/definitely/missing/guide.md");
@@ -1773,7 +1773,7 @@ mod tests {
     #[test]
     #[cfg(feature = "application")]
     fn equal_viewer_state_reconstructs_identical_paint_commands() {
-        use twinkle::{Rect, UiFrame};
+        use twinkle_ui::{Rect, UiFrame};
 
         let document = LoadedDocument {
             path: PathBuf::from("/tmp/guide.md"),
@@ -1822,8 +1822,8 @@ mod tests {
 
 #[cfg(all(test, feature = "workbench-fixtures"))]
 mod workbench_fixture_tests {
-    use twinkle::{ControllerAction, Rect, SemanticRole, UiFrame};
     use twinkle_testkit::{Fixture, FixtureProvider, FixtureRegistry, Scenario};
+    use twinkle_ui::{ControllerAction, Rect, SemanticRole, UiFrame};
 
     use super::*;
 

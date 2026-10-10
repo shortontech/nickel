@@ -10,7 +10,7 @@ use std::{
 };
 
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-use twinkle::{
+use twinkle_ui::{
     AdapterOutcome, Application, Container, FrameOverlay, HostAdapter, HostServices, OverlayAnchor,
     OverlayMenu, OverlayMenuItem, Point, UiHost, UiId, View, ViewContext,
 };
@@ -195,7 +195,7 @@ impl<Message: Clone + Send + 'static> HostAdapter<PopupApplication<Message>>
             }
         }
         host.open_transient(
-            twinkle::OverlayId::new("windows-detached-context"),
+            twinkle_ui::OverlayId::new("windows-detached-context"),
             UiId::from("popup-anchor"),
         );
         services.window().focus_window();

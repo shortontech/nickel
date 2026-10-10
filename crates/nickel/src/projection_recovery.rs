@@ -3,7 +3,7 @@ use crate::control_view::ControlAction;
 use nickel_core::display_projection::ProjectionMode;
 use nickel_core::theme::{Appearance, ThemePalette};
 use nickel_i18n::Localizer;
-use twinkle::{
+use twinkle_ui::{
     Align, AnyView, Application, Button, Column, ComponentBuilderExt, Container, DesktopDensity,
     Insets, LinearGradient, ReadingDirection, Row, Spacer, Text, UiHost, ViewContext,
 };
@@ -95,7 +95,7 @@ impl Application for ProjectionRecoveryApp {
         self.effects.push(message);
         self.dirty = true;
     }
-    fn view(&self, context: ViewContext) -> impl twinkle::View<ControlAction> {
+    fn view(&self, context: ViewContext) -> impl twinkle_ui::View<ControlAction> {
         let localizer = Localizer::system();
         let direction = if localizer.is_right_to_left() {
             ReadingDirection::RightToLeft
@@ -341,28 +341,28 @@ mod tests {
         let mut host = UiHost::new(app, 420, 600);
         let localizer = Localizer::system();
         let extend = host
-            .query_unique(&twinkle::SemanticSelector::RoleAndName {
-                role: twinkle::SemanticRole::Button,
+            .query_unique(&twinkle_ui::SemanticSelector::RoleAndName {
+                role: twinkle_ui::SemanticRole::Button,
                 name: localizer.text("control-center-display-extend"),
             })
             .unwrap();
         host.perform_semantic_action(
             extend.id,
-            twinkle::SemanticAction::Invoke(twinkle::ActionKind::Activate),
+            twinkle_ui::SemanticAction::Invoke(twinkle_ui::ActionKind::Activate),
         );
         assert_eq!(
             host.application_mut().take_effects(),
             vec![ControlAction::PreviewProjection(ProjectionMode::Extend)]
         );
         let keep = host
-            .query_unique(&twinkle::SemanticSelector::RoleAndName {
-                role: twinkle::SemanticRole::Button,
+            .query_unique(&twinkle_ui::SemanticSelector::RoleAndName {
+                role: twinkle_ui::SemanticRole::Button,
                 name: localizer.text("control-center-keep"),
             })
             .unwrap();
         host.perform_semantic_action(
             keep.id,
-            twinkle::SemanticAction::Invoke(twinkle::ActionKind::Activate),
+            twinkle_ui::SemanticAction::Invoke(twinkle_ui::ActionKind::Activate),
         );
         assert_eq!(
             host.application_mut().take_effects(),
@@ -370,8 +370,8 @@ mod tests {
         );
         assert!(host.application().view_state().pending_projection.is_none());
         assert!(
-            host.query_unique(&twinkle::SemanticSelector::RoleAndName {
-                role: twinkle::SemanticRole::Button,
+            host.query_unique(&twinkle_ui::SemanticSelector::RoleAndName {
+                role: twinkle_ui::SemanticRole::Button,
                 name: "Lock".into()
             })
             .is_err()

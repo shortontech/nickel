@@ -11,7 +11,7 @@ nickel-session-protocol = { path = "../nickel-session-protocol" }
 tracing.workspace = true
 nickel-i18n = { path = "../nickel-i18n" }
 nickel-core = { path = "../nickel-core" }
-twinkle = { workspace = true }
+twinkle_ui = { workspace = true }
 
 [dev-dependencies]
 winit-next.workspace = true
