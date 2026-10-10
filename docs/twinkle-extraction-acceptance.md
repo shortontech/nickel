@@ -70,12 +70,6 @@ configuration directories and shuts down its own compositor.
   `assert.h`/CRT-header prerequisite. No dependency or compiler checks were
   bypassed. Twinkle's independent Windows checks passed; this does not imply
   Nickel's hosted Windows build passed.
-- A local SDK route is prepared: xwin 0.10.0 is installed at
-  `/external/.tools/twinkle-xwin/bin/xwin`, without changing PATH or the default
-  Rust toolchain. Its SDK download requires explicit acceptance of Microsoft's
-  license. That decision is pending; no SDK license has been accepted or SDK
-  downloaded by this task. This offers a route to complete the hosted cross-check
-  if approved, while native interaction still needs Windows hardware/CI.
 - An independent Windows CI job is prepared upstream on `windows-2025` with
   Rust 1.96, full feature/target checks, serialized full tests and aliased macro
   validation. It has not run; publication is still pending.
