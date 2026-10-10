@@ -8,7 +8,6 @@ use std::{
 };
 
 use nickel_core::terminal_settings::{TerminalCursorStyle, TerminalSettings};
-use nickel_input::{AggregateModifier, InputEvent, KeyCode, KeyEdge, PhysicalKey};
 use nickel_terminal::{
     TerminalDimensions, TerminalEvent, TerminalExit, TerminalOptions, TerminalProgram,
     TerminalSession, TerminalSnapshot,
@@ -17,12 +16,13 @@ use nickel_terminal_ui::{
     CellMetrics, PasteDecision, TerminalInputCommand, TerminalPalette, TerminalPointerTranslator,
     TerminalViewport, confirm_paste, prepare_paste, translate_input_with_modes,
 };
-use nickel_ui::{
+use twinkle::{
     AdapterOutcome, AnyView, Application, Button, Column, Container, FrameOverlay, HostAdapter,
     HostServices, Insets, Justify, OverlayAnchor, OverlayMenu, OverlayMenuItem, Row, SemanticRole,
     Text, TextField, UiHost, UiId, View, ViewContext,
 };
-use winit::event::WindowEvent;
+use twinkle_input::{AggregateModifier, InputEvent, KeyCode, KeyEdge, PhysicalKey};
+use winit_next::event::WindowEvent;
 
 const INITIAL_COLUMNS: u16 = 100;
 const INITIAL_LINES: u16 = 30;
@@ -268,7 +268,7 @@ impl TerminalApp {
         settings: &TerminalSettings,
     ) -> Result<Self, Box<dyn Error>> {
         let mut tab = Self::spawn_tab(1, program, cwd, settings)?;
-        let resolved_font = nickel_render_assets::resolve_monospace_family(&settings.font_family);
+        let resolved_font = twinkle_render_assets::resolve_monospace_family(&settings.font_family);
         let font_fallback = !settings.font_family.eq_ignore_ascii_case("monospace")
             && !settings.font_family.trim().is_empty()
             && resolved_font.as_ref() == "monospace";
@@ -539,7 +539,7 @@ impl TerminalApp {
         self.palette.background = requested.background;
         self.palette.cursor_style = requested.cursor_style;
         self.palette.font_family =
-            nickel_render_assets::resolve_monospace_family(&requested.font_family);
+            twinkle_render_assets::resolve_monospace_family(&requested.font_family);
         self.metrics = CellMetrics::resolved(&self.palette.font_family, requested.font_size(), 1.0);
         self.settings = requested;
         self.preferences = None;
@@ -817,7 +817,7 @@ impl Application for TerminalApp {
         }
         let body = if let Some(preferences) = &self.preferences {
             AnyView::new(
-                nickel_ui::VerticalScroll::new(Message::PreferencesScroll, 0.0)
+                twinkle::VerticalScroll::new(Message::PreferencesScroll, 0.0)
                     .grow(1.0)
                     .child(preferences_view(preferences)),
             )
@@ -852,11 +852,11 @@ impl Application for TerminalApp {
         }
         if self.paste_confirmation.is_some() {
             root = root
-                .child(nickel_ui::Button::new(
+                .child(twinkle::Button::new(
                     Message::ConfirmPaste,
                     nickel_i18n::system_text("ui-nickel-terminal-paste-multiple-lines"),
                 ))
-                .child(nickel_ui::Button::new(
+                .child(twinkle::Button::new(
                     Message::CancelPaste,
                     nickel_i18n::system_text("ui-nickel-terminal-cancel-2"),
                 ));
@@ -1000,7 +1000,7 @@ impl HostAdapter<TerminalApp> for TerminalAdapter {
     fn normalized_input(
         &mut self,
         host: &mut UiHost<TerminalApp>,
-        input: &nickel_input::InputEvent,
+        input: &twinkle_input::InputEvent,
         _: HostServices<'_>,
     ) -> Result<AdapterOutcome, Box<dyn Error>> {
         if host.application().preferences.is_some() {
@@ -1018,7 +1018,7 @@ impl HostAdapter<TerminalApp> for TerminalAdapter {
             };
             return Ok(AdapterOutcome {
                 changed,
-                disposition: nickel_ui::EventDisposition::Handled,
+                disposition: twinkle::EventDisposition::Handled,
                 exit: host.application().exit_requested,
             });
         }
@@ -1028,7 +1028,7 @@ impl HostAdapter<TerminalApp> for TerminalAdapter {
             let changed = host.application_mut().close_tab(id);
             return Ok(AdapterOutcome {
                 changed,
-                disposition: nickel_ui::EventDisposition::Handled,
+                disposition: twinkle::EventDisposition::Handled,
                 exit: host.application().exit_requested,
             });
         }
@@ -1050,7 +1050,7 @@ impl HostAdapter<TerminalApp> for TerminalAdapter {
         let changed = host.application_mut().apply_input(command);
         Ok(AdapterOutcome {
             changed,
-            disposition: nickel_ui::EventDisposition::Handled,
+            disposition: twinkle::EventDisposition::Handled,
             exit: false,
         })
     }
@@ -1062,7 +1062,9 @@ impl HostAdapter<TerminalApp> for TerminalAdapter {
         _: HostServices<'_>,
     ) -> Result<AdapterOutcome, Box<dyn Error>> {
         let changed = match event {
-            WindowEvent::Resized(size) => host.application_mut().resize(size.width, size.height),
+            WindowEvent::SurfaceResized(size) => {
+                host.application_mut().resize(size.width, size.height)
+            }
             WindowEvent::CloseRequested => {
                 for tab in &mut host.application_mut().tabs {
                     if let Err(error) = tab.session.request_close() {
@@ -1129,7 +1131,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         supervise_hidden_session(&mut app.active_mut().session);
         return Ok(());
     }
-    nickel_ui::run_with_adapter(
+    nickel_ui_host::run_with_adapter(
         app,
         TerminalAdapter {
             monitor_exit: settings.close_on_successful_exit,
@@ -1155,7 +1157,7 @@ mod tests {
     }
 
     fn shortcut_key(code: KeyCode, shift: bool, repeat: bool) -> InputEvent {
-        use nickel_input::{DeviceId, EventOrder, KeyEvent, KeyLocation, LogicalKey, Modifier};
+        use twinkle_input::{DeviceId, EventOrder, KeyEvent, KeyLocation, LogicalKey, Modifier};
 
         let mut sides = vec![Modifier::ControlLeft];
         if shift {
@@ -1169,7 +1171,7 @@ mod tests {
             location: KeyLocation::Standard,
             edge: KeyEdge::Pressed,
             repeat,
-            modifiers: nickel_input::ModifierState::from_sides(sides),
+            modifiers: twinkle_input::ModifierState::from_sides(sides),
         })
     }
 
@@ -1276,7 +1278,7 @@ mod tests {
             .expect("terminal context target");
         let opened = host.perform_semantic_action(
             target.id,
-            nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::ContextMenu),
+            twinkle::SemanticAction::Invoke(twinkle::ActionKind::ContextMenu),
         );
         assert!(opened.changed);
         let names = host
@@ -1326,7 +1328,7 @@ mod tests {
 
     #[test]
     fn only_a_genuine_key_press_dismisses_a_completed_command() {
-        use nickel_input::{
+        use twinkle_input::{
             DeviceId, EventOrder, KeyCode, KeyEvent, KeyLocation, LogicalKey, ModifierState,
             PhysicalKey,
         };

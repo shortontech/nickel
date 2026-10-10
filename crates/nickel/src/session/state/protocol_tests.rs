@@ -966,7 +966,7 @@ fn pointer_targets_resolve_exact_generations_coordinates_and_protected_hits() {
 fn desktop_motion_burst_rebuilds_once_at_frame_boundary_and_focus_cancels_immediately() {
     with_package_runtime_stack(|| {
         use crate::session::internal_ui::DesktopPointerAction;
-        use nickel_input::{InputEvent, KeyEdge, PointerButton};
+        use twinkle_input::{InputEvent, KeyEdge, PointerButton};
         let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
         let (_event_loop, mut session) = internal_shell_test_session();
         let desktop = session
@@ -1042,10 +1042,10 @@ fn desktop_motion_burst_rebuilds_once_at_frame_boundary_and_focus_cancels_immedi
         // test drag into the user's desktop layout or activate a real file.
         session.internal_ui.step(
             runtime,
-            nickel_ui::HostBatch {
-                events: vec![nickel_ui::HostEvent::Normalized {
+            twinkle::HostBatch {
+                events: vec![twinkle::HostEvent::Normalized {
                     input: InputEvent::FocusLost {
-                        order: nickel_input::EventOrder(2000),
+                        order: twinkle_input::EventOrder(2000),
                     },
                     clipboard_text: None,
                 }],
@@ -1418,13 +1418,13 @@ fn output_capture_rejects_excessive_physical_pixel_bounds() {
 fn removing_internal_surface_cancels_its_active_move_authority() {
     #[derive(Default)]
     struct App;
-    impl nickel_ui::Application for App {
+    impl twinkle::Application for App {
         type Message = ();
 
         fn update(&mut self, _: ()) {}
 
-        fn view(&self, _: nickel_ui::ViewContext) -> impl nickel_ui::View<()> {
-            nickel_ui::Text::new("move target")
+        fn view(&self, _: twinkle::ViewContext) -> impl twinkle::View<()> {
+            twinkle::Text::new("move target")
         }
     }
 
@@ -1577,11 +1577,11 @@ fn x11_unmaximize_fence_cancels_active_resize_baseline_and_late_motion() {
 fn internal_move_compensation_restores_only_the_last_owned_placement() {
     #[derive(Default)]
     struct App;
-    impl nickel_ui::Application for App {
+    impl twinkle::Application for App {
         type Message = ();
         fn update(&mut self, _: ()) {}
-        fn view(&self, _: nickel_ui::ViewContext) -> impl nickel_ui::View<()> {
-            nickel_ui::Text::new("compensation target")
+        fn view(&self, _: twinkle::ViewContext) -> impl twinkle::View<()> {
+            twinkle::Text::new("compensation target")
         }
     }
 
@@ -1626,11 +1626,11 @@ fn internal_move_compensation_restores_only_the_last_owned_placement() {
 fn internal_application_move_crosses_output_without_losing_presentation() {
     #[derive(Default)]
     struct App;
-    impl nickel_ui::Application for App {
+    impl twinkle::Application for App {
         type Message = ();
         fn update(&mut self, _: ()) {}
-        fn view(&self, _: nickel_ui::ViewContext) -> impl nickel_ui::View<()> {
-            nickel_ui::Text::new("cross-output target")
+        fn view(&self, _: twinkle::ViewContext) -> impl twinkle::View<()> {
+            twinkle::Text::new("cross-output target")
         }
     }
 
@@ -1769,11 +1769,11 @@ fn internal_application_move_crosses_output_without_losing_presentation() {
 fn removed_output_rescues_internal_window_without_replacing_its_surface() {
     #[derive(Default)]
     struct App;
-    impl nickel_ui::Application for App {
+    impl twinkle::Application for App {
         type Message = ();
         fn update(&mut self, _: ()) {}
-        fn view(&self, _: nickel_ui::ViewContext) -> impl nickel_ui::View<()> {
-            nickel_ui::Text::new("output removal target")
+        fn view(&self, _: twinkle::ViewContext) -> impl twinkle::View<()> {
+            twinkle::Text::new("output removal target")
         }
     }
 
@@ -1886,11 +1886,11 @@ fn removed_output_rescues_internal_window_without_replacing_its_surface() {
 fn internal_resize_updates_placement_and_compensates_owned_geometry() {
     #[derive(Default)]
     struct App;
-    impl nickel_ui::Application for App {
+    impl twinkle::Application for App {
         type Message = ();
         fn update(&mut self, _: ()) {}
-        fn view(&self, _: nickel_ui::ViewContext) -> impl nickel_ui::View<()> {
-            nickel_ui::Text::new("resizable")
+        fn view(&self, _: twinkle::ViewContext) -> impl twinkle::View<()> {
+            twinkle::Text::new("resizable")
         }
     }
 
@@ -1924,11 +1924,11 @@ fn internal_resize_updates_placement_and_compensates_owned_geometry() {
 fn exposed_internal_frame_corners_use_effective_scene_hit_authority() {
     #[derive(Default)]
     struct App;
-    impl nickel_ui::Application for App {
+    impl twinkle::Application for App {
         type Message = ();
         fn update(&mut self, _: ()) {}
-        fn view(&self, _: nickel_ui::ViewContext) -> impl nickel_ui::View<()> {
-            nickel_ui::Text::new("corner target")
+        fn view(&self, _: twinkle::ViewContext) -> impl twinkle::View<()> {
+            twinkle::Text::new("corner target")
         }
     }
 
@@ -2168,11 +2168,11 @@ fn native_client_touch_cancel_preserves_internal_touch_domains() {
 fn internal_maximize_supersedes_active_titlebar_move() {
     #[derive(Default)]
     struct App;
-    impl nickel_ui::Application for App {
+    impl twinkle::Application for App {
         type Message = ();
         fn update(&mut self, _: ()) {}
-        fn view(&self, _: nickel_ui::ViewContext) -> impl nickel_ui::View<()> {
-            nickel_ui::Text::new("internal move target")
+        fn view(&self, _: twinkle::ViewContext) -> impl twinkle::View<()> {
+            twinkle::Text::new("internal move target")
         }
     }
 
@@ -2257,7 +2257,7 @@ fn output_capture_rejects_visible_protected_application_content() {
     struct CaptureApp {
         protected: bool,
     }
-    impl nickel_ui::Application for CaptureApp {
+    impl twinkle::Application for CaptureApp {
         type Message = ();
 
         fn update(&mut self, _: ()) {}
@@ -2266,8 +2266,8 @@ fn output_capture_rejects_visible_protected_application_content() {
             self.protected
         }
 
-        fn view(&self, _: nickel_ui::ViewContext) -> impl nickel_ui::View<()> {
-            nickel_ui::Text::new("private capture fixture")
+        fn view(&self, _: twinkle::ViewContext) -> impl twinkle::View<()> {
+            twinkle::Text::new("private capture fixture")
         }
     }
 
@@ -3141,13 +3141,13 @@ fn active_remote_lease_owns_one_overlay_per_output_and_revoke_removes_it() {
             .into_iter()
             .find(|node| node.name.as_deref() == Some("Stop"))
             .expect("trusted indicator exposes an accessible Stop button");
-        assert!(stop.actions.contains(&nickel_ui::ActionKind::Activate));
+        assert!(stop.actions.contains(&twinkle::ActionKind::Activate));
         session
             .internal_ui
             .perform_accessibility_action(
                 indicator,
                 stop.id,
-                nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
+                twinkle::SemanticAction::Invoke(twinkle::ActionKind::Activate),
             )
             .unwrap();
         assert!(
@@ -3643,12 +3643,12 @@ fn integrated_file_context_menu_is_a_detached_clickable_overlay() {
     let parent_geometry = session.internal_ui.placement(parent).unwrap().geometry;
     session.internal_ui.step(
         parent,
-        nickel_ui::HostBatch {
-            events: vec![nickel_ui::HostEvent::Normalized {
-                input: nickel_input::InputEvent::Pointer(nickel_input::PointerEvent::Motion {
-                    device: nickel_input::DeviceId(1),
-                    order: nickel_input::EventOrder(1),
-                    position: nickel_input::Point { x: 850.0, y: 610.0 },
+        twinkle::HostBatch {
+            events: vec![twinkle::HostEvent::Normalized {
+                input: twinkle_input::InputEvent::Pointer(twinkle_input::PointerEvent::Motion {
+                    device: twinkle_input::DeviceId(1),
+                    order: twinkle_input::EventOrder(1),
+                    position: twinkle_input::Point { x: 850.0, y: 610.0 },
                     delta: None,
                 }),
                 clipboard_text: None,
@@ -3658,10 +3658,10 @@ fn integrated_file_context_menu_is_a_detached_clickable_overlay() {
     );
     session.internal_ui.step(
         parent,
-        nickel_ui::HostBatch {
-            events: vec![nickel_ui::HostEvent::Semantic {
+        twinkle::HostBatch {
+            events: vec![twinkle::HostEvent::Semantic {
                 target: entry.id,
-                action: nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::ContextMenu),
+                action: twinkle::SemanticAction::Invoke(twinkle::ActionKind::ContextMenu),
             }],
             ..Default::default()
         },
@@ -3691,14 +3691,14 @@ fn integrated_file_context_menu_is_a_detached_clickable_overlay() {
         f64::from(geometry.1) + f64::from(rename.bounds.origin.y + rename.bounds.size.height / 2.0),
     );
     for edge in [
-        nickel_input::KeyEdge::Pressed,
-        nickel_input::KeyEdge::Released,
+        twinkle_input::KeyEdge::Pressed,
+        twinkle_input::KeyEdge::Released,
     ] {
         assert!(session.internal_ui.desktop_pointer_input(
             "test-context-menu",
             point,
             crate::session::internal_ui::DesktopPointerAction::Button {
-                button: nickel_input::PointerButton::Primary,
+                button: twinkle_input::PointerButton::Primary,
                 edge,
             },
             Default::default(),
@@ -3748,13 +3748,13 @@ fn integrated_file_initial_location_completes_on_shell_timer() {
     assert!(!loading(&session), "file navigation did not finish");
 }
 
-impl nickel_ui::Application for InternalWindowTestApp {
+impl twinkle::Application for InternalWindowTestApp {
     type Message = ();
 
     fn update(&mut self, (): ()) {}
 
-    fn view(&self, _: nickel_ui::ViewContext) -> impl nickel_ui::View<Self::Message> {
-        nickel_ui::Text::new("internal window")
+    fn view(&self, _: twinkle::ViewContext) -> impl twinkle::View<Self::Message> {
+        twinkle::Text::new("internal window")
     }
 
     fn title(&self) -> &str {
@@ -3762,13 +3762,13 @@ impl nickel_ui::Application for InternalWindowTestApp {
     }
 }
 
-impl nickel_ui::Application for InternalHitTestApp {
+impl twinkle::Application for InternalHitTestApp {
     type Message = ();
 
     fn update(&mut self, (): ()) {}
 
-    fn view(&self, _: nickel_ui::ViewContext) -> impl nickel_ui::View<Self::Message> {
-        nickel_ui::Button::new((), "internal action")
+    fn view(&self, _: twinkle::ViewContext) -> impl twinkle::View<Self::Message> {
+        twinkle::Button::new((), "internal action")
     }
 
     fn title(&self) -> &str {
@@ -4031,14 +4031,14 @@ fn hosted_app_clipboard_limit_is_ready_before_first_input() {
 #[test]
 fn asynchronous_native_paste_rejects_field_transfer_and_return() {
     use image::ImageEncoder;
-    use nickel_ui::{UiEvent, id, ui};
     use std::io::Write;
+    use twinkle::{UiEvent, id, ui};
     #[derive(Default)]
     struct Fields {
         first: String,
         second: String,
     }
-    impl nickel_ui::Application for Fields {
+    impl twinkle::Application for Fields {
         type Message = (bool, String);
         fn update(&mut self, (second, text): Self::Message) {
             if second {
@@ -4047,7 +4047,7 @@ fn asynchronous_native_paste_rejects_field_transfer_and_return() {
                 self.first = text;
             }
         }
-        fn view(&self, _: nickel_ui::ViewContext) -> impl nickel_ui::View<Self::Message> {
+        fn view(&self, _: twinkle::ViewContext) -> impl twinkle::View<Self::Message> {
             ui! { <Column>
                 <TextField id={id!(first)} value={&self.first} on_change={|text| (false, text)} />
                 <TextField id={id!(second)} value={&self.second} on_change={|text| (true, text)} />
@@ -4076,7 +4076,7 @@ fn asynchronous_native_paste_rejects_field_transfer_and_return() {
     let key = crate::session::input::internal_virtual_key(
         'v' as u32,
         &[0xffe3],
-        nickel_input::EventOrder(1),
+        twinkle_input::EventOrder(1),
     )
     .unwrap();
     for return_to_original in [false, true] {
@@ -4162,17 +4162,17 @@ fn asynchronous_native_paste_rejects_field_transfer_and_return() {
 #[test]
 fn native_keyboard_leases_follow_internal_recipients_without_seat_focus() {
     use nickel_session_protocol::OnScreenKeyboardInput;
-    use nickel_ui::{UiEvent, id, ui};
     use std::io::Write;
+    use twinkle::{UiEvent, id, ui};
 
     #[derive(Default)]
     struct TypingApp(String);
-    impl nickel_ui::Application for TypingApp {
+    impl twinkle::Application for TypingApp {
         type Message = String;
         fn update(&mut self, text: String) {
             self.0 = text;
         }
-        fn view(&self, _: nickel_ui::ViewContext) -> impl nickel_ui::View<String> {
+        fn view(&self, _: twinkle::ViewContext) -> impl twinkle::View<String> {
             ui! { <TextField id={id!(query)} value={&self.0} on_change={|text| text} /> }
         }
         fn title(&self) -> &str {
@@ -4293,7 +4293,7 @@ fn native_keyboard_leases_follow_internal_recipients_without_seat_focus() {
     let paste_key = crate::session::input::internal_virtual_key(
         'v' as u32,
         &[0xffe3],
-        nickel_input::EventOrder(55),
+        twinkle_input::EventOrder(55),
     )
     .unwrap();
     let (reader, mut writer) = std::os::unix::net::UnixStream::pair().unwrap();
@@ -4417,14 +4417,14 @@ fn native_keyboard_leases_follow_internal_recipients_without_seat_focus() {
 #[test]
 fn internal_protection_hides_remote_inventory_without_hiding_local_window() {
     struct ProtectedApp(bool);
-    impl nickel_ui::Application for ProtectedApp {
+    impl twinkle::Application for ProtectedApp {
         type Message = ();
         fn update(&mut self, _: ()) {}
         fn remote_access_protected(&self) -> bool {
             self.0
         }
-        fn view(&self, _: nickel_ui::ViewContext) -> impl nickel_ui::View<()> {
-            nickel_ui::Text::new("fixture")
+        fn view(&self, _: twinkle::ViewContext) -> impl twinkle::View<()> {
+            twinkle::Text::new("fixture")
         }
     }
     let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
@@ -4518,9 +4518,9 @@ fn internal_protection_hides_remote_inventory_without_hiding_local_window() {
 
     assert!(session.internal_ui.step(
         surface,
-        nickel_ui::HostBatch {
+        twinkle::HostBatch {
             application_changed: true,
-            ..nickel_ui::HostBatch::default()
+            ..twinkle::HostBatch::default()
         },
     ));
     assert!(
@@ -4546,9 +4546,9 @@ fn internal_protection_hides_remote_inventory_without_hiding_local_window() {
     assert!(pending.pointer_hit_test.is_none());
     assert!(session.internal_ui.step(
         surface,
-        nickel_ui::HostBatch {
+        twinkle::HostBatch {
             application_changed: true,
-            ..nickel_ui::HostBatch::default()
+            ..twinkle::HostBatch::default()
         },
     ));
     assert!(!session.remote_window_is_protected(window));
@@ -4703,9 +4703,9 @@ fn internal_diagnostics_follow_production_visibility_and_frame_lifecycle() {
     );
     session.internal_ui.step(
         surface,
-        nickel_ui::HostBatch {
+        twinkle::HostBatch {
             application_changed: true,
-            ..nickel_ui::HostBatch::default()
+            ..twinkle::HostBatch::default()
         },
     );
     let next = session.remote_internal_application_diagnostics(&windows);
@@ -7403,21 +7403,21 @@ fn controller_batch_drops_old_route_tail_after_launcher_changes_recipient() {
         let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
         let (_event_loop, mut session) = internal_shell_test_session();
         assert!(!session.internal_shell.as_ref().unwrap().launcher_visible());
-        let event = nickel_ui::ControllerEnvelope {
-            device: nickel_input::controller::ControllerId(7),
-            action: Some(nickel_ui::ControllerAction::Launcher),
-            edge: nickel_input::KeyEdge::Pressed,
+        let event = twinkle::ControllerEnvelope {
+            device: twinkle_input::controller::ControllerId(7),
+            action: Some(twinkle::ControllerAction::HostMenu),
+            edge: twinkle_input::KeyEdge::Pressed,
             repeat: false,
-            family: nickel_ui::ControllerFamily::Xbox,
-            evidence: nickel_ui::ControllerSourceEvidence {
+            family: twinkle::ControllerFamily::Xbox,
+            evidence: twinkle::ControllerSourceEvidence {
                 seat: 0,
                 source_namespace: "test".into(),
                 backend: "test".into(),
-                native: nickel_input::NativeCode::Numeric(7),
+                native: twinkle_input::NativeCode::Numeric(7),
                 fingerprint: None,
                 identity_capability: "native",
-                physical: nickel_ui::ControllerPhysicalControl::Button(
-                    nickel_input::controller::ControllerButton::Guide,
+                physical: twinkle::ControllerPhysicalControl::Button(
+                    twinkle_input::controller::ControllerButton::Guide,
                 ),
                 backend_order: 1,
                 produced_unix_ms: 1,
@@ -7427,7 +7427,7 @@ fn controller_batch_drops_old_route_tail_after_launcher_changes_recipient() {
         session.handle_brokered_controller_batch(
             vec![
                 event.clone(),
-                nickel_ui::ControllerEnvelope {
+                twinkle::ControllerEnvelope {
                     repeat: true,
                     ..event
                 },
@@ -7449,32 +7449,32 @@ fn queued_confirm_keeps_pre_launcher_recipient_epoch_across_batches() {
         let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
         let (_event_loop, mut session) = internal_shell_test_session();
         let queued_epoch = session.refresh_controller_route().0;
-        let launcher = nickel_ui::ControllerEnvelope {
-            device: nickel_input::controller::ControllerId(7),
-            action: Some(nickel_ui::ControllerAction::Launcher),
-            edge: nickel_input::KeyEdge::Pressed,
+        let launcher = twinkle::ControllerEnvelope {
+            device: twinkle_input::controller::ControllerId(7),
+            action: Some(twinkle::ControllerAction::HostMenu),
+            edge: twinkle_input::KeyEdge::Pressed,
             repeat: false,
-            family: nickel_ui::ControllerFamily::Xbox,
-            evidence: nickel_ui::ControllerSourceEvidence {
+            family: twinkle::ControllerFamily::Xbox,
+            evidence: twinkle::ControllerSourceEvidence {
                 seat: 0,
                 source_namespace: "test".into(),
                 backend: "test".into(),
-                native: nickel_input::NativeCode::Numeric(7),
+                native: twinkle_input::NativeCode::Numeric(7),
                 fingerprint: None,
                 identity_capability: "native",
-                physical: nickel_ui::ControllerPhysicalControl::Button(
-                    nickel_input::controller::ControllerButton::Guide,
+                physical: twinkle::ControllerPhysicalControl::Button(
+                    twinkle_input::controller::ControllerButton::Guide,
                 ),
                 backend_order: 1,
                 produced_unix_ms: 1,
             },
         };
-        let confirm = nickel_ui::ControllerEnvelope {
-            action: Some(nickel_ui::ControllerAction::Confirm),
-            evidence: nickel_ui::ControllerSourceEvidence {
-                native: nickel_input::NativeCode::Numeric(0),
-                physical: nickel_ui::ControllerPhysicalControl::Button(
-                    nickel_input::controller::ControllerButton::South,
+        let confirm = twinkle::ControllerEnvelope {
+            action: Some(twinkle::ControllerAction::Confirm),
+            evidence: twinkle::ControllerSourceEvidence {
+                native: twinkle_input::NativeCode::Numeric(0),
+                physical: twinkle::ControllerPhysicalControl::Button(
+                    twinkle_input::controller::ControllerButton::South,
                 ),
                 backend_order: 2,
                 ..launcher.evidence.clone()
@@ -7523,21 +7523,21 @@ fn broker_overflow_requests_neutral_probe_and_rearms_internal_owner() {
     with_package_runtime_stack(|| {
         let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
         let (_event_loop, mut session) = internal_shell_test_session();
-        let event = nickel_ui::ControllerEnvelope {
-            device: nickel_input::controller::ControllerId(7),
+        let event = twinkle::ControllerEnvelope {
+            device: twinkle_input::controller::ControllerId(7),
             action: None,
-            edge: nickel_input::KeyEdge::Pressed,
+            edge: twinkle_input::KeyEdge::Pressed,
             repeat: false,
-            family: nickel_ui::ControllerFamily::Xbox,
-            evidence: nickel_ui::ControllerSourceEvidence {
+            family: twinkle::ControllerFamily::Xbox,
+            evidence: twinkle::ControllerSourceEvidence {
                 seat: 0,
                 source_namespace: "test".into(),
                 backend: "test".into(),
-                native: nickel_input::NativeCode::Numeric(7),
+                native: twinkle_input::NativeCode::Numeric(7),
                 fingerprint: None,
                 identity_capability: "native",
-                physical: nickel_ui::ControllerPhysicalControl::Button(
-                    nickel_input::controller::ControllerButton::Guide,
+                physical: twinkle::ControllerPhysicalControl::Button(
+                    twinkle_input::controller::ControllerButton::Guide,
                 ),
                 backend_order: 1,
                 produced_unix_ms: 1,
@@ -7866,7 +7866,7 @@ fn ordinary_shell_semantics_reject_legacy_plugin_launcher_mutation() {
     assert!(shell.bounded_shell_semantics(id).is_err());
     let before = shell.scene(id).unwrap();
     let action = |text: &str| {
-        nickel_ui::SemanticAction::SetValue(nickel_ui::SemanticValueInput::Text(text.into()))
+        twinkle::SemanticAction::SetValue(twinkle::SemanticValueInput::Text(text.into()))
     };
     assert!(
         shell
@@ -8314,7 +8314,7 @@ fn native_screenshot_captures_and_opens_on_the_invoking_pointer_output() {
         .unwrap()
         .into_iter()
         .find_map(|command| match command {
-            nickel_ui::backend::PaintCommand::Image { image, .. }
+            twinkle::backend::PaintCommand::Image { image, .. }
                 if image.dimensions() == (1000, 800) =>
             {
                 Some(image)
@@ -8609,7 +8609,7 @@ fn opening_control_center_while_launcher_is_open_does_not_reenter_output_reconci
 #[test]
 fn launcher_sidebar_press_is_not_dismissed_for_a_client_underneath() {
     use nickel_session_protocol::{InputState, TestInput, TestPointerButton};
-    use nickel_ui::backend::PaintCommand;
+    use twinkle::backend::PaintCommand;
     let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
     let (_event_loop, mut session) = internal_shell_test_session();
     assert!(session.toggle_internal_launcher());

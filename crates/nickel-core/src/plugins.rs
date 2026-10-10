@@ -1,5 +1,10 @@
 //! Versioned, platform-neutral declarations for shell plugins.
 
+pub use twinkle_protocol::{
+    OutputScope as PluginOutputScope, SurfaceAnchor as PluginSurfaceAnchor,
+    SurfaceDefinition as PluginSurface, SurfaceKind as PluginSurfaceKind,
+};
+
 use std::{
     collections::{BTreeMap, HashSet},
     io,
@@ -211,7 +216,7 @@ pub struct PluginPackage {
 }
 
 /// One package-relative JavaScript, JSX, or CSS source file. Hosts pass these
-/// to `nickel-plugin-runtime` as a single module graph.
+/// to `twinkle-jsx-runtime` as a single module graph.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PluginSourceFile {
     pub path: String,
@@ -878,147 +883,12 @@ impl PluginSettingKind {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct PluginSurface {
-    /// Ordinary surfaces open at activation by default. Transients stay explicit.
-    #[serde(default = "default_true", skip_serializing_if = "is_true")]
-    pub initially_open: bool,
-    pub id: String,
-    pub kind: PluginSurfaceKind,
-    pub width: u32,
-    pub height: u32,
-    #[serde(default)]
-    pub bottom_offset: u32,
-    #[serde(default)]
-    pub reserve_work_area: bool,
-    #[serde(default)]
-    pub output: PluginOutputScope,
-    #[serde(default, skip_serializing_if = "PluginSurfaceAnchor::is_center")]
-    pub anchor: PluginSurfaceAnchor,
-    #[serde(default, skip_serializing_if = "is_zero_i32")]
-    pub offset_x: i32,
-    #[serde(default, skip_serializing_if = "is_zero_i32")]
-    pub offset_y: i32,
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub passive: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub owner: Option<String>,
-}
-
-fn default_true() -> bool {
-    true
-}
-fn is_true(value: &bool) -> bool {
-    *value
-}
-
-fn is_zero_i32(value: &i32) -> bool {
-    *value == 0
-}
-
-fn is_false(value: &bool) -> bool {
-    !*value
-}
-
-#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, Eq, PartialEq)]
-#[serde(rename_all = "kebab-case")]
-pub enum PluginSurfaceAnchor {
-    #[default]
-    Center,
-    TopLeft,
-    TopCenter,
-    TopRight,
-    BottomLeft,
-    BottomCenter,
-    BottomRight,
-}
-
-impl PluginSurfaceAnchor {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Center => "center",
-            Self::TopLeft => "top-left",
-            Self::TopCenter => "top-center",
-            Self::TopRight => "top-right",
-            Self::BottomLeft => "bottom-left",
-            Self::BottomCenter => "bottom-center",
-            Self::BottomRight => "bottom-right",
-        }
-    }
-
-    pub fn is_center(&self) -> bool {
-        *self == Self::Center
-    }
-
-    pub fn position(
-        self,
-        output: (i32, i32, u32, u32),
-        size: (u32, u32),
-        offset: (i32, i32),
-    ) -> (i32, i32) {
-        let (x, y, output_width, output_height) = output;
-        let (width, height) = size;
-        let remaining_x = output_width.saturating_sub(width).min(i32::MAX as u32) as i32;
-        let remaining_y = output_height.saturating_sub(height).min(i32::MAX as u32) as i32;
-        let anchor_x = match self {
-            Self::TopLeft | Self::BottomLeft => 0,
-            Self::TopRight | Self::BottomRight => remaining_x,
-            Self::Center | Self::TopCenter | Self::BottomCenter => remaining_x / 2,
-        };
-        let anchor_y = match self {
-            Self::TopLeft | Self::TopCenter | Self::TopRight => 0,
-            Self::BottomLeft | Self::BottomCenter | Self::BottomRight => remaining_y,
-            Self::Center => remaining_y / 2,
-        };
-        (
-            x.saturating_add(anchor_x.saturating_add(offset.0))
-                .clamp(x, x.saturating_add(remaining_x)),
-            y.saturating_add(anchor_y.saturating_add(offset.1))
-                .clamp(y, y.saturating_add(remaining_y)),
-        )
-    }
-}
-
 /// Stable manifest identity for a plugin-owned surface. The host pairs this
 /// with an output instance when it creates a native presentation slot.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct PluginSurfaceKey {
     pub plugin_id: String,
     pub surface_id: String,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq)]
-#[serde(rename_all = "kebab-case")]
-pub enum PluginSurfaceKind {
-    Panel,
-    Dock,
-    Desktop,
-    Window,
-    Dialog,
-    Overlay,
-}
-
-impl PluginSurfaceKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Panel => "panel",
-            Self::Dock => "dock",
-            Self::Desktop => "desktop",
-            Self::Window => "window",
-            Self::Dialog => "dialog",
-            Self::Overlay => "overlay",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, Eq, PartialEq)]
-#[serde(rename_all = "kebab-case")]
-pub enum PluginOutputScope {
-    #[default]
-    Primary,
-    Active,
-    All,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, Hash, PartialEq)]
@@ -2353,5 +2223,11 @@ mod shell_selection_persistence_tests {
         assert_eq!(settings.selected_shell(), Some("theme"));
         assert!(settings.desired_enabled("theme", false));
         assert!(PluginActivationSettings::select_shell(&path, "../invalid").is_err());
+    }
+}
+
+impl twinkle_protocol::SurfaceBoundsProvider for PluginManifest {
+    fn surface_bounds(&self) -> &[PluginSurface] {
+        &self.surfaces
     }
 }

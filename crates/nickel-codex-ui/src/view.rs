@@ -5,10 +5,10 @@ use nickel_codex::{
     SandboxPolicy, ServerRequestId,
 };
 use nickel_markdown::{MarkdownDocument, MarkdownPalette, markdown_content_view};
-use nickel_ui::SemanticRole;
-use nickel_ui::ShortcutOutcome;
-use nickel_ui::approval::{ApprovalPresentation, RequesterIdentity};
-use nickel_ui::prelude::*;
+use twinkle::SemanticRole;
+use twinkle::ShortcutOutcome;
+use twinkle::approval::{ApprovalPresentation, RequesterIdentity};
+use twinkle::prelude::*;
 
 #[cfg(test)]
 use crate::model::item_markdown_document;
@@ -30,7 +30,7 @@ static EMPTY_ACTIVITY_OUTCOME: std::sync::LazyLock<ActivityOutcome> =
 fn semantic_theme() -> SemanticTheme {
     // Standalone fallback only. Embedded surfaces receive the shell's resolved
     // semantic theme through `ChatApplication::set_theme`.
-    SemanticTheme::from_tokens(nickel_ui::SemanticTokenSet::standard(
+    SemanticTheme::from_tokens(twinkle::SemanticTokenSet::standard(
         0x101318, 0x171b22, 0x202630, 0x343d4b, 0x343d4b, 0xe8edf4, 0x9ca8b8, 0x70a5ff, 0x1d3557,
         0x63d69a, 0x63d69a,
     ))
@@ -99,7 +99,7 @@ pub enum ChatMessage {
     InteractionAnswerChanged(String),
     SubmitInput(ServerRequestId, Vec<String>),
     DismissInput(ServerRequestId),
-    ConversationScrolled(nickel_ui::ScrollExtent),
+    ConversationScrolled(twinkle::ScrollExtent),
     JumpToLatest,
     ToggleActivityDetails(String),
     ToggleProject(String),
@@ -272,7 +272,7 @@ fn interaction_answer_changed(value: String) -> ChatMessage {
     ChatMessage::InteractionAnswerChanged(value)
 }
 
-fn conversation_scrolled(extent: nickel_ui::ScrollExtent) -> ChatMessage {
+fn conversation_scrolled(extent: twinkle::ScrollExtent) -> ChatMessage {
     ChatMessage::ConversationScrolled(extent)
 }
 
@@ -2422,7 +2422,7 @@ impl Application for ChatApplication {
         })
     }
 
-    fn view(&self, context: nickel_ui::ViewContext) -> impl View<Self::Message> {
+    fn view(&self, context: twinkle::ViewContext) -> impl View<Self::Message> {
         let project_root = self
             .shell_project
             .as_ref()
@@ -2504,8 +2504,8 @@ impl Application for ChatApplication {
 
     fn frame_overlays(
         &self,
-        _context: nickel_ui::ViewContext,
-    ) -> Vec<nickel_ui::FrameOverlay<Self::Message>> {
+        _context: twinkle::ViewContext,
+    ) -> Vec<twinkle::FrameOverlay<Self::Message>> {
         if self.pending_navigation.is_none() {
             return Vec::new();
         }
@@ -2513,7 +2513,7 @@ impl Application for ChatApplication {
         let dialog = TransientSurface::dialog(
             "codex-discard-draft",
             OverlayAnchor::InvocationTargetCenter(UiId::from("root/menu-bar/file-menu")),
-            nickel_ui::Size::new(420.0, 164.0),
+            twinkle::Size::new(420.0, 164.0),
             OverlayStyle::from_theme(&self.theme),
         )
         .accessible_name("Discard unsent Codex input?")
@@ -2522,7 +2522,7 @@ impl Application for ChatApplication {
             outside_pointer: false,
             action: true,
         });
-        vec![nickel_ui::FrameOverlay::surface(
+        vec![twinkle::FrameOverlay::surface(
             dialog,
             ui! {
                 <Column fill_width fill_height padding={Insets::all(16.0)} gap={12.0}
@@ -3839,7 +3839,7 @@ fn run_settings_controls(
     }
 }
 
-fn close_icon_pixels(color: nickel_ui::Color) -> std::sync::Arc<image::RgbaImage> {
+fn close_icon_pixels(color: twinkle::Color) -> std::sync::Arc<image::RgbaImage> {
     let rgba = image::Rgba([
         ((color >> 16) & 0xff) as u8,
         ((color >> 8) & 0xff) as u8,
@@ -4544,8 +4544,8 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use nickel_codex::{ReplayBackend, Thread, ThreadId};
-    use nickel_ui::{HostBatch, HostEvent, Rect, UiFrame, UiHost};
-    use nickel_ui_testkit::Scenario;
+    use twinkle::{HostBatch, HostEvent, Rect, UiFrame, UiHost};
+    use twinkle_testkit::Scenario;
 
     use super::*;
 
@@ -4820,23 +4820,21 @@ mod tests {
         let mut scenario = Scenario::new(app, 640, 480);
         let pending = scenario
             .host()
-            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+            .query_unique(&twinkle::SemanticSelector::RoleAndName {
                 role: SemanticRole::Button,
                 name: "Approve".into(),
             })
             .expect("first approval action");
-        let point = nickel_ui::Point {
+        let point = twinkle::Point {
             x: pending.bounds.origin.x + pending.bounds.size.width / 2.0,
             y: pending.bounds.origin.y + pending.bounds.size.height / 2.0,
         };
+        scenario.host_mut().handle_event(twinkle::UiEvent::Scroll {
+            point,
+            delta_y: 400.0,
+        });
         scenario
-            .host_mut()
-            .handle_event(nickel_ui::UiEvent::Scroll {
-                point,
-                delta_y: 400.0,
-            });
-        scenario
-            .pointer_activate(&nickel_ui_testkit::Selector::role_name(
+            .pointer_activate(&twinkle_testkit::Selector::role_name(
                 SemanticRole::Button,
                 "Cancel turn",
             ))
@@ -4908,7 +4906,7 @@ mod tests {
     }
 
     fn alternate_theme() -> SemanticTheme {
-        SemanticTheme::from_tokens(nickel_ui::SemanticTokenSet::standard(
+        SemanticTheme::from_tokens(twinkle::SemanticTokenSet::standard(
             0xf4f6f8, 0xe8edf4, 0xffffff, 0xd6dce5, 0xcbd2dc, 0x171a20, 0x4d5664, 0x075ca8,
             0xc9e5ff, 0x6c3fa0, 0xefe4ff,
         ))
@@ -4928,9 +4926,9 @@ mod tests {
         app.state.fallback_reason = Some("installed schema incompatible".into());
         app.state.report_diagnostic("Transport interrupted");
         let normal = UiFrame::layout(
-            app.view(nickel_ui::ViewContext::new(
+            app.view(twinkle::ViewContext::new(
                 Rect::new(0.0, 0.0, 900.0, 640.0),
-                nickel_ui::InputModality::Keyboard,
+                twinkle::InputModality::Keyboard,
             )),
             Rect::new(0.0, 0.0, 900.0, 640.0),
         );
@@ -4938,9 +4936,9 @@ mod tests {
         assert!(!has_accessible_text(&normal, "Installed Codex 9.9.9"));
         app.update(ChatMessage::ToggleDiagnostics);
         let summary = UiFrame::layout(
-            app.view(nickel_ui::ViewContext::new(
+            app.view(twinkle::ViewContext::new(
                 Rect::new(0.0, 0.0, 900.0, 640.0),
-                nickel_ui::InputModality::Keyboard,
+                twinkle::InputModality::Keyboard,
             )),
             Rect::new(0.0, 0.0, 900.0, 640.0),
         );
@@ -4953,9 +4951,9 @@ mod tests {
         assert!(!has_accessible_text(&summary, "Installed Codex 9.9.9"));
         app.update(ChatMessage::ToggleDiagnosticDetails);
         let details = UiFrame::layout(
-            app.view(nickel_ui::ViewContext::new(
+            app.view(twinkle::ViewContext::new(
                 Rect::new(0.0, 0.0, 900.0, 640.0),
-                nickel_ui::InputModality::Keyboard,
+                twinkle::InputModality::Keyboard,
             )),
             Rect::new(0.0, 0.0, 900.0, 640.0),
         );
@@ -5025,9 +5023,9 @@ mod tests {
             app.update(ChatMessage::ToggleDiagnostics);
             let area = Rect::new(0.0, 0.0, 640.0, 480.0);
             let frame = UiFrame::layout(
-                app.view(nickel_ui::ViewContext::new(
+                app.view(twinkle::ViewContext::new(
                     area,
-                    nickel_ui::InputModality::Keyboard,
+                    twinkle::InputModality::Keyboard,
                 )),
                 area,
             );
@@ -5050,9 +5048,9 @@ mod tests {
         app.state.status = ConnectionStatus::Ready;
         app.state.draft = "Do not send".into();
         let frame = UiFrame::layout(
-            app.view(nickel_ui::ViewContext::new(
+            app.view(twinkle::ViewContext::new(
                 Rect::new(0.0, 0.0, 640.0, 480.0),
-                nickel_ui::InputModality::Keyboard,
+                twinkle::InputModality::Keyboard,
             )),
             Rect::new(0.0, 0.0, 640.0, 480.0),
         );
@@ -5100,9 +5098,9 @@ mod tests {
         assert!(matches!(app.diagnostic_copy_result, Some(Ok(()))));
         let area = Rect::new(0.0, 0.0, 640.0, 480.0);
         let copied = UiFrame::layout(
-            app.view(nickel_ui::ViewContext::new(
+            app.view(twinkle::ViewContext::new(
                 area,
-                nickel_ui::InputModality::Keyboard,
+                twinkle::InputModality::Keyboard,
             )),
             area,
         );
@@ -5115,9 +5113,9 @@ mod tests {
         let _ = app.clipboard_write.take().unwrap();
         assert!(app.clipboard_write_completed(Err("selection unavailable".into())));
         let failed = UiFrame::layout(
-            app.view(nickel_ui::ViewContext::new(
+            app.view(twinkle::ViewContext::new(
                 area,
-                nickel_ui::InputModality::Keyboard,
+                twinkle::InputModality::Keyboard,
             )),
             area,
         );
@@ -5716,7 +5714,7 @@ mod tests {
         app.state = state;
         let mut scenario = Scenario::new(app, 640, 480);
         scenario
-            .pointer_activate(&nickel_ui_testkit::Selector::role_name(
+            .pointer_activate(&twinkle_testkit::Selector::role_name(
                 SemanticRole::Button,
                 "Approve",
             ))
@@ -5753,7 +5751,7 @@ mod tests {
             scenario.resize(width, height, 1.0).expect("live resize");
             let approve = scenario
                 .host()
-                .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                .query_unique(&twinkle::SemanticSelector::RoleAndName {
                     role: SemanticRole::Button,
                     name: "Approve".into(),
                 })
@@ -5762,10 +5760,10 @@ mod tests {
             assert!(approve.bounds.origin.y + approve.bounds.size.height <= height as f32);
             if width < 1280 {
                 scenario
-                    .pointer_activate(&nickel_ui_testkit::Selector::id("root/menu-bar/codex-menu"))
+                    .pointer_activate(&twinkle_testkit::Selector::id("root/menu-bar/codex-menu"))
                     .expect("Codex menu opens");
                 scenario
-                    .pointer_activate(&nickel_ui_testkit::Selector::role_name(
+                    .pointer_activate(&twinkle_testkit::Selector::role_name(
                         SemanticRole::MenuItem,
                         "Run settings",
                     ))
@@ -5773,17 +5771,17 @@ mod tests {
                 assert!(
                     scenario
                         .host()
-                        .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                        .query_unique(&twinkle::SemanticSelector::RoleAndName {
                             role: SemanticRole::Button,
                             name: "Approval policy selector".into(),
                         })
                         .is_ok()
                 );
                 scenario
-                    .pointer_activate(&nickel_ui_testkit::Selector::id("root/menu-bar/codex-menu"))
+                    .pointer_activate(&twinkle_testkit::Selector::id("root/menu-bar/codex-menu"))
                     .expect("Codex menu reopens");
                 scenario
-                    .pointer_activate(&nickel_ui_testkit::Selector::role_name(
+                    .pointer_activate(&twinkle_testkit::Selector::role_name(
                         SemanticRole::MenuItem,
                         "Run settings",
                     ))
@@ -5795,10 +5793,10 @@ mod tests {
             .expect("high-scale logical client");
         scenario.host_mut().set_scale_factor(2.0);
         scenario
-            .pointer_activate(&nickel_ui_testkit::Selector::id("root/menu-bar/codex-menu"))
+            .pointer_activate(&twinkle_testkit::Selector::id("root/menu-bar/codex-menu"))
             .expect("scaled Codex menu hit region");
         scenario
-            .pointer_activate(&nickel_ui_testkit::Selector::role_name(
+            .pointer_activate(&twinkle_testkit::Selector::role_name(
                 SemanticRole::MenuItem,
                 "Run settings",
             ))
@@ -5806,7 +5804,7 @@ mod tests {
         assert!(
             scenario
                 .host()
-                .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                .query_unique(&twinkle::SemanticSelector::RoleAndName {
                     role: SemanticRole::Button,
                     name: "Approval policy selector".into(),
                 })
@@ -5824,12 +5822,12 @@ mod tests {
         app.controller = ChatController::fixture_idle(app.state.generation);
         app.state.status = ConnectionStatus::Ready;
         app.state.account.authenticated = true;
-        app.update(ChatMessage::ConversationScrolled(nickel_ui::ScrollExtent {
-            viewport: nickel_ui::Size {
+        app.update(ChatMessage::ConversationScrolled(twinkle::ScrollExtent {
+            viewport: twinkle::Size {
                 width: 640.0,
                 height: 240.0,
             },
-            content: nickel_ui::Size {
+            content: twinkle::Size {
                 width: 640.0,
                 height: 1200.0,
             },
@@ -5868,7 +5866,7 @@ mod tests {
                 .new_content_while_unpinned
         );
         scenario
-            .pointer_activate(&nickel_ui_testkit::Selector::role_name(
+            .pointer_activate(&twinkle_testkit::Selector::role_name(
                 SemanticRole::Button,
                 "Jump to latest",
             ))
@@ -5896,18 +5894,18 @@ mod tests {
         let mut scenario = Scenario::new(app, 1280, 720);
         let editor = scenario
             .host()
-            .query_unique(&nickel_ui::SemanticSelector::Role(SemanticRole::TextField))
+            .query_unique(&twinkle::SemanticSelector::Role(SemanticRole::TextField))
             .expect("composer field");
-        let point = nickel_ui::Point {
+        let point = twinkle::Point {
             x: editor.bounds.origin.x + editor.bounds.size.width / 2.0,
             y: editor.bounds.origin.y + editor.bounds.size.height / 2.0,
         };
         scenario
             .host_mut()
-            .handle_event(nickel_ui::UiEvent::PointerPressed(point));
+            .handle_event(twinkle::UiEvent::PointerPressed(point));
         scenario
             .host_mut()
-            .handle_event(nickel_ui::UiEvent::PointerReleased(point));
+            .handle_event(twinkle::UiEvent::PointerReleased(point));
         scenario.ime_preedit("かな").expect("preedit starts");
         assert!(scenario.host().application().state.draft.is_empty());
         scenario.resize(640, 480, 1.0).expect("compact resize");
@@ -5966,23 +5964,23 @@ mod tests {
                         .collect::<Vec<_>>()
                 )
             });
-        let start = nickel_ui::Point {
+        let start = twinkle::Point {
             x: passage.allocated.origin.x + 8.0,
             y: passage.allocated.origin.y + passage.allocated.size.height / 2.0,
         };
-        let end = nickel_ui::Point {
+        let end = twinkle::Point {
             x: start.x + 100.0,
             y: start.y,
         };
         scenario
             .host_mut()
-            .handle_event(nickel_ui::UiEvent::PointerPressed(start));
+            .handle_event(twinkle::UiEvent::PointerPressed(start));
         scenario
             .host_mut()
-            .handle_event(nickel_ui::UiEvent::PointerMoved(end));
+            .handle_event(twinkle::UiEvent::PointerMoved(end));
         scenario
             .host_mut()
-            .handle_event(nickel_ui::UiEvent::PointerReleased(end));
+            .handle_event(twinkle::UiEvent::PointerReleased(end));
         let selected = scenario
             .host()
             .selected_text()
@@ -6014,7 +6012,7 @@ mod tests {
             assert_eq!(scenario.host().application().state.draft, "/");
             let popovers = scenario
                 .host()
-                .query(&nickel_ui::SemanticSelector::RoleAndName {
+                .query(&twinkle::SemanticSelector::RoleAndName {
                     role: SemanticRole::Group,
                     name: "Slash commands".into(),
                 });
@@ -6160,7 +6158,7 @@ mod tests {
         host.step(HostBatch::default());
         for name in ["Send without diagnostics", "Send with diagnostics"] {
             let target = host
-                .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                .query_unique(&twinkle::SemanticSelector::RoleAndName {
                     role: SemanticRole::Button,
                     name: name.into(),
                 })
@@ -6299,7 +6297,7 @@ mod tests {
         app.state = state;
         let mut scenario = Scenario::new(app, 640, 480);
         scenario
-            .pointer_activate(&nickel_ui_testkit::Selector::role_name(
+            .pointer_activate(&twinkle_testkit::Selector::role_name(
                 SemanticRole::Button,
                 "Submit",
             ))
@@ -6323,7 +6321,7 @@ mod tests {
         ] {
             let menu = scenario
                 .host()
-                .query_unique(&nickel_ui::SemanticSelector::Id(
+                .query_unique(&twinkle::SemanticSelector::Id(
                     format!("root/menu-bar/{id}").into(),
                 ))
                 .expect("compact app-chrome menu");
@@ -6331,12 +6329,10 @@ mod tests {
             assert!(menu.bounds.origin.x + menu.bounds.size.width <= 640.0);
         }
         scenario
-            .pointer_activate(&nickel_ui_testkit::Selector::id(
-                "root/menu-bar/thread-menu",
-            ))
+            .pointer_activate(&twinkle_testkit::Selector::id("root/menu-bar/thread-menu"))
             .expect("thread menu opens before the backend list loads");
         scenario
-            .pointer_activate(&nickel_ui_testkit::Selector::role_name(
+            .pointer_activate(&twinkle_testkit::Selector::role_name(
                 SemanticRole::MenuItem,
                 "Browse conversations…",
             ))
@@ -6375,7 +6371,7 @@ mod tests {
         assert!(
             scenario
                 .host()
-                .query_unique(&nickel_ui::SemanticSelector::Id(
+                .query_unique(&twinkle::SemanticSelector::Id(
                     "root/menu-bar/connection-menu".into(),
                 ))
                 .is_ok()
@@ -6549,9 +6545,9 @@ mod tests {
             Some(PendingNavigation::NewChat)
         ));
         assert_eq!(app.state.draft, "Unsent work");
-        let context = nickel_ui::ViewContext::new(
+        let context = twinkle::ViewContext::new(
             Rect::new(0.0, 0.0, 640.0, 480.0),
-            nickel_ui::InputModality::Keyboard,
+            twinkle::InputModality::Keyboard,
         );
         assert_eq!(app.frame_overlays(context).len(), 1);
         let mut host = UiHost::new(app, 640, 480);
@@ -6562,14 +6558,14 @@ mod tests {
             "{opened:?}"
         );
         let keep = host
-            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+            .query_unique(&twinkle::SemanticSelector::RoleAndName {
                 role: SemanticRole::Button,
                 name: "Keep working".into(),
             })
             .unwrap();
         host.perform_accessibility_action(
             keep.id,
-            nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
+            twinkle::SemanticAction::Invoke(twinkle::ActionKind::Activate),
         );
         assert!(host.application().pending_navigation.is_none());
         assert_eq!(host.application().state.draft, "Unsent work");

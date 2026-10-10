@@ -1,0 +1,391 @@
+{
+  "twinkleRevision": "aa0a2c3a00884a7fea48cad09ca579717be99250",
+  "nickelImplementationRevision": "1416e664",
+  "profile": "release",
+  "platform": "x86_64 Linux",
+  "compiler": "rustc 1.99.0 (b940084d7 2026-09-28)",
+  "scope": "Current-run measurements and deterministic work assertions; no comparable pre-extraction timing baseline is claimed. Builds were serialized and no other task build ran during measurements.",
+  "runs": [
+    {
+      "repository": "twinkle",
+      "report": {
+        "metadata": {
+          "items": 200,
+          "iterations": 50,
+          "warmupIterations": 5
+        },
+        "schema": 1,
+        "suite": "jsx_incremental",
+        "timings": {
+          "dispatchAndReconcile": {
+            "max_ns": 3866390,
+            "p50_ns": 2933768,
+            "p95_ns": 3232512,
+            "p99_ns": 3866390
+          }
+        },
+        "work": {
+          "completeTreeBytes": 0,
+          "expansionNodes": 0,
+          "localMaterializations": 0,
+          "nodesMutated": 50,
+          "nodesVisited": 100,
+          "patchOperations": 50,
+          "transportBytes": 25250
+        },
+        "workload": "keyed_insert"
+      }
+    },
+    {
+      "repository": "twinkle",
+      "report": {
+        "metadata": {
+          "items": 200,
+          "iterations": 50,
+          "warmupIterations": 5
+        },
+        "schema": 1,
+        "suite": "jsx_incremental",
+        "timings": {
+          "dispatchAndReconcile": {
+            "max_ns": 3414596,
+            "p50_ns": 2874454,
+            "p95_ns": 3164634,
+            "p99_ns": 3414596
+          }
+        },
+        "work": {
+          "completeTreeBytes": 0,
+          "expansionNodes": 0,
+          "localMaterializations": 0,
+          "nodesMutated": 50,
+          "nodesVisited": 100,
+          "patchOperations": 50,
+          "transportBytes": 15000
+        },
+        "workload": "keyed_remove"
+      }
+    },
+    {
+      "repository": "twinkle",
+      "report": {
+        "metadata": {
+          "items": 200,
+          "iterations": 50,
+          "warmupIterations": 5
+        },
+        "schema": 1,
+        "suite": "jsx_incremental",
+        "timings": {
+          "dispatchAndReconcile": {
+            "max_ns": 3270824,
+            "p50_ns": 2814121,
+            "p95_ns": 3086356,
+            "p99_ns": 3270824
+          }
+        },
+        "work": {
+          "completeTreeBytes": 0,
+          "expansionNodes": 0,
+          "localMaterializations": 0,
+          "nodesMutated": 50,
+          "nodesVisited": 100,
+          "patchOperations": 50,
+          "transportBytes": 15200
+        },
+        "workload": "keyed_reorder"
+      }
+    },
+    {
+      "repository": "twinkle",
+      "report": {
+        "metadata": {
+          "items": 200,
+          "iterations": 50,
+          "warmupIterations": 5
+        },
+        "schema": 1,
+        "suite": "jsx_incremental",
+        "timings": {
+          "dispatchAndReconcile": {
+            "max_ns": 2301822,
+            "p50_ns": 1750530,
+            "p95_ns": 1954926,
+            "p99_ns": 2301822
+          }
+        },
+        "work": {
+          "completeTreeBytes": 0,
+          "expansionNodes": 0,
+          "localMaterializations": 0,
+          "nodesMutated": 50,
+          "nodesVisited": 50,
+          "patchOperations": 50,
+          "transportBytes": 14750
+        },
+        "workload": "leaf_hook_reducer"
+      }
+    },
+    {
+      "repository": "nickel",
+      "report": {
+        "metadata": {
+          "iterations": 50,
+          "unmountCyclesPerIteration": 17,
+          "warmupIterations": 5
+        },
+        "schema": 1,
+        "suite": "jsx_incremental",
+        "timings": {
+          "compatibleHotReload": {
+            "max_ns": 377083,
+            "p50_ns": 301159,
+            "p95_ns": 320856,
+            "p99_ns": 377083
+          },
+          "incompatibleHotReload": {
+            "max_ns": 295248,
+            "p50_ns": 230376,
+            "p95_ns": 249302,
+            "p99_ns": 295248
+          },
+          "selectorSubscription": {
+            "max_ns": 522067,
+            "p50_ns": 426115,
+            "p95_ns": 506849,
+            "p99_ns": 522067
+          },
+          "stateAndReducer": {
+            "max_ns": 1083529,
+            "p50_ns": 1005000,
+            "p95_ns": 1078379,
+            "p99_ns": 1083529
+          },
+          "total": {
+            "max_ns": 4889166,
+            "p50_ns": 4756935,
+            "p95_ns": 4882081,
+            "p99_ns": 4889166
+          },
+          "unmountChurn": {
+            "max_ns": 2880637,
+            "p50_ns": 2763755,
+            "p95_ns": 2877000,
+            "p99_ns": 2880637
+          }
+        },
+        "work": {
+          "cleanupsPerIteration": 20,
+          "coldTreeTransportBytesPerIteration": 3046,
+          "componentExecutionsPerIteration": 21,
+          "effectsRunPerIteration": 20,
+          "effectsScheduledPerIteration": 20,
+          "lifecycleCommitsPerIteration": 21,
+          "memoFactoriesPerIteration": 2,
+          "patchCompleteTreeBytesPerIteration": 0,
+          "patchExpansionNodesPerIteration": 0,
+          "patchLocalMaterializationsPerIteration": 0,
+          "patchNodesMutatedPerIteration": 2,
+          "patchNodesVisitedPerIteration": 4,
+          "patchOperationsPerIteration": 2,
+          "patchTransportBytesPerIteration": 542,
+          "retainedHandlersAfterUnmount": 0,
+          "retainedHooksAfterUnmount": 0,
+          "retainedRecordsAfterUnmount": 0,
+          "retainedSubscriptionsAfterUnmount": 0,
+          "retainedSurfaceAppsAfterUnmount": 0,
+          "retainedSurfaceStatesAfterUnmount": 1,
+          "storeChangesPerIteration": 2
+        },
+        "workload": "hook_lifecycle_churn"
+      }
+    },
+    {
+      "repository": "nickel",
+      "report": {
+        "metadata": {
+          "iterations": 50,
+          "mounts": [
+            "taskbar",
+            "launcher",
+            "settings"
+          ],
+          "warmupIterations": 5
+        },
+        "schema": 1,
+        "suite": "jsx_incremental",
+        "timings": {
+          "applicationsRevision": {
+            "max_ns": 1052219,
+            "p50_ns": 820180,
+            "p95_ns": 891436,
+            "p99_ns": 1052219
+          },
+          "themeAcceptedRetry": {
+            "max_ns": 347928,
+            "p50_ns": 292513,
+            "p95_ns": 323361,
+            "p99_ns": 347928
+          },
+          "themeRejectedCommit": {
+            "max_ns": 177505,
+            "p50_ns": 143511,
+            "p95_ns": 165082,
+            "p99_ns": 177505
+          },
+          "total": {
+            "max_ns": 1762352,
+            "p50_ns": 1429432,
+            "p95_ns": 1576982,
+            "p99_ns": 1762352
+          },
+          "windowsRevision": {
+            "max_ns": 220097,
+            "p50_ns": 171434,
+            "p95_ns": 194949,
+            "p99_ns": 220097
+          }
+        },
+        "work": {
+          "mounts": {
+            "launcher": {
+              "componentExecutionsPerIteration": 1,
+              "patchEnvelopeTransportBytesPerIteration": 277,
+              "patchNodesVisitedPerIteration": 2,
+              "patchOperationsPerIteration": 1,
+              "patchesPerIteration": 1,
+              "storeSelectionsPerIteration": 2,
+              "typedPatchApplyAttemptsPerIteration": 1,
+              "typedPatchApplyRejectionsPerIteration": 0
+            },
+            "settings": {
+              "componentExecutionsPerIteration": 2,
+              "patchEnvelopeTransportBytesPerIteration": 560,
+              "patchNodesVisitedPerIteration": 4,
+              "patchOperationsPerIteration": 2,
+              "patchesPerIteration": 2,
+              "storeSelectionsPerIteration": 3,
+              "typedPatchApplyAttemptsPerIteration": 2,
+              "typedPatchApplyRejectionsPerIteration": 1
+            },
+            "taskbar": {
+              "componentExecutionsPerIteration": 1,
+              "patchEnvelopeTransportBytesPerIteration": 276,
+              "patchNodesVisitedPerIteration": 2,
+              "patchOperationsPerIteration": 1,
+              "patchesPerIteration": 1,
+              "storeSelectionsPerIteration": 2,
+              "typedPatchApplyAttemptsPerIteration": 1,
+              "typedPatchApplyRejectionsPerIteration": 0
+            }
+          },
+          "patchCompleteTreeBytesPerIteration": 0,
+          "patchExpansionNodesPerIteration": 0,
+          "patchLocalMaterializationsPerIteration": 0,
+          "storeChangesPerIteration": 3,
+          "storeNewlyDirtyPerIteration": {
+            "applications": 1,
+            "theme": 1,
+            "windows": 1
+          }
+        },
+        "workload": "independent_mount_store_revisions"
+      }
+    }
+  ],
+  "retainedLayoutComparison": {
+    "preExtraction": {
+      "result": "failed existing 20% timing gate; deterministic work assertions passed",
+      "report": {
+        "schema": 1,
+        "suite": "retained_layout",
+        "workload": "2000_node_unchanged_and_one_label",
+        "metadata": {
+          "iterations_per_sample": 2,
+          "nodes": 2000,
+          "samples": 5
+        },
+        "work": {
+          "one_label_interaction_nodes_executed": 0,
+          "one_label_nodes_measured": 0,
+          "one_label_nodes_placed": 0,
+          "one_label_paint_nodes_executed": 2,
+          "one_label_semantic_nodes_executed": 1,
+          "unchanged_interaction_nodes_executed": 0,
+          "unchanged_nodes_measured": 0,
+          "unchanged_nodes_placed": 0,
+          "unchanged_paint_nodes_executed": 0,
+          "unchanged_semantic_nodes_executed": 0
+        },
+        "timings": {
+          "cold": {
+            "p50_ns": 4093108,
+            "p95_ns": 4154113,
+            "p99_ns": 4154113,
+            "max_ns": 4154113
+          },
+          "one_label_same_size": {
+            "p50_ns": 10450718,
+            "p95_ns": 11357571,
+            "p99_ns": 11357571,
+            "max_ns": 11357571
+          },
+          "unchanged": {
+            "p50_ns": 6093851,
+            "p95_ns": 11025424,
+            "p99_ns": 11025424,
+            "max_ns": 11025424
+          }
+        }
+      }
+    },
+    "extractedFocused": {
+      "result": "failed existing 20% timing gate; deterministic work assertions passed",
+      "report": {
+        "schema": 1,
+        "suite": "retained_layout",
+        "workload": "2000_node_unchanged_and_one_label",
+        "metadata": {
+          "iterations_per_sample": 2,
+          "nodes": 2000,
+          "samples": 5
+        },
+        "work": {
+          "one_label_interaction_nodes_executed": 0,
+          "one_label_nodes_measured": 0,
+          "one_label_nodes_placed": 0,
+          "one_label_paint_nodes_executed": 2,
+          "one_label_semantic_nodes_executed": 1,
+          "unchanged_interaction_nodes_executed": 0,
+          "unchanged_nodes_measured": 0,
+          "unchanged_nodes_placed": 0,
+          "unchanged_paint_nodes_executed": 0,
+          "unchanged_semantic_nodes_executed": 0
+        },
+        "timings": {
+          "cold": {
+            "p50_ns": 4182087,
+            "p95_ns": 5611139,
+            "p99_ns": 5611139,
+            "max_ns": 5611139
+          },
+          "one_label_same_size": {
+            "p50_ns": 10352061,
+            "p95_ns": 11402577,
+            "p99_ns": 11402577,
+            "max_ns": 11402577
+          },
+          "unchanged": {
+            "p50_ns": 6892901,
+            "p95_ns": 11329749,
+            "p99_ns": 11329749,
+            "max_ns": 11329749
+          }
+        }
+      }
+    },
+    "baselineRevision": "a42901f9f4ea1ed90bf0a6d42ecf210c82a862b1",
+    "sourceSha256": "ed1818ce434254f6d6bb923273c814b09ed80b93ebb8157e3a280d43122fe3b9",
+    "scope": "Same machine, stable compiler and release profile, isolated fresh-process focused runs. Source file byte-identical. Both fail the unchanged existing gate; no broad timing regression conclusion is claimed."
+  }
+}

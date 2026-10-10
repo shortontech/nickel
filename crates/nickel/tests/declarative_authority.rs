@@ -1,0 +1,443 @@
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    path::{Path, PathBuf},
+};
+
+#[derive(Debug)]
+struct Exception {
+    maximum: usize,
+    category: String,
+    owner: String,
+    reason: String,
+    review: String,
+}
+
+fn workspace_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("nickel is nested under the workspace crates directory")
+        .to_path_buf()
+}
+
+fn exceptions(root: &Path) -> BTreeMap<String, Exception> {
+    let source = fs::read_to_string(root.join("assets/ui-authority-exceptions.tsv"))
+        .expect("UI authority exception inventory must be readable");
+    let rows = source
+        .lines()
+        .filter(|line| !line.trim().is_empty() && !line.starts_with('#'))
+        .map(|line| {
+            let fields = line.split('\t').collect::<Vec<_>>();
+            assert_eq!(
+                fields.len(),
+                6,
+                "UI authority exception must have six tab-separated fields: {line}"
+            );
+            let maximum = fields[1]
+                .parse()
+                .expect("exception reference bound must be an integer");
+            assert!(maximum > 0, "exception bound must be positive: {line}");
+            assert!(
+                !fields[2].is_empty(),
+                "exception category is required: {line}"
+            );
+            assert!(
+                !fields[3].is_empty(),
+                "exception semantic owner is required: {line}"
+            );
+            assert!(
+                !fields[4].is_empty(),
+                "exception reason is required: {line}"
+            );
+            assert!(
+                !fields[5].is_empty(),
+                "exception review is required: {line}"
+            );
+            (
+                fields[0].to_owned(),
+                Exception {
+                    maximum,
+                    category: fields[2].to_owned(),
+                    owner: fields[3].to_owned(),
+                    reason: fields[4].to_owned(),
+                    review: fields[5].to_owned(),
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    let exceptions = rows.into_iter().collect::<BTreeMap<_, _>>();
+    assert_eq!(
+        exceptions.len(),
+        source
+            .lines()
+            .filter(|line| !line.trim().is_empty() && !line.starts_with('#'))
+            .count(),
+        "UI authority exception paths must be unique"
+    );
+    exceptions
+}
+
+fn rust_files(directory: &Path, files: &mut Vec<PathBuf>) {
+    for entry in fs::read_dir(directory).expect("source directory must be readable") {
+        let path = entry.expect("source entry must be readable").path();
+        if path.is_dir() {
+            rust_files(&path, files);
+        } else if path.extension().is_some_and(|extension| extension == "rs") {
+            files.push(path);
+        }
+    }
+}
+
+fn display_list_references(source: &str) -> usize {
+    code_references(source, "PaintCommand::")
+}
+
+fn hit_authority_references(source: &str) -> usize {
+    let launcher_targets = code_references(source, "LauncherHitTarget");
+    let generic_targets = code_references(source, "HitTarget") - launcher_targets;
+    launcher_targets
+        + generic_targets
+        + ["fn target_point", "hits: Vec"]
+            .into_iter()
+            .map(|needle| code_references(source, needle))
+            .sum::<usize>()
+        + source
+            .lines()
+            .filter(|line| {
+                let mut quoted = false;
+                let mut escaped = false;
+                let code = line
+                    .split("//")
+                    .next()
+                    .unwrap_or_default()
+                    .chars()
+                    .filter(|character| {
+                        if escaped {
+                            escaped = false;
+                            return !quoted;
+                        }
+                        if *character == '\\' {
+                            escaped = true;
+                            return !quoted;
+                        }
+                        if *character == '"' {
+                            quoted = !quoted;
+                            return false;
+                        }
+                        !quoted
+                    })
+                    .collect::<String>();
+                code.contains("fn ") && code.contains("action_at")
+            })
+            .count()
+}
+
+/// Removes comments and literal contents before counting authority-bearing
+/// identifiers. Diagnostic text must not consume a migration budget.
+fn code_references(source: &str, needle: &str) -> usize {
+    source
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim_start();
+            !trimmed.starts_with("//") && !trimmed.starts_with("/*") && !trimmed.starts_with('*')
+        })
+        .map(|line| {
+            let comment = line.find("//").unwrap_or(line.len());
+            line[..comment]
+                .match_indices(needle)
+                .filter(|(position, _)| {
+                    let prefix = &line[..*position];
+                    prefix
+                        .bytes()
+                        .fold((0usize, false), |(quotes, escaped), byte| {
+                            if escaped {
+                                (quotes, false)
+                            } else if byte == b'\\' {
+                                (quotes, true)
+                            } else if byte == b'"' {
+                                (quotes + 1, false)
+                            } else {
+                                (quotes, false)
+                            }
+                        })
+                        .0
+                        % 2
+                        == 0
+                })
+                .count()
+        })
+        .sum()
+}
+
+#[test]
+fn consumers_cannot_grow_or_create_display_list_authority() {
+    let root = workspace_root();
+    let exceptions = exceptions(&root);
+    let mut files = Vec::new();
+    rust_files(&root.join("crates"), &mut files);
+    let mut observed = BTreeSet::new();
+    let mut violations = Vec::new();
+
+    for path in files {
+        let relative = path
+            .strip_prefix(&root)
+            .expect("workspace source is below its root")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let source = fs::read_to_string(&path).expect("Rust source must be UTF-8");
+        let references = display_list_references(&source);
+        if references == 0 {
+            continue;
+        }
+        observed.insert(relative.clone());
+        match exceptions.get(&relative) {
+            Some(exception) if references == exception.maximum => {
+                if exception.category == "test_only_inspection" {
+                    let separate_test_module = relative.contains("/tests/")
+                        || relative.starts_with("crates/nickel/tests/")
+                        || (relative == "crates/nickel/src/live_shell/tests.rs"
+                            && fs::read_to_string(root.join("crates/nickel/src/live_shell.rs"))
+                                .is_ok_and(|owner| owner.contains("mod tests;")))
+                        || (relative == "crates/nickel/src/session/state/protocol_tests.rs"
+                            && fs::read_to_string(root.join("crates/nickel/src/session/state.rs"))
+                                .is_ok_and(|owner| {
+                                    owner.contains(
+                                        "#[cfg(test)]\n#[path = \"state/protocol_tests.rs\"]\nmod protocol_tests;",
+                                    )
+                                }));
+                    let production = source.split_once("\n#[cfg(test)]\nmod tests {")
+                        .or_else(|| source.split_once("\n#[cfg(test)]\nmod protocol_tests {"))
+                        .map(|(production, _)| production)
+                        .or(separate_test_module.then_some(""));
+                    if production.is_none_or(|source| display_list_references(source) != 0) {
+                        violations.push(format!("{relative}: test-only inspection exception cannot admit production display-list authority"));
+                    }
+                }
+            }
+            Some(exception) => violations.push(format!(
+                "{relative}: {references} PaintCommand references differ from admitted baseline {} ({}, owner {}, {}; review {})",
+                exception.maximum, exception.category, exception.owner, exception.reason, exception.review
+            )),
+            None => violations.push(format!(
+                "{relative}: {references} unadmitted PaintCommand references; describe UI declaratively or add a reviewed bounded custom-paint exception"
+            )),
+        }
+    }
+
+    let stale = exceptions
+        .keys()
+        .filter(|path| !observed.contains(*path))
+        .cloned()
+        .collect::<Vec<_>>();
+    assert!(
+        stale.is_empty(),
+        "remove resolved UI authority exceptions from the inventory:\n{}",
+        stale.join("\n")
+    );
+    assert!(
+        violations.is_empty(),
+        "application-owned display-list authority grew:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn consumers_cannot_grow_or_create_parallel_hit_authority() {
+    let root = workspace_root();
+    let source = fs::read_to_string(root.join("assets/ui-hit-authority-exceptions.tsv"))
+        .expect("hit authority exception inventory must be readable");
+    let rows = source
+        .lines()
+        .filter(|line| !line.trim().is_empty() && !line.starts_with('#'))
+        .map(|line| {
+            let fields = line.split('\t').collect::<Vec<_>>();
+            assert_eq!(
+                fields.len(),
+                5,
+                "hit exception must have five fields: {line}"
+            );
+            assert!(fields[2..].iter().all(|field| !field.is_empty()));
+            let baseline = fields[1].parse::<usize>().expect("hit bound is an integer");
+            assert!(
+                baseline > 0,
+                "hit authority baseline must be positive: {line}"
+            );
+            (fields[0].to_owned(), baseline)
+        })
+        .collect::<Vec<_>>();
+    let admitted = rows.into_iter().collect::<BTreeMap<_, _>>();
+    assert_eq!(
+        admitted.len(),
+        source
+            .lines()
+            .filter(|line| !line.trim().is_empty() && !line.starts_with('#'))
+            .count(),
+        "hit authority exception paths must be unique"
+    );
+    let mut files = Vec::new();
+    rust_files(&root.join("crates"), &mut files);
+    let mut observed = BTreeSet::new();
+    let mut violations = Vec::new();
+    for path in files {
+        let relative = path
+            .strip_prefix(&root)
+            .expect("workspace source is below root")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let count =
+            hit_authority_references(&fs::read_to_string(path).expect("Rust source must be UTF-8"));
+        if count == 0 {
+            continue;
+        }
+        observed.insert(relative.clone());
+        match admitted.get(&relative) {
+            Some(maximum) if count == *maximum => {}
+            Some(maximum) => violations.push(format!(
+                "{relative}: {count} parallel hit-authority references differ from baseline {maximum}"
+            )),
+            None => violations.push(format!(
+                "{relative}: {count} unadmitted parallel hit-authority references"
+            )),
+        }
+    }
+    let stale = admitted
+        .keys()
+        .filter(|path| !observed.contains(*path))
+        .cloned()
+        .collect::<Vec<_>>();
+    assert!(
+        stale.is_empty(),
+        "remove resolved hit exceptions:\n{}",
+        stale.join("\n")
+    );
+    assert!(
+        violations.is_empty(),
+        "parallel hit authority grew:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn compositor_recovery_keeps_semantics_and_hit_testing_in_ui_host() {
+    let root = workspace_root();
+    let recovery = fs::read_to_string(root.join("crates/nickel/src/session/recovery_ui.rs"))
+        .expect("compositor recovery UI must exist");
+    assert!(recovery.contains("UiHost<RecoveryApplication>"));
+    let compact_recovery = recovery
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect::<String>();
+    assert!(compact_recovery.contains("Button::new(RecoveryAction::Retry"));
+    assert!(compact_recovery.contains("Button::new(RecoveryAction::Exit"));
+
+    let mut session_files = Vec::new();
+    rust_files(&root.join("crates/nickel/src/session"), &mut session_files);
+    let forbidden = ["recovery_action_at", "RecoveryLayout"];
+    let mut violations = Vec::new();
+    for path in session_files {
+        let source = fs::read_to_string(&path).expect("Rust source must be UTF-8");
+        for needle in forbidden {
+            if source.contains(needle) {
+                violations.push(format!(
+                    "{}: obsolete parallel recovery authority {needle}",
+                    path.strip_prefix(&root).unwrap().display()
+                ));
+            }
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "recovery actions must be resolved by twinkle:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn consumers_cannot_restore_file_entry_prefix_navigation() {
+    let root = workspace_root();
+    let mut files = Vec::new();
+    rust_files(&root.join("crates"), &mut files);
+    let violations = files
+        .into_iter()
+        .filter_map(|path| {
+            let source = fs::read_to_string(&path).expect("Rust source must be UTF-8");
+            (code_references(&source, "strip_prefix(\"file-entry-\"") > 0).then(|| {
+                path.strip_prefix(&root)
+                    .expect("workspace source is below root")
+                    .display()
+                    .to_string()
+            })
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        violations.is_empty(),
+        "file entry identity must come from semantic structure, not string-prefix parsing:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn transitional_theme_api_cannot_return() {
+    let root = workspace_root();
+    let mut files = Vec::new();
+    rust_files(&root.join("crates"), &mut files);
+    let this_test = root.join(file!());
+    let forbidden = ["SemanticColors", "SemanticTheme::new(", ".colors."];
+    let mut violations = Vec::new();
+    for path in files.into_iter().filter(|path| path != &this_test) {
+        let source = fs::read_to_string(&path).expect("Rust source must be UTF-8");
+        for needle in forbidden {
+            if source.contains(needle) {
+                violations.push(format!(
+                    "{}: forbidden transitional theme reference {needle}",
+                    path.strip_prefix(&root)
+                        .expect("workspace source is below root")
+                        .display()
+                ));
+            }
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "construct themes from semantic token sets:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn display_list_reference_counter_detects_seeded_regressions() {
+    assert_eq!(
+        display_list_references(
+            "let _ = PaintCommand::Fill { rect, color };\ncommands.push(PaintCommand::Text { bounds, text });"
+        ),
+        2
+    );
+    assert_eq!(
+        display_list_references("let ordinary_component = Button::new();"),
+        0
+    );
+    assert_eq!(
+        hit_authority_references("struct HitTarget; fn action_at(&self) {} hits: Vec<()>"),
+        3
+    );
+    assert_eq!(
+        hit_authority_references(
+            r#"// LauncherHitTarget
+               let diagnostic = "HitTarget and fn action_at";
+               struct RealHitTarget;"#
+        ),
+        1
+    );
+}
+
+#[test]
+fn authority_counter_detects_seeded_file_entry_prefix_navigation() {
+    assert_eq!(
+        code_references(
+            r#"node.id.as_str().strip_prefix("file-entry-").and_then(|value| value.parse().ok())"#,
+            "strip_prefix(\"file-entry-\""
+        ),
+        1
+    );
+}

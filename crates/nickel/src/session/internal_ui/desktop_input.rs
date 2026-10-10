@@ -10,13 +10,13 @@ use std::{
     time::Instant,
 };
 
-use nickel_input::{
-    DeviceId, EventOrder, InputEvent, KeyEdge, ModifierState, PointerButton, PointerEvent,
-    TouchEvent, TouchId,
-};
-use nickel_ui::{
+use twinkle::{
     HostBatch, HostEvent, InternalSurfaceId, NormalizedAdmissionBinding,
     NormalizedIngressAuthority, NormalizedInputEnvelope, NormalizedSourceBinding,
+};
+use twinkle_input::{
+    DeviceId, EventOrder, InputEvent, KeyEdge, ModifierState, PointerButton, PointerEvent,
+    TouchEvent, TouchId,
 };
 
 use super::{InternalSurfaceRole, InternalUiRuntime};
@@ -24,7 +24,7 @@ use super::{InternalSurfaceRole, InternalUiRuntime};
 pub(crate) enum DesktopPointerAction {
     Motion,
     Axis {
-        delta: nickel_input::Vector,
+        delta: twinkle_input::Vector,
         discrete: Option<(i32, i32)>,
     },
     Button {
@@ -43,19 +43,19 @@ mod tests {
         axes: usize,
     }
 
-    impl nickel_ui::Application for PointerProbe {
+    impl twinkle::Application for PointerProbe {
         type Message = ();
 
         fn update(&mut self, (): ()) {}
 
-        fn view(&self, _: nickel_ui::ViewContext) -> impl nickel_ui::View<Self::Message> {
-            nickel_ui::Text::new("pointer probe")
+        fn view(&self, _: twinkle::ViewContext) -> impl twinkle::View<Self::Message> {
+            twinkle::Text::new("pointer probe")
         }
 
         fn adapt_input(
-            host: &mut nickel_ui::UiHost<Self>,
+            host: &mut twinkle::UiHost<Self>,
             input: &InputEvent,
-        ) -> nickel_ui::AdapterOutcome {
+        ) -> twinkle::AdapterOutcome {
             match input {
                 InputEvent::Pointer(PointerEvent::Button { .. }) => {
                     host.application_mut().buttons += 1;
@@ -63,9 +63,9 @@ mod tests {
                 InputEvent::Pointer(PointerEvent::Axis { .. }) => {
                     host.application_mut().axes += 1;
                 }
-                _ => return nickel_ui::AdapterOutcome::default(),
+                _ => return twinkle::AdapterOutcome::default(),
             }
-            nickel_ui::AdapterOutcome {
+            twinkle::AdapterOutcome {
                 changed: true,
                 ..Default::default()
             }
@@ -102,7 +102,7 @@ mod tests {
             "mouse",
             point,
             DesktopPointerAction::Axis {
-                delta: nickel_input::Vector { x: 0.0, y: 1.0 },
+                delta: twinkle_input::Vector { x: 0.0, y: 1.0 },
                 discrete: Some((0, 1)),
             },
             ModifierState::default(),
@@ -214,7 +214,7 @@ mod tests {
             .drain_routed_events()
             .into_iter()
             .flat_map(|(_, batch, _)| batch.events)
-            .filter(|event| matches!(event, HostEvent::Ui(nickel_ui::UiEvent::PointerCancelled)))
+            .filter(|event| matches!(event, HostEvent::Ui(twinkle::UiEvent::PointerCancelled)))
             .count();
         assert_eq!(cancelled, 2);
     }
@@ -311,7 +311,7 @@ mod tests {
             "wheel",
             (-780.0, -40.0),
             DesktopPointerAction::Axis {
-                delta: nickel_input::Vector { x: 0.0, y: -0.5 },
+                delta: twinkle_input::Vector { x: 0.0, y: -0.5 },
                 discrete: Some((0, 0)),
             },
             Default::default(),
@@ -344,13 +344,17 @@ mod tests {
                 pressed,
                 |device, order, repeat| {
                     assert_eq!(repeat, expected_repeat);
-                    vec![InputEvent::Key(nickel_input::KeyEvent {
+                    vec![InputEvent::Key(twinkle_input::KeyEvent {
                         device,
                         order,
                         repeat,
-                        physical: nickel_input::PhysicalKey::Code(nickel_input::KeyCode::ArrowDown),
-                        logical: nickel_input::LogicalKey::Named(nickel_input::NamedKey::ArrowDown),
-                        location: nickel_input::KeyLocation::Standard,
+                        physical: twinkle_input::PhysicalKey::Code(
+                            twinkle_input::KeyCode::ArrowDown,
+                        ),
+                        logical: twinkle_input::LogicalKey::Named(
+                            twinkle_input::NamedKey::ArrowDown,
+                        ),
+                        location: twinkle_input::KeyLocation::Standard,
                         edge: if pressed {
                             KeyEdge::Pressed
                         } else {
@@ -393,7 +397,7 @@ mod tests {
 
         assert!(
             runtime.desktop_keyboard_input("keyboard", 38, true, |device, order, _| {
-                vec![InputEvent::Text(nickel_input::TextEvent::Commit {
+                vec![InputEvent::Text(twinkle_input::TextEvent::Commit {
                     device,
                     order,
                     text: "q".into(),
@@ -404,7 +408,7 @@ mod tests {
         assert!(matches!(
             &routed[0].1.events[..],
             [HostEvent::NormalizedIngress(NormalizedInputEnvelope {
-                input: InputEvent::Text(nickel_input::TextEvent::Commit { text, .. }),
+                input: InputEvent::Text(twinkle_input::TextEvent::Commit { text, .. }),
                 .. })] if text == "q"
         ));
     }
@@ -446,15 +450,15 @@ mod tests {
 
         let event = |edge, admission| {
             HostEvent::NormalizedIngress(NormalizedInputEnvelope {
-                input: InputEvent::Key(nickel_input::KeyEvent {
+                input: InputEvent::Key(twinkle_input::KeyEvent {
                     device: DeviceId(9),
                     order: EventOrder(41),
                     repeat: false,
-                    physical: nickel_input::PhysicalKey::Code(nickel_input::KeyCode::KeyV),
-                    logical: nickel_input::LogicalKey::Character("v".into()),
-                    location: nickel_input::KeyLocation::Standard,
+                    physical: twinkle_input::PhysicalKey::Code(twinkle_input::KeyCode::KeyV),
+                    logical: twinkle_input::LogicalKey::Character("v".into()),
+                    location: twinkle_input::KeyLocation::Standard,
                     edge,
-                    modifiers: ModifierState::from_sides([nickel_input::Modifier::ControlLeft]),
+                    modifiers: ModifierState::from_sides([twinkle_input::Modifier::ControlLeft]),
                 }),
                 clipboard_text: (edge == KeyEdge::Pressed).then(|| "paste".into()),
                 source: source.clone(),
@@ -491,14 +495,14 @@ mod tests {
             &routed[0].1.events[..],
             [
                 HostEvent::NormalizedIngress(NormalizedInputEnvelope {
-                    input: InputEvent::Key(nickel_input::KeyEvent {
+                    input: InputEvent::Key(twinkle_input::KeyEvent {
                         edge: KeyEdge::Pressed,
                         ..
                     }),
                     ..
                 }),
                 HostEvent::NormalizedIngress(NormalizedInputEnvelope {
-                    input: InputEvent::Key(nickel_input::KeyEvent {
+                    input: InputEvent::Key(twinkle_input::KeyEvent {
                         edge: KeyEdge::Released,
                         ..
                     }),
@@ -563,23 +567,22 @@ mod tests {
         assert!(
             events
                 .iter()
-                .any(|event| matches!(event, HostEvent::Ui(nickel_ui::UiEvent::PointerMoved(_))))
+                .any(|event| matches!(event, HostEvent::Ui(twinkle::UiEvent::PointerMoved(_))))
         );
         assert!(
             events
                 .iter()
-                .any(|event| matches!(event, HostEvent::Ui(nickel_ui::UiEvent::PointerPressed(_))))
+                .any(|event| matches!(event, HostEvent::Ui(twinkle::UiEvent::PointerPressed(_))))
         );
         assert!(
-            events.iter().any(|event| matches!(
-                event,
-                HostEvent::Ui(nickel_ui::UiEvent::PointerReleased(_))
-            ))
+            events
+                .iter()
+                .any(|event| matches!(event, HostEvent::Ui(twinkle::UiEvent::PointerReleased(_))))
         );
         assert!(events.iter().any(|event| matches!(
             event,
-            HostEvent::Ui(nickel_ui::UiEvent::PointerContext(point))
-                if *point == nickel_ui::Point { x: 20.0, y: 20.0 }
+            HostEvent::Ui(twinkle::UiEvent::PointerContext(point))
+                if *point == twinkle::Point { x: 20.0, y: 20.0 }
         )));
         assert!(!events.iter().any(|event| {
             matches!(
@@ -617,7 +620,7 @@ mod tests {
         assert_eq!(batches[0].0, panel);
         assert!(matches!(
             &batches[0].1.events[..],
-            [HostEvent::Ui(nickel_ui::UiEvent::PointerCancelled)]
+            [HostEvent::Ui(twinkle::UiEvent::PointerCancelled)]
         ));
         assert_eq!(runtime.hovered, Some(id));
         // The session falls through to generic routing only when desktop routing
@@ -650,7 +653,7 @@ mod tests {
     fn desktop_pointer_preserves_modifiers_and_capture_over_clients() {
         let mut runtime = InternalUiRuntime::default();
         let id = desktop(&mut runtime);
-        let modifiers = ModifierState::from_sides([nickel_input::Modifier::ControlRight]);
+        let modifiers = ModifierState::from_sides([twinkle_input::Modifier::ControlRight]);
         assert!(!runtime.desktop_pointer_input(
             "mouse",
             (-780.0, -40.0),
@@ -687,11 +690,11 @@ mod tests {
         assert!(batches.iter().all(|(target, _, snapshot)| *target == id && snapshot.as_ref() == Some(&modifiers)));
         assert!(
             matches!(&batches[0].1.events[..], [HostEvent::NormalizedIngress(NormalizedInputEnvelope {
-            input: InputEvent::Pointer(PointerEvent::Button { button: PointerButton::Secondary, edge: KeyEdge::Pressed, position: Some(position), .. }), .. })] if *position == nickel_input::Point { x: 20.0, y: 80.0 })
+            input: InputEvent::Pointer(PointerEvent::Button { button: PointerButton::Secondary, edge: KeyEdge::Pressed, position: Some(position), .. }), .. })] if *position == twinkle_input::Point { x: 20.0, y: 80.0 })
         );
         assert!(
             matches!(&batches[1].1.events[..], [HostEvent::NormalizedIngress(NormalizedInputEnvelope {
-            input: InputEvent::Pointer(PointerEvent::Motion { position, .. }), .. })] if *position == nickel_input::Point { x: 1000.0, y: 420.0 })
+            input: InputEvent::Pointer(PointerEvent::Motion { position, .. }), .. })] if *position == twinkle_input::Point { x: 1000.0, y: 420.0 })
         );
         assert!(runtime.desktop_input.capture.is_none());
         assert!(!runtime.desktop_pointer_input(
@@ -803,7 +806,7 @@ mod tests {
                             position: Some(position),
                             ..
                         }),
-                        .. })] if *position == nickel_input::Point { x: 60.0, y: 60.0 }
+                        .. })] if *position == twinkle_input::Point { x: 60.0, y: 60.0 }
                 )
         }));
     }
@@ -872,7 +875,7 @@ mod tests {
 pub(super) struct DesktopInputState {
     // A contact belongs to its physical device, not merely the backend slot number.
     // Retired targets remain tombstones until Up, preventing release-through clicks.
-    touches: HashMap<(DeviceId, TouchId), (Option<InternalSurfaceId>, nickel_input::Point)>,
+    touches: HashMap<(DeviceId, TouchId), (Option<InternalSurfaceId>, twinkle_input::Point)>,
     // Allocate identities only for devices that reach a normalized shell surface. Removal
     // retires the name mapping; a reconnect receives a fresh, non-aliased identity.
     devices: HashMap<String, DeviceId>,
@@ -1168,7 +1171,7 @@ impl InternalUiRuntime {
         };
         let key = (device, contact);
         let (target, previous) = if starting {
-            (target, nickel_input::Point { x: 0.0, y: 0.0 })
+            (target, twinkle_input::Point { x: 0.0, y: 0.0 })
         } else {
             let Some(capture) = state.touches.get(&key).copied() else {
                 return false;
@@ -1195,7 +1198,7 @@ impl InternalUiRuntime {
         let local = if terminal {
             previous
         } else {
-            nickel_input::Point {
+            twinkle_input::Point {
                 x: position.0 - f64::from(geometry.0),
                 y: position.1 - f64::from(geometry.1),
             }
@@ -1365,7 +1368,7 @@ impl InternalUiRuntime {
             if *edge == KeyEdge::Pressed {
                 self.dispatch_ui(
                     id,
-                    nickel_ui::UiEvent::PointerContext(nickel_ui::Point {
+                    twinkle::UiEvent::PointerContext(twinkle::Point {
                         x: (position.0 - f64::from(placement.geometry.0)) as f32,
                         y: (position.1 - f64::from(placement.geometry.1)) as f32,
                     }),
@@ -1400,7 +1403,7 @@ impl InternalUiRuntime {
         // a normalized surface must cancel the panel before delivering motion.
         if placement.is_some() && self.hovered != Some(id) {
             if let Some(previous) = self.hovered {
-                self.dispatch_ui(previous, nickel_ui::UiEvent::PointerCancelled);
+                self.dispatch_ui(previous, twinkle::UiEvent::PointerCancelled);
             }
             self.hovered = Some(id);
         }
@@ -1434,7 +1437,7 @@ impl InternalUiRuntime {
         };
         // Shell reducers consume whole-surface local coordinates. Panel work-area
         // reservations are already handled by the coordinator's viewport projection.
-        let local = nickel_input::Point {
+        let local = twinkle_input::Point {
             x: position.0 - f64::from(placement.geometry.0),
             y: position.1 - f64::from(placement.geometry.1),
         };

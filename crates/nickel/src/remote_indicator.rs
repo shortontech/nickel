@@ -3,7 +3,7 @@
 //! The platform owner must protect placement, capture and input routing. This
 //! module supplies the semantic tree; platform owners project it through
 //! dedicated AccessKit UI Automation or AT-SPI adapters.
-use nickel_ui::{
+use twinkle::{
     Application, Button, ButtonPresentation, Column, Component, Insets, Row, SemanticTheme, Text,
     VerticalScroll, View, ViewContext,
 };
@@ -251,7 +251,7 @@ mod tests {
 #[cfg(test)]
 mod host_tests {
     use super::*;
-    use nickel_ui::{ActionKind, HostBatch, HostEvent, SemanticAction, UiHost};
+    use twinkle::{ActionKind, HostBatch, HostEvent, SemanticAction, UiHost};
 
     fn host() -> UiHost<RemoteIndicator> {
         UiHost::new_at(
@@ -342,7 +342,7 @@ mod host_tests {
     #[test]
     fn production_indicator_paints_readable_text_in_light_and_dark_themes() {
         use nickel_core::theme::{Appearance, ThemeMode, ThemePalette};
-        use nickel_ui::backend::PaintCommand;
+        use twinkle::backend::PaintCommand;
         fn luminance(color: u32) -> f64 {
             let linear = |shift| {
                 let component = f64::from((color >> shift) & 255_u32) / 255.0;
@@ -409,23 +409,25 @@ mod host_tests {
             .iter()
             .find(|node| node.label.as_deref() == Some("Stop"))
             .unwrap();
-        let position = nickel_input::Point {
+        let position = twinkle_input::Point {
             x: f64::from(stop.rect.origin.x + stop.rect.size.width / 2.0),
             y: f64::from(stop.rect.origin.y + stop.rect.size.height / 2.0),
         };
         for (order, edge) in [
-            (1, nickel_input::KeyEdge::Pressed),
-            (2, nickel_input::KeyEdge::Released),
+            (1, twinkle_input::KeyEdge::Pressed),
+            (2, twinkle_input::KeyEdge::Released),
         ] {
             host.step(HostBatch {
                 events: vec![HostEvent::Normalized {
-                    input: nickel_input::InputEvent::Pointer(nickel_input::PointerEvent::Button {
-                        device: nickel_input::DeviceId(1),
-                        order: nickel_input::EventOrder(order),
-                        button: nickel_input::PointerButton::Primary,
-                        edge,
-                        position: Some(position),
-                    }),
+                    input: twinkle_input::InputEvent::Pointer(
+                        twinkle_input::PointerEvent::Button {
+                            device: twinkle_input::DeviceId(1),
+                            order: twinkle_input::EventOrder(order),
+                            button: twinkle_input::PointerButton::Primary,
+                            edge,
+                            position: Some(position),
+                        },
+                    ),
                     clipboard_text: None,
                 }],
                 ..Default::default()

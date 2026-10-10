@@ -31,7 +31,7 @@
             key.clone(),
             (
                 surface.clone(),
-                nickel_ui::UiHost::new(application, surface.width, surface.height),
+                twinkle::UiHost::new(application, surface.width, surface.height),
             ),
         );
         assert_eq!(shell.plugin_panel_title(&key), Some("Home"));
@@ -181,7 +181,7 @@
 
     #[test]
     fn shortcut_capability_failures_have_visible_classified_status() {
-        use nickel_input::global::{ShortcutCapability, UnavailableReason};
+        use twinkle_input::global::{ShortcutCapability, UnavailableReason};
 
         assert_eq!(
             shortcut_capability_status(&ShortcutCapability::Available),
@@ -394,25 +394,25 @@
             let button = shell
                 .plugin_panel_host_for(&launcher)
                 .unwrap()
-                .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
-                    role: nickel_ui::SemanticRole::Button,
+                .query_unique(&twinkle::SemanticSelector::RoleAndName {
+                    role: twinkle::SemanticRole::Button,
                     name: "Blocked application".into(),
                 })
                 .unwrap();
-            let point = nickel_ui::Point {
+            let point = twinkle::Point {
                 x: button.bounds.origin.x + button.bounds.size.width / 2.0,
                 y: button.bounds.origin.y + button.bounds.size.height / 2.0,
             };
 
             assert!(shell.plugin_panel_host_ui_for(
                 &launcher,
-                nickel_ui::UiEvent::PointerPressed(point),
+                twinkle::UiEvent::PointerPressed(point),
                 608,
                 628,
             ));
             assert!(shell.plugin_panel_host_ui_for(
                 &launcher,
-                nickel_ui::UiEvent::PointerReleased(point),
+                twinkle::UiEvent::PointerReleased(point),
                 608,
                 628,
             ));
@@ -630,7 +630,7 @@
         assert!(shell.open_window_menu_at(window.id.0,120,200));
         let key=shell.active_shell_surface_key("window-menu");
         shell.plugin_panel_scene(&key,320,400);
-        let target=shell.plugin_panel_host_ref(&key).unwrap().query_unique(&nickel_ui::SemanticSelector::RoleAndName{role:nickel_ui::SemanticRole::Button,name:"Close window".into()}).unwrap();
+        let target=shell.plugin_panel_host_ref(&key).unwrap().query_unique(&twinkle::SemanticSelector::RoleAndName{role:twinkle::SemanticRole::Button,name:"Close window".into()}).unwrap();
         host.take_commands();
         shell.plugin_surface_host_event(&key,HostEvent::Ui(UiEvent::AccessibilityActivate(target.id)),(320,400),None,None);
         assert!(shell.window_menu.is_none());
@@ -660,6 +660,7 @@
         assert!(!shell.retire_window_menu(generation));
         assert_eq!(shell.windows.iter().find(|window| window.active).unwrap().id, WindowId(74));
         assert!(!shell.default_shell_surface_visible("window-menu"));
+        #[cfg(target_os = "linux")]
         assert!(!host.take_commands().iter().any(|command| matches!(command, crate::platform::ShellCommand::RestoreApplicationFocus)));
         });
     }
@@ -674,13 +675,13 @@
             ),
             effects: Vec::new(),
         };
-        nickel_ui::Application::update(
+        twinkle::Application::update(
             &mut application,
             super::LockMessage::Password("secret".into()),
         );
-        assert!(nickel_ui::Application::shortcut_outcome(
+        assert!(twinkle::Application::shortcut_outcome(
             &mut application,
-            nickel_ui::Shortcut::Submit
+            twinkle::Shortcut::Submit
         )
         .changed);
         assert!(application.password.is_empty());
@@ -759,8 +760,8 @@
 
         assert!(shell.global_shortcut(GlobalShortcut::ProjectDisplays));
         assert!(shell.control_visible);
-        assert!(shell.control_host.query_unique(&nickel_ui::SemanticSelector::RoleAndName {
-            role: nickel_ui::SemanticRole::Button,
+        assert!(shell.control_host.query_unique(&twinkle::SemanticSelector::RoleAndName {
+            role: twinkle::SemanticRole::Button,
             name: "Show desktop".into(),
         }).is_err());
         });

@@ -9,7 +9,7 @@ mod windows_harness {
     use std::sync::{Mutex, OnceLock};
 
     use nickel_core::hotkeys::{HotkeyAction, default_bindings};
-    use nickel_input::{
+    use twinkle_input::{
         KeyEdge,
         windows::{InjectedEventPolicy, NativeKeyboardEvent, WindowsInputAdapter},
     };
@@ -76,37 +76,37 @@ mod windows_harness {
             let index = state.seen;
             let expected = [
                 (
-                    nickel_input::PhysicalKey::Code(nickel_input::KeyCode::SuperLeft),
+                    twinkle_input::PhysicalKey::Code(twinkle_input::KeyCode::SuperLeft),
                     KeyEdge::Pressed,
                     None,
                     false,
                 ),
                 (
-                    nickel_input::PhysicalKey::Code(nickel_input::KeyCode::KeyR),
+                    twinkle_input::PhysicalKey::Code(twinkle_input::KeyCode::KeyR),
                     KeyEdge::Pressed,
                     Some(HotkeyAction::ShowRun),
                     true,
                 ),
                 (
-                    nickel_input::PhysicalKey::Code(nickel_input::KeyCode::KeyR),
+                    twinkle_input::PhysicalKey::Code(twinkle_input::KeyCode::KeyR),
                     KeyEdge::Released,
                     None,
                     false,
                 ),
                 (
-                    nickel_input::PhysicalKey::Code(nickel_input::KeyCode::SuperLeft),
+                    twinkle_input::PhysicalKey::Code(twinkle_input::KeyCode::SuperLeft),
                     KeyEdge::Released,
                     None,
                     false,
                 ),
                 (
-                    nickel_input::PhysicalKey::Code(nickel_input::KeyCode::KeyR),
+                    twinkle_input::PhysicalKey::Code(twinkle_input::KeyCode::KeyR),
                     KeyEdge::Pressed,
                     None,
                     false,
                 ),
                 (
-                    nickel_input::PhysicalKey::Code(nickel_input::KeyCode::KeyR),
+                    twinkle_input::PhysicalKey::Code(twinkle_input::KeyCode::KeyR),
                     KeyEdge::Released,
                     None,
                     false,

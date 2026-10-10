@@ -1,4 +1,4 @@
-//! Nickel-rendered context menus in a dedicated Windows popup window.
+//! Nickel-rendered context menus in transient windows on the owning event loop.
 
 use std::{
     sync::{
@@ -9,11 +9,11 @@ use std::{
     time::Duration,
 };
 
-use nickel_ui::{
+use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+use twinkle::{
     AdapterOutcome, Application, Container, FrameOverlay, HostAdapter, HostServices, OverlayAnchor,
     OverlayMenu, OverlayMenuItem, Point, UiHost, UiId, View, ViewContext,
 };
-use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use windows::Win32::{
     Foundation::{HWND, POINT},
     UI::WindowsAndMessaging::{
@@ -21,10 +21,10 @@ use windows::Win32::{
         WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
     },
 };
-use winit::{
+use winit_next::{
     dpi::PhysicalPosition,
     event::WindowEvent,
-    window::{Window, WindowAttributes, WindowLevel},
+    window::{WindowAttributes, WindowLevel},
 };
 
 #[derive(Clone)]
@@ -35,6 +35,7 @@ enum Choice<Message> {
 
 struct PopupApplication<Message> {
     menu: OverlayMenu<usize>,
+    source: OverlayMenu<Message>,
     choices: Vec<Choice<Message>>,
     selected: Option<usize>,
     size: (u32, u32),
@@ -43,6 +44,7 @@ struct PopupApplication<Message> {
 impl<Message: Clone> PopupApplication<Message> {
     fn new(source: OverlayMenu<Message>) -> Self {
         let source = source.fit_width_to_content(320.0);
+        let source_template = source.clone();
         let menu_width = source.width
             + if source.items.iter().any(|item| !item.children.is_empty()) {
                 18.0
@@ -105,6 +107,7 @@ impl<Message: Clone> PopupApplication<Message> {
         }
         Self {
             menu,
+            source: source_template,
             choices,
             selected: None,
             size: (width, height),
@@ -146,9 +149,10 @@ impl<Message: Clone> Application for PopupApplication<Message> {
 }
 
 struct PopupAdapter<Message> {
-    sender: mpsc::Sender<Option<Choice<Message>>>,
+    sender: mpsc::Sender<Option<Message>>,
     owner: HWND,
     position: POINT,
+    scale: f64,
     focused: bool,
     cancelled: Arc<AtomicBool>,
 }
@@ -191,7 +195,7 @@ impl<Message: Clone + Send + 'static> HostAdapter<PopupApplication<Message>>
             }
         }
         host.open_transient(
-            nickel_ui::OverlayId::new("windows-detached-context"),
+            twinkle::OverlayId::new("windows-detached-context"),
             UiId::from("popup-anchor"),
         );
         services.window().focus_window();
@@ -225,14 +229,37 @@ impl<Message: Clone + Send + 'static> HostAdapter<PopupApplication<Message>>
     fn poll(
         &mut self,
         host: &mut UiHost<PopupApplication<Message>>,
-        _services: HostServices<'_>,
+        services: HostServices<'_>,
     ) -> Result<AdapterOutcome, Box<dyn std::error::Error>> {
         if self.cancelled.load(Ordering::Acquire) {
             let _ = self.sender.send(None);
             return Ok(AdapterOutcome::exit());
         }
         if let Some(choice) = host.application_mut().take_choice() {
-            let _ = self.sender.send(Some(choice));
+            match choice {
+                Choice::Action(action) => {
+                    let _ = self.sender.send(Some(action));
+                }
+                Choice::Submenu(children) => {
+                    let mut menu = host.application().source.clone();
+                    menu.items = children;
+                    let mut position = self.position;
+                    position.x +=
+                        ((host.application().size.0 as i32 - 4) as f64 * self.scale).round() as i32;
+                    let application = PopupApplication::new(menu);
+                    services.open_transient(
+                        application,
+                        PopupAdapter {
+                            sender: self.sender.clone(),
+                            owner: self.owner,
+                            position,
+                            scale: self.scale,
+                            focused: false,
+                            cancelled: Arc::clone(&self.cancelled),
+                        },
+                    );
+                }
+            }
             return Ok(AdapterOutcome::exit());
         }
         if host.inspect().open_overlay.is_none() {
@@ -247,8 +274,9 @@ impl<Message: Clone + Send + 'static> HostAdapter<PopupApplication<Message>>
 /// Nested entries open another tightly sized Nickel popup after selection.
 pub fn start<Message: Clone + Send + 'static>(
     menu: OverlayMenu<Message>,
-    window: &Window,
+    services: &HostServices<'_>,
 ) -> Option<PopupSession<Message>> {
+    let window = services.window();
     let RawWindowHandle::Win32(handle) = window.window_handle().ok()?.as_raw() else {
         return None;
     };
@@ -264,14 +292,18 @@ pub fn start<Message: Clone + Send + 'static>(
     }
     let (sender, receiver) = mpsc::channel();
     let cancelled = Arc::new(AtomicBool::new(false));
-    let popup_cancelled = Arc::clone(&cancelled);
-    std::thread::Builder::new()
-        .name("nickel-context-popup-owner".into())
-        .spawn(move || {
-            let action = run(menu, owner, scale, position, popup_cancelled);
-            let _ = sender.send(action);
-        })
-        .ok()?;
+    let application = PopupApplication::new(menu);
+    services.open_transient(
+        application,
+        PopupAdapter {
+            sender,
+            owner: HWND(owner as *mut _),
+            position,
+            scale,
+            focused: false,
+            cancelled: Arc::clone(&cancelled),
+        },
+    );
     Some(PopupSession {
         receiver,
         cancelled,
@@ -304,50 +336,6 @@ fn popup_owner(window: usize, extended_style: u32) -> usize {
         0
     } else {
         window
-    }
-}
-
-fn run<Message: Clone + Send + 'static>(
-    mut menu: OverlayMenu<Message>,
-    owner: usize,
-    scale: f64,
-    mut position: POINT,
-    cancelled: Arc<AtomicBool>,
-) -> Option<Message> {
-    loop {
-        if cancelled.load(Ordering::Acquire) {
-            return None;
-        }
-        let application = PopupApplication::new(menu.clone());
-        let width = application.size.0 as i32;
-        let (sender, receiver) = mpsc::channel();
-        let cancelled = Arc::clone(&cancelled);
-        let popup = std::thread::Builder::new()
-            .name("nickel-context-popup".into())
-            .spawn(move || {
-                let adapter = PopupAdapter {
-                    sender,
-                    owner: HWND(owner as *mut _),
-                    position,
-                    focused: false,
-                    cancelled,
-                };
-                nickel_ui::run_with_adapter_on_any_thread(application, adapter)
-                    .map_err(|error| error.to_string())
-            })
-            .ok()?;
-        let choice = receiver.recv().ok().flatten();
-        if let Err(error) = popup.join().ok()? {
-            tracing::warn!(%error, "Nickel context popup failed");
-            return None;
-        }
-        match choice? {
-            Choice::Action(action) => return Some(action),
-            Choice::Submenu(children) => {
-                position.x += ((width - 4) as f64 * scale).round() as i32;
-                menu.items = children;
-            }
-        }
     }
 }
 

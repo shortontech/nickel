@@ -10290,22 +10290,22 @@ Used by:
 - nickel-gaze 0.1.0
 - nickel-i18n 0.1.0
 - nickel-i18n-lint 0.1.0
-- nickel-input 0.1.0
+- twinkle-input 0.1.0
 - nickel-logging 0.1.0
 - nickel-markdown 0.1.0
 - nickel-markdown-ui 0.1.0
 - nickel-mcp-client 0.1.0
 - nickel-platform 0.1.0
 - nickel-remote-control 0.1.0
-- nickel-render-assets 0.1.0
+- twinkle-render-assets 0.1.0
 - nickel-session-protocol 0.1.0
 - nickel-storage 0.1.0
 - nickel-terminal 0.1.0
 - nickel-terminal-ui 0.1.0
-- nickel-ui 0.1.0
-- nickel-ui-testkit 0.1.0
-- nickel-ui-workbench 0.1.0
-- ui-declarative-macros 0.1.0
+- twinkle 0.1.0
+- twinkle-testkit 0.1.0
+- twinkle-workbench 0.1.0
+- twinkle-macros 0.1.0
 - ab_glyph 0.2.32 (https://github.com/alexheretic/ab-glyph)
 - ab_glyph_rasterizer 0.1.10 (https://github.com/alexheretic/ab-glyph)
 - accesskit 0.24.1 (https://github.com/AccessKit/accesskit)

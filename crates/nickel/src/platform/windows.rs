@@ -130,7 +130,7 @@ use nickel_core::{
         WindowId as OperationWindowId, WindowMapping, WindowOperationReducer,
     },
 };
-use nickel_input::{
+use twinkle_input::{
     AggregateModifier, PhysicalKey, PointerButton, Shortcut, ShortcutKey, ShortcutTrigger,
     global::{GlobalShortcutEdge, Registration, RegistrationError, RegistrationTable},
     windows::{
@@ -1072,8 +1072,8 @@ pub fn launcher_hotkey_receiver() -> super::GlobalShortcutFeed {
     let (sender, receiver) = mpsc::channel();
     let (startup_sender, startup_receiver) = mpsc::sync_channel(1);
     let diagnostic_state = Arc::new(Mutex::new(WindowsShortcutOwnerState {
-        capability: nickel_input::global::ShortcutCapability::Unavailable(
-            nickel_input::global::UnavailableReason::MissingRuntime,
+        capability: twinkle_input::global::ShortcutCapability::Unavailable(
+            twinkle_input::global::UnavailableReason::MissingRuntime,
         ),
         registration_revision: None,
     }));
@@ -1083,8 +1083,8 @@ pub fn launcher_hotkey_receiver() -> super::GlobalShortcutFeed {
         .spawn(move || {
             run_super_key_hook(sender, startup_sender, &hook_diagnostic_state);
             if let Ok(mut state) = hook_diagnostic_state.lock() {
-                state.capability = nickel_input::global::ShortcutCapability::Unavailable(
-                    nickel_input::global::UnavailableReason::MissingRuntime,
+                state.capability = twinkle_input::global::ShortcutCapability::Unavailable(
+                    twinkle_input::global::UnavailableReason::MissingRuntime,
                 );
                 state.registration_revision = None;
             }
@@ -1092,21 +1092,21 @@ pub fn launcher_hotkey_receiver() -> super::GlobalShortcutFeed {
         Ok(_) => startup_receiver
             .recv_timeout(Duration::from_secs(2))
             .unwrap_or_else(|error| {
-                nickel_input::global::ShortcutCapability::Unavailable(
-                    nickel_input::global::UnavailableReason::Backend(format!(
+                twinkle_input::global::ShortcutCapability::Unavailable(
+                    twinkle_input::global::UnavailableReason::Backend(format!(
                         "Windows shortcut adapter did not initialize: {error}"
                     )),
                 )
             }),
-        Err(error) => nickel_input::global::ShortcutCapability::Unavailable(
-            nickel_input::global::UnavailableReason::Backend(format!(
+        Err(error) => twinkle_input::global::ShortcutCapability::Unavailable(
+            twinkle_input::global::UnavailableReason::Backend(format!(
                 "could not start Windows shortcut adapter: {error}"
             )),
         ),
     };
     super::GlobalShortcutFeed {
         receiver,
-        ownership: nickel_input::global::ShortcutOwnership::OperatingSystem,
+        ownership: twinkle_input::global::ShortcutOwnership::OperatingSystem,
         capability: capability.clone(),
         diagnostics: WindowsShortcutDiagnosticSource {
             state: diagnostic_state,
@@ -1115,7 +1115,7 @@ pub fn launcher_hotkey_receiver() -> super::GlobalShortcutFeed {
 }
 
 struct WindowsShortcutOwnerState {
-    capability: nickel_input::global::ShortcutCapability,
+    capability: twinkle_input::global::ShortcutCapability,
     registration_revision: Option<u64>,
 }
 
@@ -1128,8 +1128,8 @@ impl WindowsShortcutDiagnosticSource {
     pub(crate) fn unavailable() -> Self {
         Self {
             state: Arc::new(Mutex::new(WindowsShortcutOwnerState {
-                capability: nickel_input::global::ShortcutCapability::Unavailable(
-                    nickel_input::global::UnavailableReason::MissingRuntime,
+                capability: twinkle_input::global::ShortcutCapability::Unavailable(
+                    twinkle_input::global::UnavailableReason::MissingRuntime,
                 ),
                 registration_revision: None,
             })),
@@ -1144,7 +1144,7 @@ impl WindowsShortcutDiagnosticSource {
         let owner = self.state.try_lock().ok().map(|state| {
             let capability = if matches!(
                 state.capability,
-                nickel_input::global::ShortcutCapability::Available
+                twinkle_input::global::ShortcutCapability::Available
             ) {
                 nickel_remote_control::diagnostics::ShortcutDiagnosticCapability::Available
             } else {
@@ -1171,11 +1171,11 @@ fn project_windows_shortcuts(
     )>,
     adapter: Option<&WindowsInputAdapter<HotkeyAction>>,
 ) -> nickel_remote_control::diagnostics::ShortcutDiagnostic {
-    use nickel_input::{PhysicalKey, ShortcutKey};
     use nickel_remote_control::diagnostics::{
         MAX_DIAGNOSTIC_SHORTCUTS, ShortcutDiagnostic, ShortcutDiagnosticCapability,
         ShortcutRegistrationDiagnostic,
     };
+    use twinkle_input::{PhysicalKey, ShortcutKey};
     let available = owner.is_some_and(|(capability, revision)| {
         capability == ShortcutDiagnosticCapability::Available && revision.is_some()
     }) && adapter.is_some();
@@ -1257,7 +1257,7 @@ fn handle_focused_shortcut_edge(key: KeyCode, edge: KeyEdge, synthesize_missing_
 
 fn run_super_key_hook(
     sender: Sender<GlobalShortcut>,
-    startup: mpsc::SyncSender<nickel_input::global::ShortcutCapability>,
+    startup: mpsc::SyncSender<twinkle_input::global::ShortcutCapability>,
     diagnostic_state: &Arc<Mutex<WindowsShortcutOwnerState>>,
 ) {
     SHORTCUT_SENDER.set(sender).ok();
@@ -1314,7 +1314,7 @@ fn run_super_key_hook(
                         );
                         registrations.1 = registration;
                     }
-                    let available = nickel_input::global::ShortcutCapability::Available;
+                    let available = twinkle_input::global::ShortcutCapability::Available;
                     if let Ok(mut state) = ready_diagnostic_state.lock() {
                         state.capability = available.clone();
                         state.registration_revision = Some(1);
@@ -1322,8 +1322,8 @@ fn run_super_key_hook(
                     let _ = startup.send(available);
                 }
                 Err(error) => {
-                    let unavailable = nickel_input::global::ShortcutCapability::Unavailable(
-                        nickel_input::global::UnavailableReason::Backend(error),
+                    let unavailable = twinkle_input::global::ShortcutCapability::Unavailable(
+                        twinkle_input::global::UnavailableReason::Backend(error),
                     );
                     if let Ok(mut state) = ready_diagnostic_state.lock() {
                         state.capability = unavailable.clone();
@@ -1371,7 +1371,7 @@ fn native_registration(
     key: KeyCode,
     modifiers: impl IntoIterator<Item = AggregateModifier>,
     action: RegisteredHotkey,
-) -> Option<nickel_input::global::RegistrationId> {
+) -> Option<twinkle_input::global::RegistrationId> {
     if !native_registered {
         let error =
             RegistrationError::Backend(format!("RegisterHotKey rejected {key:?} for {action:?}"));
@@ -1396,7 +1396,7 @@ fn native_registration(
 
 fn deliver_registered_hotkey(
     registrations: &mut RegistrationTable<RegisteredHotkey>,
-    id: Option<nickel_input::global::RegistrationId>,
+    id: Option<twinkle_input::global::RegistrationId>,
     edge: GlobalShortcutEdge,
 ) {
     let Some(event) = id.and_then(|id| registrations.deliver(id, edge)) else {
@@ -2754,7 +2754,7 @@ fn send_hotkey_action(action: Option<HotkeyAction>) {
     }
 }
 
-fn send_hotkey_outcomes(outcomes: Vec<nickel_input::ShortcutOutcome<HotkeyAction>>) {
+fn send_hotkey_outcomes(outcomes: Vec<twinkle_input::ShortcutOutcome<HotkeyAction>>) {
     for outcome in outcomes {
         match outcome.action {
             HotkeyAction::SwitchNext
@@ -7928,11 +7928,11 @@ mod tests {
     #[test]
     fn shortcut_diagnostic_projects_only_confirmed_fixed_registration_metadata() {
         use nickel_core::hotkeys::HotkeyAction;
-        use nickel_input::{
+        use nickel_remote_control::diagnostics::ShortcutDiagnosticCapability;
+        use twinkle_input::{
             Binding, LogicalKey, Shortcut, ShortcutKey, ShortcutTrigger,
             windows::WindowsInputAdapter,
         };
-        use nickel_remote_control::diagnostics::ShortcutDiagnosticCapability;
 
         let adapter = WindowsInputAdapter::new([
             nickel_core::hotkeys::default_bindings()
@@ -7971,8 +7971,8 @@ mod tests {
 
     #[test]
     fn unavailable_shortcut_owner_cannot_publish_configured_bindings() {
-        use nickel_input::windows::WindowsInputAdapter;
         use nickel_remote_control::diagnostics::ShortcutDiagnosticCapability;
+        use twinkle_input::windows::WindowsInputAdapter;
 
         let adapter = WindowsInputAdapter::new(nickel_core::hotkeys::default_bindings());
         let snapshot = project_windows_shortcuts(

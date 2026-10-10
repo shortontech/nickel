@@ -10,15 +10,22 @@ which is the authoritative list. `crates/nickel` is the default member.
 - `nickel-markdown-ui` — standalone Markdown viewer.
 - `nickel-terminal-ui` — terminal application UI.
 - `nickel-codex-ui` — standalone Codex chat application.
-- `nickel-ui-workbench` — UI workbench.
+- `twinkle-workbench` — independent native component gallery and shared fixtures.
+- `nickel-workbench` — Nickel consumer fixtures, shell providers and acceptance tooling.
 
 ## Shared components
 
 - `nickel-core` — platform-neutral shell state and behavior.
-- `nickel-ui` — declarative UI, layout, state, and presentation.
+- `nickel-ui-host` — Nickel-owned adapters to the Twinkle engine.
+- `nickel-jsx-host` — Nickel package composition and provider lifecycle integration.
+- `twinkle` — declarative UI, layout, state, and presentation.
 - `nickel-platform` — native Windows and Linux adapters.
-- `nickel-input` — input handling.
-- `nickel-render-assets` — rendering assets.
+- `twinkle-input` — input handling.
+- `twinkle-render-assets` — rendering assets.
+- `twinkle-jsx-runtime` — JSX/TSX execution and hooks.
+- `twinkle-presentation` — native tree/CSS presentation; optional `jsx` executor conveniences.
+- `twinkle-protocol` — executor-neutral patches, scheduling types and host-provided surface bounds.
+- `twinkle-theme` — portable palette types and perceptual color math.
 - `nickel-storage` — persistent storage.
 - `nickel-logging` — native logging.
 - `nickel-session-protocol` — session communication types.
@@ -41,5 +48,9 @@ which is the authoritative list. `crates/nickel` is the default member.
 - `nickel-build-support` — shared build support.
 - `nickel-codex-fixture` — offline Codex protocol fixtures and replay.
 - `nickel-i18n-lint` — internationalization checks.
-- `nickel-ui-testkit` — UI testing helpers.
-- `ui-declarative-macros` — declarative UI macros.
+- `twinkle-testkit` — UI testing helpers.
+- `twinkle-macros` — declarative UI macros.
+
+The Twinkle crates are being prepared for extraction into their own workspace. They
+currently retain Nickel dependencies; the local rename does not establish independence.
+The active extraction specifications are `specs/0273` through `specs/0276`.

@@ -3676,8 +3676,8 @@ mod tests {
             lease_requests::LeaseRequest,
             leases::{ResourceEvidence, ResourceScope},
         };
-        use nickel_input::{KeyCode, KeyEdge};
         use std::sync::atomic::{AtomicUsize, Ordering};
+        use twinkle_input::{KeyCode, KeyEdge};
 
         let _subscription_test_guard = TEST_LOCK.lock().unwrap();
         let runtime = tokio::runtime::Builder::new_current_thread()

@@ -779,7 +779,7 @@ fn rust_files(path: &Path, output: &mut Vec<PathBuf>) -> std::io::Result<()> {
         .any(|component| component.as_os_str() == "examples")
         || (path
             .components()
-            .any(|component| component.as_os_str() == "nickel-ui-workbench")
+            .any(|component| component.as_os_str() == "twinkle-workbench")
             && path
                 .components()
                 .any(|component| component.as_os_str() == "crates"))

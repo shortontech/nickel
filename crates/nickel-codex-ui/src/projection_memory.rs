@@ -1,6 +1,6 @@
 //! Capacity accounting for the owned Markdown tree; shared selection text is counted once here.
 use nickel_markdown::{Block, Inline, MarkdownDocument};
-use nickel_ui::SelectionRun;
+use twinkle::SelectionRun;
 
 /// Conservative allowance for the full selection document's cloned run IDs,
 /// vector slots, and index buckets. Run text is Arc-shared with the item cache.

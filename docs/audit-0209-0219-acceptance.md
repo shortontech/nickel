@@ -35,7 +35,7 @@ Integrated Linux checks on 2026-09-07:
   Ignored native, environment-specific, and opt-in measurement tests are not implied to have run.
 - `cargo fmt --all --check`: passed.
 - `CARGO_BUILD_JOBS=4 cargo clippy --workspace --all-targets --all-features -- -D warnings`: passed.
-- `CARGO_BUILD_JOBS=4 cargo run -p nickel-ui-workbench -- validate`: passed; 28 fixtures, 44 cache
+- `CARGO_BUILD_JOBS=4 cargo run -p nickel-workbench -- validate`: passed; 28 fixtures, 44 cache
   records, 44 lifecycle records, 22 consumers, and 22 live acceptance records. Validation checks the
   ledger structure and consistency, not that pending live acceptance has been performed.
 

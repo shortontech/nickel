@@ -1,6 +1,7 @@
 mod preference_persistence;
 mod shell_selection;
 
+use nickel_jsx_host::SettingsRuntimeExt;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     sync::{
@@ -14,18 +15,18 @@ static INTERNAL_INGRESS_ORDER: AtomicU64 = AtomicU64::new(1);
 static INTERNAL_INGRESS_EPOCH: OnceLock<Instant> = OnceLock::new();
 
 pub(crate) fn internal_normalized_ingress(
-    input: nickel_input::InputEvent,
+    input: twinkle_input::InputEvent,
     clipboard_text: Option<String>,
     owner: &'static str,
-    recipient: impl Into<nickel_ui::HostInputLease>,
+    recipient: impl Into<twinkle::HostInputLease>,
     transform_generation: Option<u64>,
-) -> (HostEvent, nickel_ui::NormalizedIngressAuthority) {
+) -> (HostEvent, twinkle::NormalizedIngressAuthority) {
     let recipient = recipient.into();
     let device = input.device();
     let device_generation = device.map_or(0, |device| device.0);
     let order = INTERNAL_INGRESS_ORDER.fetch_add(1, Ordering::Relaxed);
     let epoch = INTERNAL_INGRESS_EPOCH.get_or_init(Instant::now);
-    let source = nickel_ui::NormalizedSourceBinding {
+    let source = twinkle::NormalizedSourceBinding {
         seat: 0,
         backend_stream: if device.is_some() {
             format!("routed-native-input:{owner}")
@@ -41,17 +42,17 @@ pub(crate) fn internal_normalized_ingress(
         },
         reconnect_generation: device_generation,
     };
-    let recipient = nickel_ui::NormalizedRecipientBinding {
+    let recipient = twinkle::NormalizedRecipientBinding {
         // A focus-gained event is the authority that restores this host's input
         // lease. Rejecting it while the previous lease is zero would leave a
         // window unable to accept input after its first focus loss.
         lease: u64::from(
             recipient.window_focused
-                || matches!(input, nickel_input::InputEvent::FocusGained { .. }),
+                || matches!(input, twinkle_input::InputEvent::FocusGained { .. }),
         ),
         lifetime: recipient.frame_generation,
     };
-    let authority = nickel_ui::NormalizedIngressAuthority {
+    let authority = twinkle::NormalizedIngressAuthority {
         source: source.clone(),
         recipient,
         transfer_cutoff: None,
@@ -63,11 +64,11 @@ pub(crate) fn internal_normalized_ingress(
         composition_recipient_epoch: None,
         coordinate_meaning: "host-logical".into(),
     };
-    let event = HostEvent::NormalizedIngress(nickel_ui::NormalizedInputEnvelope {
+    let event = HostEvent::NormalizedIngress(twinkle::NormalizedInputEnvelope {
         input,
         clipboard_text,
         source,
-        admission: nickel_ui::NormalizedAdmissionBinding {
+        admission: twinkle::NormalizedAdmissionBinding {
             order,
             monotonic_micros: epoch.elapsed().as_micros() as u64,
         },
@@ -86,7 +87,7 @@ pub(crate) fn internal_normalized_ingress(
     (event, authority)
 }
 
-fn normalized_input(event: &HostEvent) -> Option<&nickel_input::InputEvent> {
+fn normalized_input(event: &HostEvent) -> Option<&twinkle_input::InputEvent> {
     match event {
         HostEvent::Normalized { input, .. } => Some(input),
         HostEvent::NormalizedIngress(envelope) => Some(&envelope.input),
@@ -107,10 +108,10 @@ use nickel_session_protocol::{AnchorSide, Geometry, ShellPopoverAnchor};
 use nickel_session_protocol::{
     PointerInteraction, PreviewTargetAction, ResolvedShellTarget, ShellSemanticTarget,
 };
-use nickel_ui::InternalSurfaceId;
-use nickel_ui::Rect;
-use nickel_ui::backend::PaintCommand;
-use nickel_ui::{
+use twinkle::InternalSurfaceId;
+use twinkle::Rect;
+use twinkle::backend::PaintCommand;
+use twinkle::{
     Application as UiApplication, Column, Container, ControllerAction, HostBatch, HostChangeToken,
     HostEvent, Insets, Point, SemanticRole, Shortcut, Size, Spacer, Text, TextAlign, TextField,
     UiEvent, UiHostViewport, ViewContext,
@@ -140,7 +141,7 @@ use crate::{
     winit_shell::SurfaceRole,
 };
 
-use nickel_input::KeyCode;
+use twinkle_input::KeyCode;
 #[cfg(not(target_os = "windows"))]
 use zeroize::Zeroize;
 use zeroize::Zeroizing;
@@ -241,7 +242,7 @@ impl LockApplication {
     }
 }
 
-impl nickel_ui::Application for LockApplication {
+impl twinkle::Application for LockApplication {
     type Message = LockMessage;
 
     fn update(&mut self, message: Self::Message) {
@@ -254,16 +255,16 @@ impl nickel_ui::Application for LockApplication {
         }
     }
 
-    fn shortcut_outcome(&mut self, shortcut: Shortcut) -> nickel_ui::ShortcutOutcome {
+    fn shortcut_outcome(&mut self, shortcut: Shortcut) -> twinkle::ShortcutOutcome {
         if shortcut != Shortcut::Submit {
-            return nickel_ui::ShortcutOutcome::from_changed(false);
+            return twinkle::ShortcutOutcome::from_changed(false);
         }
         self.effects
             .push(LockEffect::Authenticate(std::mem::take(&mut self.password)));
-        nickel_ui::ShortcutOutcome::handled(true)
+        twinkle::ShortcutOutcome::handled(true)
     }
 
-    fn view(&self, context: ViewContext) -> impl nickel_ui::View<Self::Message> {
+    fn view(&self, context: ViewContext) -> impl twinkle::View<Self::Message> {
         let width = context.viewport.size.width;
         let height = context.viewport.size.height;
         let username = std::env::var("USER").unwrap_or_else(|_| "Session locked".into());
@@ -300,7 +301,7 @@ impl nickel_ui::Application for LockApplication {
                     .accessibility_label("Password")
                     .width(340.0)
                     .height(46.0)
-                    .align_self(nickel_ui::Align::Center)
+                    .align_self(twinkle::Align::Center)
                     .background(self.palette.surface)
                     .radius(10.0)
                     .padding(Insets {
@@ -489,10 +490,10 @@ fn validate_plugin_display_layout(
 
 #[derive(Clone)]
 enum RetainedPackageRuntime {
-    Ordinary(std::rc::Rc<std::cell::RefCell<nickel_plugin_runtime::JsxRuntime>>),
+    Ordinary(std::rc::Rc<std::cell::RefCell<nickel_jsx_host::JsxRuntime>>),
     Composed(
         std::rc::Rc<
-            std::cell::RefCell<nickel_plugin_runtime::composition_runtime::ShellCompositionRuntime>,
+            std::cell::RefCell<nickel_jsx_host::composition_runtime::ShellCompositionRuntime>,
         >,
     ),
 }
@@ -503,7 +504,7 @@ impl RetainedPackageRuntime {
         active: &str,
     ) -> std::collections::BTreeMap<
         String,
-        std::rc::Rc<std::cell::RefCell<nickel_plugin_runtime::JsxRuntime>>,
+        std::rc::Rc<std::cell::RefCell<nickel_jsx_host::JsxRuntime>>,
     > {
         match self {
             Self::Ordinary(runtime) => {
@@ -594,7 +595,7 @@ pub struct LiveShell {
     wallpaper_loaded_source_fingerprint: Option<WallpaperSourceFingerprint>,
     wallpaper: Option<Arc<image::RgbaImage>>,
     wallpaper_size: (u32, u32),
-    desktop_host: nickel_ui::UiHost<DesktopApplication>,
+    desktop_host: twinkle::UiHost<DesktopApplication>,
     desktop_viewports: HashMap<String, DesktopSurfaceViewport>,
     desktop_active_viewport: String,
     desktop_change_token: HostChangeToken,
@@ -604,7 +605,7 @@ pub struct LiveShell {
     /// overlay.  Application messages may close the overlay on release, so
     /// routing cannot be inferred independently from the menu's current
     /// visibility without risking a half transaction reaching the file plane.
-    desktop_overlay_pointer_capture: Option<nickel_input::PointerButton>,
+    desktop_overlay_pointer_capture: Option<twinkle_input::PointerButton>,
     #[cfg(target_os = "windows")]
     output_identification: Option<(String, u64, usize)>,
     panel_icon: Arc<image::RgbaImage>,
@@ -625,7 +626,7 @@ pub struct LiveShell {
     launcher_visible: bool,
     run_status: HashMap<String, String>,
     locked: bool,
-    lock_host: nickel_ui::UiHost<LockApplication>,
+    lock_host: twinkle::UiHost<LockApplication>,
     lock_change_token: HostChangeToken,
     lock_deadline: Option<Instant>,
     control_visible: bool,
@@ -634,13 +635,13 @@ pub struct LiveShell {
     package_settings_registry: nickel_core::settings_registry::SettingsRegistry,
     package_settings_runtimes: std::collections::BTreeMap<
         String,
-        std::rc::Rc<std::cell::RefCell<nickel_plugin_runtime::JsxRuntime>>,
+        std::rc::Rc<std::cell::RefCell<nickel_jsx_host::JsxRuntime>>,
     >,
     active_shell_package_id: String,
     package_runtimes: std::collections::BTreeMap<String, RetainedPackageRuntime>,
     platform_maintenance_cursor: usize,
     package_settings_generation: u64,
-    package_settings_values: nickel_plugin_runtime::settings::SettingsValueSnapshot,
+    package_settings_values: nickel_jsx_host::settings::SettingsValueSnapshot,
     package_settings_value_revisions: std::collections::BTreeMap<String, u64>,
     package_settings_invoking: bool,
     plugin_settings:
@@ -661,7 +662,7 @@ pub struct LiveShell {
         nickel_core::plugins::PluginSurfaceKey,
         (
             nickel_core::plugins::PluginSurface,
-            nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>,
+            twinkle::UiHost<crate::plugin_panel::PluginPanelApplication>,
         ),
     >,
     plugin_image_deadlines:
@@ -672,7 +673,7 @@ pub struct LiveShell {
         nickel_core::plugins::PluginSurfaceKey,
         (
             nickel_core::plugins::PluginSurface,
-            nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>,
+            twinkle::UiHost<crate::plugin_panel::PluginPanelApplication>,
             u64,
             u64,
         ),
@@ -733,7 +734,7 @@ pub struct LiveShell {
     secure_storage_query_error: Option<(platform::SessionRequestError, Instant)>,
     requested_codex_project: Option<String>,
     screenshot: ScreenshotTool,
-    keyboard_host: nickel_ui::UiHost<nickel_ui::on_screen_keyboard::KeyboardApp>,
+    keyboard_host: twinkle::UiHost<twinkle::on_screen_keyboard::KeyboardApp>,
     keyboard_service_generation: u64,
     keyboard_visible: bool,
     keyboard_enabled: bool,
@@ -743,10 +744,11 @@ pub struct LiveShell {
     keyboard_touchscreen_present: bool,
     keyboard_dock_top: bool,
     keyboard_height: u32,
-    keyboard_resize: Option<(nickel_input::DeviceId, Option<nickel_input::TouchId>, f64)>,
+    keyboard_resize: Option<(twinkle_input::DeviceId, Option<twinkle_input::TouchId>, f64)>,
     keyboard_override: nickel_core::on_screen_keyboard::KeyboardOverride,
     keyboard_deadline: Instant,
-    keyboard_gesture_leases: HashMap<(nickel_input::DeviceId, Option<nickel_input::TouchId>), u64>,
+    keyboard_gesture_leases:
+        HashMap<(twinkle_input::DeviceId, Option<twinkle_input::TouchId>), u64>,
     keyboard_recipient: Option<nickel_session_protocol::OnScreenKeyboardSnapshot>,
 }
 
@@ -809,7 +811,7 @@ struct DesktopSurfaceViewport {
     application: desktop::DesktopViewportState,
     change_token: HostChangeToken,
     deadline: Option<Instant>,
-    overlay_pointer_capture: Option<nickel_input::PointerButton>,
+    overlay_pointer_capture: Option<twinkle_input::PointerButton>,
 }
 
 #[cfg(any(test, target_os = "windows"))]
@@ -827,7 +829,7 @@ struct HostRuntimeSamples {
 }
 
 impl HostRuntimeSamples {
-    fn record(&mut self, telemetry: nickel_ui::HostTelemetry) {
+    fn record(&mut self, telemetry: twinkle::HostTelemetry) {
         for (samples, value) in [
             (&mut self.input_to_message_us, telemetry.input_to_message_us),
             (&mut self.input_to_frame_us, telemetry.input_to_frame_us),
@@ -850,9 +852,9 @@ fn preview_refresh_due(deadline: Option<Instant>, now: Instant) -> bool {
 }
 
 fn shortcut_capability_status(
-    capability: &nickel_input::global::ShortcutCapability,
+    capability: &twinkle_input::global::ShortcutCapability,
 ) -> Option<String> {
-    use nickel_input::global::{ShortcutCapability, UnavailableReason};
+    use twinkle_input::global::{ShortcutCapability, UnavailableReason};
 
     let reason = match capability {
         ShortcutCapability::Available => return None,
@@ -895,9 +897,9 @@ fn external_plugin_settings(
 }
 
 fn taskbar_plugin_control_bounds(
-    host: &nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>,
+    host: &twinkle::UiHost<crate::plugin_panel::PluginPanelApplication>,
     control: &str,
-) -> Option<nickel_ui::Rect> {
+) -> Option<twinkle::Rect> {
     let mut matches = host
         .accessibility_nodes()
         .iter()
@@ -931,19 +933,19 @@ pub(crate) fn passive_pointer_batch(batch: &HostBatch) -> bool {
         HostEvent::Ui(UiEvent::PointerMoved(_) | UiEvent::PointerCancelled) => true,
         event => matches!(
             normalized_input(event),
-            Some(nickel_input::InputEvent::Pointer(
-                nickel_input::PointerEvent::Motion { .. }
-                    | nickel_input::PointerEvent::Leave { .. }
+            Some(twinkle_input::InputEvent::Pointer(
+                twinkle_input::PointerEvent::Motion { .. }
+                    | twinkle_input::PointerEvent::Leave { .. }
             ))
         ),
     }
 }
 
 pub(crate) fn step_plugin_host(
-    host: &mut nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>,
+    host: &mut twinkle::UiHost<crate::plugin_panel::PluginPanelApplication>,
     data: Option<String>,
     mut batch: HostBatch,
-) -> Result<(nickel_ui::HostEventOutcome, u64), String> {
+) -> Result<(twinkle::HostEventOutcome, u64), String> {
     let geometry_or_data_changed = batch.application_changed
         || batch
             .surface_size
@@ -999,7 +1001,7 @@ pub(crate) fn step_plugin_host(
         return Ok((outcome, retained_bytes));
     }
     let now = batch.now;
-    let mut before_update: Vec<nickel_ui::ScrollAnchor> = Vec::new();
+    let mut before_update: Vec<twinkle::ScrollAnchor> = Vec::new();
     let mut virtual_targets = Vec::new();
     // Projection may already have admitted a new tree. Its row keys cannot
     // measure the previous native view. Resolve that tree in host.step below
@@ -1008,7 +1010,7 @@ pub(crate) fn step_plugin_host(
     if geometry_or_data_changed && host.application().native_view_matches_accepted() {
         if host.application().has_virtual_collections() {
             let inspection = host.inspect();
-            let targets = if inspection.modality == nickel_ui::InputModality::Controller {
+            let targets = if inspection.modality == twinkle::InputModality::Controller {
                 [inspection.controller_target, inspection.keyboard_focus]
             } else {
                 [inspection.keyboard_focus, inspection.controller_target]
@@ -1068,7 +1070,7 @@ pub(crate) fn step_plugin_host(
     let mut virtual_work_pending = false;
     for pass in 0..8 {
         let (width, height) = host.render_frame().logical_size;
-        let viewport = nickel_ui::Rect::new(0.0, 0.0, width as f32, height as f32);
+        let viewport = twinkle::Rect::new(0.0, 0.0, width as f32, height as f32);
         let scale = host.render_frame().scale_factor;
         let generation = host.resolved_frame_generation();
         let measurements = host.application().virtual_measurements(
@@ -1080,7 +1082,7 @@ pub(crate) fn step_plugin_host(
         // Keep a surviving transaction anchor through estimate refinement.
         // Anchoring a different first-visible row here can move the focused
         // row back offscreen as preceding estimates become measured heights.
-        let mut anchors: Vec<nickel_ui::ScrollAnchor> = before_update
+        let mut anchors: Vec<twinkle::ScrollAnchor> = before_update
             .iter()
             .filter(|anchor| {
                 host.capture_scroll_anchor(anchor.target())
@@ -1126,7 +1128,7 @@ pub(crate) fn step_plugin_host(
         let feedback = host.application().virtual_collection_feedback(
             host.resolved_frame_generation(),
             host.resolved_layout(),
-            nickel_ui::Rect::new(0.0, 0.0, width as f32, height as f32),
+            twinkle::Rect::new(0.0, 0.0, width as f32, height as f32),
         )?;
         if feedback.is_empty() {
             break;
@@ -1168,7 +1170,7 @@ pub(crate) fn step_plugin_host(
 }
 
 fn render_plugin_host(
-    host: &mut nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>,
+    host: &mut twinkle::UiHost<crate::plugin_panel::PluginPanelApplication>,
     data: Option<String>,
     batch: HostBatch,
 ) -> Result<(Vec<PaintCommand>, u64), String> {
@@ -1421,12 +1423,12 @@ impl LiveShell {
         let secure_storage_state = platform::SecureStorageState::Ready;
         let control_host = ProjectionRecoveryHost::new(ProjectionRecoveryApp::new(), 380, 650);
         let notification_host = NotificationHost::new(NotificationApp::new(palette), 420, 180);
-        let desktop_host = nickel_ui::UiHost::new(
+        let desktop_host = twinkle::UiHost::new(
             DesktopApplication::new(wallpaper.clone(), palette, file_window_host.clone()),
             1920,
             1080,
         );
-        let lock_host = nickel_ui::UiHost::new(
+        let lock_host = twinkle::UiHost::new(
             LockApplication {
                 password: Zeroizing::new(String::new()),
                 status: None,
@@ -1513,7 +1515,7 @@ impl LiveShell {
             match crate::plugin_panel::PluginPanelApplication::bundled() {
                 Ok(application) => {
                     plugin_registry.mark_running(id)?;
-                    Some(nickel_ui::UiHost::new(
+                    Some(twinkle::UiHost::new(
                         application,
                         crate::plugin_panel::surface().width,
                         crate::plugin_panel::surface().height,
@@ -1704,8 +1706,8 @@ impl LiveShell {
             secure_storage_query_error,
             requested_codex_project: None,
             screenshot: ScreenshotTool::default().with_session_host(session_host),
-            keyboard_host: nickel_ui::UiHost::new(
-                nickel_ui::on_screen_keyboard::KeyboardApp::new(palette),
+            keyboard_host: twinkle::UiHost::new(
+                nickel_ui_host::keyboard_app(palette),
                 1280,
                 nickel_core::on_screen_keyboard::KEYBOARD_HEIGHT,
             ),
@@ -2344,7 +2346,7 @@ impl LiveShell {
         true
     }
 
-    pub fn semantic_theme(&self) -> nickel_ui::SemanticTheme {
+    pub fn semantic_theme(&self) -> twinkle::SemanticTheme {
         semantic_theme_from_palette(self.palette)
     }
 
@@ -2481,10 +2483,10 @@ impl LiveShell {
             SurfaceRole::OnScreenKeyboard => {
                 self.keyboard_host
                     .application_mut()
-                    .set_palette(self.palette);
-                self.keyboard_host.step(nickel_ui::HostBatch {
+                    .set_tokens(nickel_ui_host::semantic_tokens(self.palette));
+                self.keyboard_host.step(twinkle::HostBatch {
                     surface_size: Some((width, height)),
-                    events: vec![nickel_ui::HostEvent::Poll],
+                    events: vec![twinkle::HostEvent::Poll],
                     ..Default::default()
                 });
                 self.keyboard_host.commands().to_vec()
@@ -2593,13 +2595,13 @@ impl LiveShell {
         }
     }
 
-    pub(crate) fn set_desktop_input_modifiers(&mut self, modifiers: &nickel_input::ModifierState) {
+    pub(crate) fn set_desktop_input_modifiers(&mut self, modifiers: &twinkle_input::ModifierState) {
         self.desktop_host
             .application_mut()
             .set_input_modifiers(modifiers);
     }
 
-    pub fn desktop_input(&mut self, event: nickel_input::InputEvent) -> bool {
+    pub fn desktop_input(&mut self, event: twinkle_input::InputEvent) -> bool {
         let (ingress, authority) = internal_normalized_ingress(
             event,
             None,
@@ -2613,14 +2615,14 @@ impl LiveShell {
     pub(crate) fn desktop_host_event_authorized(
         &mut self,
         ingress: HostEvent,
-        authority: Option<nickel_ui::NormalizedIngressAuthority>,
+        authority: Option<twinkle::NormalizedIngressAuthority>,
     ) -> bool {
         let event = normalized_input(&ingress)
             .expect("desktop host event must be normalized")
             .clone();
         if matches!(
             event,
-            nickel_input::InputEvent::Pointer(nickel_input::PointerEvent::Leave { .. })
+            twinkle_input::InputEvent::Pointer(twinkle_input::PointerEvent::Leave { .. })
         ) {
             // Pointer position is not interaction focus: briefly moving away must
             // not dismiss the menu or clear selection. FocusLost below owns that
@@ -2638,7 +2640,7 @@ impl LiveShell {
             self.desktop_deadline = outcome.next_deadline;
             return had_hover || outcome.changed;
         }
-        if matches!(event, nickel_input::InputEvent::FocusLost { .. }) {
+        if matches!(event, twinkle_input::InputEvent::FocusLost { .. }) {
             // Focus can leave while another output owns the menu. Clear shared
             // selection and modifiers before either menu-ownership branch returns;
             // the corresponding key-up may be delivered to the newly focused client.
@@ -2653,13 +2655,13 @@ impl LiveShell {
             .as_ref()
             .is_none_or(|menu| menu.output == self.desktop_host.application().active_output);
         if !menu_belongs_to_active_output {
-            let focus_departed = matches!(&event, nickel_input::InputEvent::FocusLost { .. });
+            let focus_departed = matches!(&event, twinkle_input::InputEvent::FocusLost { .. });
             let outside_press = matches!(
                 &event,
-                nickel_input::InputEvent::Pointer(nickel_input::PointerEvent::Button {
-                    edge: nickel_input::KeyEdge::Pressed,
+                twinkle_input::InputEvent::Pointer(twinkle_input::PointerEvent::Button {
+                    edge: twinkle_input::KeyEdge::Pressed,
                     ..
-                }) | nickel_input::InputEvent::Touch(nickel_input::TouchEvent::Started { .. })
+                }) | twinkle_input::InputEvent::Touch(twinkle_input::TouchEvent::Started { .. })
             );
             if outside_press || focus_departed {
                 let reason = if focus_departed {
@@ -2689,20 +2691,20 @@ impl LiveShell {
         }
         let pointer_cancelled = matches!(
             event,
-            nickel_input::InputEvent::FocusLost { .. }
-                | nickel_input::InputEvent::DeviceRemoved { .. }
+            twinkle_input::InputEvent::FocusLost { .. }
+                | twinkle_input::InputEvent::DeviceRemoved { .. }
         );
         if pointer_cancelled {
             let application = self.desktop_host.application_mut();
-            if matches!(event, nickel_input::InputEvent::FocusLost { .. }) {
+            if matches!(event, twinkle_input::InputEvent::FocusLost { .. }) {
                 application.dismiss_context_menu(desktop::DesktopMenuDismissReason::FocusDeparted);
             }
             application.cancel_pointer_transaction();
             self.desktop_overlay_pointer_capture = None;
         }
-        if let nickel_input::InputEvent::Pointer(nickel_input::PointerEvent::Button {
-            button: nickel_input::PointerButton::Secondary,
-            edge: nickel_input::KeyEdge::Pressed,
+        if let twinkle_input::InputEvent::Pointer(twinkle_input::PointerEvent::Button {
+            button: twinkle_input::PointerButton::Secondary,
+            edge: twinkle_input::KeyEdge::Pressed,
             position: Some(position),
             ..
         }) = &event
@@ -2729,10 +2731,10 @@ impl LiveShell {
             });
             self.desktop_change_token = outcome.change_token;
             self.desktop_deadline = outcome.next_deadline;
-            self.desktop_overlay_pointer_capture = Some(nickel_input::PointerButton::Secondary);
-        } else if let nickel_input::InputEvent::Pointer(nickel_input::PointerEvent::Button {
+            self.desktop_overlay_pointer_capture = Some(twinkle_input::PointerButton::Secondary);
+        } else if let twinkle_input::InputEvent::Pointer(twinkle_input::PointerEvent::Button {
             button,
-            edge: nickel_input::KeyEdge::Pressed,
+            edge: twinkle_input::KeyEdge::Pressed,
             ..
         }) = &event
             && (self.desktop_host.inspect().open_overlay.is_some()
@@ -2745,21 +2747,21 @@ impl LiveShell {
         }
         let captured_release = matches!(
             &event,
-            nickel_input::InputEvent::Pointer(nickel_input::PointerEvent::Button {
+            twinkle_input::InputEvent::Pointer(twinkle_input::PointerEvent::Button {
                 button,
-                edge: nickel_input::KeyEdge::Released,
+                edge: twinkle_input::KeyEdge::Released,
                 ..
             }) if self.desktop_overlay_pointer_capture.as_ref() == Some(button)
         );
         let overlay_owns_event = self.desktop_host.application().context_menu.is_some()
             || self.desktop_host.inspect().open_overlay.is_some()
             || self.desktop_overlay_pointer_capture.is_some()
-            || matches!(event, nickel_input::InputEvent::Touch(_))
+            || matches!(event, twinkle_input::InputEvent::Touch(_))
             || pointer_cancelled
             || matches!(
                 event,
-                nickel_input::InputEvent::Pointer(nickel_input::PointerEvent::Button {
-                    button: nickel_input::PointerButton::Secondary,
+                twinkle_input::InputEvent::Pointer(twinkle_input::PointerEvent::Button {
+                    button: twinkle_input::PointerButton::Secondary,
                     ..
                 })
             );
@@ -2779,19 +2781,19 @@ impl LiveShell {
         }
         let coalesce_motion = matches!(
             &event,
-            nickel_input::InputEvent::Pointer(nickel_input::PointerEvent::Motion { .. })
+            twinkle_input::InputEvent::Pointer(twinkle_input::PointerEvent::Motion { .. })
         );
         // Passive motion and scrolling must not snap the viewport back to the
         // selected item. Only keyboard/button selection changes request reveal.
         let reveal_selection = matches!(
             &event,
-            nickel_input::InputEvent::Key(_)
-                | nickel_input::InputEvent::Pointer(nickel_input::PointerEvent::Button { .. })
+            twinkle_input::InputEvent::Key(_)
+                | twinkle_input::InputEvent::Pointer(twinkle_input::PointerEvent::Button { .. })
         );
         let application = self.desktop_host.application_mut();
         let changed = match event {
-            nickel_input::InputEvent::Key(key) => application.key(&key),
-            nickel_input::InputEvent::Pointer(nickel_input::PointerEvent::Button {
+            twinkle_input::InputEvent::Key(key) => application.key(&key),
+            twinkle_input::InputEvent::Pointer(twinkle_input::PointerEvent::Button {
                 button,
                 edge,
                 position: Some(position),
@@ -2801,24 +2803,24 @@ impl LiveShell {
                     x: position.x as f32,
                     y: position.y as f32,
                 };
-                if edge == nickel_input::KeyEdge::Pressed
-                    && button == nickel_input::PointerButton::Primary
+                if edge == twinkle_input::KeyEdge::Pressed
+                    && button == twinkle_input::PointerButton::Primary
                 {
                     application.pointer_press(point, false, application.modifiers)
-                } else if button == nickel_input::PointerButton::Primary {
+                } else if button == twinkle_input::PointerButton::Primary {
                     application.pointer_release(point, Instant::now())
                 } else {
                     false
                 }
             }
-            nickel_input::InputEvent::Pointer(nickel_input::PointerEvent::Motion {
+            twinkle_input::InputEvent::Pointer(twinkle_input::PointerEvent::Motion {
                 position,
                 ..
             }) => application.pointer_motion(DesktopPoint {
                 x: position.x as f32,
                 y: position.y as f32,
             }),
-            nickel_input::InputEvent::Pointer(nickel_input::PointerEvent::Axis {
+            twinkle_input::InputEvent::Pointer(twinkle_input::PointerEvent::Axis {
                 delta,
                 discrete,
                 ..
@@ -2888,7 +2890,7 @@ impl LiveShell {
                 application.layout.clear_selection();
                 true
             }
-            ControllerAction::Launcher
+            ControllerAction::HostMenu
             | ControllerAction::PreviousPane
             | ControllerAction::NextPane => false,
         };
@@ -3339,7 +3341,7 @@ impl LiveShell {
     pub(crate) fn plugin_surface_semantic_nodes(
         &self,
         key: &nickel_core::plugins::PluginSurfaceKey,
-    ) -> Option<Vec<nickel_ui::SemanticNodeSnapshot>> {
+    ) -> Option<Vec<twinkle::SemanticNodeSnapshot>> {
         self.plugin_surface_hosts
             .get(key)
             .map(|(_, host)| host.semantic_nodes())
@@ -3355,7 +3357,7 @@ impl LiveShell {
     pub(crate) fn plugin_surface_retained_paint_damage(
         &self,
         key: &nickel_core::plugins::PluginSurfaceKey,
-    ) -> Option<&[nickel_ui::Rect]> {
+    ) -> Option<&[twinkle::Rect]> {
         self.plugin_panel_host_ref(key)?.retained_paint_damage()
     }
 
@@ -4920,7 +4922,7 @@ impl LiveShell {
             }
         };
         let surface = application.resolved_surface(&surface)?;
-        let host = nickel_ui::UiHost::new(application, surface.width, surface.height);
+        let host = twinkle::UiHost::new(application, surface.width, surface.height);
         if self.primary_panel_host_ref().is_none() {
             self.primary_panel_key = key.clone();
         }
@@ -5425,8 +5427,7 @@ impl LiveShell {
                     }
                     if let Some((surface, host)) = self.plugin_surface_hosts.get_mut(&key) {
                         *surface = resolved.clone();
-                        *host =
-                            nickel_ui::UiHost::new(application, resolved.width, resolved.height);
+                        *host = twinkle::UiHost::new(application, resolved.width, resolved.height);
                     }
                 }
             }
@@ -5649,7 +5650,7 @@ impl LiveShell {
         &self,
     ) -> std::collections::BTreeMap<
         nickel_core::package_composition::PackageIdentity,
-        nickel_plugin_runtime::composition_runtime::ProviderContext,
+        nickel_jsx_host::composition_runtime::ProviderContext,
     > {
         let mut contexts = std::collections::BTreeMap::new();
         for retained in self.package_runtimes.values() {
@@ -5776,7 +5777,7 @@ impl LiveShell {
                                 let settings=self.plugin_settings.get(&c.id).cloned().unwrap_or_else(||package.manifest.settings.iter().map(|setting|(setting.id.clone(),setting.kind.default_value())).collect());
                                 Some((owner,serde_json::json!({"settings":settings})))
                             }).collect();
-                            let host=nickel_plugin_runtime::composition_runtime::ShellCompositionRuntime::new_with_contexts(&catalog,id,&snapshots,&self.composition_contexts())?;
+                            let host=nickel_jsx_host::composition_runtime::ShellCompositionRuntime::new_with_contexts(&catalog,id,&snapshots,&self.composition_contexts())?;
                             Ok((RetainedPackageRuntime::Composed(std::rc::Rc::new(std::cell::RefCell::new(host))),Vec::new()))
                         })
                     } else if !surfaces.is_empty()
@@ -5803,7 +5804,7 @@ impl LiveShell {
                                 let catalog = self.composition_catalog(id, &package)?;
                                 let first = surfaces.iter().find(|surface| !matches!(surface.kind, nickel_core::plugins::PluginSurfaceKind::Dialog | nickel_core::plugins::PluginSurfaceKind::Overlay)).ok_or("composed package has no ordinary surface")?;
                                 let snapshots = self.composition_snapshots(&catalog, first);
-                                let shared = std::rc::Rc::new(std::cell::RefCell::new(nickel_plugin_runtime::composition_runtime::ShellCompositionRuntime::new_with_contexts(&catalog, id, &snapshots, &self.composition_contexts())?));
+                                let shared = std::rc::Rc::new(std::cell::RefCell::new(nickel_jsx_host::composition_runtime::ShellCompositionRuntime::new_with_contexts(&catalog, id, &snapshots, &self.composition_contexts())?));
                                 let mut applications = Vec::new();
                                 for surface in surfaces.iter().filter(|surface| surface.initially_open && (!self.is_shell_package(id) || self.shell_package_selected(id)) && !matches!(surface.kind,
                                     nickel_core::plugins::PluginSurfaceKind::Dialog | nickel_core::plugins::PluginSurfaceKind::Overlay)) {
@@ -5819,7 +5820,7 @@ impl LiveShell {
                                 let catalog=self.composition_catalog(id,&package)?;
                                 let first=surfaces.iter().find(|surface|!matches!(surface.kind,nickel_core::plugins::PluginSurfaceKind::Dialog|nickel_core::plugins::PluginSurfaceKind::Overlay)).ok_or("provider has no ordinary surface")?;
                                 let snapshots=self.composition_snapshots(&catalog,first);
-                                let shared=std::rc::Rc::new(std::cell::RefCell::new(nickel_plugin_runtime::composition_runtime::ShellCompositionRuntime::new_with_contexts(&catalog,id,&snapshots,&self.composition_contexts())?));
+                                let shared=std::rc::Rc::new(std::cell::RefCell::new(nickel_jsx_host::composition_runtime::ShellCompositionRuntime::new_with_contexts(&catalog,id,&snapshots,&self.composition_contexts())?));
                                 let owner=shared.borrow().resolution().active.clone();let runtime=shared.borrow().shared_owner_runtime(&owner)?;
                                 let settings=self.plugin_settings.get(id).cloned().map(Ok).unwrap_or_else(||external_plugin_settings(&package.manifest))?;
                                 let images=crate::plugin_panel::package_images(&package)?;
@@ -5956,7 +5957,7 @@ impl LiveShell {
                     if self.is_shell_package(id) && !self.shell_package_selected(id) {
                         continue;
                     }
-                    let host = nickel_ui::UiHost::new(application, surface.width, surface.height);
+                    let host = twinkle::UiHost::new(application, surface.width, surface.height);
                     let key = nickel_core::plugins::PluginSurfaceKey {
                         plugin_id: id.to_owned(),
                         surface_id: surface.id.clone(),
@@ -5970,7 +5971,7 @@ impl LiveShell {
         } else if id == crate::plugin_panel::manifest().id {
             crate::plugin_panel::PluginPanelApplication::bundled().map(|application| {
                 let surface = crate::plugin_panel::surface().clone();
-                let host = nickel_ui::UiHost::new(application, surface.width, surface.height);
+                let host = twinkle::UiHost::new(application, surface.width, surface.height);
                 if self.primary_panel_host_ref().is_none() {
                     self.primary_panel_key = crate::plugin_panel::surface_key();
                 }
@@ -6042,7 +6043,7 @@ impl LiveShell {
                     return None;
                 }
                 let frame = host.render_frame();
-                let viewport = nickel_ui::Rect::new(
+                let viewport = twinkle::Rect::new(
                     0.0,
                     0.0,
                     frame.logical_size.0 as f32,
@@ -6124,7 +6125,7 @@ impl LiveShell {
     }
 
     pub fn scene_change_token(&self, role: SurfaceRole) -> Option<HostChangeToken> {
-        let host_token = |inspection: nickel_ui::HostInspection| HostChangeToken {
+        let host_token = |inspection: twinkle::HostInspection| HostChangeToken {
             frame_generation: inspection.frame_generation,
             semantic_generation: inspection.semantic_generation,
             native_correlation: inspection.native_correlation,
@@ -6427,7 +6428,7 @@ impl LiveShell {
             // wallpaper selection. Redraw the live admitted consumers only.
             for (key, (_, host)) in &self.plugin_surface_hosts {
                 let frame = host.render_frame();
-                let viewport = nickel_ui::Rect::new(
+                let viewport = twinkle::Rect::new(
                     0.0,
                     0.0,
                     frame.logical_size.0 as f32,
@@ -6545,7 +6546,7 @@ impl LiveShell {
     #[cfg(test)]
     pub(crate) fn notification_host_input(
         &mut self,
-        input: nickel_input::InputEvent,
+        input: twinkle_input::InputEvent,
         width: u32,
         height: u32,
     ) -> bool {
@@ -6569,7 +6570,7 @@ impl LiveShell {
         ingress: HostEvent,
         width: u32,
         height: u32,
-        authority: Option<nickel_ui::NormalizedIngressAuthority>,
+        authority: Option<twinkle::NormalizedIngressAuthority>,
     ) -> bool {
         if !self.surface_visible(SurfaceRole::Notification) {
             return false;
@@ -6636,27 +6637,27 @@ impl LiveShell {
 
     fn primary_panel_host_ref(
         &self,
-    ) -> Option<&nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>> {
+    ) -> Option<&twinkle::UiHost<crate::plugin_panel::PluginPanelApplication>> {
         self.plugin_panel_host_ref(&self.primary_panel_key())
     }
 
     fn plugin_panel_host_for(
         &mut self,
         key: &nickel_core::plugins::PluginSurfaceKey,
-    ) -> Option<&mut nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>> {
+    ) -> Option<&mut twinkle::UiHost<crate::plugin_panel::PluginPanelApplication>> {
         self.plugin_surface_hosts.get_mut(key).map(|(_, host)| host)
     }
 
     pub(crate) fn plugin_panel_host_ref(
         &self,
         key: &nickel_core::plugins::PluginSurfaceKey,
-    ) -> Option<&nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>> {
+    ) -> Option<&twinkle::UiHost<crate::plugin_panel::PluginPanelApplication>> {
         self.plugin_surface_hosts.get(key).map(|(_, host)| host)
     }
 
     fn preview_plugin_host_ref(
         &self,
-    ) -> Option<&nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>> {
+    ) -> Option<&twinkle::UiHost<crate::plugin_panel::PluginPanelApplication>> {
         self.plugin_panel_host_ref(&self.active_shell_surface_key("window-preview"))
     }
 
@@ -6750,7 +6751,7 @@ impl LiveShell {
                     && outcome.messages.is_empty()
                     && matches!(
                         outcome.invalidation,
-                        nickel_ui::Invalidation::None | nickel_ui::Invalidation::Paint
+                        twinkle::Invalidation::None | twinkle::Invalidation::Paint
                     );
                 Ok((
                     outcome.changed,
@@ -6798,7 +6799,7 @@ impl LiveShell {
     pub(crate) fn plugin_panel_host_input_for(
         &mut self,
         key: &nickel_core::plugins::PluginSurfaceKey,
-        input: nickel_input::InputEvent,
+        input: twinkle_input::InputEvent,
         width: u32,
         height: u32,
     ) -> bool {
@@ -7706,7 +7707,7 @@ impl LiveShell {
         event: HostEvent,
         size: (u32, u32),
         limit: Option<usize>,
-    ) -> nickel_ui::HostEventOutcome {
+    ) -> twinkle::HostEventOutcome {
         self.control_host_event_authorized(event, size, limit, None)
     }
 
@@ -7715,8 +7716,8 @@ impl LiveShell {
         event: HostEvent,
         size: (u32, u32),
         limit: Option<usize>,
-        authority: Option<nickel_ui::NormalizedIngressAuthority>,
-    ) -> nickel_ui::HostEventOutcome {
+        authority: Option<twinkle::NormalizedIngressAuthority>,
+    ) -> twinkle::HostEventOutcome {
         if !self.control_visible {
             return Default::default();
         }
@@ -7757,7 +7758,7 @@ impl LiveShell {
     pub(crate) fn plugin_surface_field_lease(
         &self,
         key: &nickel_core::plugins::PluginSurfaceKey,
-    ) -> Option<(nickel_ui::UiId, u64)> {
+    ) -> Option<(twinkle::UiId, u64)> {
         let inspection = self.plugin_panel_host_ref(key)?.inspect();
         Some((
             inspection.keyboard_focus?,
@@ -7766,7 +7767,7 @@ impl LiveShell {
     }
 
     #[cfg(target_os = "linux")]
-    pub(crate) fn shell_field_lease(&self, role: SurfaceRole) -> Option<(nickel_ui::UiId, u64)> {
+    pub(crate) fn shell_field_lease(&self, role: SurfaceRole) -> Option<(twinkle::UiId, u64)> {
         let inspection = match role {
             SurfaceRole::ControlCenter => self
                 .quick_settings_surface_active()
@@ -7934,7 +7935,7 @@ impl LiveShell {
     fn semantic_panel_host(
         &self,
         _output: &Option<String>,
-    ) -> Option<&nickel_ui::UiHost<crate::plugin_panel::PluginPanelApplication>> {
+    ) -> Option<&twinkle::UiHost<crate::plugin_panel::PluginPanelApplication>> {
         self.taskbar_surface_key()
             .as_ref()
             .and_then(|key| self.plugin_panel_host_ref(key))
@@ -7975,7 +7976,7 @@ impl LiveShell {
                 use nickel_core::on_screen_keyboard::{
                     KeyboardPanel, compact_us_keyboard_rows, us_keyboard_rows,
                 };
-                use nickel_ui::on_screen_keyboard::KeyboardMessage;
+                use twinkle::on_screen_keyboard::KeyboardMessage;
                 let message = if key == "osk-hide" {
                     KeyboardMessage::Hide
                 } else if key == "osk-larger" {
@@ -8332,8 +8333,8 @@ impl LiveShell {
 
     pub fn preview_host_input(
         &mut self,
-        input: nickel_input::InputEvent,
-    ) -> nickel_ui::HostEventOutcome {
+        input: twinkle_input::InputEvent,
+    ) -> twinkle::HostEventOutcome {
         if self.preview_plugin_active() {
             let Some(host) = self.preview_plugin_host_ref() else {
                 return Default::default();
@@ -8353,8 +8354,8 @@ impl LiveShell {
     pub(crate) fn preview_host_event_authorized(
         &mut self,
         ingress: HostEvent,
-        authority: Option<nickel_ui::NormalizedIngressAuthority>,
-    ) -> nickel_ui::HostEventOutcome {
+        authority: Option<twinkle::NormalizedIngressAuthority>,
+    ) -> twinkle::HostEventOutcome {
         if self.preview_plugin_active() {
             let Some(size) = self.preview_plugin_size() else {
                 return Default::default();
@@ -9231,7 +9232,7 @@ impl LiveShell {
         event: HostEvent,
         width: u32,
         height: u32,
-        authority: Option<nickel_ui::NormalizedIngressAuthority>,
+        authority: Option<twinkle::NormalizedIngressAuthority>,
     ) -> bool {
         if !self.screenshot.visible() {
             return false;
@@ -9884,7 +9885,7 @@ impl LiveShell {
 
     pub fn lock_host_input(
         &mut self,
-        input: nickel_input::InputEvent,
+        input: twinkle_input::InputEvent,
         width: u32,
         height: u32,
     ) -> bool {
@@ -9898,7 +9899,7 @@ impl LiveShell {
         if !self.lock_host.input_context().text_focused
             && let Ok(target) = self
                 .lock_host
-                .query_unique(&nickel_ui::SemanticSelector::Role(SemanticRole::TextField))
+                .query_unique(&twinkle::SemanticSelector::Role(SemanticRole::TextField))
         {
             let point = Point {
                 x: target.bounds.origin.x + target.bounds.size.width / 2.0,
@@ -10440,9 +10441,9 @@ impl LiveShell {
             if request.request.renewal.is_some() {
                 warnings.push("This renews an existing lease; it does not extend until approved.");
             }
-            let presentation = nickel_ui::approval::ApprovalPresentation {
+            let presentation = twinkle::approval::ApprovalPresentation {
                 requester: request.client_label.clone(),
-                identity: nickel_ui::approval::RequesterIdentity::SelfReportedRemote,
+                identity: twinkle::approval::RequesterIdentity::SelfReportedRemote,
                 action: "Control desktop resources".into(),
                 scope: Some(scope),
                 duration,
@@ -10745,8 +10746,8 @@ impl LiveShell {
         &mut self,
         event: HostEvent,
         size: (u32, u32),
-        authority: Option<nickel_ui::NormalizedIngressAuthority>,
-    ) -> nickel_ui::HostEventOutcome {
+        authority: Option<twinkle::NormalizedIngressAuthority>,
+    ) -> twinkle::HostEventOutcome {
         self.plugin_surface_host_event(
             &self.active_shell_surface_key("window-preview"),
             event,
@@ -10758,7 +10759,7 @@ impl LiveShell {
 
     pub fn set_global_shortcut_capability(
         &mut self,
-        capability: &nickel_input::global::ShortcutCapability,
+        capability: &twinkle_input::global::ShortcutCapability,
     ) {
         self.shortcut_capability_observed = true;
         self.shortcut_capability_status = shortcut_capability_status(capability);
@@ -10908,8 +10909,8 @@ impl LiveShell {
         event: HostEvent,
         size: (u32, u32),
         limit: Option<usize>,
-        authority: Option<nickel_ui::NormalizedIngressAuthority>,
-    ) -> nickel_ui::HostEventOutcome {
+        authority: Option<twinkle::NormalizedIngressAuthority>,
+    ) -> twinkle::HostEventOutcome {
         let batch = HostBatch {
             surface_size: Some(size),
             clipboard_text_limit: limit,
@@ -10921,13 +10922,13 @@ impl LiveShell {
             let _ = self.plugin_panel_scene(key, size.0, size.1);
         }
         let Some(host) = self.plugin_panel_host_for(key) else {
-            return nickel_ui::HostEventOutcome::default();
+            return twinkle::HostEventOutcome::default();
         };
         let mut outcome = host.step(batch);
         let effects = host.application_mut().take_effects();
         if let Some(error) = host.application_mut().take_runtime_failure() {
             self.fail_plugin_panel_runtime(&key.plugin_id, error);
-            return nickel_ui::HostEventOutcome::default();
+            return twinkle::HostEventOutcome::default();
         }
         outcome.changed |= self.apply_plugin_effects(effects);
         outcome
@@ -11450,11 +11451,11 @@ fn desktop_label_foreground(
     wallpaper: Option<&image::RgbaImage>,
     viewport: Size,
     label: Rect,
-    desktop_base: nickel_ui::Color,
-    interaction_surface: Option<nickel_ui::Color>,
-) -> nickel_ui::Color {
-    const DARK_INK: nickel_ui::Color = 0x111111;
-    const LIGHT_INK: nickel_ui::Color = 0xffffff;
+    desktop_base: twinkle::Color,
+    interaction_surface: Option<twinkle::Color>,
+) -> twinkle::Color {
+    const DARK_INK: twinkle::Color = 0x111111;
+    const LIGHT_INK: twinkle::Color = 0xffffff;
     const SAMPLE_COLUMNS: usize = 9;
     const SAMPLE_ROWS: usize = 5;
 
@@ -11509,7 +11510,7 @@ fn desktop_label_foreground(
     }
 }
 
-fn color_channels(color: nickel_ui::Color) -> [u8; 4] {
+fn color_channels(color: twinkle::Color) -> [u8; 4] {
     let encoded_alpha = ((color >> 24) & 0xff) as u8;
     [
         ((color >> 16) & 0xff) as u8,

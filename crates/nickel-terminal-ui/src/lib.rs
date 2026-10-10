@@ -1,4 +1,4 @@
-//! Declarative Nickel UI projection and normalized input policy for one terminal viewport.
+//! Declarative Twinkle projection and normalized input policy for one terminal viewport.
 
 #[cfg(test)]
 mod allocation_probe {
@@ -55,16 +55,16 @@ mod allocation_probe {
 #[global_allocator]
 static TEST_ALLOCATOR: allocation_probe::CountingAllocator = allocation_probe::CountingAllocator;
 
-use nickel_input::{
-    AggregateModifier, InputEvent, KeyCode, KeyEdge, ModifierState, PhysicalKey, PointerButton,
-    PointerEvent, TextEvent,
-};
 use nickel_terminal::{
     TerminalCell, TerminalColor, TerminalNamedColor, TerminalPoint, TerminalScroll,
     TerminalSelectionKind, TerminalSnapshot, TerminalUnderline,
 };
-use nickel_ui::{
+use twinkle::{
     CustomPaint, Rect, SemanticRole, StyledTextSpan, TextAlign, View, backend::PaintCommand,
+};
+use twinkle_input::{
+    AggregateModifier, InputEvent, KeyCode, KeyEdge, ModifierState, PhysicalKey, PointerButton,
+    PointerEvent, TextEvent,
 };
 
 pub const MAX_PASTE_BYTES: usize = 1024 * 1024;
@@ -618,7 +618,7 @@ impl CellMetrics {
 
     pub fn resolved(font_family: &str, font_size: f32, scale: f32) -> Self {
         let (width, height) =
-            nickel_render_assets::monospace_cell_geometry(font_family, font_size, scale);
+            twinkle_render_assets::monospace_cell_geometry(font_family, font_size, scale);
         Self {
             width,
             height,
@@ -750,12 +750,12 @@ impl<'a> TerminalViewport<'a> {
                     font_family: Some(std::sync::Arc::clone(&self.palette.font_family)),
                     strikethrough: cell.strikethrough,
                     underline: match cell.underline {
-                        TerminalUnderline::None => nickel_ui::TextUnderlineStyle::None,
-                        TerminalUnderline::Single => nickel_ui::TextUnderlineStyle::Single,
-                        TerminalUnderline::Double => nickel_ui::TextUnderlineStyle::Double,
-                        TerminalUnderline::Curly => nickel_ui::TextUnderlineStyle::Curly,
-                        TerminalUnderline::Dotted => nickel_ui::TextUnderlineStyle::Dotted,
-                        TerminalUnderline::Dashed => nickel_ui::TextUnderlineStyle::Dashed,
+                        TerminalUnderline::None => twinkle::TextUnderlineStyle::None,
+                        TerminalUnderline::Single => twinkle::TextUnderlineStyle::Single,
+                        TerminalUnderline::Double => twinkle::TextUnderlineStyle::Double,
+                        TerminalUnderline::Curly => twinkle::TextUnderlineStyle::Curly,
+                        TerminalUnderline::Dotted => twinkle::TextUnderlineStyle::Dotted,
+                        TerminalUnderline::Dashed => twinkle::TextUnderlineStyle::Dashed,
                     },
                     color: Some(foreground),
                     background: None,
@@ -916,12 +916,12 @@ fn blend(foreground: u32, background: u32, amount: f32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nickel_input::{
+    use nickel_terminal::{TerminalDimensions, TerminalEngine};
+    use twinkle::{Rect, SoftwareRenderer, UiFrame};
+    use twinkle_input::{
         DeviceId, EventOrder, KeyEvent, KeyLocation, LogicalKey, Modifier, ModifierState,
         Point as InputPoint,
     };
-    use nickel_terminal::{TerminalDimensions, TerminalEngine};
-    use nickel_ui::{Rect, SoftwareRenderer, UiFrame};
 
     fn snapshot(bytes: &[u8]) -> TerminalSnapshot {
         let dimensions = TerminalDimensions::new(10, 3, 8, 16).unwrap();
@@ -1098,7 +1098,7 @@ mod tests {
             device: DeviceId(1),
             order: EventOrder(1),
             physical: PhysicalKey::Code(code),
-            logical: LogicalKey::Named(nickel_input::NamedKey::Enter),
+            logical: LogicalKey::Named(twinkle_input::NamedKey::Enter),
             location: KeyLocation::Standard,
             edge: KeyEdge::Pressed,
             repeat: false,
@@ -1322,7 +1322,7 @@ mod tests {
         let wheel = InputEvent::Pointer(PointerEvent::Axis {
             device: DeviceId(1),
             order: EventOrder(3),
-            delta: nickel_input::Vector { x: 0.0, y: -1.0 },
+            delta: twinkle_input::Vector { x: 0.0, y: -1.0 },
             discrete: Some((0, -2)),
             position: Some(InputPoint { x: 45.0, y: 5.0 }),
         });

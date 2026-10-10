@@ -169,7 +169,7 @@ impl NickelSession {
         identity: &nickel_remote_control::leases::ResourceId,
     ) -> Result<
         (
-            nickel_ui::InternalSurfaceId,
+            twinkle::InternalSurfaceId,
             Option<nickel_remote_control::leases::ResourceId>,
         ),
         String,

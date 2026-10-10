@@ -6,7 +6,7 @@ use std::time::Instant;
 #[cfg(not(debug_assertions))]
 use nickel_shell::ShellFixtureProvider;
 #[cfg(not(debug_assertions))]
-use nickel_ui_testkit::{ActivationVia, FixtureProvider, FixtureRegistry};
+use twinkle_testkit::{ActivationVia, FixtureProvider, FixtureRegistry};
 
 #[cfg(not(debug_assertions))]
 const OPEN_P95_BUDGET_MS: f64 = 100.0;

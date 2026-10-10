@@ -6,9 +6,9 @@
 
 use std::{cell::RefCell, collections::HashMap, sync::Arc};
 
-use nickel_ui::backend::PaintCommand;
-use nickel_ui::{DamageRegion, GradientAxis, PresenterCacheDiagnostics, Rect, SoftwareRenderer};
 use raw_window_handle::{DisplayHandle, WindowHandle};
+use twinkle::backend::PaintCommand;
+use twinkle::{DamageRegion, GradientAxis, PresenterCacheDiagnostics, Rect, SoftwareRenderer};
 
 use crate::softbuffer_presenter::{
     PresentationGeometry, SharedGraphics as SoftwareGraphics,
@@ -1021,7 +1021,7 @@ impl Frame {
     }
 
     fn rounded(&mut self, rect: Rect, color: u32, radius: f32, top_only: bool) {
-        for (span, shaded) in nickel_ui::backend::rounded_coverage_spans(
+        for (span, shaded) in twinkle::backend::rounded_coverage_spans(
             rect, color, radius, None, top_only, self.scale,
         ) {
             self.solid(span, shaded);
@@ -1051,7 +1051,7 @@ impl Frame {
                     width,
                     radius,
                 } => {
-                    for (span, shaded) in nickel_ui::backend::rounded_coverage_spans(
+                    for (span, shaded) in twinkle::backend::rounded_coverage_spans(
                         *rect,
                         *color,
                         *radius,
@@ -1241,7 +1241,7 @@ mod tests {
         offscreen_redraw, physical_scissor, retained_framebuffer_bytes,
         retained_framebuffer_configuration,
     };
-    use nickel_ui::{Rect, backend::PaintCommand};
+    use twinkle::{Rect, backend::PaintCommand};
 
     #[test]
     fn disjoint_scissors_are_rejected_without_unsigned_underflow() {
@@ -1261,13 +1261,13 @@ mod tests {
     use {
         super::{GpuGraphics, GpuPresenter},
         crate::softbuffer_presenter::PresentationGeometry,
-        nickel_ui::{
-            SoftwareRenderer,
-            backend::{FrameRenderer, RenderFrame},
-        },
         raw_window_handle::{HasDisplayHandle, HasWindowHandle},
         serde_json::json,
         std::time::{Duration, Instant},
+        twinkle::{
+            SoftwareRenderer,
+            backend::{FrameRenderer, RenderFrame},
+        },
         winit::{
             event_loop::EventLoop, platform::windows::EventLoopBuilderExtWindows, window::Window,
         },
@@ -1349,7 +1349,7 @@ mod tests {
                 "status": "skipped",
                 "skip_reason": reason.to_string(),
                 "metadata": {
-                    "software_renderer": "nickel_ui::SoftwareRenderer",
+                    "software_renderer": "twinkle::SoftwareRenderer",
                     "wgpu_renderer": "production GpuPresenter",
                 },
                 "work": software_work,
@@ -1571,7 +1571,7 @@ mod tests {
                     "driver": adapter.driver,
                     "driver_info": adapter.driver_info,
                     "wgpu_renderer": "production GpuPresenter with native surface",
-                    "software_renderer": "nickel_ui::SoftwareRenderer",
+                    "software_renderer": "twinkle::SoftwareRenderer",
                     "wgpu_surface_readback_available": false,
                     "software_cold_raster_equivalence_samples": SAMPLES,
                 },

@@ -1,7 +1,7 @@
 //! Atomic Windows emergency-chord recognition. Native hook attribution is the
 //! caller's responsibility; injected edges never participate in this state.
-use nickel_input::{KeyCode, KeyEdge, windows::NativeKeyboardEvent};
 use std::sync::atomic::{AtomicU64, Ordering};
+use twinkle_input::{KeyCode, KeyEdge, windows::NativeKeyboardEvent};
 
 const ENABLED: u64 = 1;
 const LEFT: u64 = 2;
@@ -48,13 +48,14 @@ impl WindowsEmergencyChord {
         if event.scan_code == 0x29 || (event.scan_code == 0x1c && event.extended) {
             return false;
         }
-        let bit =
-            match nickel_input::windows::virtual_key_to_key_code(event.virtual_key, event.extended)
-            {
-                Some(KeyCode::ControlLeft) => LEFT,
-                Some(KeyCode::ControlRight) => RIGHT,
-                _ => return false,
-            };
+        let bit = match twinkle_input::windows::virtual_key_to_key_code(
+            event.virtual_key,
+            event.extended,
+        ) {
+            Some(KeyCode::ControlLeft) => LEFT,
+            Some(KeyCode::ControlRight) => RIGHT,
+            _ => return false,
+        };
         let pressed = event.edge == KeyEdge::Pressed;
         let result = self
             .0

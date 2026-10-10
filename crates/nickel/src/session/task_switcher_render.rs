@@ -152,9 +152,9 @@ pub(crate) fn contained_preview_bounds(
     source_width: u32,
     source_height: u32,
 ) -> (u32, u32, u32, u32) {
-    let bounds = nickel_ui::ImagePresentation::default().bounds(
-        nickel_ui::Rect::new(x as f32, y as f32, width as f32, height as f32),
-        nickel_ui::Size::new(source_width as f32, source_height as f32),
+    let bounds = twinkle::ImagePresentation::default().bounds(
+        twinkle::Rect::new(x as f32, y as f32, width as f32, height as f32),
+        twinkle::Size::new(source_width as f32, source_height as f32),
     );
     let fitted_width = bounds.size.width.round().clamp(0.0, width as f32) as u32;
     let fitted_height = bounds.size.height.round().clamp(0.0, height as f32) as u32;
@@ -190,7 +190,7 @@ pub(crate) fn draw_contained_preview<D, S>(
     image::imageops::overlay(destination, &thumbnail, i64::from(x), i64::from(y));
 }
 
-fn theme(state: &NickelSession) -> nickel_ui::SemanticTheme {
+fn theme(state: &NickelSession) -> twinkle::SemanticTheme {
     state
         .internal_shell
         .as_ref()

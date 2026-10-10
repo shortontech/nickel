@@ -20,7 +20,7 @@ pub enum BackendKind {
     Udev,
 }
 
-/// Selects how compositor-owned Nickel UI is presented.
+/// Selects how compositor-owned Twinkle is presented.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum InternalUiRendererMode {
     #[default]

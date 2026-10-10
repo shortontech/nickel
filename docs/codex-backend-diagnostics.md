@@ -1,6 +1,6 @@
 # Codex Backend Diagnostics
 
-Codex support is deliberately testable without Nickel UI. These commands validate offline replay and
+Codex support is deliberately testable without Twinkle. These commands validate offline replay and
 probe a CLI without starting a model turn:
 
 ```bash

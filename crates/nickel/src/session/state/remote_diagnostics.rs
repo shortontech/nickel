@@ -244,7 +244,7 @@ impl NickelSession {
 
     pub(crate) fn record_remote_internal_focus_event(
         &mut self,
-        runtime: nickel_ui::InternalSurfaceId,
+        runtime: twinkle::InternalSurfaceId,
     ) {
         let state = self
             .internal_shell_surfaces
@@ -1439,7 +1439,7 @@ impl NickelSession {
                 pointer_hit_test: None,
             };
         }
-        let ordinary_shell = |surface: nickel_ui::InternalSurfaceId| {
+        let ordinary_shell = |surface: twinkle::InternalSurfaceId| {
             let identity = nickel_remote_control::leases::ResourceId {
                 id: format!("internal:{}", surface.snapshot_token()),
                 generation: surface.snapshot_token(),
@@ -1662,7 +1662,7 @@ fn internal_decoration_hit(
 }
 
 fn semantic_projection(
-    projection: Vec<nickel_ui::SemanticNodeSnapshot>,
+    projection: Vec<twinkle::SemanticNodeSnapshot>,
 ) -> Result<Vec<nickel_remote_control::semantics::SemanticNode>, String> {
     use nickel_remote_control::semantics::*;
     projection
@@ -1679,13 +1679,13 @@ fn semantic_projection(
                 return Err("semantic geometry unavailable".to_owned());
             }
             let value = match node.value {
-                Some(nickel_ui::SemanticValueSnapshot::Boolean(value)) => {
+                Some(twinkle::SemanticValueSnapshot::Boolean(value)) => {
                     Some(SemanticValue::Boolean(value))
                 }
-                Some(nickel_ui::SemanticValueSnapshot::Text(value)) => {
+                Some(twinkle::SemanticValueSnapshot::Text(value)) => {
                     Some(SemanticValue::Text(value))
                 }
-                Some(nickel_ui::SemanticValueSnapshot::Number {
+                Some(twinkle::SemanticValueSnapshot::Number {
                     value,
                     minimum,
                     maximum,
@@ -1704,7 +1704,7 @@ fn semantic_projection(
                         step,
                     })
                 }
-                Some(nickel_ui::SemanticValueSnapshot::ProtectedText { .. }) => {
+                Some(twinkle::SemanticValueSnapshot::ProtectedText { .. }) => {
                     return Err("protected surface".into());
                 }
                 None => None,
@@ -1730,31 +1730,31 @@ fn semantic_projection(
 
 fn semantic_mutation_action(
     action: nickel_remote_control::semantics::SemanticMutation,
-) -> nickel_ui::SemanticAction {
+) -> twinkle::SemanticAction {
     use nickel_remote_control::semantics::*;
     match action {
         SemanticMutation::SetBoolean(value) => {
-            nickel_ui::SemanticAction::SetValue(nickel_ui::SemanticValueInput::Boolean(value))
+            twinkle::SemanticAction::SetValue(twinkle::SemanticValueInput::Boolean(value))
         }
         SemanticMutation::SetNumber(value) => {
-            nickel_ui::SemanticAction::SetValue(nickel_ui::SemanticValueInput::Number(value))
+            twinkle::SemanticAction::SetValue(twinkle::SemanticValueInput::Number(value))
         }
         SemanticMutation::SetText(value) => {
-            nickel_ui::SemanticAction::SetValue(nickel_ui::SemanticValueInput::Text(value))
+            twinkle::SemanticAction::SetValue(twinkle::SemanticValueInput::Text(value))
         }
-        SemanticMutation::Invoke(value) => nickel_ui::SemanticAction::Invoke(match value {
-            SemanticInvocation::Activate => nickel_ui::ActionKind::Activate,
-            SemanticInvocation::Cancel => nickel_ui::ActionKind::Cancel,
-            SemanticInvocation::ContextMenu => nickel_ui::ActionKind::ContextMenu,
-            SemanticInvocation::Increment => nickel_ui::ActionKind::Increment,
-            SemanticInvocation::Decrement => nickel_ui::ActionKind::Decrement,
-            SemanticInvocation::Expand => nickel_ui::ActionKind::Expand,
-            SemanticInvocation::Collapse => nickel_ui::ActionKind::Collapse,
-            SemanticInvocation::Select => nickel_ui::ActionKind::Select,
-            SemanticInvocation::Dismiss => nickel_ui::ActionKind::Dismiss,
-            SemanticInvocation::Scroll => nickel_ui::ActionKind::Scroll,
-            SemanticInvocation::EnterNavigation => nickel_ui::ActionKind::EnterNavigation,
-            SemanticInvocation::ExitNavigation => nickel_ui::ActionKind::ExitNavigation,
+        SemanticMutation::Invoke(value) => twinkle::SemanticAction::Invoke(match value {
+            SemanticInvocation::Activate => twinkle::ActionKind::Activate,
+            SemanticInvocation::Cancel => twinkle::ActionKind::Cancel,
+            SemanticInvocation::ContextMenu => twinkle::ActionKind::ContextMenu,
+            SemanticInvocation::Increment => twinkle::ActionKind::Increment,
+            SemanticInvocation::Decrement => twinkle::ActionKind::Decrement,
+            SemanticInvocation::Expand => twinkle::ActionKind::Expand,
+            SemanticInvocation::Collapse => twinkle::ActionKind::Collapse,
+            SemanticInvocation::Select => twinkle::ActionKind::Select,
+            SemanticInvocation::Dismiss => twinkle::ActionKind::Dismiss,
+            SemanticInvocation::Scroll => twinkle::ActionKind::Scroll,
+            SemanticInvocation::EnterNavigation => twinkle::ActionKind::EnterNavigation,
+            SemanticInvocation::ExitNavigation => twinkle::ActionKind::ExitNavigation,
         }),
     }
 }
@@ -1766,11 +1766,11 @@ pub(super) fn shortcut_diagnostic(
     observation_generation: u64,
     observed_at_us: u64,
 ) -> nickel_remote_control::diagnostics::ShortcutDiagnostic {
-    use nickel_input::{PhysicalKey, ShortcutKey};
     use nickel_remote_control::diagnostics::{
         MAX_DIAGNOSTIC_SHORTCUTS, ShortcutDiagnostic, ShortcutDiagnosticCapability,
         ShortcutRegistrationDiagnostic,
     };
+    use twinkle_input::{PhysicalKey, ShortcutKey};
     let mut snapshot = ShortcutDiagnostic {
         observation_generation,
         observed_at_us,
@@ -1817,13 +1817,13 @@ pub(super) fn shortcut_diagnostic(
 mod shortcut_tests {
     use super::shortcut_diagnostic;
     use nickel_core::hotkeys::{CompositorShortcutAdapter, HotkeyAction};
-    use nickel_input::global::{GlobalShortcutAdapter, Registration};
-    use nickel_input::{
-        AggregateModifier, KeyCode, KeyEdge, LogicalKey, PhysicalKey, Shortcut, ShortcutKey,
-        ShortcutTrigger,
-    };
     use nickel_remote_control::diagnostics::{
         MAX_DIAGNOSTIC_SHORTCUTS, ShortcutDiagnosticCapability,
+    };
+    use twinkle_input::global::{GlobalShortcutAdapter, Registration};
+    use twinkle_input::{
+        AggregateModifier, KeyCode, KeyEdge, LogicalKey, PhysicalKey, Shortcut, ShortcutKey,
+        ShortcutTrigger,
     };
 
     #[test]
@@ -1860,7 +1860,7 @@ mod shortcut_tests {
         );
         assert!(adapter.unregister(id));
         let physical = before.registrations[0].registration_id;
-        assert!(adapter.unregister(nickel_input::global::RegistrationId(physical)));
+        assert!(adapter.unregister(twinkle_input::global::RegistrationId(physical)));
         let after = shortcut_diagnostic(Some(&adapter), 9, 13);
         assert!(
             !after

@@ -8,7 +8,7 @@ pub(crate) use windows::remote_observation;
 #[cfg(target_os = "windows")]
 pub(crate) use windows::run_packaged_activation_child;
 pub(crate) mod status_mailbox;
-use nickel_input::global::{ShortcutCapability, ShortcutOwnership};
+use twinkle_input::global::{ShortcutCapability, ShortcutOwnership};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum ShellTestRequest {
@@ -816,7 +816,7 @@ pub struct GlobalShortcutFeed {
 }
 
 impl GlobalShortcutFeed {
-    pub fn unavailable(reason: nickel_input::global::UnavailableReason) -> Self {
+    pub fn unavailable(reason: twinkle_input::global::UnavailableReason) -> Self {
         let (_sender, receiver) = std::sync::mpsc::channel();
         Self {
             receiver,

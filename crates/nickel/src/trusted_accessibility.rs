@@ -4,7 +4,6 @@
 use accesskit::{
     Action, ActionHandler, ActionRequest, Node, NodeId, Role, Tree, TreeId, TreeUpdate,
 };
-use nickel_ui::{AccessibilityNode, ActionKind, SemanticRole, UiId};
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{
@@ -14,6 +13,7 @@ use std::{
     },
     time::{Duration, Instant},
 };
+use twinkle::{AccessibilityNode, ActionKind, SemanticRole, UiId};
 
 const ROOT: NodeId = NodeId(1);
 const MAX_NODES: usize = 2048;
@@ -416,7 +416,7 @@ pub(crate) mod native {
 mod tests {
     use super::*;
     use crate::remote_indicator::{IndicatorGrant, RemoteIndicator};
-    use nickel_ui::{HostBatch, HostEvent, SemanticAction, UiHost};
+    use twinkle::{HostBatch, HostEvent, SemanticAction, UiHost};
 
     fn host() -> UiHost<RemoteIndicator> {
         UiHost::new_at(

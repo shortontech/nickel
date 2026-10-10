@@ -1211,7 +1211,7 @@ the tested workflow, not proof of these concurrency and cancellation requirement
 The integrated Windows UIA owner/provider passed the GNU Windows all-target
 cross-check (`windows-uia-integrated-crosscheck-fresh.txt`), retaining the existing
 screenshot-tool dead-code warning. The first attempt used a stale shared-cache
-`nickel-input` artifact missing an API present in source; refreshing all primary
+`twinkle-input` artifact missing an API present in source; refreshing all primary
 Rust source timestamps inside the serialized build lock produced the coherent
 passing result. This is compile evidence only, not native UIA execution.
 

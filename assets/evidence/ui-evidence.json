@@ -7,7 +7,7 @@
     "profile": "development checks plus deterministic headless raster",
     "rustc": "rustc 1.94.1 (e408947bf 2026-03-25), x86_64-unknown-linux-gnu, LLVM 21.1.8",
     "cpu": "AMD Ryzen 9 5900X 12-Core Processor",
-    "renderer": "nickel-ui deterministic software raster; native workbench acceptance used llvmpipe LLVM 21.1.8, Mesa OpenGL ES 3.2",
+    "renderer": "twinkle deterministic software raster; native workbench acceptance used llvmpipe LLVM 21.1.8, Mesa OpenGL ES 3.2",
     "scale": 1.0
   },
   "reachability": {
@@ -18,7 +18,7 @@
     "path_count": 4350,
     "reached_count": 4350,
     "issue_count": 0,
-    "generator_command": "cargo run -q -p nickel-ui-workbench --all-features -- reachability-report assets/evidence/ui-reachability-report.json",
+    "generator_command": "cargo run -q -p nickel-workbench --all-features -- reachability-report assets/evidence/ui-reachability-report.json",
     "drift_check": "The evidence validator regenerates or reads the full report, verifies its hash and schema, and requires reached_count == path_count with issue_count == 0. Any topology, action, route, or serialized-path change changes the retained hash."
   },
   "workbench_live_acceptance": {
@@ -60,7 +60,7 @@
     }
   },
   "performance_comparison": {
-    "generator_command": "cargo run -q -p nickel-ui-workbench -- feedback-evidence --full-comparison",
+    "generator_command": "cargo run -q -p nickel-workbench -- feedback-evidence --full-comparison",
     "captured_at": "2026-08-31",
     "clean_bootstrap_ms": 12285.9,
     "clean_incremental_ms": 155.1,

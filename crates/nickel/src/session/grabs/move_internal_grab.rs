@@ -3,11 +3,11 @@ use crate::session::{
 };
 use nickel_core::window_operation::CancellationReason;
 use nickel_core::window_operation::WindowId as OperationWindowId;
-use nickel_ui::InternalSurfaceId;
 use smithay::input::pointer::{
     ButtonEvent, GrabStartData, MotionEvent, PointerGrab, PointerInnerHandle,
 };
 use smithay::utils::{Logical, Point};
+use twinkle::InternalSurfaceId;
 
 pub struct MoveInternalSurfaceGrab {
     pub start_data: GrabStartData<NickelSession>,

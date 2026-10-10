@@ -17,7 +17,7 @@ retirement coverage removes the corresponding identity before deferred lease
 cleanup and ignores identity-worker replies whose monotonic window ID is gone.
 
 No live transient acceptance is claimed by this increment. The checked
-`nickel-ui` examples each create one winit toplevel. Winit's parent-window API is
+`twinkle` examples each create one winit toplevel. Winit's parent-window API is
 unsupported on Wayland and creates an embedded X11 child rather than a managed
 `WM_TRANSIENT_FOR` toplevel on X11. Zenity's `--attach` option is a deprecated
 no-op on this host. A normal ELF process also gives every one of its windows the

@@ -6,7 +6,7 @@ Run the repository gate from the workspace root:
 cargo run -p nickel-i18n-lint -- crates
 ```
 
-The scan excludes the `nickel-ui-workbench` fixture crate and Rust `examples/`
+The scan excludes the `twinkle-workbench` fixture crate and Rust `examples/`
 directories. They are development surfaces; the shell and bundled applications
 remain in scope. For an intentional literal in shipped UI, use a same-line or
 preceding-line `nickel-i18n-lint: allow <reason>` comment.

@@ -1932,9 +1932,9 @@ pub fn launcher_hotkey_receiver() -> super::GlobalShortcutFeed {
     let Some(session) = env::var_os(SESSION_CONTROL_ENV) else {
         return super::GlobalShortcutFeed {
             receiver,
-            ownership: nickel_input::global::ShortcutOwnership::Compositor,
-            capability: nickel_input::global::ShortcutCapability::Unavailable(
-                nickel_input::global::UnavailableReason::MissingRuntime,
+            ownership: twinkle_input::global::ShortcutOwnership::Compositor,
+            capability: twinkle_input::global::ShortcutCapability::Unavailable(
+                twinkle_input::global::UnavailableReason::MissingRuntime,
             ),
         };
     };
@@ -1946,9 +1946,9 @@ pub fn launcher_hotkey_receiver() -> super::GlobalShortcutFeed {
     let Ok(socket) = UnixDatagram::bind(&path) else {
         return super::GlobalShortcutFeed {
             receiver,
-            ownership: nickel_input::global::ShortcutOwnership::Compositor,
-            capability: nickel_input::global::ShortcutCapability::Unavailable(
-                nickel_input::global::UnavailableReason::Backend(
+            ownership: twinkle_input::global::ShortcutOwnership::Compositor,
+            capability: twinkle_input::global::ShortcutCapability::Unavailable(
+                twinkle_input::global::UnavailableReason::Backend(
                     "could not bind the session shortcut socket".into(),
                 ),
             ),
@@ -1960,9 +1960,9 @@ pub fn launcher_hotkey_receiver() -> super::GlobalShortcutFeed {
             Err(_) => {
                 return super::GlobalShortcutFeed {
                     receiver,
-                    ownership: nickel_input::global::ShortcutOwnership::Compositor,
-                    capability: nickel_input::global::ShortcutCapability::Unavailable(
-                        nickel_input::global::UnavailableReason::PermissionDenied,
+                    ownership: twinkle_input::global::ShortcutOwnership::Compositor,
+                    capability: twinkle_input::global::ShortcutCapability::Unavailable(
+                        twinkle_input::global::UnavailableReason::PermissionDenied,
                     ),
                 };
             }
@@ -1977,9 +1977,9 @@ pub fn launcher_hotkey_receiver() -> super::GlobalShortcutFeed {
         let _ = std::fs::remove_file(path);
         return super::GlobalShortcutFeed {
             receiver,
-            ownership: nickel_input::global::ShortcutOwnership::Compositor,
-            capability: nickel_input::global::ShortcutCapability::Unavailable(
-                nickel_input::global::UnavailableReason::Backend(
+            ownership: twinkle_input::global::ShortcutOwnership::Compositor,
+            capability: twinkle_input::global::ShortcutCapability::Unavailable(
+                twinkle_input::global::UnavailableReason::Backend(
                     "session shortcut subscription failed".into(),
                 ),
             ),
@@ -2007,8 +2007,8 @@ pub fn launcher_hotkey_receiver() -> super::GlobalShortcutFeed {
         .expect("failed to start Nickel launcher event listener");
     super::GlobalShortcutFeed {
         receiver,
-        ownership: nickel_input::global::ShortcutOwnership::Compositor,
-        capability: nickel_input::global::ShortcutCapability::Available,
+        ownership: twinkle_input::global::ShortcutOwnership::Compositor,
+        capability: twinkle_input::global::ShortcutCapability::Available,
     }
 }
 

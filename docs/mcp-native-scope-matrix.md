@@ -56,11 +56,12 @@ Wayland application identity. Xwayland was not rerun for this increment.
 ## Ordinary Wayland clients
 
 The optional `--ordinary-scopes` increment uses the unchanged repository examples
-`nickel-ui/examples/keyboard_recipient.rs` and `standalone.rs`. Build these beside
+`nickel-ui-host/examples/keyboard_recipient.rs` and `standalone.rs`. Build these beside
 the compositor and harness:
 
 ```sh
-cargo build -p nickel-ui --example keyboard_recipient --example standalone
+cargo build -p nickel-ui-host --example keyboard_recipient
+cargo build -p twinkle --example standalone
 target/debug/nickel-linux-remote-control-acceptance --ordinary-scopes
 ```
 
@@ -169,7 +170,8 @@ The parallel Xwayland increment uses the same repository examples and assertions
 Run it from a reachable X11 session with:
 
 ```sh
-cargo build -p nickel-ui --example keyboard_recipient --example standalone
+cargo build -p nickel-ui-host --example keyboard_recipient
+cargo build -p twinkle --example standalone
 target/debug/nickel-linux-remote-control-acceptance --xwayland-ordinary-scopes
 ```
 

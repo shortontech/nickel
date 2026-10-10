@@ -1,6 +1,6 @@
 # Nickel File semantic scenario evidence
 
-The production `FileApp` is exercised through `nickel_ui_testkit::Scenario`, which owns a real
+The production `FileApp` is exercised through `twinkle_testkit::Scenario`, which owns a real
 `UiHost`; the scenarios do not call the application reducer directly or use copied hit geometry.
 
 Covered states and transitions:
@@ -47,12 +47,12 @@ cargo check -p nickel-file --target x86_64-pc-windows-gnu
 cargo test -p nickel-platform unavailable_or_non_local_theme_names_return_no_artwork
 cargo test -p nickel-platform scalable_theme_artwork_rasterizes_at_the_requested_physical_size
 cargo build -p nickel-file --target x86_64-pc-windows-gnu
-cargo run -p nickel-ui-workbench --features file-provider -- headless render-variant file.browser wide-details-light /tmp/nickel-file-wide-details-light.png
-cargo run -p nickel-ui-workbench --features file-provider -- headless render-variant file.browser minimum-details-light /tmp/nickel-file-minimum-details-light.png
-cargo run -p nickel-ui-workbench --features file-provider -- headless render-variant file.browser narrow-grid-dark /tmp/nickel-file-narrow-grid-dark.png
-cargo run -p nickel-ui-workbench --features file-provider -- headless render-variant file.browser minimum-command-surface /tmp/nickel-file-minimum-command.png
-cargo run -p nickel-ui-workbench --features file-provider -- headless render-variant file.browser loading /tmp/nickel-file-loading.png
-cargo run -p nickel-ui-workbench --features file-provider -- headless render-variant file.browser unreadable /tmp/nickel-file-unreadable.png
+cargo run -p nickel-workbench --features file-provider -- headless render-variant file.browser wide-details-light /tmp/nickel-file-wide-details-light.png
+cargo run -p nickel-workbench --features file-provider -- headless render-variant file.browser minimum-details-light /tmp/nickel-file-minimum-details-light.png
+cargo run -p nickel-workbench --features file-provider -- headless render-variant file.browser narrow-grid-dark /tmp/nickel-file-narrow-grid-dark.png
+cargo run -p nickel-workbench --features file-provider -- headless render-variant file.browser minimum-command-surface /tmp/nickel-file-minimum-command.png
+cargo run -p nickel-workbench --features file-provider -- headless render-variant file.browser loading /tmp/nickel-file-loading.png
+cargo run -p nickel-workbench --features file-provider -- headless render-variant file.browser unreadable /tmp/nickel-file-unreadable.png
 ```
 
 Live nested-compositor acceptance was run in the Smithay winit backend at 1200x768. Renderer-owned

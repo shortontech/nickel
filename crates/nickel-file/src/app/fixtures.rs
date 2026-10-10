@@ -9,25 +9,25 @@ pub struct FileWorkbenchFixture;
 #[cfg(any(test, feature = "workbench-fixtures"))]
 macro_rules! file_fixture_variant {
     ($id:literal, $title:literal, $viewport:literal, $width:literal, $height:literal, $theme:ident) => {
-        nickel_ui_testkit::FixtureVariant {
+        twinkle_testkit::FixtureVariant {
             id: $id,
             title: $title,
-            viewport: nickel_ui_testkit::ViewportPreset {
+            viewport: twinkle_testkit::ViewportPreset {
                 id: $viewport,
                 width: $width,
                 height: $height,
             },
-            theme: nickel_ui_testkit::FixtureTheme::$theme,
-            locale: nickel_ui_testkit::DEFAULT_LOCALE,
-            scale: nickel_ui_testkit::DEFAULT_SCALE,
-            controller_family: nickel_ui::ControllerFamily::Generic,
-            accessibility: nickel_ui_testkit::DEFAULT_ACCESSIBILITY,
+            theme: twinkle_testkit::FixtureTheme::$theme,
+            locale: twinkle_testkit::DEFAULT_LOCALE,
+            scale: twinkle_testkit::DEFAULT_SCALE,
+            controller_family: twinkle::ControllerFamily::Generic,
+            accessibility: twinkle_testkit::DEFAULT_ACCESSIBILITY,
         }
     };
 }
 
 #[cfg(any(test, feature = "workbench-fixtures"))]
-pub(crate) const FILE_FIXTURE_VARIANTS: &[nickel_ui_testkit::FixtureVariant] = &[
+pub(crate) const FILE_FIXTURE_VARIANTS: &[twinkle_testkit::FixtureVariant] = &[
     file_fixture_variant!("wide-grid-dark", "Wide Grid Dark", "wide", 1100, 700, Dark),
     file_fixture_variant!(
         "wide-grid-light",
@@ -191,86 +191,85 @@ pub(crate) const FILE_FIXTURE_VARIANTS: &[nickel_ui_testkit::FixtureVariant] = &
         620,
         Light
     ),
-    nickel_ui_testkit::FixtureVariant {
+    twinkle_testkit::FixtureVariant {
         id: "rtl-grid",
         title: "RTL Grid",
-        viewport: nickel_ui_testkit::ViewportPreset {
+        viewport: twinkle_testkit::ViewportPreset {
             id: "wide",
             width: 1100,
             height: 700,
         },
-        theme: nickel_ui_testkit::FixtureTheme::Dark,
-        locale: nickel_ui_testkit::LocalePreset {
+        theme: twinkle_testkit::FixtureTheme::Dark,
+        locale: twinkle_testkit::LocalePreset {
             id: "ar",
-            direction: nickel_ui_testkit::FixtureDirection::RightToLeft,
+            direction: twinkle_testkit::FixtureDirection::RightToLeft,
         },
-        scale: nickel_ui_testkit::DEFAULT_SCALE,
-        controller_family: nickel_ui::ControllerFamily::Generic,
-        accessibility: nickel_ui_testkit::DEFAULT_ACCESSIBILITY,
+        scale: twinkle_testkit::DEFAULT_SCALE,
+        controller_family: twinkle::ControllerFamily::Generic,
+        accessibility: twinkle_testkit::DEFAULT_ACCESSIBILITY,
     },
-    nickel_ui_testkit::FixtureVariant {
+    twinkle_testkit::FixtureVariant {
         id: "medium-details-125",
         title: "Medium Details 125%",
-        viewport: nickel_ui_testkit::ViewportPreset {
+        viewport: twinkle_testkit::ViewportPreset {
             id: "medium",
             width: 1025,
             height: 775,
         },
-        theme: nickel_ui_testkit::FixtureTheme::Light,
-        locale: nickel_ui_testkit::DEFAULT_LOCALE,
-        scale: nickel_ui_testkit::ScalePreset {
+        theme: twinkle_testkit::FixtureTheme::Light,
+        locale: twinkle_testkit::DEFAULT_LOCALE,
+        scale: twinkle_testkit::ScalePreset {
             id: "1.25x",
             factor: 1.25,
         },
-        controller_family: nickel_ui::ControllerFamily::Generic,
-        accessibility: nickel_ui_testkit::DEFAULT_ACCESSIBILITY,
+        controller_family: twinkle::ControllerFamily::Generic,
+        accessibility: twinkle_testkit::DEFAULT_ACCESSIBILITY,
     },
-    nickel_ui_testkit::FixtureVariant {
+    twinkle_testkit::FixtureVariant {
         id: "narrow-200",
         title: "Narrow 200%",
-        viewport: nickel_ui_testkit::ViewportPreset {
+        viewport: twinkle_testkit::ViewportPreset {
             id: "narrow",
             width: 960,
             height: 720,
         },
-        theme: nickel_ui_testkit::FixtureTheme::Dark,
-        locale: nickel_ui_testkit::DEFAULT_LOCALE,
-        scale: nickel_ui_testkit::ScalePreset {
+        theme: twinkle_testkit::FixtureTheme::Dark,
+        locale: twinkle_testkit::DEFAULT_LOCALE,
+        scale: twinkle_testkit::ScalePreset {
             id: "2x",
             factor: 2.0,
         },
-        controller_family: nickel_ui::ControllerFamily::Generic,
-        accessibility: nickel_ui_testkit::DEFAULT_ACCESSIBILITY,
+        controller_family: twinkle::ControllerFamily::Generic,
+        accessibility: twinkle_testkit::DEFAULT_ACCESSIBILITY,
     },
 ];
 
 #[cfg(any(test, feature = "workbench-fixtures"))]
-static FILE_FIXTURE_METADATA: nickel_ui_testkit::FixtureMetadata =
-    nickel_ui_testkit::FixtureMetadata {
-        id: "file.browser",
-        title: "Nickel File",
-        description: "Production Nickel File browser surface",
-        tags: &["file", "browser", "collection", "context-menu"],
-        source: nickel_ui_testkit::FixtureSource {
-            crate_name: "nickel-file",
-            file: file!(),
-            line: line!(),
-        },
-        variants: FILE_FIXTURE_VARIANTS,
-        assets: FILE_FIXTURE_ASSETS,
-        simulated_effects: &[],
-    };
+static FILE_FIXTURE_METADATA: twinkle_testkit::FixtureMetadata = twinkle_testkit::FixtureMetadata {
+    id: "file.browser",
+    title: "Nickel File",
+    description: "Production Nickel File browser surface",
+    tags: &["file", "browser", "collection", "context-menu"],
+    source: twinkle_testkit::FixtureSource {
+        crate_name: "nickel-file",
+        file: file!(),
+        line: line!(),
+    },
+    variants: FILE_FIXTURE_VARIANTS,
+    assets: FILE_FIXTURE_ASSETS,
+    simulated_effects: &[],
+};
 
 #[cfg(any(test, feature = "workbench-fixtures"))]
-impl nickel_ui_testkit::Fixture for FileWorkbenchFixture {
+impl twinkle_testkit::Fixture for FileWorkbenchFixture {
     type App = FileApp;
-    fn metadata() -> &'static nickel_ui_testkit::FixtureMetadata {
+    fn metadata() -> &'static twinkle_testkit::FixtureMetadata {
         &FILE_FIXTURE_METADATA
     }
     fn create() -> Self::App {
         FileApp::fixture()
     }
-    fn create_variant(variant: &nickel_ui_testkit::FixtureVariant) -> Self::App {
+    fn create_variant(variant: &twinkle_testkit::FixtureVariant) -> Self::App {
         let mut app = match variant.id {
             "long-unicode" => FileApp::with_browser(
                 DirectoryBrowser::fixture(vec![
@@ -368,70 +367,70 @@ impl nickel_ui_testkit::Fixture for FileWorkbenchFixture {
         }
         app.fixture_appearance = Some(Appearance {
             mode: match variant.theme {
-                nickel_ui_testkit::FixtureTheme::Light => ThemeMode::Light,
-                nickel_ui_testkit::FixtureTheme::Dark
-                | nickel_ui_testkit::FixtureTheme::HighContrast => ThemeMode::Dark,
+                twinkle_testkit::FixtureTheme::Light => ThemeMode::Light,
+                twinkle_testkit::FixtureTheme::Dark
+                | twinkle_testkit::FixtureTheme::HighContrast => ThemeMode::Dark,
             },
             accent: [0, 164, 96],
             intensity: 100,
         });
         app.localizer = Localizer::for_locale(Some(variant.locale.id));
         app.reading_direction = match variant.locale.direction {
-            nickel_ui_testkit::FixtureDirection::LeftToRight => ReadingDirection::LeftToRight,
-            nickel_ui_testkit::FixtureDirection::RightToLeft => ReadingDirection::RightToLeft,
+            twinkle_testkit::FixtureDirection::LeftToRight => ReadingDirection::LeftToRight,
+            twinkle_testkit::FixtureDirection::RightToLeft => ReadingDirection::RightToLeft,
         };
         app
     }
     fn surface_size() -> (u32, u32) {
         (960, 640)
     }
-    fn default_activation() -> Option<nickel_ui_testkit::Selector> {
-        Some(nickel_ui_testkit::Selector::role_name(
-            nickel_ui::SemanticRole::Button,
+    fn default_activation() -> Option<twinkle_testkit::Selector> {
+        Some(twinkle_testkit::Selector::role_name(
+            twinkle::SemanticRole::Button,
             "report.txt",
         ))
     }
 }
 
 #[cfg(any(test, feature = "workbench-fixtures"))]
-pub(crate) const FILE_FIXTURE_ASSETS: &[nickel_ui_testkit::FixtureAsset] = &[
-    nickel_ui_testkit::FixtureAsset {
+pub(crate) const FILE_FIXTURE_ASSETS: &[twinkle_testkit::FixtureAsset] = &[
+    twinkle_testkit::FixtureAsset {
         id: "nickel-file-folder",
         path: "assets/concepts/nickel-file-icon-family/folder.png",
         license: "Same license as Nickel",
         sha256: "befa4351e2f22c200f07103d4b1c2f51de4303e0da9c3a7352fdbeec05066ec2",
     },
-    nickel_ui_testkit::FixtureAsset {
+    twinkle_testkit::FixtureAsset {
         id: "nickel-file-home-folder",
         path: "assets/concepts/nickel-file-icon-family/home-folder.png",
         license: "Same license as Nickel",
         sha256: "2c492d5438c43d6c0b7e376ce07399560d64fa66b2ebf0ae4054195bcf9cb2e4",
     },
-    nickel_ui_testkit::FixtureAsset {
+    twinkle_testkit::FixtureAsset {
         id: "nickel-file-pictures-folder",
         path: "assets/concepts/nickel-file-icon-family/pictures-folder.png",
         license: "Same license as Nickel",
         sha256: "b4477db1170bae282f22c38099e3327fbdc0e680c8c652b62177e1b57684cc77",
     },
-    nickel_ui_testkit::FixtureAsset {
+    twinkle_testkit::FixtureAsset {
         id: "nickel-file-music-folder",
         path: "assets/concepts/nickel-file-icon-family/music-folder.png",
         license: "Same license as Nickel",
         sha256: "667c2b11bcb2351e6e6476c1b761d4d04b268a02f1af604aff7c2229c10c24ee",
     },
-    nickel_ui_testkit::FixtureAsset {
+    twinkle_testkit::FixtureAsset {
         id: "nickel-file-image-file",
         path: "assets/concepts/nickel-file-icon-family/image-file.png",
         license: "Same license as Nickel",
         sha256: "7ad8b1935c1bb774f41a9e47e0e75e29639310d613fef08f651185ec1c478056",
     },
-    nickel_ui_testkit::FixtureAsset {
+    twinkle_testkit::FixtureAsset {
         id: "nickel-file-text-file",
         path: "assets/concepts/nickel-file-icon-family/text-file.png",
         license: "Same license as Nickel",
         sha256: "e6bd3410eb2b294b2f3fc600271f35d8ef6cbd9c2182add560bdc584ac539e92",
     },
-    nickel_ui_testkit::FixtureAsset {
+    twinkle_testkit::FixtureAsset {
         id: "nickel-file-unknown-file",
         path: "assets/concepts/nickel-file-icon-family/unknown-file.png",
         license: "Same license as Nickel",
@@ -440,11 +439,11 @@ pub(crate) const FILE_FIXTURE_ASSETS: &[nickel_ui_testkit::FixtureAsset] = &[
 ];
 
 #[cfg(any(test, feature = "workbench-fixtures"))]
-impl nickel_ui_testkit::FixtureProvider for FileFixtureProvider {
+impl twinkle_testkit::FixtureProvider for FileFixtureProvider {
     fn register(
         &self,
-        registry: &mut nickel_ui_testkit::FixtureRegistry,
-    ) -> Result<(), nickel_ui_testkit::RegistryError> {
+        registry: &mut twinkle_testkit::FixtureRegistry,
+    ) -> Result<(), twinkle_testkit::RegistryError> {
         registry.register::<FileWorkbenchFixture>()
     }
 }

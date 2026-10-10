@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use nickel_input::{
+use twinkle_input::{
     AggregateModifier, Binding, DeviceId, EventOrder, InputEvent, KeyEvent, KeyLocation,
     LogicalKey, Modifier, ModifierState, NativeCode, NativeKey, PhysicalKey, Shortcut,
     ShortcutEngine, ShortcutKey, ShortcutTrigger,
@@ -9,7 +9,7 @@ use nickel_input::{
         RegistrationTable, ShortcutCapability, ShortcutOwnership,
     },
 };
-pub use nickel_input::{KeyCode, KeyEdge};
+pub use twinkle_input::{KeyCode, KeyEdge};
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum HotkeyAction {
@@ -387,13 +387,13 @@ fn compositor_registrations() -> Vec<Registration<HotkeyAction>> {
         registration(
             KeyCode::SuperLeft,
             [],
-            ShortcutTrigger::ModifierReleased(nickel_input::Modifier::SuperLeft),
+            ShortcutTrigger::ModifierReleased(twinkle_input::Modifier::SuperLeft),
             ToggleLauncher,
         ),
         registration(
             KeyCode::SuperRight,
             [],
-            ShortcutTrigger::ModifierReleased(nickel_input::Modifier::SuperRight),
+            ShortcutTrigger::ModifierReleased(twinkle_input::Modifier::SuperRight),
             ToggleLauncher,
         ),
         registration(KeyCode::KeyR, [Super], ShortcutTrigger::Pressed, ShowRun),
@@ -510,25 +510,25 @@ fn compositor_registrations() -> Vec<Registration<HotkeyAction>> {
         registration(
             KeyCode::AltLeft,
             [],
-            ShortcutTrigger::ModifierReleasedAfterChord(nickel_input::Modifier::AltLeft),
+            ShortcutTrigger::ModifierReleasedAfterChord(twinkle_input::Modifier::AltLeft),
             CommitSwitch,
         ),
         registration(
             KeyCode::AltRight,
             [],
-            ShortcutTrigger::ModifierReleasedAfterChord(nickel_input::Modifier::AltRight),
+            ShortcutTrigger::ModifierReleasedAfterChord(twinkle_input::Modifier::AltRight),
             CommitSwitch,
         ),
         registration(
             KeyCode::AltLeft,
             [Shift],
-            ShortcutTrigger::ModifierReleasedAfterChord(nickel_input::Modifier::AltLeft),
+            ShortcutTrigger::ModifierReleasedAfterChord(twinkle_input::Modifier::AltLeft),
             CommitSwitch,
         ),
         registration(
             KeyCode::AltRight,
             [Shift],
-            ShortcutTrigger::ModifierReleasedAfterChord(nickel_input::Modifier::AltRight),
+            ShortcutTrigger::ModifierReleasedAfterChord(twinkle_input::Modifier::AltRight),
             CommitSwitch,
         ),
         registration(
@@ -642,10 +642,10 @@ fn workspace_number_registrations() -> impl Iterator<Item = Registration<HotkeyA
 /// Native adapters own translation and lifecycle state; Nickel Core owns what
 /// each shortcut means. Keeping this declaration here prevents platform
 /// backends from growing parallel binding tables.
-pub fn default_bindings() -> Vec<nickel_input::Binding<HotkeyAction>> {
+pub fn default_bindings() -> Vec<twinkle_input::Binding<HotkeyAction>> {
     compositor_registrations()
         .into_iter()
-        .map(|registration| nickel_input::Binding {
+        .map(|registration| twinkle_input::Binding {
             suppress: !matches!(
                 registration.shortcut.trigger,
                 ShortcutTrigger::ModifierReleased(_)
@@ -698,11 +698,11 @@ pub struct HotkeySnapshot {
 }
 #[cfg(test)]
 mod tests {
-    use nickel_input::global::{
+    use twinkle_input::global::{
         GlobalShortcutAdapter, RegistrationError, ShortcutCapability, ShortcutOwnership,
     };
-    use nickel_input::windows::WindowsInputAdapter;
-    use nickel_input::{KeyCode, KeyEdge};
+    use twinkle_input::windows::WindowsInputAdapter;
+    use twinkle_input::{KeyCode, KeyEdge};
 
     use super::{
         CompositorShortcutAdapter, HotkeyAction, HotkeyOutcome, compositor_registrations,

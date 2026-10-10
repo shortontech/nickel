@@ -253,9 +253,9 @@ layout-produced q and verifies keypad Enter, release edges, device identity, and
 Runtime coverage verifies repeated press/release delivery and focus-loss retirement while a key is
 held. The runtime module/state were renamed from desktop_pointer to desktop_input to match their
 combined ownership. These are adapter contracts, not a completed live keyboard acceptance matrix.
-Validation: 30 nickel-input tests passed with winit enabled; full Nickel library suite 627 passed,
+Validation: 30 twinkle-input tests passed with winit enabled; full Nickel library suite 627 passed,
 11 ignored. After the module/state rename, all 52 desktop-focused tests passed. Formatting,
-diff whitespace checks, and strict all-target/all-feature Clippy for nickel and nickel-input passed.
+diff whitespace checks, and strict all-target/all-feature Clippy for nickel and twinkle-input passed.
 
 Hover/focus follow-up: native desktop input and generic widgets now share runtime hover ownership.
 Moving from a panel into a desktop cancels the old panel hover before desktop motion; leaving an
@@ -556,7 +556,7 @@ Default-feature compilation also exposed an unused nested-only CPU-buffer failur
 gated to `backend-winit`/tests, with the ownership difference from asynchronous native capture
 documented at the method. No native failure accounting was removed.
 
-Keyboard follow-up inspection confirms that `nickel-ui::FocusedInputDispatcher` already owns editing
+Keyboard follow-up inspection confirms that `twinkle::FocusedInputDispatcher` already owns editing
 chords. The native host must transport normalized input **and** clipboard outcomes: currently
 `InternalUiRuntime::step` retains only `HostEventOutcome.changed`, and the session selection owner
 only represents XWayland. Merely dropping the modifier rejection and forwarding a chord would still
@@ -729,7 +729,7 @@ now using the same isolated runner; its terminal result will be recorded separat
 The unfiltered isolated workspace run at `2b52b1e` completed with exit 0:
 `cargo test --workspace --no-fail-fast --quiet`, with the private Xvfb environment described above.
 No test-name exclusion was applied; built-in ignored tests remain ignored. The Nickel library
-reported **659 passed, 12 ignored**, nickel-ui **335 passed, 2 ignored**, and the workbench
+reported **659 passed, 12 ignored**, twinkle **335 passed, 2 ignored**, and the workbench
 **46 passed**. Strict workspace all-target/all-feature Clippy also passed. Neither command exercised
 the running native desktop; these results do not establish live acceptance for the other specs.
 
@@ -785,7 +785,7 @@ The failure wording now refers to the rejected operation, not the whole batch, b
 copy/cut in that batch may have succeeded.
 
 Root verification: native keyboard lease test **1 passed**; coordinator suite **15 passed**;
-clipboard-filtered all-feature tests **8 passed, 4 live tests ignored** across Nickel/nickel-ui;
+clipboard-filtered all-feature tests **8 passed, 4 live tests ignored** across Nickel/twinkle;
 source-reuse authority tests **3 passed**. Strict workspace all-target/all-feature Clippy passed,
 followed by the small hidden-control guard restoration. The source inventory now covers 265 Rust
 sources, including 98 in Nickel, with the two new clipboard modules' ownership boundaries documented.
@@ -797,8 +797,8 @@ The implementation comment now states that exact scope rather than promising fie
 Spec 0222 is not archived, and no running desktop, audio, clipboard or input state was changed.
 
 Post-follow-up full all-feature library run completed with exit 0:
-`CARGO_BUILD_JOBS=4 cargo test -p nickel -p nickel-ui --lib --all-features --quiet`.
-Nickel: **671 passed, 12 ignored**; nickel-ui: **336 passed, 2 ignored**. Strict workspace
+`CARGO_BUILD_JOBS=4 cargo test -p nickel -p twinkle --lib --all-features --quiet`.
+Nickel: **671 passed, 12 ignored**; twinkle: **336 passed, 2 ignored**. Strict workspace
 all-target/all-feature Clippy was rerun after the hidden-control guard and passed; formatting and
 diff checks passed. The integrated keyboard worktree was clean, with no remaining agent build,
 before cleanup of its checkout and 3.3 GiB disposable target cache. Its branch/commit are preserved.
@@ -889,7 +889,7 @@ surface tests also passed. A UI-state regression covers stable focus/hover and t
 Clipboard-size policy remains unconfigured, and real external-client interoperability/live acceptance
 remain outstanding; this fixes field focus leases, not every outstanding keyboard acceptance item.
 
-Verification: nickel-ui all-feature library suite **337 passed, 2 ignored**; both focused native
+Verification: twinkle all-feature library suite **337 passed, 2 ignored**; both focused native
 async-paste/keyboard-lease tests passed; strict workspace all-target/all-feature Clippy, formatting
 and diff checks passed. No live clipboard or input state was exercised.
 
@@ -914,7 +914,7 @@ was sent. The full isolated workspace run started at `824d3a6` predates this rep
 reported separately rather than represented as validation of code compiled afterward.
 
 The unfiltered workspace run at `824d3a6` finished with exit 0 under the private Xvfb runner:
-`cargo test --workspace --no-fail-fast --quiet`. Nickel **664 passed, 12 ignored**, nickel-ui
+`cargo test --workspace --no-fail-fast --quiet`. Nickel **664 passed, 12 ignored**, twinkle
 **337 passed, 2 ignored**, workbench **46 passed**, plus remaining workspace suites and doctests.
 No test-name exclusion was applied. This verifies the accumulated keyboard/preview bridge changes
 before the repeat-lifetime follow-up; that follow-up has its separate focused test and Clippy results

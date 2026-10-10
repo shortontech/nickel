@@ -25,7 +25,7 @@ pub(crate) struct OnScreenKeyboardState {
     generation: u64,
     environment_override: bool,
     epoch: u64,
-    internal_recipient: Option<nickel_ui::InternalSurfaceId>,
+    internal_recipient: Option<twinkle::InternalSurfaceId>,
     enabled: bool,
     pub(crate) visible: bool,
     source: KeyboardSource,
@@ -104,7 +104,7 @@ impl NickelSession {
         }
     }
 
-    fn keyboard_internal_recipient(&self) -> Option<nickel_ui::InternalSurfaceId> {
+    fn keyboard_internal_recipient(&self) -> Option<twinkle::InternalSurfaceId> {
         let id = self.internal_ui.focused()?;
         let placement = self.internal_ui.placement(id)?;
         (self.internal_ui.is_visible(id)
@@ -265,7 +265,7 @@ impl NickelSession {
                     {
                         return Err("invalid on-screen keyboard text");
                     }
-                    nickel_ui::UiEvent::TextInput(text)
+                    twinkle::UiEvent::TextInput(text)
                 }
                 OnScreenKeyboardInput::Key { keysym, modifiers } => {
                     self.on_screen_keyboard.virtual_order =
@@ -273,9 +273,9 @@ impl NickelSession {
                     let event = super::input::internal_virtual_key(
                         keysym,
                         &modifiers,
-                        nickel_input::EventOrder(self.on_screen_keyboard.virtual_order),
+                        twinkle_input::EventOrder(self.on_screen_keyboard.virtual_order),
                     )?;
-                    if crate::is_clipboard_paste(&nickel_input::InputEvent::Key(event.clone())) {
+                    if crate::is_clipboard_paste(&twinkle_input::InputEvent::Key(event.clone())) {
                         return self.request_native_paste(epoch, event);
                     }
                     return self.dispatch_native_key(epoch, event, None);

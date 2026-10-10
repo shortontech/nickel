@@ -13,7 +13,7 @@ use std::{
 use nickel_codex::{BackendChoice, ThreadId};
 use nickel_codex_ui::{ChatApplication, ShellRequest, shell_application_with_backend};
 use nickel_core::optional_features::{CodexSource, OptionalFeatureSettings};
-use nickel_ui::{Application, HostBatch, HostEvent, InternalSurfaceId};
+use twinkle::{Application, HostBatch, HostEvent, InternalSurfaceId};
 
 use crate::session::{InternalSurfacePlacement, InternalSurfaceRole, InternalUiRuntime};
 
@@ -56,7 +56,7 @@ pub enum NativeProjectMenuAction {
 /// Owns the identities and domain leases for compositor-hosted Codex UI.
 pub struct InternalCodexHost {
     settings: OptionalFeatureSettings,
-    theme: nickel_ui::SemanticTheme,
+    theme: twinkle::SemanticTheme,
     cwd: PathBuf,
     project_controller: Option<InternalSurfaceId>,
     chats: Vec<ChatSurface>,
@@ -66,7 +66,7 @@ pub struct InternalCodexHost {
 impl InternalCodexHost {
     pub fn new(
         settings: OptionalFeatureSettings,
-        theme: nickel_ui::SemanticTheme,
+        theme: twinkle::SemanticTheme,
         cwd: PathBuf,
     ) -> Self {
         Self {
@@ -233,7 +233,7 @@ impl InternalCodexHost {
     pub fn set_theme(
         &mut self,
         runtime: &mut InternalUiRuntime,
-        theme: nickel_ui::SemanticTheme,
+        theme: twinkle::SemanticTheme,
     ) -> Vec<InternalSurfaceId> {
         if self.theme == theme {
             return Vec::new();
@@ -250,7 +250,7 @@ impl InternalCodexHost {
                     id,
                     HostBatch {
                         application_changed: true,
-                        events: vec![nickel_ui::HostEvent::Poll],
+                        events: vec![twinkle::HostEvent::Poll],
                         ..HostBatch::default()
                     },
                 );
@@ -625,7 +625,7 @@ fn internal_placement(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nickel_ui::{Application, Text, View, ViewContext};
+    use twinkle::{Application, Text, View, ViewContext};
 
     struct TestApp;
 
@@ -712,7 +712,7 @@ mod tests {
             runtime
                 .semantic_nodes(menu)
                 .iter()
-                .any(|node| node.role == Some(nickel_ui::SemanticRole::TextField))
+                .any(|node| node.role == Some(twinkle::SemanticRole::TextField))
         );
         runtime.focus_surface(application);
         assert!(host.dismiss_unfocused_project_menu(&mut runtime));
@@ -757,10 +757,10 @@ mod tests {
             .into_iter()
             .find(|node| {
                 node.name.as_deref() == Some("Example")
-                    && node.role == Some(nickel_ui::SemanticRole::Button)
+                    && node.role == Some(twinkle::SemanticRole::Button)
             })
             .expect("native project button");
-        let point = nickel_ui::Point {
+        let point = twinkle::Point {
             x: button.bounds.origin.x + button.bounds.size.width / 2.0,
             y: button.bounds.origin.y + button.bounds.size.height / 2.0,
         };
@@ -768,8 +768,8 @@ mod tests {
             menu,
             HostBatch {
                 events: vec![
-                    HostEvent::Ui(nickel_ui::UiEvent::PointerPressed(point)),
-                    HostEvent::Ui(nickel_ui::UiEvent::PointerReleased(point)),
+                    HostEvent::Ui(twinkle::UiEvent::PointerPressed(point)),
+                    HostEvent::Ui(twinkle::UiEvent::PointerReleased(point)),
                 ],
                 ..Default::default()
             },

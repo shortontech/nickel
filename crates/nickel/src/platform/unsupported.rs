@@ -109,7 +109,7 @@ pub(crate) fn publish_application_discovery(_: &ApplicationDiscovery) {}
 
 pub fn launcher_hotkey_receiver() -> super::GlobalShortcutFeed {
     super::GlobalShortcutFeed::unavailable(
-        nickel_input::global::UnavailableReason::UnsupportedPlatform,
+        twinkle_input::global::UnavailableReason::UnsupportedPlatform,
     )
 }
 

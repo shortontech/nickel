@@ -1168,8 +1168,8 @@ pub struct EmergencyChord {
 impl EmergencyChord {
     pub fn handle_physical(
         &mut self,
-        key: nickel_input::KeyCode,
-        edge: nickel_input::KeyEdge,
+        key: twinkle_input::KeyCode,
+        edge: twinkle_input::KeyEdge,
         remote_control_enabled: bool,
     ) -> bool {
         if !remote_control_enabled {
@@ -1178,10 +1178,10 @@ impl EmergencyChord {
             self.fired = false;
             return false;
         }
-        let pressed = edge == nickel_input::KeyEdge::Pressed;
+        let pressed = edge == twinkle_input::KeyEdge::Pressed;
         match key {
-            nickel_input::KeyCode::ControlLeft => self.left = pressed,
-            nickel_input::KeyCode::ControlRight => self.right = pressed,
+            twinkle_input::KeyCode::ControlLeft => self.left = pressed,
+            twinkle_input::KeyCode::ControlRight => self.right = pressed,
             _ => return false,
         }
         if !self.left || !self.right {
@@ -4179,7 +4179,7 @@ mod tests {
 
     #[test]
     fn emergency_chord_requires_both_physical_sides_and_fires_once_per_hold() {
-        use nickel_input::{KeyCode, KeyEdge};
+        use twinkle_input::{KeyCode, KeyEdge};
         let mut chord = EmergencyChord::default();
         assert!(!chord.handle_physical(KeyCode::ControlLeft, KeyEdge::Pressed, false));
         assert!(!chord.handle_physical(KeyCode::ControlLeft, KeyEdge::Pressed, true));
