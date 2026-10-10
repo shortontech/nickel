@@ -60,6 +60,112 @@ const MAX_EFFECT_RECONCILIATIONS: usize = 16;
 static NEXT_DIAGNOSTIC_MOUNT: AtomicU64 = AtomicU64::new(1);
 static NEXT_NATIVE_TEXT_REVISION: AtomicU64 = AtomicU64::new(1);
 
+fn nickel_theme_properties(
+    palette: nickel_core::theme::ThemePalette,
+) -> std::collections::HashMap<String, String> {
+    let blend = |base: u32, foreground: u32, foreground_percent: u32| -> u32 {
+        let channel = |shift: u32| {
+            let base = (base >> shift) & 0xff;
+            let foreground = (foreground >> shift) & 0xff;
+            (base * (100 - foreground_percent) + foreground * foreground_percent + 50) / 100
+        };
+        (channel(16) << 16) | (channel(8) << 8) | channel(0)
+    };
+    let light = palette.mode == nickel_core::theme::ThemeMode::Light;
+    let raised = if light {
+        blend(palette.surface, 0x00ff_ffff, 35)
+    } else {
+        blend(palette.panel, palette.text, 10)
+    };
+    let control = if light {
+        blend(palette.surface, 0x00ff_ffff, 15)
+    } else {
+        blend(palette.panel, palette.text, 15)
+    };
+    let mut properties = std::collections::HashMap::new();
+    for (name, color) in [
+        ("background", palette.background),
+        (
+            "background-raised",
+            if light {
+                blend(palette.background, 0x00ff_ffff, 18)
+            } else {
+                palette.background
+            },
+        ),
+        (
+            "panel-raised",
+            if light {
+                blend(palette.panel, 0x00ff_ffff, 12)
+            } else {
+                palette.panel
+            },
+        ),
+        ("panel", palette.panel),
+        ("surface", palette.surface),
+        (
+            "card",
+            if light {
+                nickel_core::theme::shifted_surface_hue(
+                    blend(palette.background, 0x00ff_ffff, 18),
+                    8.0,
+                )
+            } else {
+                palette.surface
+            },
+        ),
+        ("surface-hover", palette.surface_hover),
+        ("text", palette.text),
+        ("muted", palette.muted),
+        ("accent", palette.accent),
+        ("accent-soft", palette.accent_soft),
+        ("complement", palette.complement),
+        ("raised", raised),
+        ("control", control),
+        ("border", blend(palette.panel, palette.text, 30)),
+        ("soft-text", blend(palette.muted, palette.text, 40)),
+        ("selected", blend(control, palette.accent, 25)),
+        ("selected-border", blend(palette.accent, palette.text, 35)),
+        ("panel-soft", blend(palette.panel, palette.text, 4)),
+        ("border-soft", blend(palette.panel, palette.text, 12)),
+        ("divider-soft", blend(palette.panel, palette.text, 8)),
+        ("control-soft", blend(palette.panel, palette.text, 7)),
+        ("text-soft", blend(palette.panel, palette.text, 88)),
+        ("selection-soft", blend(palette.panel, palette.accent, 24)),
+        ("focus-soft", blend(palette.panel, palette.accent, 48)),
+        ("action-soft", blend(palette.panel, palette.accent, 72)),
+    ] {
+        properties.insert(
+            format!("--nickel-{name}"),
+            format!("#{:06x}", color & 0x00ff_ffff),
+        );
+    }
+    for (name, value) in [
+        ("surface-raised", format!("#{:06x}", raised & 0x00ff_ffff)),
+        (
+            "text-muted",
+            format!("#{:06x}", palette.muted & 0x00ff_ffff),
+        ),
+        ("radius-control", "8px".into()),
+        ("radius-card", "12px".into()),
+        ("spacing-control", "8px".into()),
+        ("font-size", "14px".into()),
+        ("line-height", "20px".into()),
+    ] {
+        properties.insert(format!("--nickel-{name}"), value);
+    }
+    properties
+}
+
+fn compile_plugin_stylesheet(source: &str) -> Result<StyleSheet, String> {
+    StyleSheet::compile_with_host_properties(
+        source,
+        nickel_theme_properties(nickel_core::theme::ThemePalette::from_appearance(
+            nickel_core::theme::Appearance::default(),
+        )),
+    )
+}
+
 fn allocate_native_text_revision(counter: &AtomicU64) -> Option<u64> {
     // Exhaustion disables this optimization instead of aliasing an older source.
     counter
@@ -145,7 +251,7 @@ fn bundled_stylesheet(
     } else {
         Cow::Borrowed(fallback)
     };
-    StyleSheet::compile(&source)
+    compile_plugin_stylesheet(&source)
 }
 
 pub fn bottom_offset() -> u32 {
@@ -493,7 +599,7 @@ fn package_stylesheet(package: &PluginPackage) -> Result<StyleSheet, String> {
         .map(|graph| graph.stylesheet())
         .transpose()?
         .unwrap_or_default();
-    StyleSheet::compile(&format!("{}\n{}", package.stylesheet, imported))
+    compile_plugin_stylesheet(&format!("{}\n{}", package.stylesheet, imported))
 }
 
 impl PluginPanelApplication {
@@ -880,7 +986,7 @@ impl PluginPanelApplication {
                 })
                 .collect::<Result<Vec<_>, _>>()?
                 .join("\n");
-            let stylesheet = StyleSheet::compile(&css)?;
+            let stylesheet = compile_plugin_stylesheet(&css)?;
             let mount = host_ref.mount(&reference)?;
             (runtime, mount, stylesheet, manifests)
         };
@@ -1035,7 +1141,7 @@ impl PluginPanelApplication {
                 images.insert(alias.into(), ((images.len() + 1) as u16, image));
             }
         }
-        let stylesheet = StyleSheet::compile(&css)?;
+        let stylesheet = compile_plugin_stylesheet(&css)?;
         state.manifests = owners
             .iter()
             .map(|owner| (owner.clone(), catalog[&owner.id].manifest.clone()))
@@ -1495,7 +1601,7 @@ impl PluginPanelApplication {
                 &mut runtime_ref,
                 manifest,
                 expected_surface_id,
-                "__nickelRender()",
+                "__twinkleRender()",
                 1,
             )?
         };
@@ -1552,7 +1658,11 @@ impl PluginPanelApplication {
         &mut self,
         palette: nickel_core::theme::ThemePalette,
     ) -> Result<bool, String> {
-        let changed = self.stylesheet.set_palette(palette)?;
+        let scheme_changed = self.stylesheet.set_palette(palette)?;
+        let properties_changed = self
+            .stylesheet
+            .set_host_properties(nickel_theme_properties(palette))?;
+        let changed = scheme_changed || properties_changed;
         if changed {
             self.virtual_measurement_epoch = self.virtual_measurement_epoch.wrapping_add(1);
         }
