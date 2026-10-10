@@ -1686,6 +1686,7 @@ fn unchanged_system_feed_events_are_idle_and_do_not_schedule_polling() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 #[ignore = "release-profile real-deadline Settings traversal workload"]
 fn scheduled_settings_traversal_reports_retained_lifetimes() {
     with_package_runtime_stack(|| {

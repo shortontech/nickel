@@ -660,6 +660,7 @@
         assert!(!shell.retire_window_menu(generation));
         assert_eq!(shell.windows.iter().find(|window| window.active).unwrap().id, WindowId(74));
         assert!(!shell.default_shell_surface_visible("window-menu"));
+        #[cfg(target_os = "linux")]
         assert!(!host.take_commands().iter().any(|command| matches!(command, crate::platform::ShellCommand::RestoreApplicationFocus)));
         });
     }

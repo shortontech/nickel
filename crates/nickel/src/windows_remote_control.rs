@@ -10638,7 +10638,7 @@ mod tests {
         let mut state =
             crate::live_shell::LiveShell::new_with_session_host(Arc::new(RejectingHost))
                 .expect("temporary shell state");
-        crate::sync_visibility(&mut shell, &state);
+        crate::sync_visibility(&mut shell, &mut state);
         let observations = shell.remote_shell_surface_observations(&state);
         let panel = observations
             .iter()

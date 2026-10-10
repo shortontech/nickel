@@ -223,7 +223,8 @@ mod tests {
     }
     impl<R: Read> Read for Fragmented<R> {
         fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-            self.inner.read(&mut buffer[..buffer.len().min(self.limit)])
+            let length = buffer.len().min(self.limit);
+            self.inner.read(&mut buffer[..length])
         }
     }
 
