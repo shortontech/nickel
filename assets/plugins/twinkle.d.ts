@@ -308,8 +308,14 @@ declare const TwinkleStores:Readonly<{
  theme:TwinkleExternalStore<Readonly<TwinkleThemeSnapshot>>;
  capabilities:TwinkleExternalStore<Readonly<Record<string,Readonly<TwinkleHostCapabilitySnapshot>>>>;
 }>;
+interface TwinkleContribution<P = TwinkleProps> {
+ readonly key:string;
+ readonly component:TwinkleComponent<P>;
+ readonly [metadata:string]:unknown;
+}
 declare const twinkle:Readonly<{
  readonly data:Readonly<Record<string,unknown>>;
  request(effect:TwinkleJson):void;
  component<P=TwinkleProps>(contract:string):TwinkleComponent<P>;
+ contributions<P=TwinkleProps>(collection:string):ReadonlyArray<Readonly<TwinkleContribution<P>>>;
 }>;

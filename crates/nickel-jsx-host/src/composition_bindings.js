@@ -7,14 +7,6 @@ function __nickelCompositionSettingsPages() {
     return result;
 }
 const __nickelCompositionClient = Object.freeze({...nickel, get data() { return nickel.data; },
-    component(contract) {
-        if (typeof contract !== 'string') throw TypeError('invalid component contract');
-        return __nickelComponentProxy({contract});
-    },
-    contributions(collection) {
-        if (typeof collection !== 'string') throw TypeError('invalid contribution collection');
-        return Object.freeze((__nickelContributionCatalog[collection] || []).map(entry => Object.freeze({
-            ...entry, component: __nickelComponentProxy({contribution:entry.key})
-        })));
-    }
+    component(contract) { return __twinkleCompositionClient.component(contract); },
+    contributions(collection) { return __twinkleCompositionClient.contributions(collection); }
 });

@@ -1,9 +1,10 @@
 //! Nickel-owned package composition and provider lifecycle integration.
 //! Generic execution and native transaction identities remain in Twinkle.
 pub use twinkle_jsx_runtime::*;
-mod composition;
+pub mod composition_admission;
 pub mod composition_runtime;
-pub use composition::ComposedShellGraph;
+mod shell_graph;
+pub use shell_graph::ComposedShellGraph;
 
 pub mod settings;
 pub use settings::{SettingsRuntimeExt, SettingsValueSnapshot};
