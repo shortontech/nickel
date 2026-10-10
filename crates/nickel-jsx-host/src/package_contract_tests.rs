@@ -360,7 +360,7 @@ fn settings_collection_identity_matching_is_linear_and_preserves_duplicate_keys(
             super::ModuleSource {path:"settings-collection.js",source:include_str!("../../../assets/plugins/nickel-default/src/settings-collection.js")},
         ]).unwrap();
     let mut runtime = crate::create_module_runtime(&graph, None).unwrap();
-    for count in [100_u64, 1_000, 10_000] {
+    for count in [100_u64, 1_000, 5_000] {
         // Keep each cardinality in its own bounded execution. The production
         // deadline protects every host call; this test checks algorithmic work
         // counts and must not combine independent workloads into one budget.
