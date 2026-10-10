@@ -176,6 +176,11 @@ accessibility, hardware integration, and the direct Linux session.
 
 ## Contributing
 
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, architecture
+boundaries, testing expectations, and pull request guidance. For usage help and
+bug-reporting guidance, see [SUPPORT.md](SUPPORT.md). Please report suspected
+vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
+
 Before submitting a change, run the usual three Cargo checks:
 
 ```bash
