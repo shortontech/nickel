@@ -2,8 +2,8 @@
 
 Status: active. Nickel `feature/twinkle` consumes the independent Twinkle
 repository at `aa0a2c3a00884a7fea48cad09ca579717be99250`. Implementation and
-local validation are complete for the boundaries below; publication and manual
-platform/controller sign-off remain outstanding. Specs 0273–0276 remain active.
+automated validation are complete for the boundaries below; manual
+platform/controller sign-off remains outstanding. Specs 0273–0276 remain active.
 
 ## Implemented boundaries
 
@@ -49,6 +49,7 @@ byte-identical to upstream and has revision/SHA provenance.
 | Release admission workloads | 4 generic and 2 Nickel workloads passed | Keyed insert/remove/reorder, leaf hooks, lifecycle churn and independent mount/store revisions |
 | Aliased Windows consumer | Passed | Separate workspace uses `lights` to compile native UI/macros for Windows MSVC |
 | Minimum Rust 1.96 all-targets/all-features check | Passed on Linux and Windows MSVC | Declared minimum toolchain, including optional V8/JSX |
+| Published-repository CI | Passed on Linux and Windows MSVC | Clean GitHub runners fetched the pinned revision, checked and tested the full Twinkle workspace, verified the aliased consumer and checked formatting |
 | Native retained-render release unit workloads | 7 passed, 1 failed | Existing 2,000-node retained-layout timing gate also fails on isolated pre-extraction revision; spec 0280 |
 | Native cache and overlay release workloads | 4 passed | Cache admission, long-Unicode selection and retained-overlay bounds |
 | Selected package formatting and declaration bytes/SHA | Passed | Changed native code and packaged declaration provenance |
@@ -61,18 +62,11 @@ configuration directories and shuts down its own compositor.
 
 ## Outstanding evidence and known issues
 
-- Publish the pinned Twinkle revision before fresh remote Nickel checkouts can
-  fetch it. Local verification used a command-scoped URL rewrite; no global Git
-  configuration or remote push was performed.
-- Nickel's full Windows hosted cross-check could not finish here: its native
-  `mozjpeg-sys`/`ring` builds require Windows CRT headers. The initial attempt
-  lacked `lib.exe`; selecting actual `clang-cl` and `llvm-lib` reached the missing
-  `assert.h`/CRT-header prerequisite. No dependency or compiler checks were
-  bypassed. Twinkle's independent Windows checks passed; this does not imply
-  Nickel's hosted Windows build passed.
-- An independent Windows CI job is prepared upstream on `windows-2025` with
-  Rust 1.96, full feature/target checks, serialized full tests and aliased macro
-  validation. It has not run; publication is still pending.
+- Twinkle `main` is published, and an isolated Cargo home fetched Nickel's exact
+  pinned revision from GitHub without a URL rewrite. The independent Linux and
+  `windows-2025` jobs passed full workspace checks and tests, aliased macro
+  validation and formatting. Native Windows interaction still requires a real
+  desktop session.
 - Physical controller hotplug, two simultaneous devices, held input across
   direct-session focus/ownership changes, manual multi-output behavior and native
   Windows hosted/standalone interaction have not been verified here.
