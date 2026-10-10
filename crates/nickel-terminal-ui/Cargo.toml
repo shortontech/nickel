@@ -19,5 +19,5 @@ nickel-terminal = { path = "../nickel-terminal" }
 twinkle = { workspace = true }
 nickel-logging = { path = "../nickel-logging" }
 twinkle-render-assets = { workspace = true }
-winit.workspace = true
+winit-next.workspace = true
 arboard = { version = "3.6.1", default-features = false, features = ["wayland-data-control"] }

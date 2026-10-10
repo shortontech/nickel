@@ -342,7 +342,9 @@ fn desktop_key_event(
     let physical = raw
         .checked_sub(8)
         .map(|scan| {
-            twinkle_input::winit::physical_key(winit::keyboard::PhysicalKey::from_scancode(scan))
+            twinkle_input::winit_030::physical_key(winit::keyboard::PhysicalKey::from_scancode(
+                scan,
+            ))
         })
         .unwrap_or_else(|| {
             PhysicalKey::Native(NativeKey {

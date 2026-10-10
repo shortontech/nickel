@@ -22,7 +22,7 @@ use twinkle::{
     Text, TextField, UiHost, UiId, View, ViewContext,
 };
 use twinkle_input::{AggregateModifier, InputEvent, KeyCode, KeyEdge, PhysicalKey};
-use winit::event::WindowEvent;
+use winit_next::event::WindowEvent;
 
 const INITIAL_COLUMNS: u16 = 100;
 const INITIAL_LINES: u16 = 30;
@@ -1062,7 +1062,9 @@ impl HostAdapter<TerminalApp> for TerminalAdapter {
         _: HostServices<'_>,
     ) -> Result<AdapterOutcome, Box<dyn Error>> {
         let changed = match event {
-            WindowEvent::Resized(size) => host.application_mut().resize(size.width, size.height),
+            WindowEvent::SurfaceResized(size) => {
+                host.application_mut().resize(size.width, size.height)
+            }
             WindowEvent::CloseRequested => {
                 for tab in &mut host.application_mut().tabs {
                     if let Err(error) = tab.session.request_close() {

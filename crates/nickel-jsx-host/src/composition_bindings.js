@@ -2,7 +2,7 @@
 function __nickelCompositionSettingsPages() {
     const result = readPluginSettingsPages();
     for (const entry of result.pages) {
-        if (typeof entry.component !== 'function') entry.component = __nickelComponentProxy({settingPage:{provider:entry.providerPackage,id:entry.id}});
+        if (typeof entry.component !== 'function') entry.component = __twinkleComponentProxy({settingPage:{provider:entry.providerPackage,id:entry.id}});
     }
     return result;
 }

@@ -1513,7 +1513,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3263,7 +3263,7 @@ version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "536bfad37a309d62069485248eeaba1e8d9853aaf951caaeaed0585a95346f08"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3605,7 +3605,7 @@ dependencies = [
  "twinkle-testkit",
  "url",
  "windows",
- "winit 0.30.13",
+ "winit 0.31.0-beta.3",
  "wl-clipboard-rs",
 ]
 
@@ -3813,7 +3813,7 @@ dependencies = [
  "twinkle",
  "twinkle-input",
  "twinkle-render-assets",
- "winit 0.30.13",
+ "winit 0.31.0-beta.3",
 ]
 
 [[package]]
@@ -3826,7 +3826,7 @@ dependencies = [
  "tracing",
  "twinkle",
  "twinkle-input",
- "winit 0.30.13",
+ "winit 0.31.0-beta.3",
 ]
 
 [[package]]
@@ -4011,7 +4011,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4540,6 +4540,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "orbclient"
+version = "0.4.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "01f140a738f180203d7912dfd369936fff2fb0ad6f426c0aa007ed3e2b443e6b"
+dependencies = [
+ "libredox",
+]
+
+[[package]]
 name = "ordered-float"
 version = "5.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4589,7 +4598,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d8fae84b431384b68627d0f9b3b1245fcf9f46f6c0e3dc902e9dce64edd1967"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5512,7 +5521,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5662,6 +5671,16 @@ dependencies = [
  "bytemuck",
  "font-types 0.12.4",
  "once_cell",
+]
+
+[[package]]
+name = "redox_event"
+version = "0.4.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c5018d583d6d2f5499352aea8d177e9067d1eb03ab17c78169d5ba7a30001b15"
+dependencies = [
+ "bitflags 2.13.1",
+ "libredox",
 ]
 
 [[package]]
@@ -5974,7 +5993,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6157,6 +6176,19 @@ dependencies = [
  "memmap2",
  "smithay-client-toolkit 0.19.2",
  "tiny-skia 0.11.4",
+]
+
+[[package]]
+name = "sctk-adwaita"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1f8ea028b7cb32e2f577b0a55a7b54cb206376bdb1221bd5c81dcf20b68db1fb"
+dependencies = [
+ "ab_glyph",
+ "log",
+ "memmap2",
+ "smithay-client-toolkit 0.21.1",
+ "tiny-skia 0.12.0",
 ]
 
 [[package]]
@@ -6492,7 +6524,7 @@ dependencies = [
  "wayland-protocols-misc",
  "wayland-protocols-wlr",
  "wayland-server",
- "winit 0.31.0-beta.2",
+ "winit 0.31.0-beta.3",
  "x11rb",
  "xkbcommon 0.9.0",
 ]
@@ -6544,11 +6576,36 @@ dependencies = [
  "wayland-csd-frame",
  "wayland-cursor",
  "wayland-protocols",
- "wayland-protocols-experimental",
+ "wayland-protocols-experimental 20250721.0.1",
  "wayland-protocols-misc",
  "wayland-protocols-wlr",
  "wayland-scanner",
  "xkbcommon 0.8.0",
+ "xkeysym",
+]
+
+[[package]]
+name = "smithay-client-toolkit"
+version = "0.21.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "74dc9ee14b0fdcb535f9556141bacac070c994a977d2240ee455d7438a617f00"
+dependencies = [
+ "bitflags 2.13.1",
+ "calloop 0.14.4",
+ "calloop-wayland-source 0.4.1",
+ "cursor-icon",
+ "log",
+ "memmap2",
+ "rustix 1.1.4",
+ "thiserror 2.0.20",
+ "wayland-client",
+ "wayland-csd-frame",
+ "wayland-cursor",
+ "wayland-protocols",
+ "wayland-protocols-experimental 20251230.0.3",
+ "wayland-protocols-misc",
+ "wayland-protocols-wlr",
+ "wayland-scanner",
  "xkeysym",
 ]
 
@@ -6578,7 +6635,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6818,10 +6875,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7342,7 +7399,7 @@ dependencies = [
 [[package]]
 name = "twinkle"
 version = "0.2.0"
-source = "git+https://github.com/shortontech/twinkle.git?rev=aa0a2c3a00884a7fea48cad09ca579717be99250#aa0a2c3a00884a7fea48cad09ca579717be99250"
+source = "git+https://github.com/shortontech/twinkle.git?rev=4a44f1f4cb4a67f593ab9d95025e62944397ed54#4a44f1f4cb4a67f593ab9d95025e62944397ed54"
 dependencies = [
  "arboard",
  "cosmic-text",
@@ -7357,24 +7414,25 @@ dependencies = [
  "unicode-segmentation",
  "windows",
  "windows-core",
- "winit 0.30.13",
+ "winit 0.31.0-beta.3",
 ]
 
 [[package]]
 name = "twinkle-input"
 version = "0.2.0"
-source = "git+https://github.com/shortontech/twinkle.git?rev=aa0a2c3a00884a7fea48cad09ca579717be99250#aa0a2c3a00884a7fea48cad09ca579717be99250"
+source = "git+https://github.com/shortontech/twinkle.git?rev=4a44f1f4cb4a67f593ab9d95025e62944397ed54#4a44f1f4cb4a67f593ab9d95025e62944397ed54"
 dependencies = [
  "gilrs",
  "serde",
  "windows",
  "winit 0.30.13",
+ "winit 0.31.0-beta.3",
 ]
 
 [[package]]
 name = "twinkle-jsx-runtime"
 version = "0.2.0"
-source = "git+https://github.com/shortontech/twinkle.git?rev=aa0a2c3a00884a7fea48cad09ca579717be99250#aa0a2c3a00884a7fea48cad09ca579717be99250"
+source = "git+https://github.com/shortontech/twinkle.git?rev=4a44f1f4cb4a67f593ab9d95025e62944397ed54#4a44f1f4cb4a67f593ab9d95025e62944397ed54"
 dependencies = [
  "oxc_allocator",
  "oxc_codegen",
@@ -7391,7 +7449,7 @@ dependencies = [
 [[package]]
 name = "twinkle-macros"
 version = "0.2.0"
-source = "git+https://github.com/shortontech/twinkle.git?rev=aa0a2c3a00884a7fea48cad09ca579717be99250#aa0a2c3a00884a7fea48cad09ca579717be99250"
+source = "git+https://github.com/shortontech/twinkle.git?rev=4a44f1f4cb4a67f593ab9d95025e62944397ed54#4a44f1f4cb4a67f593ab9d95025e62944397ed54"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -7402,7 +7460,7 @@ dependencies = [
 [[package]]
 name = "twinkle-presentation"
 version = "0.2.0"
-source = "git+https://github.com/shortontech/twinkle.git?rev=aa0a2c3a00884a7fea48cad09ca579717be99250#aa0a2c3a00884a7fea48cad09ca579717be99250"
+source = "git+https://github.com/shortontech/twinkle.git?rev=4a44f1f4cb4a67f593ab9d95025e62944397ed54#4a44f1f4cb4a67f593ab9d95025e62944397ed54"
 dependencies = [
  "cssparser",
  "image",
@@ -7416,7 +7474,7 @@ dependencies = [
 [[package]]
 name = "twinkle-protocol"
 version = "0.2.0"
-source = "git+https://github.com/shortontech/twinkle.git?rev=aa0a2c3a00884a7fea48cad09ca579717be99250#aa0a2c3a00884a7fea48cad09ca579717be99250"
+source = "git+https://github.com/shortontech/twinkle.git?rev=4a44f1f4cb4a67f593ab9d95025e62944397ed54#4a44f1f4cb4a67f593ab9d95025e62944397ed54"
 dependencies = [
  "serde",
  "serde_json",
@@ -7425,7 +7483,7 @@ dependencies = [
 [[package]]
 name = "twinkle-render-assets"
 version = "0.2.0"
-source = "git+https://github.com/shortontech/twinkle.git?rev=aa0a2c3a00884a7fea48cad09ca579717be99250#aa0a2c3a00884a7fea48cad09ca579717be99250"
+source = "git+https://github.com/shortontech/twinkle.git?rev=4a44f1f4cb4a67f593ab9d95025e62944397ed54#4a44f1f4cb4a67f593ab9d95025e62944397ed54"
 dependencies = [
  "cosmic-text",
  "image",
@@ -7434,7 +7492,7 @@ dependencies = [
 [[package]]
 name = "twinkle-testkit"
 version = "0.2.0"
-source = "git+https://github.com/shortontech/twinkle.git?rev=aa0a2c3a00884a7fea48cad09ca579717be99250#aa0a2c3a00884a7fea48cad09ca579717be99250"
+source = "git+https://github.com/shortontech/twinkle.git?rev=4a44f1f4cb4a67f593ab9d95025e62944397ed54#4a44f1f4cb4a67f593ab9d95025e62944397ed54"
 dependencies = [
  "serde",
  "serde_json",
@@ -7445,12 +7503,12 @@ dependencies = [
 [[package]]
 name = "twinkle-theme"
 version = "0.2.0"
-source = "git+https://github.com/shortontech/twinkle.git?rev=aa0a2c3a00884a7fea48cad09ca579717be99250#aa0a2c3a00884a7fea48cad09ca579717be99250"
+source = "git+https://github.com/shortontech/twinkle.git?rev=4a44f1f4cb4a67f593ab9d95025e62944397ed54#4a44f1f4cb4a67f593ab9d95025e62944397ed54"
 
 [[package]]
 name = "twinkle-workbench"
 version = "0.2.0"
-source = "git+https://github.com/shortontech/twinkle.git?rev=aa0a2c3a00884a7fea48cad09ca579717be99250#aa0a2c3a00884a7fea48cad09ca579717be99250"
+source = "git+https://github.com/shortontech/twinkle.git?rev=4a44f1f4cb4a67f593ab9d95025e62944397ed54#4a44f1f4cb4a67f593ab9d95025e62944397ed54"
 dependencies = [
  "image",
  "twinkle",
@@ -7502,7 +7560,7 @@ checksum = "f2f6fb2847f6742cd76af783a2a2c49e9375d0a111c7bef6f71cd9e738c72d6e"
 dependencies = [
  "memoffset",
  "tempfile",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7998,6 +8056,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "wayland-protocols-experimental"
+version = "20251230.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "91c6c3e7178e553d093d46999032bc79aafea9dedd71dd702c8ace7bbc25cf13"
+dependencies = [
+ "bitflags 2.13.1",
+ "wayland-backend",
+ "wayland-client",
+ "wayland-protocols",
+ "wayland-scanner",
+]
+
+[[package]]
 name = "wayland-protocols-misc"
 version = "0.3.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8346,7 +8417,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -8699,7 +8770,8 @@ checksum = "d6bbff5f0aada427a1e5a6da5f1f98158182f26556f345ac9e04d36d0ebed650"
 [[package]]
 name = "winit"
 version = "0.30.13"
-source = "git+https://github.com/shortontech/twinkle.git?rev=aa0a2c3a00884a7fea48cad09ca579717be99250#aa0a2c3a00884a7fea48cad09ca579717be99250"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a6755fa58a9f8350bd1e472d4c3fcc25f824ec358933bba33306d0b63df5978d"
 dependencies = [
  "ahash",
  "android-activity",
@@ -8722,13 +8794,13 @@ dependencies = [
  "objc2-app-kit 0.2.2",
  "objc2-foundation 0.2.2",
  "objc2-ui-kit 0.2.2",
- "orbclient",
+ "orbclient 0.3.55",
  "percent-encoding",
  "pin-project",
  "raw-window-handle",
  "redox_syscall 0.4.1",
  "rustix 0.38.44",
- "sctk-adwaita",
+ "sctk-adwaita 0.10.1",
  "smithay-client-toolkit 0.19.2",
  "smol_str 0.2.2",
  "tracing",
@@ -8749,9 +8821,9 @@ dependencies = [
 
 [[package]]
 name = "winit"
-version = "0.31.0-beta.2"
+version = "0.31.0-beta.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2879d2854d1a43e48f67322d4bd097afcb6eb8f8f775c8de0260a71aea1df1aa"
+checksum = "f431156a3e4f0f1b35eaaf37674e55838e3652908c8088f570466274d1902e2b"
 dependencies = [
  "bitflags 2.13.1",
  "cfg_aliases",
@@ -8776,9 +8848,9 @@ dependencies = [
 
 [[package]]
 name = "winit-android"
-version = "0.31.0-beta.2"
+version = "0.31.0-beta.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "51d9c0d2cd93efec3a9f9ad819cfaf0834782403af7c0d248c784ec0c61761df"
+checksum = "d5d60d944a564986b9311e325334cc22e7e4cf726dd0ff7475fd925404215af4"
 dependencies = [
  "android-activity",
  "bitflags 2.13.1",
@@ -8792,9 +8864,9 @@ dependencies = [
 
 [[package]]
 name = "winit-appkit"
-version = "0.31.0-beta.2"
+version = "0.31.0-beta.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "21310ca07851a49c348e0c2cc768e36b52ca65afda2c2354d78ed4b90074d8aa"
+checksum = "23343ec0ea7ac6aa72f38009a6ff66fb63bcf6395e0622fba72794d2a762ab42"
 dependencies = [
  "bitflags 2.13.1",
  "block2 0.6.2",
@@ -8815,13 +8887,16 @@ dependencies = [
 
 [[package]]
 name = "winit-common"
-version = "0.31.0-beta.2"
+version = "0.31.0-beta.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "45375fbac4cbb77260d83a30b1f9d8105880dbac99a9ae97f56656694680ff69"
+checksum = "e90422ff1c04502aaaac1dad1d099791c2bbb3fbb3f823019e0ce5cdeee04025"
 dependencies = [
+ "block2 0.6.2",
+ "dpi",
  "memmap2",
  "objc2 0.6.4",
  "objc2-core-foundation",
+ "objc2-foundation 0.3.2",
  "smol_str 0.3.6",
  "tracing",
  "winit-core",
@@ -8831,9 +8906,9 @@ dependencies = [
 
 [[package]]
 name = "winit-core"
-version = "0.31.0-beta.2"
+version = "0.31.0-beta.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e4f0ccd7abb43740e2c6124ac7cae7d865ecec74eec63783e8922577ac232583"
+checksum = "b8af6307236c51847199950c15cf80e0481a250bb96ce9132f5026df4ad3d0f9"
 dependencies = [
  "bitflags 2.13.1",
  "cursor-icon",
@@ -8841,20 +8916,22 @@ dependencies = [
  "keyboard-types",
  "raw-window-handle",
  "smol_str 0.3.6",
+ "url",
  "web-time",
 ]
 
 [[package]]
 name = "winit-orbital"
-version = "0.31.0-beta.2"
+version = "0.31.0-beta.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "51ea1fb262e7209f265f12bd0cc792c399b14355675e65531e9c8a87db287d46"
+checksum = "278a8ae837902a3bc95dd2fd696d680da33f32130eecc29905358c9089cf6c50"
 dependencies = [
  "bitflags 2.13.1",
  "dpi",
- "orbclient",
+ "libredox",
+ "orbclient 0.4.6",
  "raw-window-handle",
- "redox_syscall 0.5.18",
+ "redox_event",
  "smol_str 0.3.6",
  "tracing",
  "winit-core",
@@ -8862,9 +8939,9 @@ dependencies = [
 
 [[package]]
 name = "winit-uikit"
-version = "0.31.0-beta.2"
+version = "0.31.0-beta.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "680a356e798837d8eb274d4556e83bceaf81698194e31aafc5cfb8a9f2fab643"
+checksum = "83315a3ea1739c8466cf23d35e3b0a2cb20c9515d8857666b633afef484740b5"
 dependencies = [
  "bitflags 2.13.1",
  "block2 0.6.2",
@@ -8883,20 +8960,22 @@ dependencies = [
 
 [[package]]
 name = "winit-wayland"
-version = "0.31.0-beta.2"
+version = "0.31.0-beta.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8ce5afb2ba07da603f84b722c95f9f9396d2cedae3944fb6c0cda4a6f88de545"
+checksum = "8b64ceed06de0c45886eef05102106abe1413e703384e337bc57c7e95b71f803"
 dependencies = [
- "ahash",
  "bitflags 2.13.1",
  "calloop 0.14.4",
  "cursor-icon",
  "dpi",
+ "foldhash 0.2.0",
  "libc",
  "memmap2",
+ "percent-encoding",
  "raw-window-handle",
  "rustix 1.1.4",
- "smithay-client-toolkit 0.20.0",
+ "sctk-adwaita 0.12.0",
+ "smithay-client-toolkit 0.21.1",
  "smol_str 0.3.6",
  "tracing",
  "wayland-backend",
@@ -8909,9 +8988,9 @@ dependencies = [
 
 [[package]]
 name = "winit-web"
-version = "0.31.0-beta.2"
+version = "0.31.0-beta.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8c2490a953fb776fbbd5e295d54f1c3847f4f15b6c3929ec53c09acda6487a92"
+checksum = "f539be45f95cc297bdfb80569aef38d925d64aec4133852a4d3fc5cb3660f1c9"
 dependencies = [
  "atomic-waker",
  "bitflags 2.13.1",
@@ -8932,9 +9011,9 @@ dependencies = [
 
 [[package]]
 name = "winit-win32"
-version = "0.31.0-beta.2"
+version = "0.31.0-beta.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "644ea78af0e858aa3b092e5d1c67c41995a98220c81813f1353b28bc8bb91eaa"
+checksum = "25fb480c41df01d351f656cbf3ad74013f8a9d22bb5b2dcab59f9167e7a0b6ec"
 dependencies = [
  "bitflags 2.13.1",
  "cursor-icon",
@@ -8943,15 +9022,17 @@ dependencies = [
  "smol_str 0.3.6",
  "tracing",
  "unicode-segmentation",
- "windows-sys 0.59.0",
+ "url",
+ "windows-sys 0.61.2",
+ "winit-common",
  "winit-core",
 ]
 
 [[package]]
 name = "winit-x11"
-version = "0.31.0-beta.2"
+version = "0.31.0-beta.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aa5b600756534c7041aa93cd0d244d44b09fca1b89e202bd1cd80dd9f3636c46"
+checksum = "bb5746cd907e514b7895491a1c6f7d0cb70077f9e16928cd74ae6f987ffd96aa"
 dependencies = [
  "bitflags 2.13.1",
  "bytemuck",

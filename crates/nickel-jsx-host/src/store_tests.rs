@@ -8,7 +8,7 @@ fn boundary_contains_selector_and_cleanup_failures() {
         )
         .unwrap();
     let tree = selector
-        .render("__nickelRender()", |node| Ok(node.clone()))
+        .render("__twinkleRender()", |node| Ok(node.clone()))
         .unwrap();
     assert_eq!(tree["children"][0], "selector fallback");
 
@@ -17,11 +17,11 @@ fn boundary_contains_selector_and_cleanup_failures() {
             function App(){const [shown,setShown]=useState(true);return h(ErrorBoundary,{fallback:h(Text,null,'cleanup fallback')},h(Button,{onClick:()=>setShown(false)},shown?h(Child):'gone'))}
         "#;
     let mut cleanup = crate::create_runtime(source, None).unwrap();
-    cleanup.render("__nickelRender()", |_| Ok(())).unwrap();
-    cleanup.render("__nickelDispatch(0)", |_| Ok(())).unwrap();
+    cleanup.render("__twinkleRender()", |_| Ok(())).unwrap();
+    cleanup.render("__twinkleDispatch(0)", |_| Ok(())).unwrap();
     cleanup.finish_event(true).unwrap();
     let tree = cleanup
-        .render("__nickelRender()", |node| Ok(node.clone()))
+        .render("__twinkleRender()", |node| Ok(node.clone()))
         .unwrap();
     assert_eq!(tree["children"][0], "cleanup fallback");
     assert!(
@@ -49,7 +49,7 @@ fn developer_diagnostics_cover_identity_selectors_props_depth_and_loops() {
         None,
     )
     .unwrap();
-    identity.render("__nickelRender()", |_| Ok(())).unwrap();
+    identity.render("__twinkleRender()", |_| Ok(())).unwrap();
     assert!(kinds(&mut identity).contains(&"positional-identity-churn".into()));
 
     let mut selector = crate::create_runtime(
@@ -57,8 +57,8 @@ fn developer_diagnostics_cover_identity_selectors_props_depth_and_loops() {
             None,
         )
         .unwrap();
-    selector.render("__nickelRender()", |_| Ok(())).unwrap();
-    selector.render("__nickelRender()", |_| Ok(())).unwrap();
+    selector.render("__twinkleRender()", |_| Ok(())).unwrap();
+    selector.render("__twinkleRender()", |_| Ok(())).unwrap();
     assert!(kinds(&mut selector).contains(&"unstable-selector".into()));
 
     let mut props = crate::create_runtime(
@@ -66,7 +66,7 @@ fn developer_diagnostics_cover_identity_selectors_props_depth_and_loops() {
             None,
         )
         .unwrap();
-    props.render("__nickelRender()", |_| Ok(())).unwrap();
+    props.render("__twinkleRender()", |_| Ok(())).unwrap();
     assert!(kinds(&mut props).contains(&"invalid-props".into()));
 
     let mut depth = crate::create_runtime(
@@ -74,7 +74,7 @@ fn developer_diagnostics_cover_identity_selectors_props_depth_and_loops() {
             None,
         )
         .unwrap();
-    depth.render("__nickelRender()", |_| Ok(())).unwrap();
+    depth.render("__twinkleRender()", |_| Ok(())).unwrap();
     let diagnostics = depth.runtime_diagnostics().unwrap();
     let depth_diagnostic = diagnostics["developerDiagnostics"]
         .as_array()
@@ -97,7 +97,7 @@ fn developer_diagnostics_cover_identity_selectors_props_depth_and_loops() {
         )
         .unwrap();
     for _ in 0..25 {
-        effect_loop.render("__nickelRender()", |_| Ok(())).unwrap();
+        effect_loop.render("__twinkleRender()", |_| Ok(())).unwrap();
     }
     assert!(kinds(&mut effect_loop).contains(&"effect-loop".into()));
 }
@@ -254,7 +254,7 @@ fn generated_jsx_updates_match_cold_oracle_through_production_patch_scheduler() 
         let mut runtime = crate::create_runtime(SOURCE, Some(&serialized)).unwrap();
         runtime.set_windows_store(&windows(model)).unwrap();
         runtime
-            .render("__nickelRender()", |node| Ok(node.clone()))
+            .render("__twinkleRender()", |node| Ok(node.clone()))
             .unwrap()
     }
 
@@ -286,7 +286,7 @@ fn generated_jsx_updates_match_cold_oracle_through_production_patch_scheduler() 
         let mut runtime = crate::create_runtime(SOURCE, Some(&serialized)).unwrap();
         runtime.set_windows_store(&windows(&model)).unwrap();
         let mut accepted = runtime
-            .render("__nickelRender()", |node| Ok(node.clone()))
+            .render("__twinkleRender()", |node| Ok(node.clone()))
             .unwrap();
         assert_eq!(accepted, cold(&model));
 
@@ -329,7 +329,7 @@ fn generated_jsx_updates_match_cold_oracle_through_production_patch_scheduler() 
             let action = accepted["children"][0]["action"].as_u64().unwrap();
             let update = serde_json::json!({"items":next.items,"state":next.state,
                     "delta":1,"context":next.context,"revision":next.revision});
-            let expression = format!("__nickelDispatchBatchPatched([[{action},{update}]])");
+            let expression = format!("__twinkleDispatchBatchPatched([[{action},{update}]])");
 
             if step % 5 == 2 {
                 let rejected = runtime.dispatch_patched(&expression).unwrap();
@@ -400,9 +400,9 @@ fn windows_store_is_versioned_immutable_and_retains_unchanged_identity() {
     let mut runtime = crate::create_runtime(source, None).unwrap();
     let first = serde_json::json!([{"id":"1","title":"Editor","active":true,"canActivate":true}]);
     assert!(runtime.set_windows_store(&first).unwrap());
-    runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+    runtime.render("__twinkleRender()", |_| Ok(())).unwrap();
     assert!(!runtime.set_windows_store(&first).unwrap());
-    runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+    runtime.render("__twinkleRender()", |_| Ok(())).unwrap();
     assert!(
         runtime
             .eval_json::<bool>("observed[0] === observed[1] && observed[0][0] === observed[1][0]")
@@ -425,7 +425,7 @@ fn windows_store_is_versioned_immutable_and_retains_unchanged_identity() {
         {"id":"2","title":"Terminal","active":false}
     ]);
     assert!(runtime.set_windows_store(&second).unwrap());
-    runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+    runtime.render("__twinkleRender()", |_| Ok(())).unwrap();
     assert!(
         runtime
             .eval_json::<bool>("observed[1] !== observed[2] && observed[1][0] === observed[2][0]")
@@ -452,7 +452,7 @@ fn unchanged_mount_window_transport_is_bounded_and_explicit_updates_invalidate()
         let props = serde_json::json!({});
         runtime.set_mount_data(&base, None, &props).unwrap();
         let original = runtime
-            .render("__nickelRender()", |node| Ok(node.clone()))
+            .render("__twinkleRender()", |node| Ok(node.clone()))
             .unwrap();
         let before = runtime.bridge_value_count();
         runtime.set_mount_data(&base, None, &props).unwrap();
@@ -463,14 +463,14 @@ fn unchanged_mount_window_transport_is_bounded_and_explicit_updates_invalidate()
             .unwrap();
         assert_ne!(
             runtime
-                .render("__nickelRender()", |node| Ok(node.clone()))
+                .render("__twinkleRender()", |node| Ok(node.clone()))
                 .unwrap(),
             original
         );
         runtime.set_mount_data(&base, None, &props).unwrap();
         assert_eq!(
             runtime
-                .render("__nickelRender()", |node| Ok(node.clone()))
+                .render("__twinkleRender()", |node| Ok(node.clone()))
                 .unwrap(),
             original
         );
@@ -480,7 +480,7 @@ fn unchanged_mount_window_transport_is_bounded_and_explicit_updates_invalidate()
         runtime.set_mount_data(&base, None, &props).unwrap();
         assert_eq!(
             runtime
-                .render("__nickelRender()", |node| Ok(node.clone()))
+                .render("__twinkleRender()", |node| Ok(node.clone()))
                 .unwrap(),
             original
         );
@@ -497,7 +497,7 @@ fn unchanged_mount_window_publication_still_rejects_pending_render() {
     let base = std::rc::Rc::new(serde_json::json!({"windows":[{"id":"one","title":"One"}]}));
     let props = serde_json::json!({});
     runtime.set_mount_data(&base, None, &props).unwrap();
-    let initial: Value = runtime.eval_json("__nickelRender()").unwrap();
+    let initial: Value = runtime.eval_json("__twinkleRender()").unwrap();
     // Unlike unchanged applications, even unchanged windows publication
     // is forbidden while a native render candidate awaits admission.
     let error = runtime.set_mount_data(&base, None, &props).unwrap_err();
@@ -506,7 +506,7 @@ fn unchanged_mount_window_publication_still_rejects_pending_render() {
     runtime.set_mount_data(&base, None, &props).unwrap();
     assert_eq!(
         runtime
-            .render("__nickelRender()", |node| Ok(node.clone()))
+            .render("__twinkleRender()", |node| Ok(node.clone()))
             .unwrap(),
         initial
     );
@@ -526,7 +526,7 @@ fn unchanged_mount_application_transport_is_independent_of_catalog_size() {
                     "launchClass":"graphical"})).collect::<Vec<_>>() }));
         let props = serde_json::json!({});
         runtime.set_mount_data(&base, None, &props).unwrap();
-        runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+        runtime.render("__twinkleRender()", |_| Ok(())).unwrap();
         let before = runtime.bridge_value_count();
         runtime.set_mount_data(&base, None, &props).unwrap();
         assert_eq!(
@@ -563,13 +563,13 @@ fn unchanged_mount_republishes_independently_updated_application_store() {
     let props = serde_json::json!({});
     runtime.set_mount_data(&base, None, &props).unwrap();
     let initial = runtime
-        .render("__nickelRender()", |node| Ok(node.clone()))
+        .render("__twinkleRender()", |node| Ok(node.clone()))
         .unwrap();
     let replacement = serde_json::json!([{"id":"editor","name":"Replacement",
             "icon":"application:1","kind":"application","launchClass":"graphical"}]);
     runtime.set_applications_store(&replacement).unwrap();
     let changed = runtime
-        .render("__nickelRender()", |node| Ok(node.clone()))
+        .render("__twinkleRender()", |node| Ok(node.clone()))
         .unwrap();
     assert_ne!(changed, initial);
     // The immutable mount owner did not change, but its public store did.
@@ -577,7 +577,7 @@ fn unchanged_mount_republishes_independently_updated_application_store() {
     runtime.set_mount_data(&base, None, &props).unwrap();
     assert_eq!(
         runtime
-            .render("__nickelRender()", |node| Ok(node.clone()))
+            .render("__twinkleRender()", |node| Ok(node.clone()))
             .unwrap(),
         initial
     );
@@ -587,7 +587,7 @@ fn unchanged_mount_republishes_independently_updated_application_store() {
     runtime.set_mount_data(&base, None, &props).unwrap();
     assert_eq!(
         runtime
-            .render("__nickelRender()", |node| Ok(node.clone()))
+            .render("__twinkleRender()", |node| Ok(node.clone()))
             .unwrap(),
         initial
     );
@@ -609,14 +609,14 @@ fn preview_and_window_menu_hooks_reconcile_only_their_consumers() {
             "windowMenu":{"targetId":null}
         }))
         .unwrap();
-    runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+    runtime.render("__twinkleRender()", |_| Ok(())).unwrap();
     runtime
         .set_data_value(serde_json::json!({
             "windowPreviews":{"available":true,"windows":[{"id":"7"}]},
             "windowMenu":{"targetId":null}
         }))
         .unwrap();
-    runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+    runtime.render("__twinkleRender()", |_| Ok(())).unwrap();
     assert_eq!(
         runtime
             .eval_json::<serde_json::Value>("JSON.stringify(runs)")
@@ -638,16 +638,16 @@ fn active_window_follows_public_store_order_and_updates() {
             {"id":"second","title":"Second","active":true}
         ]))
         .unwrap();
-    runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+    runtime.render("__twinkleRender()", |_| Ok(())).unwrap();
     runtime
         .set_windows_store(&serde_json::json!([
             {"id":"first","title":"First","active":false},
             {"id":"second","title":"Second","active":true}
         ]))
         .unwrap();
-    runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+    runtime.render("__twinkleRender()", |_| Ok(())).unwrap();
     runtime.set_windows_store(&serde_json::json!([])).unwrap();
-    runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+    runtime.render("__twinkleRender()", |_| Ok(())).unwrap();
     assert_eq!(
         runtime
             .eval_json::<Vec<Option<String>>>("JSON.stringify(seen)")
@@ -675,14 +675,14 @@ fn window_and_surface_stores_dirty_only_their_subscribers() {
             &serde_json::json!({"id":"main","kind":"window","width":640,"height":480}),
         )
         .unwrap();
-    runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+    runtime.render("__twinkleRender()", |_| Ok(())).unwrap();
     runtime
         .set_surface_store(
             "mount",
             &serde_json::json!({"id":"main","kind":"window","width":800,"height":480}),
         )
         .unwrap();
-    runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+    runtime.render("__twinkleRender()", |_| Ok(())).unwrap();
     assert_eq!(
         runtime
             .eval_json::<serde_json::Value>("JSON.stringify(runs)")
@@ -692,7 +692,7 @@ fn window_and_surface_stores_dirty_only_their_subscribers() {
     runtime
         .set_windows_store(&serde_json::json!([{"id":"1","title":"Two"}]))
         .unwrap();
-    runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+    runtime.render("__twinkleRender()", |_| Ok(())).unwrap();
     assert_eq!(
         runtime
             .eval_json::<serde_json::Value>("JSON.stringify(runs)")
@@ -709,14 +709,14 @@ fn rejected_window_consumer_render_does_not_install_subscription() {
     )
     .unwrap();
     runtime
-        .render("__nickelRender()", |_| Err::<(), _>("reject".into()))
+        .render("__twinkleRender()", |_| Err::<(), _>("reject".into()))
         .unwrap_err();
     runtime
         .set_windows_store(&serde_json::json!([{"id":"1","title":"One"}]))
         .unwrap();
     assert!(
         !runtime
-            .eval_json::<bool>("JSON.parse(__nickelReconciliationRequest()).requested")
+            .eval_json::<bool>("JSON.parse(__twinkleReconciliationRequest()).requested")
             .unwrap()
     );
 }
@@ -730,9 +730,9 @@ fn applications_store_is_versioned_and_structurally_shares_records() {
     let first = serde_json::json!([{"id":"editor","name":"Editor","icon":"application:1","pinned":true,
             "pinOrder":0,"recentOrder":1,"kind":"application","launchClass":"graphical"}]);
     assert!(runtime.set_applications_store(&first).unwrap());
-    runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+    runtime.render("__twinkleRender()", |_| Ok(())).unwrap();
     assert!(!runtime.set_applications_store(&first).unwrap());
-    runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+    runtime.render("__twinkleRender()", |_| Ok(())).unwrap();
     assert!(runtime.eval_json::<bool>("seen[0] === seen[1] && seen[0][0] === seen[1][0] && Object.isFrozen(seen[0]) && Object.isFrozen(seen[0][0])").unwrap());
     assert_eq!(
         runtime
@@ -747,7 +747,7 @@ fn applications_store_is_versioned_and_structurally_shares_records() {
             "recentOrder":0,"kind":"application","launchClass":"terminal"}
     ]);
     runtime.set_applications_store(&second).unwrap();
-    runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+    runtime.render("__twinkleRender()", |_| Ok(())).unwrap();
     assert!(
         runtime
             .eval_json::<bool>("seen[1] !== seen[2] && seen[1][0] === seen[2][0]")
@@ -766,9 +766,9 @@ fn applications_store_dirties_only_changed_application_selections() {
             function App(){runs.app++;return h(Window,{},h(Applications),h(Windows),h(Theme),h(Sibling))}
         "#;
     let mut runtime = crate::create_runtime(source, None).unwrap();
-    runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+    runtime.render("__twinkleRender()", |_| Ok(())).unwrap();
     runtime.set_applications_store(&serde_json::json!([{"id":"one","name":"One","icon":"application:1","kind":"application","launchClass":"graphical"}])).unwrap();
-    runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+    runtime.render("__twinkleRender()", |_| Ok(())).unwrap();
     assert_eq!(
         runtime
             .eval_json::<serde_json::Value>("JSON.stringify(runs)")
@@ -785,12 +785,12 @@ fn rejected_application_consumer_does_not_install_a_subscription() {
     )
     .unwrap();
     runtime
-        .render("__nickelRender()", |_| Err::<(), _>("reject".into()))
+        .render("__twinkleRender()", |_| Err::<(), _>("reject".into()))
         .unwrap_err();
     runtime.set_applications_store(&serde_json::json!([{"id":"one","name":"One","icon":"application:1","kind":"application","launchClass":"graphical"}])).unwrap();
     assert!(
         !runtime
-            .eval_json::<bool>("JSON.parse(__nickelReconciliationRequest()).requested")
+            .eval_json::<bool>("JSON.parse(__twinkleReconciliationRequest()).requested")
             .unwrap()
     );
 }
@@ -802,17 +802,17 @@ fn notifications_store_versions_visibility_and_structurally_shares_history() {
     let item = serde_json::json!({"id":1,"appName":"Mail","summary":"Hello","body":"Body","actions":[{"key":"open","label":"Open"}]});
     let first = serde_json::json!({"notification":item,"history":[item]});
     assert!(runtime.set_notifications_store(&first).unwrap());
-    runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+    runtime.render("__twinkleRender()", |_| Ok(())).unwrap();
     assert!(!runtime.set_notifications_store(&first).unwrap());
-    runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+    runtime.render("__twinkleRender()", |_| Ok(())).unwrap();
     assert!(runtime.eval_json::<bool>("seen[0]===seen[1] && seen[0].notification===seen[0].history[0] && Object.isFrozen(seen[0]) && Object.isFrozen(seen[0].history) && Object.isFrozen(seen[0].notification.actions)").unwrap());
     let hidden = serde_json::json!({"notification":item,"history":[item],"visible":false});
     assert!(runtime.set_notifications_store(&hidden).unwrap());
-    runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+    runtime.render("__twinkleRender()", |_| Ok(())).unwrap();
     assert!(runtime.eval_json::<bool>("seen[1].notification===seen[2].notification && seen[2].visible===false && __notificationsStore.generation===2").unwrap());
     let replaced = serde_json::json!({"notification":{"id":1,"appName":"Mail","summary":"Updated","body":"Body","actions":[]},"history":[]});
     runtime.set_notifications_store(&replaced).unwrap();
-    runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+    runtime.render("__twinkleRender()", |_| Ok(())).unwrap();
     assert_eq!(
         runtime
             .eval_json::<String>("JSON.stringify(seen[3].notification.summary)")
@@ -822,7 +822,7 @@ fn notifications_store_versions_visibility_and_structurally_shares_history() {
     runtime
         .set_notifications_store(&serde_json::json!({"notification":null,"history":[]}))
         .unwrap();
-    runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+    runtime.render("__twinkleRender()", |_| Ok(())).unwrap();
     assert_eq!(
         runtime
             .eval_json::<u64>("__notificationsStore.generation")
@@ -842,9 +842,9 @@ fn notification_updates_are_isolated_and_rejected_subscriptions_roll_back() {
             function App(){runs.app++;return h(Window,{},h(Notifications),h(Applications),h(Windows),h(Sibling))}
         "#;
     let mut runtime = crate::create_runtime(source, None).unwrap();
-    runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+    runtime.render("__twinkleRender()", |_| Ok(())).unwrap();
     runtime.set_notifications_store(&serde_json::json!({"notification":{"id":1,"appName":"App","summary":"One","body":"","actions":[]},"history":[]})).unwrap();
-    runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+    runtime.render("__twinkleRender()", |_| Ok(())).unwrap();
     assert_eq!(
         runtime
             .eval_json::<serde_json::Value>("JSON.stringify(runs)")
@@ -858,7 +858,7 @@ fn notification_updates_are_isolated_and_rejected_subscriptions_roll_back() {
     )
     .unwrap();
     rejected
-        .render("__nickelRender()", |_| Err::<(), _>("reject".into()))
+        .render("__twinkleRender()", |_| Err::<(), _>("reject".into()))
         .unwrap_err();
     rejected
         .set_notifications_store(
@@ -867,7 +867,7 @@ fn notification_updates_are_isolated_and_rejected_subscriptions_roll_back() {
         .unwrap();
     assert!(
         !rejected
-            .eval_json::<bool>("JSON.parse(__nickelReconciliationRequest()).requested")
+            .eval_json::<bool>("JSON.parse(__twinkleReconciliationRequest()).requested")
             .unwrap()
     );
 }
@@ -877,17 +877,17 @@ fn workspaces_store_separates_observation_generation_from_mutation_revision() {
     let mut runtime=crate::create_runtime("globalThis.seen=[];function App(){const all=useWorkspaces();const active=useWorkspace();seen.push({all,active});return h(Text,null,active?.id??'none')}",None).unwrap();
     let first = serde_json::json!({"available":true,"revision":"topology-1","workspaces":[{"id":"1","active":true},{"id":"2","active":false}],"activeWorkspace":"1","operations":{"switch":true,"create":true,"remove":true}});
     assert!(runtime.set_workspaces_store(&first).unwrap());
-    runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+    runtime.render("__twinkleRender()", |_| Ok(())).unwrap();
     assert!(!runtime.set_workspaces_store(&first).unwrap());
-    runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+    runtime.render("__twinkleRender()", |_| Ok(())).unwrap();
     assert!(runtime.eval_json::<bool>("seen[0].all===seen[1].all && seen[0].active===seen[1].active && Object.isFrozen(seen[0].all) && Object.isFrozen(seen[0].all.workspaces[0])").unwrap());
     let locked = serde_json::json!({"available":true,"revision":"topology-1","workspaces":[{"id":"1","active":true},{"id":"2","active":false}],"activeWorkspace":"1","operations":{}});
     assert!(runtime.set_workspaces_store(&locked).unwrap());
-    runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+    runtime.render("__twinkleRender()", |_| Ok(())).unwrap();
     assert!(runtime.eval_json::<bool>("seen[1].active===seen[2].active && seen[2].all.revision==='topology-1' && seen[2].all.generation===2 && seen[2].all.writable===false").unwrap());
     let switched = serde_json::json!({"available":true,"revision":"topology-2","workspaces":[{"id":"1","active":false},{"id":"2","active":true}],"activeWorkspace":"2","operations":{"switch":true}});
     runtime.set_workspaces_store(&switched).unwrap();
-    runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+    runtime.render("__twinkleRender()", |_| Ok(())).unwrap();
     assert_eq!(
         runtime
             .eval_json::<String>("JSON.stringify(seen[3].active.id)")
@@ -900,9 +900,9 @@ fn workspaces_store_separates_observation_generation_from_mutation_revision() {
 fn workspace_updates_are_isolated_and_rejected_subscriptions_roll_back() {
     let source = "globalThis.runs={app:0,workspace:0,windows:0,sibling:0};function Workspace(){runs.workspace++;return h(Text,null,useWorkspace()?.id??'none')}function Windows(){runs.windows++;return h(Text,null,String(useWindows().length))}function Sibling(){runs.sibling++;return h(Text,null,'stable')}function App(){runs.app++;return h(Window,{},h(Workspace),h(Windows),h(Sibling))}";
     let mut runtime = crate::create_runtime(source, None).unwrap();
-    runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+    runtime.render("__twinkleRender()", |_| Ok(())).unwrap();
     runtime.set_workspaces_store(&serde_json::json!({"available":true,"revision":"one","workspaces":[{"id":"1","active":true}],"operations":{}})).unwrap();
-    runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+    runtime.render("__twinkleRender()", |_| Ok(())).unwrap();
     assert_eq!(
         runtime
             .eval_json::<serde_json::Value>("JSON.stringify(runs)")
@@ -915,12 +915,12 @@ fn workspace_updates_are_isolated_and_rejected_subscriptions_roll_back() {
     )
     .unwrap();
     rejected
-        .render("__nickelRender()", |_| Err::<(), _>("reject".into()))
+        .render("__twinkleRender()", |_| Err::<(), _>("reject".into()))
         .unwrap_err();
     rejected.set_workspaces_store(&serde_json::json!({"available":false,"reason":"absent","workspaces":[],"operations":{}})).unwrap();
     assert!(
         !rejected
-            .eval_json::<bool>("JSON.parse(__nickelReconciliationRequest()).requested")
+            .eval_json::<bool>("JSON.parse(__twinkleReconciliationRequest()).requested")
             .unwrap()
     );
 }
@@ -934,12 +934,12 @@ fn outputs_store_versions_unavailable_transitions_and_resolves_surface_output() 
         .unwrap();
     let first = serde_json::json!({"available":true,"revision":"layout-1","outputs":[output]});
     assert!(runtime.set_outputs_store(&first).unwrap());
-    runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+    runtime.render("__twinkleRender()", |_| Ok(())).unwrap();
     assert!(!runtime.set_outputs_store(&first).unwrap());
-    runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+    runtime.render("__twinkleRender()", |_| Ok(())).unwrap();
     assert!(runtime.eval_json::<bool>("seen[0].all===seen[1].all && seen[0].current===seen[1].current && seen[0].current.name==='DP-1' && Object.isFrozen(seen[0].current)").unwrap());
     runtime.set_outputs_store(&serde_json::json!({"available":false,"reason":"backend gone","revision":"layout-1","outputs":[]})).unwrap();
-    runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+    runtime.render("__twinkleRender()", |_| Ok(())).unwrap();
     assert!(runtime.eval_json::<bool>("seen[2].current===null && seen[2].all.generation===2 && seen[2].all.revision==='layout-1'").unwrap());
 }
 
@@ -947,11 +947,11 @@ fn outputs_store_versions_unavailable_transitions_and_resolves_surface_output() 
 fn output_updates_are_isolated_and_rejected_subscriptions_roll_back() {
     let source = "globalThis.runs={app:0,outputs:0,windows:0,sibling:0};function Outputs(){runs.outputs++;return h(Text,null,String(useOutputs().available))}function Windows(){runs.windows++;return h(Text,null,String(useWindows().length))}function Sibling(){runs.sibling++;return h(Text,null,'stable')}function App(){runs.app++;return h(Window,{},h(Outputs),h(Windows),h(Sibling))}";
     let mut runtime = crate::create_runtime(source, None).unwrap();
-    runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+    runtime.render("__twinkleRender()", |_| Ok(())).unwrap();
     runtime
         .set_outputs_store(&serde_json::json!({"available":false,"reason":"none","outputs":[]}))
         .unwrap();
-    runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+    runtime.render("__twinkleRender()", |_| Ok(())).unwrap();
     assert_eq!(
         runtime
             .eval_json::<serde_json::Value>("JSON.stringify(runs)")
@@ -964,14 +964,14 @@ fn output_updates_are_isolated_and_rejected_subscriptions_roll_back() {
     )
     .unwrap();
     rejected
-        .render("__nickelRender()", |_| Err::<(), _>("reject".into()))
+        .render("__twinkleRender()", |_| Err::<(), _>("reject".into()))
         .unwrap_err();
     rejected
         .set_outputs_store(&serde_json::json!({"available":false,"reason":"none","outputs":[]}))
         .unwrap();
     assert!(
         !rejected
-            .eval_json::<bool>("JSON.parse(__nickelReconciliationRequest()).requested")
+            .eval_json::<bool>("JSON.parse(__twinkleReconciliationRequest()).requested")
             .unwrap()
     );
 }
@@ -980,11 +980,11 @@ fn output_updates_are_isolated_and_rejected_subscriptions_roll_back() {
 fn locale_updates_are_isolated_and_rejected_subscriptions_roll_back() {
     let source = "globalThis.runs={app:0,locale:0,windows:0,sibling:0};function Locale(){runs.locale++;return h(Text,null,useLocale().tag)}function Windows(){runs.windows++;return h(Text,null,String(useWindows().length))}function Sibling(){runs.sibling++;return h(Text,null,'stable')}function App(){runs.app++;return h(Window,{},h(Locale),h(Windows),h(Sibling))}";
     let mut runtime = crate::create_runtime(source, None).unwrap();
-    runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+    runtime.render("__twinkleRender()", |_| Ok(())).unwrap();
     runtime
         .set_locale_store(&serde_json::json!({"known":true,"tag":"fr-FR","direction":"ltr"}))
         .unwrap();
-    runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+    runtime.render("__twinkleRender()", |_| Ok(())).unwrap();
     assert_eq!(
         runtime
             .eval_json::<serde_json::Value>("JSON.stringify(runs)")
@@ -994,14 +994,14 @@ fn locale_updates_are_isolated_and_rejected_subscriptions_roll_back() {
     let mut rejected =
         crate::create_runtime("function App(){return h(Text,null,useLocale().tag)}", None).unwrap();
     rejected
-        .render("__nickelRender()", |_| Err::<(), _>("reject".into()))
+        .render("__twinkleRender()", |_| Err::<(), _>("reject".into()))
         .unwrap_err();
     rejected
         .set_locale_store(&serde_json::json!({"known":true,"tag":"de-DE","direction":"ltr"}))
         .unwrap();
     assert!(
         !rejected
-            .eval_json::<bool>("JSON.parse(__nickelReconciliationRequest()).requested")
+            .eval_json::<bool>("JSON.parse(__twinkleReconciliationRequest()).requested")
             .unwrap()
     );
 }
@@ -1015,11 +1015,11 @@ fn sync_external_store_accepts_only_branded_contracts_and_tracks_generation() {
             function App(){runs.app++;return h(Window,{},h(Store),h(Sibling))}
         "#;
     let mut runtime = crate::create_runtime(source, None).unwrap();
-    runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+    runtime.render("__twinkleRender()", |_| Ok(())).unwrap();
     runtime
         .set_locale_store(&serde_json::json!({"known":true,"tag":"en-US","direction":"ltr"}))
         .unwrap();
-    runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+    runtime.render("__twinkleRender()", |_| Ok(())).unwrap();
     assert_eq!(
         runtime
             .eval_json::<serde_json::Value>("JSON.stringify(runs)")
@@ -1031,7 +1031,7 @@ fn sync_external_store_accepts_only_branded_contracts_and_tracks_generation() {
             .eval_json::<bool>("seen[1]===NickelStores.locale.getSnapshot()")
             .unwrap()
     );
-    assert!(runtime.eval("function Bad(){return h(Text,null,String(useSyncExternalStore(()=>()=>{},()=>0)))}__nickelSetApp(Bad);__nickelRender()").is_err());
+    assert!(runtime.eval("function Bad(){return h(Text,null,String(useSyncExternalStore(()=>()=>{},()=>0)))}__twinkleSetApp(Bad);__twinkleRender()").is_err());
     assert!(
         runtime
             .eval("NickelStores.locale.subscribe(()=>{})")
@@ -1043,14 +1043,14 @@ fn sync_external_store_accepts_only_branded_contracts_and_tracks_generation() {
 fn rejected_sync_store_render_does_not_install_subscription() {
     let mut runtime=crate::create_runtime("function App(){return h(Text,null,useSyncExternalStore(NickelStores.locale.subscribe,NickelStores.locale.getSnapshot).tag)}",None).unwrap();
     runtime
-        .render("__nickelRender()", |_| Err::<(), _>("reject".into()))
+        .render("__twinkleRender()", |_| Err::<(), _>("reject".into()))
         .unwrap_err();
     runtime
         .set_locale_store(&serde_json::json!({"known":true,"tag":"fr-FR","direction":"ltr"}))
         .unwrap();
     assert!(
         !runtime
-            .eval_json::<bool>("JSON.parse(__nickelReconciliationRequest()).requested")
+            .eval_json::<bool>("JSON.parse(__twinkleReconciliationRequest()).requested")
             .unwrap()
     );
 }
@@ -1066,11 +1066,11 @@ fn theme_store_dirties_only_changed_theme_selections() {
             function App(){runs.app++;return h(Window,{},h(Mode),h(Motion),h(Windows),h(Sibling))}
         "#;
     let mut runtime = crate::create_runtime(source, None).unwrap();
-    runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+    runtime.render("__twinkleRender()", |_| Ok(())).unwrap();
     runtime
         .set_theme_store(&serde_json::json!({"mode":"dark","reducedMotion":null}))
         .unwrap();
-    runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+    runtime.render("__twinkleRender()", |_| Ok(())).unwrap();
     assert_eq!(
         runtime
             .eval_json::<serde_json::Value>("JSON.stringify(runs)")
@@ -1080,7 +1080,7 @@ fn theme_store_dirties_only_changed_theme_selections() {
     runtime
         .set_windows_store(&serde_json::json!([{"id":"one"}]))
         .unwrap();
-    runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+    runtime.render("__twinkleRender()", |_| Ok(())).unwrap();
     assert_eq!(
         runtime
             .eval_json::<serde_json::Value>("JSON.stringify(runs)")
@@ -1095,7 +1095,7 @@ fn appearance_projection_feeds_effective_theme_without_fabricating_palette() {
             "globalThis.seen=[];function App(){seen.push([useTheme(),useReducedMotion()]);return h(Text,null,'theme')}",
             Some(r#"{"appearance":{"available":true,"configured":{"animations":"reduced","reduce_transparency":true},"resolved":{"theme":"light","hue":210,"intensity":55,"accent":[1,2,3]}}}"#),
         ).unwrap();
-    runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+    runtime.render("__twinkleRender()", |_| Ok(())).unwrap();
     assert_eq!(
         runtime
             .eval_json::<serde_json::Value>("JSON.stringify(seen[0])")

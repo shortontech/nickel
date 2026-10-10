@@ -276,7 +276,7 @@ fn cold_lifecycle(source: &str, state: u64, reduced: u64, windows: &Value) -> Va
         nickel_jsx_host::create_runtime(&source, Some(&lifecycle_data(state, reduced))).unwrap();
     runtime.set_windows_store(windows).unwrap();
     runtime
-        .render("__nickelRender()", |node| Ok(node.clone()))
+        .render("__twinkleRender()", |node| Ok(node.clone()))
         .unwrap()
 }
 
@@ -566,7 +566,7 @@ fn independent_runtime(applications: &Value, windows: &Value, theme_value: &Valu
 fn render_mount(runtime: &mut JsxRuntime, mount: &str) -> Value {
     runtime.select_surface(mount).unwrap();
     runtime
-        .render("__nickelRender()", |node| Ok(node.clone()))
+        .render("__twinkleRender()", |node| Ok(node.clone()))
         .unwrap()
 }
 
@@ -614,7 +614,7 @@ fn reconcile_store_patch(
     runtime.select_surface(mount).unwrap();
     let started = Instant::now();
     let ScheduledPatch::Patched { patch, .. } = runtime
-        .dispatch_patched("__nickelDispatchBatchPatched([])")
+        .dispatch_patched("__twinkleDispatchBatchPatched([])")
         .unwrap()
     else {
         panic!("{mount} store revision unexpectedly produced no patch");
@@ -849,7 +849,7 @@ fn exercise_lifecycle() -> (LifecycleTimings, LifecycleWork) {
     runtime.select_surface("lifecycle").unwrap();
     runtime.set_data(&lifecycle_data(0, 0)).unwrap();
     let mut accepted = runtime
-        .render("__nickelRender()", |node| Ok(node.clone()))
+        .render("__twinkleRender()", |node| Ok(node.clone()))
         .unwrap();
     let mut cold_tree_transport_bytes = serde_json::to_vec(&accepted).unwrap().len() as u64;
     let initial_leaf = find_by_id(&accepted, "lifecycle-leaf").unwrap();
@@ -861,7 +861,7 @@ fn exercise_lifecycle() -> (LifecycleTimings, LifecycleWork) {
     let (state_patch, state_transport) = lifecycle_patch(
         &mut runtime,
         &mut accepted,
-        &format!("__nickelDispatchBatchPatched([[{action},{{\"state\":3,\"reduced\":4}}]])"),
+        &format!("__twinkleDispatchBatchPatched([[{action},{{\"state\":3,\"reduced\":4}}]])"),
     );
     let state_and_reducer = phase.elapsed();
     assert_eq!(state_patch.operations.len(), 1);
@@ -873,7 +873,7 @@ fn exercise_lifecycle() -> (LifecycleTimings, LifecycleWork) {
     let (store_patch, store_transport) = lifecycle_patch(
         &mut runtime,
         &mut accepted,
-        "__nickelDispatchBatchPatched([])",
+        "__twinkleDispatchBatchPatched([])",
     );
     let selector_subscription = phase.elapsed();
     assert_eq!(store_patch.operations.len(), 1);
@@ -898,7 +898,7 @@ fn exercise_lifecycle() -> (LifecycleTimings, LifecycleWork) {
             .unwrap()
     );
     accepted = runtime
-        .render("__nickelRender()", |node| Ok(node.clone()))
+        .render("__twinkleRender()", |node| Ok(node.clone()))
         .unwrap();
     cold_tree_transport_bytes += serde_json::to_vec(&accepted).unwrap().len() as u64;
     let compatible_hot_reload = phase.elapsed();
@@ -923,7 +923,7 @@ fn exercise_lifecycle() -> (LifecycleTimings, LifecycleWork) {
             .unwrap()
     );
     let reset = runtime
-        .render("__nickelRender()", |node| Ok(node.clone()))
+        .render("__twinkleRender()", |node| Ok(node.clone()))
         .unwrap();
     cold_tree_transport_bytes += serde_json::to_vec(&reset).unwrap().len() as u64;
     let incompatible_hot_reload = phase.elapsed();
@@ -944,7 +944,7 @@ fn exercise_lifecycle() -> (LifecycleTimings, LifecycleWork) {
     runtime.drop_surface("lifecycle").unwrap();
     let stale = runtime
         .dispatch_patched(&format!(
-            "__nickelDispatchBatchPatched([[{action},{{\"state\":99,\"reduced\":99}}]])"
+            "__twinkleDispatchBatchPatched([[{action},{{\"state\":99,\"reduced\":99}}]])"
         ))
         .unwrap();
     assert!(matches!(stale, ScheduledPatch::Unchanged));
@@ -958,7 +958,7 @@ fn exercise_lifecycle() -> (LifecycleTimings, LifecycleWork) {
             .unwrap();
         runtime.select_surface(&id).unwrap();
         let rendered = runtime
-            .render("__nickelRender()", |node| Ok(node.clone()))
+            .render("__twinkleRender()", |node| Ok(node.clone()))
             .unwrap();
         cold_tree_transport_bytes += serde_json::to_vec(&rendered).unwrap().len() as u64;
         runtime.drop_surface(&id).unwrap();

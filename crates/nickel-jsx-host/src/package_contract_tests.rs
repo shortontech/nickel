@@ -247,14 +247,14 @@ fn repeated_setting_drafts_survive_control_unmount_but_not_source_or_schema_repl
     ) -> serde_json::Value {
         let action = find(tree, id).unwrap()["action"].as_u64().unwrap();
         runtime
-            .render(&format!("__nickelDispatch({action},{value})"), |node| {
+            .render(&format!("__twinkleDispatch({action},{value})"), |node| {
                 Ok(node.clone())
             })
             .unwrap()
     }
     let mut runtime = crate::create_module_runtime(&graph, Some(r#"{"value":"stored"}"#)).unwrap();
     let mut tree = runtime
-        .render("__nickelRender()", |node| Ok(node.clone()))
+        .render("__twinkleRender()", |node| Ok(node.clone()))
         .unwrap();
     tree = dispatch(&mut runtime, &tree, "field", serde_json::json!("unapplied"));
     tree = dispatch(
@@ -283,7 +283,7 @@ fn repeated_setting_drafts_survive_control_unmount_but_not_source_or_schema_repl
             .set_data(&serde_json::json!({"value":value}).to_string())
             .unwrap();
         tree = runtime
-            .render("__nickelRender()", |node| Ok(node.clone()))
+            .render("__twinkleRender()", |node| Ok(node.clone()))
             .unwrap();
         assert_eq!(find(&tree, "field").unwrap()["value"], value);
         assert_eq!(
@@ -393,7 +393,7 @@ fn ordinary_connectivity_pages_preserve_disconnect_pair_and_native_details() {
             .find_map(|child| find(child, id))
     }
     let tree = runtime
-        .render("__nickelRender()", |node| Ok(node.clone()))
+        .render("__twinkleRender()", |node| Ok(node.clone()))
         .unwrap();
     let mut tree = tree;
     assert!(!tree.to_string().contains("Battery: 75%"));
@@ -415,9 +415,10 @@ fn ordinary_connectivity_pages_preserve_disconnect_pair_and_native_details() {
         )
         .unwrap();
         tree = runtime
-            .render(&format!("__nickelDispatch({action},{feedback})"), |value| {
-                Ok(value.clone())
-            })
+            .render(
+                &format!("__twinkleDispatch({action},{feedback})"),
+                |value| Ok(value.clone()),
+            )
             .unwrap();
     }
     assert!(tree.to_string().contains("Battery: 75%"));
@@ -426,7 +427,7 @@ fn ordinary_connectivity_pages_preserve_disconnect_pair_and_native_details() {
         .as_u64()
         .unwrap();
     let tree = runtime
-        .render(&format!("__nickelDispatch({action})"), |node| {
+        .render(&format!("__twinkleDispatch({action})"), |node| {
             Ok(node.clone())
         })
         .unwrap();
@@ -434,7 +435,7 @@ fn ordinary_connectivity_pages_preserve_disconnect_pair_and_native_details() {
         .as_u64()
         .unwrap();
     runtime
-        .render(&format!("__nickelDispatch({action})"), |node| {
+        .render(&format!("__twinkleDispatch({action})"), |node| {
             Ok(node.clone())
         })
         .unwrap();
@@ -464,7 +465,7 @@ fn plugin_declarations_match_the_bidirectional_runtime_surface() {
         crate::create_runtime("function App(){return h(Text,null,'ok')}", None).unwrap();
     let runtime_globals = runtime
         .eval_json::<std::collections::BTreeSet<String>>(
-            "JSON.stringify(__nickelPublicRuntimeGlobals)",
+            "JSON.stringify(__twinklePublicRuntimeGlobals)",
         )
         .unwrap();
     let (declaration_only, runtime_only) =

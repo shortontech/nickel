@@ -8,10 +8,8 @@ pub(crate) trait FileWindowHost: Send + Sync {
     fn dispatch(&self, request: FileWindowRequest) -> Result<(), String>;
 }
 
-#[cfg(not(target_os = "windows"))]
 pub(crate) struct ExternalFileWindowHost;
 
-#[cfg(not(target_os = "windows"))]
 impl FileWindowHost for ExternalFileWindowHost {
     fn dispatch(&self, request: FileWindowRequest) -> Result<(), String> {
         let launch = match request {
@@ -20,10 +18,14 @@ impl FileWindowHost for ExternalFileWindowHost {
                 return Err("external file windows cannot be addressed by internal id".into());
             }
         };
-        let executable = std::env::current_exe()
-            .map_err(|error| error.to_string())?
-            .with_file_name("nickel-file");
+        let executable = std::env::current_exe().map_err(|error| error.to_string())?;
+        #[cfg(target_os = "windows")]
+        let executable = executable.with_file_name("nickel.exe");
+        #[cfg(not(target_os = "windows"))]
+        let executable = executable.with_file_name("nickel-file");
         let mut command = std::process::Command::new(executable);
+        #[cfg(target_os = "windows")]
+        command.arg("--nickel-file-window");
         #[cfg(target_os = "linux")]
         command.env_remove("__EGL_VENDOR_LIBRARY_FILENAMES");
         match launch {
@@ -69,51 +71,7 @@ pub(crate) fn browse_request(path: PathBuf) -> FileWindowRequest {
 }
 
 pub(crate) fn default_file_window_host() -> std::sync::Arc<dyn FileWindowHost> {
-    #[cfg(target_os = "windows")]
-    return std::sync::Arc::new(InProcessFileWindowHost);
-
-    #[cfg(not(target_os = "windows"))]
     std::sync::Arc::new(ExternalFileWindowHost)
-}
-
-#[cfg(target_os = "windows")]
-struct InProcessFileWindowHost;
-
-#[cfg(target_os = "windows")]
-impl FileWindowHost for InProcessFileWindowHost {
-    fn dispatch(&self, request: FileWindowRequest) -> Result<(), String> {
-        let launch = match request {
-            FileWindowRequest::Open(launch) | FileWindowRequest::OpenOrFocus(launch) => launch,
-            FileWindowRequest::Focus(_) | FileWindowRequest::Close(_) => {
-                return Err("file window is not addressable by internal id".into());
-            }
-        };
-        std::thread::Builder::new()
-            .name("nickel-file-window".into())
-            .spawn(move || {
-                let _window_thread = crate::platform::register_internal_window_thread();
-                let adapter = nickel_file::FileHostAdapter::default()
-                    .with_focused_shortcut_handler(|key, edge| {
-                        crate::platform::handle_focused_shortcut(key, edge);
-                    })
-                    .with_window_lifecycle_handlers(
-                        |window| {
-                            crate::platform::register_native_application_window(
-                                window,
-                                "nickel-file",
-                            );
-                        },
-                        crate::platform::unregister_native_application_window,
-                    );
-                if let Err(error) =
-                    nickel_ui_host::run_with_adapter_on_any_thread(launch.into_app(), adapter)
-                {
-                    tracing::error!(%error, "in-process file window failed");
-                }
-            })
-            .map(|_| ())
-            .map_err(|error| error.to_string())
-    }
 }
 
 #[cfg(test)]

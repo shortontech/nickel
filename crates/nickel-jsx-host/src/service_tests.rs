@@ -10,11 +10,11 @@ fn native_rejection_activates_nearest_boundary_after_rollback() {
             None,
         )
         .unwrap();
-    let initial: Value = runtime.eval_json("__nickelRender()").unwrap();
-    runtime.eval("__nickelCommitRender()").unwrap();
+    let initial: Value = runtime.eval_json("__twinkleRender()").unwrap();
+    runtime.eval("__twinkleCommitRender()").unwrap();
     runtime.begin_transaction().unwrap();
     let candidate = runtime
-        .dispatch_patched("__nickelDispatchBatchPatched([[0,null]])")
+        .dispatch_patched("__twinkleDispatchBatchPatched([[0,null]])")
         .unwrap();
     assert!(matches!(candidate, super::ScheduledPatch::Patched { .. }));
     assert_eq!(runtime.take_effects().unwrap().len(), 1);
@@ -29,8 +29,8 @@ fn native_rejection_activates_nearest_boundary_after_rollback() {
         .capture_native_failure(&[owner], "native shape rejected")
         .unwrap();
     assert_eq!(captured.len(), 1);
-    let fallback: Value = runtime.eval_json("__nickelRender()").unwrap();
-    runtime.eval("__nickelCommitRender()").unwrap();
+    let fallback: Value = runtime.eval_json("__twinkleRender()").unwrap();
+    runtime.eval("__twinkleCommitRender()").unwrap();
     assert!(fallback.to_string().contains("inner:native shape rejected"));
     assert!(fallback.to_string().contains("sibling"));
     assert!(!fallback.to_string().contains("leaf:1"));

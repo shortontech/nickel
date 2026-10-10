@@ -27,14 +27,14 @@ fn node<'a>(value: &'a Value, id: &str) -> Option<&'a Value> {
 }
 fn render(runtime: &mut JsxRuntime) -> Value {
     runtime
-        .render("__nickelRender()", |value| Ok(value.clone()))
+        .render("__twinkleRender()", |value| Ok(value.clone()))
         .unwrap()
 }
 fn click(runtime: &mut JsxRuntime, id: &str) -> Value {
     let tree = render(runtime);
     let action = node(&tree, id).unwrap()["action"].as_u64().unwrap();
     runtime
-        .render(&format!("__nickelDispatch({action})"), |value| {
+        .render(&format!("__twinkleDispatch({action})"), |value| {
             Ok(value.clone())
         })
         .unwrap();
@@ -141,7 +141,7 @@ fn preferences_package_pages_preserve_unavailable_choices_until_explicit_selecti
 #[test]
 fn preferred_terminal_dropdown_filters_games_keeps_icons_and_allows_other_providers() {
     let mut apps = runtime("apps", true);
-    apps.render("nickel.data.preferences.applications.push({id:'org.kde.konsole.desktop'},{id:'steam-disgaea.desktop'},{id:'custom.desktop'},{id:'emacs-term.desktop'}); nickel.data.applications.push({id:'org.kde.konsole.desktop',name:'Konsole',icon:'application:konsole'},{id:'steam-disgaea.desktop',name:'Disgaea 5 Complete',icon:'application:disgaea'},{id:'custom.desktop',name:'Custom Console',icon:'application:custom'},{id:'emacs-term.desktop',name:'Emacs (Terminal)',icon:'application:emacs',launchClass:'terminal'}); __nickelRender()", |value| Ok(value.clone())).unwrap();
+    apps.render("nickel.data.preferences.applications.push({id:'org.kde.konsole.desktop'},{id:'steam-disgaea.desktop'},{id:'custom.desktop'},{id:'emacs-term.desktop'}); nickel.data.applications.push({id:'org.kde.konsole.desktop',name:'Konsole',icon:'application:konsole'},{id:'steam-disgaea.desktop',name:'Disgaea 5 Complete',icon:'application:disgaea'},{id:'custom.desktop',name:'Custom Console',icon:'application:custom'},{id:'emacs-term.desktop',name:'Emacs (Terminal)',icon:'application:emacs',launchClass:'terminal'}); __twinkleRender()", |value| Ok(value.clone())).unwrap();
     let tree = render(&mut apps);
     let select = node(&tree, "preferences-preferredTerminal-select").unwrap();
     assert_eq!(select["kind"], "select");
@@ -152,7 +152,7 @@ fn preferred_terminal_dropdown_filters_games_keeps_icons_and_allows_other_provid
     let action = node(&tree, "preferences-preferredTerminal-show-all").unwrap()["action"]
         .as_u64()
         .unwrap();
-    apps.render(&format!("__nickelDispatch({action})"), |value| {
+    apps.render(&format!("__twinkleDispatch({action})"), |value| {
         Ok(value.clone())
     })
     .unwrap();
@@ -165,14 +165,14 @@ fn preferred_terminal_dropdown_filters_games_keeps_icons_and_allows_other_provid
     );
     assert!(apps.take_effects().unwrap().is_empty());
     apps.render(
-        "nickel.data.preferences.configured.preferredTerminal='custom.desktop'; __nickelRender()",
+        "nickel.data.preferences.configured.preferredTerminal='custom.desktop'; __twinkleRender()",
         |value| Ok(value.clone()),
     )
     .unwrap();
     let action = node(&tree, "preferences-preferredTerminal-show-all").unwrap()["action"]
         .as_u64()
         .unwrap();
-    apps.render(&format!("__nickelDispatch({action})"), |value| {
+    apps.render(&format!("__twinkleDispatch({action})"), |value| {
         Ok(value.clone())
     })
     .unwrap();
@@ -210,7 +210,7 @@ fn preferences_package_pages_validate_custom_idle_values_and_show_unavailability
             .unwrap();
         let value = serde_json::to_string(draft).unwrap();
         let next = runtime
-            .render(&format!("__nickelDispatch({action},{value})"), |value| {
+            .render(&format!("__twinkleDispatch({action},{value})"), |value| {
                 Ok(value.clone())
             })
             .unwrap();

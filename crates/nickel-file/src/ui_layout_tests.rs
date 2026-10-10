@@ -3571,10 +3571,11 @@ fn headless_software_resize_pipeline_benchmark() {
 #[ignore = "requires a dedicated offscreen X11 display"]
 fn offscreen_presented_software_resize_benchmark() {
     use std::{num::NonZeroU32, sync::Arc, time::Instant};
-    use winit::{
+    use winit_next::{
         application::ApplicationHandler,
         dpi::{LogicalSize, PhysicalSize},
         event::WindowEvent,
+        event_loop::run_on_demand::EventLoopExtRunOnDemand,
         event_loop::{ActiveEventLoop, ControlFlow, EventLoop, OwnedDisplayHandle},
         platform::x11::EventLoopBuilderExtX11,
         window::{Window, WindowAttributes, WindowId},
@@ -3596,8 +3597,8 @@ fn offscreen_presented_software_resize_benchmark() {
         host: UiHost<FileApp>,
         renderer: twinkle::SoftwareRenderer,
         display: OwnedDisplayHandle,
-        window: Option<Arc<Window>>,
-        surface: Option<softbuffer::Surface<OwnedDisplayHandle, Arc<Window>>>,
+        window: Option<Arc<dyn Window>>,
+        surface: Option<softbuffer::Surface<OwnedDisplayHandle, Arc<dyn Window>>>,
         started: Instant,
         frames: usize,
         rendered: usize,
@@ -3615,16 +3616,16 @@ fn offscreen_presented_software_resize_benchmark() {
     }
 
     impl ApplicationHandler for Benchmark {
-        fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        fn can_create_surfaces(&mut self, event_loop: &dyn ActiveEventLoop) {
             if self.window.is_some() {
                 return;
             }
-            let window = Arc::new(
+            let window: Arc<dyn Window> = Arc::from(
                 event_loop
                     .create_window(
                         WindowAttributes::default()
                             .with_title("Nickel File offscreen resize benchmark")
-                            .with_inner_size(LogicalSize::new(900, 700))
+                            .with_surface_size(LogicalSize::new(900, 700))
                             .with_visible(true),
                     )
                     .unwrap(),
@@ -3632,13 +3633,13 @@ fn offscreen_presented_software_resize_benchmark() {
             let context = softbuffer::Context::new(self.display.clone()).unwrap();
             self.surface = Some(softbuffer::Surface::new(&context, window.clone()).unwrap());
             let (width, height) = self.size();
-            let _ = window.request_inner_size(PhysicalSize::new(width, height));
+            let _ = window.request_surface_size(PhysicalSize::new(width, height).into());
             self.window = Some(window);
         }
 
         fn window_event(
             &mut self,
-            event_loop: &ActiveEventLoop,
+            event_loop: &dyn ActiveEventLoop,
             window_id: WindowId,
             event: WindowEvent,
         ) {
@@ -3646,7 +3647,7 @@ fn offscreen_presented_software_resize_benchmark() {
             if window.id() != window_id {
                 return;
             }
-            if let WindowEvent::Resized(size) = event {
+            if let WindowEvent::SurfaceResized(size) = event {
                 let (width, height) = self.size();
                 if size != PhysicalSize::new(width, height) {
                     return;
@@ -3678,12 +3679,12 @@ fn offscreen_presented_software_resize_benchmark() {
                     event_loop.exit();
                 } else {
                     let (width, height) = self.size();
-                    let _ = window.request_inner_size(PhysicalSize::new(width, height));
+                    let _ = window.request_surface_size(PhysicalSize::new(width, height).into());
                 }
             }
         }
 
-        fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        fn about_to_wait(&mut self, event_loop: &dyn ActiveEventLoop) {
             if self.started.elapsed().as_secs() > 30 {
                 event_loop.exit();
             }
@@ -3703,7 +3704,7 @@ fn offscreen_presented_software_resize_benchmark() {
     let app = FileApp::with_browser(DirectoryBrowser::fixture(entries), String::new());
     let mut event_loop_builder = EventLoop::builder();
     event_loop_builder.with_any_thread(true);
-    let event_loop = event_loop_builder.build().unwrap();
+    let mut event_loop = event_loop_builder.build().unwrap();
     event_loop.set_control_flow(ControlFlow::WaitUntil(
         Instant::now() + std::time::Duration::from_secs(31),
     ));
@@ -3719,7 +3720,7 @@ fn offscreen_presented_software_resize_benchmark() {
         presented: 0,
         elapsed_ms: Vec::new(),
     };
-    event_loop.run_app(&mut benchmark).unwrap();
+    event_loop.run_app_on_demand(&mut benchmark).unwrap();
     assert_eq!(benchmark.frames, 120, "offscreen window stopped resizing");
     assert_eq!(benchmark.rendered, 120);
     assert_eq!(benchmark.presented, 120);

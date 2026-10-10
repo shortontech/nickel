@@ -370,7 +370,7 @@ mod tests {
         assert!(compiled.contains("contribution.settings.pages.child.theme"));
         assert_eq!(
             compiled
-                .matches("__nickelDefineModule(\"child/main.js\"")
+                .matches("__twinkleDefineModule(\"child/main.js\"")
                 .count(),
             1
         );
@@ -387,7 +387,7 @@ mod tests {
             ComposedShellGraph::link(&BTreeMap::from([("base".into(), base)]), "base").unwrap();
         let mut runtime = plan.activate(None).unwrap();
         let value: serde_json::Value = runtime
-            .eval_json("JSON.stringify(__nickelRender())")
+            .eval_json("JSON.stringify(__twinkleRender())")
             .unwrap();
         assert!(value.to_string().contains("base"));
     }

@@ -261,11 +261,11 @@ mod tests {
             .publish_settings(&mut registry, "org.nickel.provider")
             .unwrap();
         runtime
-            .render("__nickelRender()", |node| Ok(node.clone()))
+            .render("__twinkleRender()", |node| Ok(node.clone()))
             .unwrap();
         let revision = runtime.settings_revision();
         runtime
-            .render("__nickelDispatch(0)", |node| Ok(node.clone()))
+            .render("__twinkleDispatch(0)", |node| Ok(node.clone()))
             .unwrap();
         runtime.finish_event(false).unwrap();
         assert_eq!(runtime.settings_revision(), revision);
@@ -274,7 +274,7 @@ mod tests {
             Value::Bool(false)
         );
         runtime
-            .render("__nickelDispatch(0)", |node| Ok(node.clone()))
+            .render("__twinkleDispatch(0)", |node| Ok(node.clone()))
             .unwrap();
         runtime.finish_event(true).unwrap();
         assert_ne!(runtime.settings_revision(), revision);

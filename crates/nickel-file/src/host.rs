@@ -10,9 +10,10 @@ use twinkle::{
 use twinkle_input::{
     AggregateModifier, InputEvent, KeyCode, KeyEdge, PhysicalKey, PointerButton, PointerEvent,
 };
-use winit::{
+use winit_next::{
     dpi::LogicalSize,
-    window::{Icon, Window},
+    icon::{Icon, RgbaIcon},
+    window::Window,
 };
 
 use crate::{
@@ -20,7 +21,7 @@ use crate::{
     layout::{entries_in_selection, rect_between},
 };
 
-fn set_nickel_file_icon(window: &Window) {
+fn set_nickel_file_icon(window: &dyn Window) {
     let Ok(image) =
         image::load_from_memory(include_bytes!("../../../assets/icons/nickel-file.png"))
     else {
@@ -28,8 +29,8 @@ fn set_nickel_file_icon(window: &Window) {
     };
     let image = image.into_rgba8();
     let (width, height) = image.dimensions();
-    if let Ok(icon) = Icon::from_rgba(image.into_raw(), width, height) {
-        window.set_window_icon(Some(icon));
+    if let Ok(icon) = RgbaIcon::new(image.into_raw(), width, height) {
+        window.set_window_icon(Some(Icon::from(icon)));
     }
 }
 
@@ -49,9 +50,9 @@ pub struct FileHostAdapter {
     #[cfg(target_os = "windows")]
     focused_shortcut: Option<std::sync::Arc<dyn Fn(KeyCode, KeyEdge) + Send + Sync>>,
     #[cfg(target_os = "windows")]
-    window_started: Option<std::sync::Arc<dyn Fn(&Window) + Send + Sync>>,
+    window_started: Option<std::sync::Arc<dyn Fn(&dyn Window) + Send + Sync>>,
     #[cfg(target_os = "windows")]
-    window_stopped: Option<std::sync::Arc<dyn Fn(&Window) + Send + Sync>>,
+    window_stopped: Option<std::sync::Arc<dyn Fn(&dyn Window) + Send + Sync>>,
 }
 
 #[cfg(target_os = "windows")]
@@ -66,8 +67,8 @@ impl FileHostAdapter {
 
     pub fn with_window_lifecycle_handlers(
         mut self,
-        started: impl Fn(&Window) + Send + Sync + 'static,
-        stopped: impl Fn(&Window) + Send + Sync + 'static,
+        started: impl Fn(&dyn Window) + Send + Sync + 'static,
+        stopped: impl Fn(&dyn Window) + Send + Sync + 'static,
     ) -> Self {
         self.window_started = Some(std::sync::Arc::new(started));
         self.window_stopped = Some(std::sync::Arc::new(stopped));
@@ -743,16 +744,16 @@ impl HostAdapter<FileApp> for FileHostAdapter {
     fn event(
         &mut self,
         _host: &mut UiHost<FileApp>,
-        event: &winit::event::WindowEvent,
+        event: &winit_next::event::WindowEvent,
         _services: HostServices<'_>,
     ) -> Result<AdapterOutcome, Box<dyn std::error::Error>> {
-        if let winit::event::WindowEvent::KeyboardInput { event: key, .. } = event
+        if let winit_next::event::WindowEvent::KeyboardInput { event: key, .. } = event
             && !key.repeat
             && let twinkle_input::PhysicalKey::Code(key_code) =
                 twinkle_input::winit::physical_key(key.physical_key)
             && let Some(shortcut) = &self.focused_shortcut
         {
-            let edge = if key.state == winit::event::ElementState::Pressed {
+            let edge = if key.state == winit_next::event::ElementState::Pressed {
                 KeyEdge::Pressed
             } else {
                 KeyEdge::Released
@@ -795,7 +796,7 @@ impl HostAdapter<FileApp> for FileHostAdapter {
     ) -> Result<AdapterOutcome, Box<dyn std::error::Error>> {
         services
             .window()
-            .set_min_inner_size(Some(LogicalSize::new(560, 360)));
+            .set_min_surface_size(Some(LogicalSize::new(560, 360).into()));
         set_nickel_file_icon(services.window());
         #[cfg(target_os = "windows")]
         if let Some(started) = &self.window_started {
@@ -809,6 +810,8 @@ impl HostAdapter<FileApp> for FileHostAdapter {
         _host: &mut UiHost<FileApp>,
         services: HostServices<'_>,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        #[cfg(not(target_os = "windows"))]
+        let _ = &services;
         #[cfg(target_os = "windows")]
         if let Some(stopped) = &self.window_stopped {
             stopped(services.window());
@@ -821,6 +824,8 @@ impl HostAdapter<FileApp> for FileHostAdapter {
         host: &mut UiHost<FileApp>,
         services: HostServices<'_>,
     ) -> Result<AdapterOutcome, Box<dyn std::error::Error>> {
+        #[cfg(not(target_os = "windows"))]
+        let _ = &services;
         self.sync_requested = false;
         host.application_mut().resolved_grid_columns =
             host.resolved_grid_columns().unwrap_or(1).max(1);
@@ -855,13 +860,12 @@ impl HostAdapter<FileApp> for FileHostAdapter {
                 }
             }
             if self.context_popup_rx.is_none() {
-                let size = services.window().inner_size();
+                let size = services.window().surface_size();
                 if let Some(spec) = host
                     .application_mut()
                     .take_context_popup_request(size.width, size.height)
                 {
-                    self.context_popup_rx =
-                        crate::windows_popup_menu::start(spec.menu, services.window());
+                    self.context_popup_rx = crate::windows_popup_menu::start(spec.menu, &services);
                     self.context_popup_poll_at = self
                         .context_popup_rx
                         .as_ref()

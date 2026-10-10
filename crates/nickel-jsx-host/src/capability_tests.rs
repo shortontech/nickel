@@ -24,7 +24,7 @@ fn capability_store_is_owner_scoped_versioned_and_rejects_unknown_names() {
             .set_capability_store(&grants, &serde_json::json!({"windows":[]}))
             .unwrap()
     );
-    runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+    runtime.render("__twinkleRender()", |_| Ok(())).unwrap();
     assert_eq!(
         runtime
             .eval_json::<serde_json::Value>("JSON.stringify(seen[0])")
@@ -43,14 +43,14 @@ fn capability_store_is_owner_scoped_versioned_and_rejects_unknown_names() {
             &serde_json::json!({"windows":{"available":false,"reason":"backend absent"}}),
         )
         .unwrap();
-    runtime.render("__nickelRender()", |_| Ok(())).unwrap();
+    runtime.render("__twinkleRender()", |_| Ok(())).unwrap();
     assert_eq!(
         runtime
             .eval_json::<serde_json::Value>("JSON.stringify(runs)")
             .unwrap(),
         serde_json::json!({"app":1,"windows":2,"audio":1})
     );
-    assert!(runtime.eval("function Unknown(){useCapability('future-root')} __nickelSetApp(Unknown); __nickelRender()").is_err());
+    assert!(runtime.eval("function Unknown(){useCapability('future-root')} __twinkleSetApp(Unknown); __twinkleRender()").is_err());
 }
 
 #[test]
@@ -68,7 +68,7 @@ fn rejected_capability_consumer_does_not_install_a_subscription() {
         )
         .unwrap();
     runtime
-        .render("__nickelRender()", |_| Err::<(), _>("reject".into()))
+        .render("__twinkleRender()", |_| Err::<(), _>("reject".into()))
         .unwrap_err();
     runtime
         .set_capability_store(
@@ -78,7 +78,7 @@ fn rejected_capability_consumer_does_not_install_a_subscription() {
         .unwrap();
     assert!(
         !runtime
-            .eval_json::<bool>("JSON.parse(__nickelReconciliationRequest()).requested")
+            .eval_json::<bool>("JSON.parse(__twinkleReconciliationRequest()).requested")
             .unwrap()
     );
 }

@@ -17,7 +17,7 @@ fn ordinary_plugins_page_registers_from_emitted_module_and_renders_inventory() {
         "plugins"
     );
     let mut tree = runtime
-        .render("__nickelRender()", |node| Ok(node.clone()))
+        .render("__twinkleRender()", |node| Ok(node.clone()))
         .unwrap();
     // This runtime-only fixture supplies a one-card viewport; the native
     // Settings regression below owns clipping and range selection coverage.
@@ -35,7 +35,7 @@ fn ordinary_plugins_page_registers_from_emitted_module_and_renders_inventory() {
         serde_json::to_string(&serde_json::json!({"start":0,"end":1,"source":1}).to_string())
             .unwrap();
     tree = runtime
-        .render(&format!("__nickelDispatch({action},{feedback})"), |node| {
+        .render(&format!("__twinkleDispatch({action},{feedback})"), |node| {
             Ok(node.clone())
         })
         .unwrap();
@@ -56,7 +56,7 @@ fn ordinary_plugins_page_registers_from_emitted_module_and_renders_inventory() {
         .as_u64()
         .unwrap();
     let reviewed = runtime
-        .render(&format!("__nickelDispatch({action})"), |node| {
+        .render(&format!("__twinkleDispatch({action})"), |node| {
             Ok(node.clone())
         })
         .unwrap();
@@ -65,7 +65,7 @@ fn ordinary_plugins_page_registers_from_emitted_module_and_renders_inventory() {
     assert_ne!(confirm["disabled"], serde_json::json!(true));
     let action = confirm["action"].as_u64().unwrap();
     runtime
-        .render(&format!("__nickelDispatch({action})"), |node| {
+        .render(&format!("__twinkleDispatch({action})"), |node| {
             Ok(node.clone())
         })
         .unwrap();
@@ -76,13 +76,13 @@ fn ordinary_plugins_page_registers_from_emitted_module_and_renders_inventory() {
         ]
     );
     let tree = runtime
-        .render("__nickelRender()", |node| Ok(node.clone()))
+        .render("__twinkleRender()", |node| Ok(node.clone()))
         .unwrap();
     let action = find(&tree, "plugin-toggle-0").unwrap()["action"]
         .as_u64()
         .unwrap();
     runtime
-        .render(&format!("__nickelDispatch({action})"), |node| {
+        .render(&format!("__twinkleDispatch({action})"), |node| {
             Ok(node.clone())
         })
         .unwrap();
@@ -90,7 +90,7 @@ fn ordinary_plugins_page_registers_from_emitted_module_and_renders_inventory() {
     data["plugins"]["revision"] = serde_json::json!("8");
     runtime.set_data(&data.to_string()).unwrap();
     let stale = runtime
-        .render("__nickelRender()", |node| Ok(node.clone()))
+        .render("__twinkleRender()", |node| Ok(node.clone()))
         .unwrap();
     assert_eq!(
         find(&stale, "plugin-review-confirm").unwrap()["disabled"],

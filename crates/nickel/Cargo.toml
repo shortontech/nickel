@@ -15,7 +15,7 @@ name = "nickel_shell"
 [features]
 default = ["backend-udev"]
 workbench-fixtures = ["dep:twinkle-testkit", "nickel-codex-ui/workbench-fixtures"]
-backend-winit = ["smithay/backend_winit", "twinkle-input/winit"]
+backend-winit = ["smithay/backend_winit", "twinkle-input/winit-030"]
 backend-udev = [
     "smithay/backend_drm",
     "smithay/backend_egl",
@@ -41,7 +41,7 @@ nickel-file = { path = "../nickel-file" }
 nickel-codex = { path = "../nickel-codex" }
 nickel-codex-ui = { path = "../nickel-codex-ui" }
 nickel-i18n = { path = "../nickel-i18n" }
-twinkle-input = { workspace = true, features = ["winit", "windows"] }
+twinkle-input = { workspace = true, features = ["winit-030", "windows"] }
 nickel-remote-control = { path = "../nickel-remote-control" }
 nickel-logging = { path = "../nickel-logging" }
 nickel-jsx-host = { path = "../nickel-jsx-host" }

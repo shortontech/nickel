@@ -8,10 +8,10 @@ let __outputsStore = {generation:0,snapshot:Object.freeze({generation:0,availabl
 let __windowPreviewsStore = {generation:0, encoded:'null', snapshot:Object.freeze({available:false,windows:Object.freeze([])})};
 let __windowMenuStore = {generation:0, encoded:'null', snapshot:Object.freeze({targetId:null})};
 const NickelStores=Object.freeze({
-    windows:__nickelStoreContract('windows',()=>__windowsStore),applications:__nickelStoreContract('applications',()=>__applicationsStore),
-    notifications:__nickelStoreContract('notifications',()=>__notificationsStore),workspaces:__nickelStoreContract('workspaces',()=>__workspacesStore),
-    outputs:__nickelStoreContract('outputs',()=>__outputsStore),locale:__nickelStoreContract('locale',()=>__localeStore),
-    theme:__nickelStoreContract('theme',()=>__themeStore),capabilities:__nickelStoreContract('capabilities',()=>__capabilityStore)
+    windows:__twinkleStoreContract('windows',()=>__windowsStore),applications:__twinkleStoreContract('applications',()=>__applicationsStore),
+    notifications:__twinkleStoreContract('notifications',()=>__notificationsStore),workspaces:__twinkleStoreContract('workspaces',()=>__workspacesStore),
+    outputs:__twinkleStoreContract('outputs',()=>__outputsStore),locale:__twinkleStoreContract('locale',()=>__localeStore),
+    theme:__twinkleStoreContract('theme',()=>__themeStore),capabilities:__twinkleStoreContract('capabilities',()=>__capabilityStore)
 });
 function __nickelWindowEqual(left, right) {
     const fields = ['id','applicationId','title','active','minimized','maximized','fullscreen',
@@ -66,14 +66,14 @@ function __nickelValidateWindowsStorePublication() {
 }
 function __nickelSetWindowsStore(value) {
     __nickelValidateWindowsStorePublication();
-    const before=__nickelDirtyComponentCount(), windows = __nickelWindowSnapshot(value);
+    const before=__twinkleDirtyComponentCount(), windows = __nickelWindowSnapshot(value);
     const previous = __windowsStore.snapshot;
     if (previous.length === windows.length && previous.every((window, index) => window === windows[index]))
         return false;
     const generation = __windowsStore.generation + 1;
     __windowsStore = {generation, snapshot:windows};
-    __nickelNotifyExternalStore('windows');
-    __nickelForEachSurfaceHooks((hooks, dirty) => {
+    __twinkleNotifyExternalStore('windows');
+    __twinkleForEachSurfaceHooks((hooks, dirty) => {
         for (const [owner, slots] of hooks) {
             for (const entry of slots) {
                 if (entry?.kind !== 'windows-store') continue;
@@ -88,7 +88,7 @@ function __nickelSetWindowsStore(value) {
             }
         }
     });
-    __nickelRecordStoreChange('windows',generation,before); return true;
+    __twinkleRecordStoreChange('windows',generation,before); return true;
 }
 
 function __nickelImmutableProjection(value) {
@@ -106,7 +106,7 @@ function __nickelSetProjectionStore(name,value) {
     if(current.encoded===encoded)return false;
     const generation=current.generation+1,snapshot=__nickelImmutableProjection(value),next={generation,encoded,snapshot};
     if(name==='windowPreviews')__windowPreviewsStore=next;else __windowMenuStore=next;
-    __nickelForEachSurfaceHooks((hooks,dirty)=>{for(const [owner,slots] of hooks)for(const entry of slots){
+    __twinkleForEachSurfaceHooks((hooks,dirty)=>{for(const [owner,slots] of hooks)for(const entry of slots){
         if(entry?.kind!==`${name}-store`)continue;
         try{const selected=entry.selector?entry.selector(snapshot):snapshot;entry.storeError=undefined;if(!Object.is(selected,entry.value))dirty.add(owner);}
         catch(error){entry.storeError=error;dirty.add(owner);}
@@ -119,9 +119,9 @@ function __nickelUseProjectionStore(name,selector) {
     const slot=__hookIndex++,hooks=__componentHooks.get(__currentComponent),normalized=selector??null;
     const store=name==='windowPreviews'?__windowPreviewsStore:name==='windowMenu'?__windowMenuStore:null;
     if(store===null)throw Error('unknown projection store');
-    const entry=__nickelSelectedStoreEntry(hooks,slot,`${name}-store`,normalized,name);
+    const entry=__twinkleSelectedStoreEntry(hooks,slot,`${name}-store`,normalized,name);
     entry.storeError=undefined;
-    entry.value=__nickelSelectedValue(entry,normalized,store.snapshot,store.generation,name);
+    entry.value=__twinkleSelectedValue(entry,normalized,store.snapshot,store.generation,name);
     entry.generation=store.generation;
     return entry.value;
 }
@@ -134,9 +134,9 @@ function useWindows(selector) {
     const slot = __hookIndex++;
     const hooks = __componentHooks.get(__currentComponent);
     const normalized = selector ?? null;
-    const entry=__nickelSelectedStoreEntry(hooks,slot,'windows-store',normalized,'windows');
+    const entry=__twinkleSelectedStoreEntry(hooks,slot,'windows-store',normalized,'windows');
     entry.storeError = undefined;
-    entry.value = __nickelSelectedValue(entry,normalized,__windowsStore.snapshot,__windowsStore.generation,'windows');
+    entry.value = __twinkleSelectedValue(entry,normalized,__windowsStore.snapshot,__windowsStore.generation,'windows');
     entry.generation = __windowsStore.generation;
     return entry.value;
 }
@@ -173,7 +173,7 @@ function __nickelApplicationSnapshot(value) {
     }));
 }
 function __nickelSetApplicationsStore(value) {
-    const before=__nickelDirtyComponentCount(), applications = __nickelApplicationSnapshot(value);
+    const before=__twinkleDirtyComponentCount(), applications = __nickelApplicationSnapshot(value);
     const previous = __applicationsStore.snapshot;
     if (previous.length === applications.length
         && previous.every((application, index) => application === applications[index])) return false;
@@ -181,8 +181,8 @@ function __nickelSetApplicationsStore(value) {
         throw Error('cannot publish changed applications store during a render or event');
     const generation = __applicationsStore.generation + 1;
     __applicationsStore = {generation, snapshot:applications};
-    __nickelNotifyExternalStore('applications');
-    __nickelForEachSurfaceHooks((hooks, dirty) => {
+    __twinkleNotifyExternalStore('applications');
+    __twinkleForEachSurfaceHooks((hooks, dirty) => {
         for (const [owner, slots] of hooks) for (const entry of slots) {
             if (entry?.kind !== 'applications-store') continue;
             try {
@@ -192,7 +192,7 @@ function __nickelSetApplicationsStore(value) {
             } catch (error) { entry.storeError = error; dirty.add(owner); }
         }
     });
-    __nickelRecordStoreChange('applications',generation,before); return true;
+    __twinkleRecordStoreChange('applications',generation,before); return true;
 }
 function useApplications(selector) {
     if (__currentComponent === null) throw Error('useApplications requires a component');
@@ -200,9 +200,9 @@ function useApplications(selector) {
     const slot = __hookIndex++;
     const hooks = __componentHooks.get(__currentComponent);
     const normalized = selector ?? null;
-    const entry=__nickelSelectedStoreEntry(hooks,slot,'applications-store',normalized,'applications');
+    const entry=__twinkleSelectedStoreEntry(hooks,slot,'applications-store',normalized,'applications');
     entry.storeError = undefined;
-    entry.value = __nickelSelectedValue(entry,normalized,__applicationsStore.snapshot,__applicationsStore.generation,'applications');
+    entry.value = __twinkleSelectedValue(entry,normalized,__applicationsStore.snapshot,__applicationsStore.generation,'applications');
     entry.generation = __applicationsStore.generation;
     return entry.value;
 }
@@ -251,7 +251,7 @@ function __nickelNotificationSnapshot(value) {
     return Object.freeze({notification,history,visible});
 }
 function __nickelSetNotificationsStore(value) {
-    const before=__nickelDirtyComponentCount(), snapshot = __nickelNotificationSnapshot(value), previous = __notificationsStore.snapshot;
+    const before=__twinkleDirtyComponentCount(), snapshot = __nickelNotificationSnapshot(value), previous = __notificationsStore.snapshot;
     if (previous.notification === snapshot.notification && previous.visible === snapshot.visible
         && previous.history.length === snapshot.history.length
         && previous.history.every((item,index) => item === snapshot.history[index])) return false;
@@ -259,8 +259,8 @@ function __nickelSetNotificationsStore(value) {
         throw Error('cannot publish changed notifications store during a render or event');
     const generation = __notificationsStore.generation + 1;
     __notificationsStore = {generation,snapshot};
-    __nickelNotifyExternalStore('notifications');
-    __nickelForEachSurfaceHooks((hooks, dirty) => {
+    __twinkleNotifyExternalStore('notifications');
+    __twinkleForEachSurfaceHooks((hooks, dirty) => {
         for (const [owner, slots] of hooks) for (const entry of slots) {
             if (entry?.kind !== 'notifications-store') continue;
             try {
@@ -270,15 +270,15 @@ function __nickelSetNotificationsStore(value) {
             } catch (error) { entry.storeError = error; dirty.add(owner); }
         }
     });
-    __nickelRecordStoreChange('notifications',generation,before); return true;
+    __twinkleRecordStoreChange('notifications',generation,before); return true;
 }
 function useNotifications(selector) {
     if (__currentComponent === null) throw Error('useNotifications requires a component');
     if (selector !== undefined && typeof selector !== 'function') throw TypeError('useNotifications selector must be a function');
     const slot=__hookIndex++, hooks=__componentHooks.get(__currentComponent), normalized=selector??null;
-    const entry=__nickelSelectedStoreEntry(hooks,slot,'notifications-store',normalized,'notifications');
+    const entry=__twinkleSelectedStoreEntry(hooks,slot,'notifications-store',normalized,'notifications');
     entry.storeError=undefined;
-    entry.value=__nickelSelectedValue(entry,normalized,__notificationsStore.snapshot,__notificationsStore.generation,'notifications');
+    entry.value=__twinkleSelectedValue(entry,normalized,__notificationsStore.snapshot,__notificationsStore.generation,'notifications');
     entry.generation=__notificationsStore.generation;
     return entry.value;
 }
@@ -315,7 +315,7 @@ function __nickelWorkspaceSnapshot(value,generation) {
         revision,workspaces,activeWorkspace,operations});
 }
 function __nickelSetWorkspacesStore(value) {
-    const before=__nickelDirtyComponentCount(), generation=__workspacesStore.generation+1, snapshot=__nickelWorkspaceSnapshot(value,generation), previous=__workspacesStore.snapshot;
+    const before=__twinkleDirtyComponentCount(), generation=__workspacesStore.generation+1, snapshot=__nickelWorkspaceSnapshot(value,generation), previous=__workspacesStore.snapshot;
     const unchanged=previous.available===snapshot.available&&previous.reason===snapshot.reason
         &&previous.writable===snapshot.writable&&previous.revision===snapshot.revision
         &&previous.activeWorkspace===snapshot.activeWorkspace
@@ -328,19 +328,19 @@ function __nickelSetWorkspacesStore(value) {
         &&previous.operations.remove===snapshot.operations.remove?previous.operations:snapshot.operations;
     const retained=Object.freeze({...snapshot,operations:retainedOperations});
     __workspacesStore={generation,snapshot:retained};
-    __nickelNotifyExternalStore('workspaces');
-    __nickelForEachSurfaceHooks((hooks,dirty)=>{for(const [owner,slots] of hooks)for(const entry of slots){
+    __twinkleNotifyExternalStore('workspaces');
+    __twinkleForEachSurfaceHooks((hooks,dirty)=>{for(const [owner,slots] of hooks)for(const entry of slots){
         if(entry?.kind!=='workspaces-store')continue;
         try{const selected=entry.selector?entry.selector(retained):retained;entry.storeError=undefined;if(!Object.is(selected,entry.value))dirty.add(owner);}
         catch(error){entry.storeError=error;dirty.add(owner);}
-    }});__nickelRecordStoreChange('workspaces',generation,before);return true;
+    }});__twinkleRecordStoreChange('workspaces',generation,before);return true;
 }
 function useWorkspaces(selector) {
     if(__currentComponent===null)throw Error('useWorkspaces requires a component');
     if(selector!==undefined&&typeof selector!=='function')throw TypeError('useWorkspaces selector must be a function');
     const slot=__hookIndex++,hooks=__componentHooks.get(__currentComponent),normalized=selector??null;
-    const entry=__nickelSelectedStoreEntry(hooks,slot,'workspaces-store',normalized,'workspaces');
-    entry.storeError=undefined;entry.value=__nickelSelectedValue(entry,normalized,__workspacesStore.snapshot,__workspacesStore.generation,'workspaces');entry.generation=__workspacesStore.generation;return entry.value;
+    const entry=__twinkleSelectedStoreEntry(hooks,slot,'workspaces-store',normalized,'workspaces');
+    entry.storeError=undefined;entry.value=__twinkleSelectedValue(entry,normalized,__workspacesStore.snapshot,__workspacesStore.generation,'workspaces');entry.generation=__workspacesStore.generation;return entry.value;
 }
 const __nickelSelectWorkspace=snapshot=>snapshot.workspaces.find(workspace=>workspace.id===snapshot.activeWorkspace)??null;
 function useWorkspace(){return useWorkspaces(__nickelSelectWorkspace);}
@@ -360,7 +360,7 @@ function __nickelFreezeOutput(value) {
 }
 function __nickelOutputEqual(left,right){return JSON.stringify(left)===JSON.stringify(right);}
 function __nickelSetOutputsStore(value){
-    const before=__nickelDirtyComponentCount();
+    const before=__twinkleDirtyComponentCount();
     if(!value||typeof value!=='object'||Array.isArray(value)||!Array.isArray(value.outputs)||value.outputs.length>32)throw Error('invalid bounded outputs snapshot');
     const previous=__outputsStore.snapshot,byName=new Map(previous.outputs.map(output=>[output.name,output])),seen=new Set();
     const outputs=Object.freeze(value.outputs.map(source=>{const copy=__nickelFreezeOutput(source);if(seen.has(copy.name))throw Error('duplicate output');seen.add(copy.name);
@@ -369,19 +369,19 @@ function __nickelSetOutputsStore(value){
     const revision=value.revision==null?null:typeof value.revision==='string'&&value.revision.length<=128?value.revision:(()=>{throw Error('invalid output revision')})();
     if(previous.available===available&&previous.reason===reason&&previous.revision===revision&&previous.outputs.length===outputs.length&&previous.outputs.every((output,index)=>output===outputs[index]))return false;
     if(__pendingRender!==null||__pendingEvent!==null)throw Error('cannot publish changed outputs store during a render or event');
-    const generation=__outputsStore.generation+1,snapshot=Object.freeze({generation,available,reason,revision,outputs});__outputsStore={generation,snapshot};__nickelNotifyExternalStore('outputs');
-    __nickelForEachSurfaceHooks((hooks,dirty)=>{for(const [owner,slots] of hooks)for(const entry of slots){if(entry?.kind!=='outputs-store')continue;
-        try{const selected=entry.selector?entry.selector(snapshot):snapshot;entry.storeError=undefined;if(!Object.is(selected,entry.value))dirty.add(owner);}catch(error){entry.storeError=error;dirty.add(owner);}}});__nickelRecordStoreChange('outputs',generation,before);return true;
+    const generation=__outputsStore.generation+1,snapshot=Object.freeze({generation,available,reason,revision,outputs});__outputsStore={generation,snapshot};__twinkleNotifyExternalStore('outputs');
+    __twinkleForEachSurfaceHooks((hooks,dirty)=>{for(const [owner,slots] of hooks)for(const entry of slots){if(entry?.kind!=='outputs-store')continue;
+        try{const selected=entry.selector?entry.selector(snapshot):snapshot;entry.storeError=undefined;if(!Object.is(selected,entry.value))dirty.add(owner);}catch(error){entry.storeError=error;dirty.add(owner);}}});__twinkleRecordStoreChange('outputs',generation,before);return true;
 }
 function useOutputs(selector){if(__currentComponent===null)throw Error('useOutputs requires a component');if(selector!==undefined&&typeof selector!=='function')throw TypeError('useOutputs selector must be a function');
     const slot=__hookIndex++,hooks=__componentHooks.get(__currentComponent),normalized=selector??null;
-    const entry=__nickelSelectedStoreEntry(hooks,slot,'outputs-store',normalized,'outputs');
-    entry.storeError=undefined;entry.value=__nickelSelectedValue(entry,normalized,__outputsStore.snapshot,__outputsStore.generation,'outputs');entry.generation=__outputsStore.generation;return entry.value;}
+    const entry=__twinkleSelectedStoreEntry(hooks,slot,'outputs-store',normalized,'outputs');
+    entry.storeError=undefined;entry.value=__twinkleSelectedValue(entry,normalized,__outputsStore.snapshot,__outputsStore.generation,'outputs');entry.generation=__outputsStore.generation;return entry.value;}
 function __nickelRegisterSettingsPageSurface(id, selection) {
     if (typeof selection !== 'string')
         throw Error('invalid Settings page surface selection');
-    __nickelRegisterSurfaceApp(id, function App() {
-        const {children, ...props} = __nickelHydrateComponentProps(__nickelData.__componentProps);
+    __twinkleRegisterSurfaceApp(id, function App() {
+        const {children, ...props} = __twinkleHydrateComponentProps(__twinkleData.__componentProps);
         return h(__nickelRegisteredPageComponent(selection),
             props, ...(children ?? []));
     });
@@ -448,7 +448,7 @@ function __nickelReadSettingsValues() {
         if (__effects.length) throw Error('Settings getter emitted effects');
         return json;
     } finally {
-        __nickelRestoreHooks(hooks, values, 0);
+        __twinkleRestoreHooks(hooks, values, 0);
         __effects = effects;
     }
 }
@@ -459,7 +459,7 @@ function __nickelSetSettingsRegistry(provider, settings, pages) {
     if (provider !== __settingsProvider
         || JSON.stringify(settings) !== JSON.stringify(__settingsSnapshot)
         || JSON.stringify(pages) !== JSON.stringify(__settingsPagesSnapshot))
-        __nickelDirtyResourceConsumers('__settingsRegistry');
+        __twinkleDirtyResourceConsumers('__settingsRegistry');
     __settingsProvider = provider;
     __settingsSnapshot = settings;
     __settingsPagesSnapshot = pages;
@@ -485,8 +485,8 @@ function __readSettings(snapshot, page) {
     }
     return result;
 }
-function readPluginSettings() { __nickelMarkResourceRead('__settingsRegistry'); return __readSettings(__settingsSnapshot, false); }
-function readSettingsPages() { __nickelMarkResourceRead('__settingsRegistry'); return __readSettings(__settingsPagesSnapshot, true); }
+function readPluginSettings() { __twinkleMarkResourceRead('__settingsRegistry'); return __readSettings(__settingsSnapshot, false); }
+function readSettingsPages() { __twinkleMarkResourceRead('__settingsRegistry'); return __readSettings(__settingsPagesSnapshot, true); }
 function readPluginSettingsPages() { return readSettingsPages(); }
 function __nickelRegisteredPageComponent(id) {
     const entry = __settingsPages.get(id);
@@ -511,7 +511,7 @@ function __nickelRetireSettings() {
 
 function __nickelConnectivityEffect(resource, operation, value, identity = false) {
     if (!identity && typeof value !== 'boolean') throw TypeError('invalid connectivity value');
-    const snapshot = __nickelData[resource];
+    const snapshot = __twinkleData[resource];
     if (!snapshot || !snapshot.available || !snapshot.operations?.[operation]) throw Error('connectivity operation is unavailable');
     const effect = {type:resource + '.' + operation, revision:snapshot.revision};
     effect[identity ? 'id' : 'value'] = value;
@@ -533,12 +533,12 @@ function __nickelSessionAction(action) {
 }
 
 function __nickelFeatureEffect(operation, values = {}) {
-    const snapshot = __nickelData.features;
+    const snapshot = __twinkleData.features;
     if (!snapshot?.available || !snapshot.operations?.[operation]) throw Error('feature operation is unavailable');
     __effects.push({type:'features.' + operation, revision:snapshot.revision, ...values});
 }
 function __nickelDecideShell(token, revision, confirm) {
-            const snapshot = __nickelResource('plugins', {available:false,writable:false});
+            const snapshot = __twinkleResource('plugins', {available:false,writable:false});
             const preview = snapshot.shellPreview;
             if (!snapshot.available || !snapshot.writable || !preview || typeof token !== 'string' || token !== preview.token || !preview[confirm ? 'canConfirm' : 'canRevert']) throw Error('shell preview decision is unavailable');
             if (typeof revision !== 'string' || revision !== snapshot.revision) throw Error('plugin inventory is stale');
@@ -549,22 +549,22 @@ function __nickelWorkspaceEffect(operation,id) {
     if (!snapshot.available || !snapshot.operations[operation]) throw Error('workspace operation unavailable');
     const effect = {type:'workspaces.'+operation,revision:snapshot.revision};
     if (operation !== 'create') {
-        id=__nickelIdentity(id);
+        id=__twinkleIdentity(id);
         if (!snapshot.workspaces.some(workspace=>workspace.id===id)) throw Error('unknown workspace');
         effect.id=id;
     }
     __effects.push(effect);
 }
 // Nickel-owned shell service clients. Evaluated only by Nickel host constructors.
-__nickelPublicRuntimeGlobals = Object.freeze([
-    ...__nickelPublicRuntimeGlobals, 'nickel'
+__twinklePublicRuntimeGlobals = Object.freeze([
+    ...__twinklePublicRuntimeGlobals, 'nickel'
 ]);
 const nickel = Object.freeze({
     shortcuts: Object.freeze({
-        get() { return __nickelResource('shortcuts', {available:false,editable:false,shortcuts:[],reason:'Shortcut read capability is unavailable'}); }
+        get() { return __twinkleResource('shortcuts', {available:false,editable:false,shortcuts:[],reason:'Shortcut read capability is unavailable'}); }
     }),
     features: Object.freeze({
-        get() { return __nickelResource('features', {available:false,operations:{},keyboard:{},codex:{},reason:'Feature read capability is unavailable'}); },
+        get() { return __twinkleResource('features', {available:false,operations:{},keyboard:{},codex:{},reason:'Feature read capability is unavailable'}); },
         setKeyboardMode(mode) {
             if (!['automatic','enabled','disabled'].includes(mode)) throw TypeError('invalid keyboard mode');
             __nickelFeatureEffect('setKeyboardMode', {mode});
@@ -576,11 +576,11 @@ const nickel = Object.freeze({
         retryCodex() { __nickelFeatureEffect('retryCodex'); }
     }),
     appearance: Object.freeze({
-        get() { return __nickelResource('appearance', {available:false,reason:'Appearance read capability is unavailable'}); },
+        get() { return __twinkleResource('appearance', {available:false,reason:'Appearance read capability is unavailable'}); },
         set(preferences) { __nickelAppearanceEffect('appearance', preferences); }
     }),
     wallpaper: Object.freeze({
-        get() { return __nickelResource('wallpaper', {available:false,reason:'Wallpaper read capability is unavailable',images:[]}); },
+        get() { return __twinkleResource('wallpaper', {available:false,reason:'Wallpaper read capability is unavailable',images:[]}); },
         listImages() { return this.get().images; },
         setPosition(position) { __nickelAppearanceEffect('wallpaper', {kind:'set_position',position}); },
         resetCustomImage() { __nickelAppearanceEffect('wallpaper', {kind:'reset_custom_image'}); },
@@ -590,13 +590,13 @@ const nickel = Object.freeze({
             if (!snapshot.available || snapshot.writable !== true || !Number.isSafeInteger(snapshot.generation) || snapshot.generation < 1 || !snapshot.chooser || snapshot.chooser.available !== true || snapshot.chooser.pending) throw Error('Native image chooser is unavailable');
             __effects.push({type:'wallpaper.chooseImage',transaction:{generation:snapshot.generation,prior:JSON.parse(JSON.stringify(snapshot.configured))}});
         },
-        selectImage(id) { __nickelAppearanceEffect('wallpaper', {kind:'select_approved_image',image_id:__nickelIdentity(id)}); }
+        selectImage(id) { __nickelAppearanceEffect('wallpaper', {kind:'select_approved_image',image_id:__twinkleIdentity(id)}); }
     }),
     system: Object.freeze({
-        get() { return __nickelResource('system', {available:false,version:null,platform:null,architecture:null}); }
+        get() { return __twinkleResource('system', {available:false,version:null,platform:null,architecture:null}); }
     }),
     session: Object.freeze({
-        get() { return __nickelResource('session', {revision:'',account:null,locked:false,support:{lock:false,logout:false,suspend:false,reboot:false,powerOff:false,restartShell:false}}); },
+        get() { return __twinkleResource('session', {revision:'',account:null,locked:false,support:{lock:false,logout:false,suspend:false,reboot:false,powerOff:false,restartShell:false}}); },
         lock() { __nickelSessionAction('lock'); },
         logout() { __nickelSessionAction('logout'); },
         suspend() { __nickelSessionAction('suspend'); },
@@ -605,7 +605,7 @@ const nickel = Object.freeze({
         restartShell() { __nickelSessionAction('restartShell'); }
     }),
     audio: Object.freeze({
-        get() { return __nickelResource('audio', {available:false,muted:false,percent:0,devices:[]}); },
+        get() { return __twinkleResource('audio', {available:false,muted:false,percent:0,devices:[]}); },
         outputs() { return this.get().devices; },
         setVolume(percent) {
             if (!Number.isInteger(percent) || percent < 0 || percent > 100) throw TypeError('volume must be an integer from 0 to 100');
@@ -615,13 +615,13 @@ const nickel = Object.freeze({
             if (typeof muted !== 'boolean') throw TypeError('muted must be boolean');
             __effects.push({type:'control-action',action:'audio-mute',value:muted});
         },
-        selectOutput(id) { __effects.push({type:'control-action',action:'audio-device',value:__nickelIdentity(id)}); }
+        selectOutput(id) { __effects.push({type:'control-action',action:'audio-device',value:__twinkleIdentity(id)}); }
     }),
     run: Object.freeze({
-        get() { return __nickelResource('run', {available:false, status:null}); },
+        get() { return __twinkleResource('run', {available:false, status:null}); },
         execute(command, expectedRevision) {
             if (typeof command !== 'string' || !command.trim() || Array.from(command.trim()).length > 4096 || command.includes('\0')) throw TypeError('invalid Run command');
-            const current = __nickelResource('run', {available:false});
+            const current = __twinkleResource('run', {available:false});
             const revision = expectedRevision === undefined ? current.revision : expectedRevision;
             if (!current.available || typeof revision !== 'string' || !revision.length || revision.length > 128) throw Error('Run unavailable');
             __effects.push({type:'run.execute', command:command.trim(), revision});
@@ -632,7 +632,7 @@ const nickel = Object.freeze({
         toggle() { __effects.push({type:'projects.toggle'}); }
     }),
     keyboard: Object.freeze({
-        get() { return __nickelResource('keyboard', {available:false,generation:0,rows:[],recipientAvailable:false,operations:{}}); },
+        get() { return __twinkleResource('keyboard', {available:false,generation:0,rows:[],recipientAvailable:false,operations:{}}); },
         toggle() { __effects.push({type:'keyboard.toggle'}); },
         press(id) { if(typeof id !== 'string' || !id || id.length > 64) throw TypeError('invalid keyboard key'); __effects.push({type:'keyboard.press',id,generation:this.get().generation}); },
         hide() { __effects.push({type:'keyboard.hide',generation:this.get().generation}); },
@@ -641,13 +641,13 @@ const nickel = Object.freeze({
         resize(delta) { if(delta !== -32 && delta !== 32) throw TypeError('invalid keyboard resize'); __effects.push({type:'keyboard.resize',delta,generation:this.get().generation}); }
     }),
     clock: Object.freeze({
-        get() { return __nickelResource('clock', {unixMilliseconds:Date.now(),utcOffsetMinutes:0}); }
+        get() { return __twinkleResource('clock', {unixMilliseconds:Date.now(),utcOffsetMinutes:0}); }
     }),
     notifications: Object.freeze({
-        get() { return __nickelResource('notifications', {notification:null,history:[]}); },
+        get() { return __twinkleResource('notifications', {notification:null,history:[]}); },
         invoke(id, key) {
             if (!Number.isSafeInteger(id) || id < 1 || id > 4294967295) throw TypeError('invalid notification identity');
-            key = __nickelIdentity(key);
+            key = __twinkleIdentity(key);
             if (key.length > 128) throw TypeError('invalid notification action');
             __effects.push({type:'notifications.invoke',id,key});
         },
@@ -657,58 +657,58 @@ const nickel = Object.freeze({
         }
     }),
     tray: Object.freeze({
-        list() { return __nickelResource('tray', []); },
-        activate(id) { __effects.push({type:'tray.activate',id:__nickelIdentity(id)}); },
-        contextMenu(id) { __effects.push({type:'tray.contextMenu',id:__nickelIdentity(id)}); }
+        list() { return __twinkleResource('tray', []); },
+        activate(id) { __effects.push({type:'tray.activate',id:__twinkleIdentity(id)}); },
+        contextMenu(id) { __effects.push({type:'tray.contextMenu',id:__twinkleIdentity(id)}); }
     }),
     windowPreviews: Object.freeze({
-        get() { return __nickelResource('windowPreviews', {available:false, windows:[]}); },
-        activate(id, revision) { __effects.push({type:'windowPreviews.action', action:'activate', window:__nickelIdentity(id), revision:__nickelIdentity(revision)}); },
-        close(id, revision) { __effects.push({type:'windowPreviews.action', action:'close', window:__nickelIdentity(id), revision:__nickelIdentity(revision)}); },
-        openMenu(id, revision) { __effects.push({type:'windowPreviews.action', action:'menu', window:__nickelIdentity(id), revision:__nickelIdentity(revision)}); }
+        get() { return __twinkleResource('windowPreviews', {available:false, windows:[]}); },
+        activate(id, revision) { __effects.push({type:'windowPreviews.action', action:'activate', window:__twinkleIdentity(id), revision:__twinkleIdentity(revision)}); },
+        close(id, revision) { __effects.push({type:'windowPreviews.action', action:'close', window:__twinkleIdentity(id), revision:__twinkleIdentity(revision)}); },
+        openMenu(id, revision) { __effects.push({type:'windowPreviews.action', action:'menu', window:__twinkleIdentity(id), revision:__twinkleIdentity(revision)}); }
     }),
     windows: Object.freeze({
-        list() { return __nickelResource('windows', []); },
-        activate(id) { __effects.push({type:'windows.focus',id:__nickelIdentity(id)}); },
-        close(id) { __effects.push({type:'windows.close',id:__nickelIdentity(id)}); },
-        menu() { return __nickelResource('windowMenu', {targetId:null}); },
+        list() { return __twinkleResource('windows', []); },
+        activate(id) { __effects.push({type:'windows.focus',id:__twinkleIdentity(id)}); },
+        close(id) { __effects.push({type:'windows.close',id:__twinkleIdentity(id)}); },
+        menu() { return __twinkleResource('windowMenu', {targetId:null}); },
         dismissMenu(options) { __effects.push({type:'windows.dismissMenu', restoreFocus: options?.restoreFocus ?? true}); },
-        showMenu(id) { __effects.push({type:'windows.showMenu',id:__nickelIdentity(id)}); },
-        minimize(id) { __effects.push({type:'windows.minimize',id:__nickelIdentity(id)}); },
-        maximize(id) { __effects.push({type:'windows.maximize',id:__nickelIdentity(id)}); },
-        restore(id) { __effects.push({type:'windows.restore',id:__nickelIdentity(id)}); },
-        toggleMaximize(id) { __effects.push({type:'windows.toggleMaximize',id:__nickelIdentity(id)}); },
-        toggleFullscreen(id) { __effects.push({type:'windows.toggleFullscreen',id:__nickelIdentity(id)}); },
-        snapLeading(id) { __effects.push({type:'windows.snapLeading',id:__nickelIdentity(id)}); },
-        snapTrailing(id) { __effects.push({type:'windows.snapTrailing',id:__nickelIdentity(id)}); },
-        destinations() { return __nickelResource('windowDestinations', {workspaces:[],outputs:[]}); },
-        moveToWorkspace(id, workspace) { __effects.push({type:'windows.moveToWorkspace',id:__nickelIdentity(id),destination:__nickelIdentity(workspace)}); },
-        moveToOutput(id, output) { __effects.push({type:'windows.moveToOutput',id:__nickelIdentity(id),destination:String(output)}); }
+        showMenu(id) { __effects.push({type:'windows.showMenu',id:__twinkleIdentity(id)}); },
+        minimize(id) { __effects.push({type:'windows.minimize',id:__twinkleIdentity(id)}); },
+        maximize(id) { __effects.push({type:'windows.maximize',id:__twinkleIdentity(id)}); },
+        restore(id) { __effects.push({type:'windows.restore',id:__twinkleIdentity(id)}); },
+        toggleMaximize(id) { __effects.push({type:'windows.toggleMaximize',id:__twinkleIdentity(id)}); },
+        toggleFullscreen(id) { __effects.push({type:'windows.toggleFullscreen',id:__twinkleIdentity(id)}); },
+        snapLeading(id) { __effects.push({type:'windows.snapLeading',id:__twinkleIdentity(id)}); },
+        snapTrailing(id) { __effects.push({type:'windows.snapTrailing',id:__twinkleIdentity(id)}); },
+        destinations() { return __twinkleResource('windowDestinations', {workspaces:[],outputs:[]}); },
+        moveToWorkspace(id, workspace) { __effects.push({type:'windows.moveToWorkspace',id:__twinkleIdentity(id),destination:__twinkleIdentity(workspace)}); },
+        moveToOutput(id, output) { __effects.push({type:'windows.moveToOutput',id:__twinkleIdentity(id),destination:String(output)}); }
     }),
     applications: Object.freeze({
-        list() { return __nickelResource('applications', []); },
+        list() { return __twinkleResource('applications', []); },
         search(query) {
             if (typeof query !== 'string' || Array.from(query).length > 512 || query.includes('\0')) throw TypeError('invalid application search query');
             __effects.push({type:'applications.search',query});
         },
-        searchResults() { return __nickelResource('applicationSearch', {available:false, query:'', results:[], total:0, reason:'Application search is unavailable'}); },
+        searchResults() { return __twinkleResource('applicationSearch', {available:false, query:'', results:[], total:0, reason:'Application search is unavailable'}); },
         retryPinSave() { __effects.push({type:'applications-retry-pin-save'}); },
-        launch(id) { __effects.push({type:'applications.launch',id:__nickelIdentity(id)}); },
-        togglePin(id) { __effects.push({type:'applications.togglePin',id:__nickelIdentity(id)}); },
+        launch(id) { __effects.push({type:'applications.launch',id:__twinkleIdentity(id)}); },
+        togglePin(id) { __effects.push({type:'applications.togglePin',id:__twinkleIdentity(id)}); },
         movePin(id, direction) {
             if (direction !== -1 && direction !== 1) throw TypeError('pin direction must be -1 or 1');
-            __effects.push({type:'applications.movePin',id:__nickelIdentity(id),direction});
+            __effects.push({type:'applications.movePin',id:__twinkleIdentity(id),direction});
         }
     }),
     surfaces: Object.freeze({
-        show(id) { __effects.push({type:'surface.show',surfaceId:__nickelIdentity(id)}); },
-        hide(id) { __effects.push({type:'surface.hide',surfaceId:__nickelIdentity(id)}); },
-        focus(id) { __effects.push({type:'surface.focus',surfaceId:__nickelIdentity(id)}); },
+        show(id) { __effects.push({type:'surface.show',surfaceId:__twinkleIdentity(id)}); },
+        hide(id) { __effects.push({type:'surface.hide',surfaceId:__twinkleIdentity(id)}); },
+        focus(id) { __effects.push({type:'surface.focus',surfaceId:__twinkleIdentity(id)}); },
         setPlacement(id, {anchor, offsetX = 0, offsetY = 0}) {
             if (typeof anchor !== 'string' || !Number.isInteger(offsetX) || !Number.isInteger(offsetY)
                 || Math.abs(offsetX) > 8192 || Math.abs(offsetY) > 8192)
                 throw TypeError('invalid surface placement');
-            __effects.push({type:'surface.setPlacement',surfaceId:__nickelIdentity(id),anchor,offsetX,offsetY});
+            __effects.push({type:'surface.setPlacement',surfaceId:__twinkleIdentity(id),anchor,offsetX,offsetY});
         }
     }),
     // Ordinary package validation has no installed composition catalog. The
@@ -718,12 +718,12 @@ const nickel = Object.freeze({
         return Object.freeze([]);
     },
     component(contract) {
-        const component = __nickelPublicComponents.get(contract);
+        const component = __twinklePublicComponents.get(contract);
         if (!component) throw Error(`unknown public component ${contract}`);
         return component;
     },
     preferences: Object.freeze({
-        get() { return __nickelResource('preferences', {available:false,writable:false,reason:'Preferences read capability is unavailable'}); },
+        get() { return __twinkleResource('preferences', {available:false,writable:false,reason:'Preferences read capability is unavailable'}); },
         set(patch) {
             const snapshot = this.get();
             if (!snapshot.available || !snapshot.writable) throw Error('preferences write capability is unavailable');
@@ -733,12 +733,12 @@ const nickel = Object.freeze({
         }
     }),
     plugins: Object.freeze({
-        get() { return __nickelResource('plugins', {available:false,writable:false,reason:'Plugin read capability is unavailable',plugins:[],lastResult:null}); },
+        get() { return __twinkleResource('plugins', {available:false,writable:false,reason:'Plugin read capability is unavailable',plugins:[],lastResult:null}); },
         list() { return this.get().plugins; },
         enable(id, revision) { this.setEnabled(id, true, revision); },
         disable(id, revision) { this.setEnabled(id, false, revision); },
         selectShell(id, revision) {
-            id = __nickelIdentity(id);
+            id = __twinkleIdentity(id);
             const snapshot = this.get();
             const plugin = snapshot.plugins.find(plugin => plugin.id === id);
             if (!snapshot.available || !snapshot.writable || snapshot.shellPreview || !plugin || !plugin.shell) throw Error('shell selection is unavailable');
@@ -748,7 +748,7 @@ const nickel = Object.freeze({
         confirmShell(token, revision) { __nickelDecideShell(token, revision, true); },
         revertShell(token, revision) { __nickelDecideShell(token, revision, false); },
         setSetting(id, key, value, revision) {
-            id = __nickelIdentity(id); key = __nickelIdentity(key);
+            id = __twinkleIdentity(id); key = __twinkleIdentity(key);
             const snapshot = this.get();
             const plugin = snapshot.plugins.find(plugin => plugin.id === id);
             const setting = plugin?.settings?.find(setting => setting.id === key);
@@ -758,7 +758,7 @@ const nickel = Object.freeze({
             __effects.push({type:'plugins.setSetting',id,key,revision,priorValue:setting.value,value});
         },
         setEnabled(id, enabled, revision) {
-            id = __nickelIdentity(id);
+            id = __twinkleIdentity(id);
             const snapshot = this.get();
             const plugin = snapshot.plugins.find(plugin => plugin.id === id);
             if (!snapshot.available || !snapshot.writable || !plugin) throw Error('plugin management is unavailable');
@@ -768,17 +768,17 @@ const nickel = Object.freeze({
         }
     }),
     associations: Object.freeze({
-        get() { return __nickelResource('associations', {available:false,reason:'Associations read capability is unavailable',targets:[],operations:{},lastResult:null}); },
+        get() { return __twinkleResource('associations', {available:false,reason:'Associations read capability is unavailable',targets:[],operations:{},lastResult:null}); },
         list() { return this.get().targets; },
         getHandlers(targetId) {
-            const target = this.list().find(target => target.id === __nickelIdentity(targetId));
+            const target = this.list().find(target => target.id === __twinkleIdentity(targetId));
             if (!target) throw Error('association target is unavailable');
             return {revision:this.get().revision,target,handlers:target.handlers};
         },
         setDefault(targetId, handlerId, expectedRevision) {
             const snapshot = this.get();
-            const target = snapshot.targets.find(target => target.id === __nickelIdentity(targetId));
-            handlerId = __nickelIdentity(handlerId);
+            const target = snapshot.targets.find(target => target.id === __twinkleIdentity(targetId));
+            handlerId = __twinkleIdentity(handlerId);
             if (typeof expectedRevision !== 'string' || !/^[1-9][0-9]*$/.test(expectedRevision) || expectedRevision !== snapshot.revision)
                 throw Error('association snapshot is stale');
             if (!snapshot.available || !target?.canSetDefault || target.protected)
@@ -790,39 +790,39 @@ const nickel = Object.freeze({
         openSystemSettings() { __effects.push({type:'associations.openSystemSettings'}); }
     }),
     wifi: Object.freeze({
-        get() { return __nickelResource('wifi', {available:false, reason:'Wi-Fi read capability is unavailable', enabled:false, adaptersAvailable:false, adapters:[], networks:[], operations:{}}); },
+        get() { return __twinkleResource('wifi', {available:false, reason:'Wi-Fi read capability is unavailable', enabled:false, adaptersAvailable:false, adapters:[], networks:[], operations:{}}); },
         listNetworks() { return this.get().networks; },
         setEnabled(value) { __nickelConnectivityEffect('wifi', 'setEnabled', value); },
-        connect(id) { __nickelConnectivityEffect('wifi', 'connect', __nickelIdentity(id), true); },
-        disconnect(id) { __nickelConnectivityEffect('wifi', 'disconnect', __nickelIdentity(id), true); }
+        connect(id) { __nickelConnectivityEffect('wifi', 'connect', __twinkleIdentity(id), true); },
+        disconnect(id) { __nickelConnectivityEffect('wifi', 'disconnect', __twinkleIdentity(id), true); }
     }),
     bluetooth: Object.freeze({
-        get() { return __nickelResource('bluetooth', {available:false, reason:'Bluetooth read capability is unavailable', adapterName:'', powered:false, discovering:false, devices:[], operations:{}}); },
+        get() { return __twinkleResource('bluetooth', {available:false, reason:'Bluetooth read capability is unavailable', adapterName:'', powered:false, discovering:false, devices:[], operations:{}}); },
         listDevices() { return this.get().devices; },
         setPowered(value) { __nickelConnectivityEffect('bluetooth', 'setPowered', value); },
         setDiscovery(value) { __nickelConnectivityEffect('bluetooth', 'setDiscovery', value); },
-        connect(id) { __nickelConnectivityEffect('bluetooth', 'connect', __nickelIdentity(id), true); },
-        disconnect(id) { __nickelConnectivityEffect('bluetooth', 'disconnect', __nickelIdentity(id), true); },
-        pair(id) { __nickelConnectivityEffect('bluetooth', 'pair', __nickelIdentity(id), true); }
+        connect(id) { __nickelConnectivityEffect('bluetooth', 'connect', __twinkleIdentity(id), true); },
+        disconnect(id) { __nickelConnectivityEffect('bluetooth', 'disconnect', __twinkleIdentity(id), true); },
+        pair(id) { __nickelConnectivityEffect('bluetooth', 'pair', __twinkleIdentity(id), true); }
     }),
     registerSetting, registerSettingsPage, readPluginSettings, readSettingsPages, readPluginSettingsPages,
     request(effect) { __effects.push(effect); },
     openDialog(id) { __effects.push(`open-dialog:${id}`); },
     openMenu(id) { __effects.push(`open-menu:${id}`); },
     workspaces: Object.freeze({
-        get() { return __nickelResource('workspaces',{available:false,workspaces:[],operations:{}}); },
+        get() { return __twinkleResource('workspaces',{available:false,workspaces:[],operations:{}}); },
         switch(id) { __nickelWorkspaceEffect('switch',id); },
         create() { __nickelWorkspaceEffect('create'); },
         remove(id) { __nickelWorkspaceEffect('remove',id); }
     }),
     desktop: Object.freeze({
-        get() { return __nickelResource('desktop',{available:false,operations:{}}); },
+        get() { return __twinkleResource('desktop',{available:false,operations:{}}); },
         toggleShowDesktop() { if (!this.get().operations.toggleShowDesktop) throw Error('show desktop unavailable'); __effects.push({type:'desktop.toggleShowDesktop'}); }
     }),
     displays: Object.freeze({
         get() {
-            __nickelMarkResourceRead('displays');
-            const snapshot = __nickelData.displays;
+            __twinkleMarkResourceRead('displays');
+            const snapshot = __twinkleData.displays;
             return snapshot === undefined ? undefined : JSON.parse(JSON.stringify(snapshot));
         },
         previewProjection(mode) {
@@ -830,7 +830,7 @@ const nickel = Object.freeze({
             if (!snapshot?.projectionModes?.some(entry=>entry.id===mode) || snapshot.pending_confirmation) throw Error('display projection unavailable');
             __effects.push({type:'displays.previewProjection',mode,revision:snapshot.revision});
         },
-        getApplicationScale() { return __nickelResource('displays', {}).application_scale || {available:false,reason:'Application scale capability is unavailable'}; },
+        getApplicationScale() { return __twinkleResource('displays', {}).application_scale || {available:false,reason:'Application scale capability is unavailable'}; },
         setApplicationScale(policy, expectedRevision) {
             const snapshot = this.getApplicationScale();
             const revision = expectedRevision === undefined ? snapshot.revision : expectedRevision;
@@ -861,20 +861,20 @@ const nickel = Object.freeze({
         confirm() { __effects.push({type: 'displays.confirm'}); },
         revert() { __effects.push({type: 'displays.revert'}); }
     }),
-    get data() { return __nickelData; }
+    get data() { return __twinkleData; }
 });
 
 
-__nickelPublicRuntimeGlobals = Object.freeze([...__nickelPublicRuntimeGlobals,
+__twinklePublicRuntimeGlobals = Object.freeze([...__twinklePublicRuntimeGlobals,
     'registerSetting','registerSettingsPage','readPluginSettings','readSettingsPages','readPluginSettingsPages']);
 __twinkleRegisterCheckpointParticipant({
     capture(copy) { return {values:copy(__settingsValues),settings:copy(__settingsSnapshot),pages:copy(__settingsPagesSnapshot)}; },
     restore(state,original) { __settingsValues=original(state.values);__settingsSnapshot=original(state.settings);__settingsPagesSnapshot=original(state.pages); }
 });
 
-__nickelPublicRuntimeGlobals=Object.freeze([...__nickelPublicRuntimeGlobals,'NickelStores','useWindows','useActiveWindow','useWindowPreviews','useWindowMenu','useApplications','useNotifications','useWorkspaces','useWorkspace','useOutputs']);
+__twinklePublicRuntimeGlobals=Object.freeze([...__twinklePublicRuntimeGlobals,'NickelStores','useWindows','useActiveWindow','useWindowPreviews','useWindowMenu','useApplications','useNotifications','useWorkspaces','useWorkspace','useOutputs']);
 
 __twinkleOutputResolver = name => { const topology=useOutputs(); return name===null?null:topology.outputs.find(output=>output.name===name)??null; };
 
 function useCapability(name) { return useHostCapability(name); }
-__nickelPublicRuntimeGlobals=Object.freeze([...__nickelPublicRuntimeGlobals,'useCapability']);
+__twinklePublicRuntimeGlobals=Object.freeze([...__twinklePublicRuntimeGlobals,'useCapability']);
