@@ -7341,7 +7341,7 @@ dependencies = [
 [[package]]
 name = "twinkle"
 version = "0.2.0"
-source = "git+https://github.com/shortontech/twinkle.git?rev=57e6e1d75e6cdfe0aacc7c1d80d4ea74c0873ee1#57e6e1d75e6cdfe0aacc7c1d80d4ea74c0873ee1"
+source = "git+https://github.com/shortontech/twinkle.git?rev=a9f2132bd9a6aba0d7fb0503449079f6c515da6b#a9f2132bd9a6aba0d7fb0503449079f6c515da6b"
 dependencies = [
  "arboard",
  "cosmic-text",
@@ -7362,7 +7362,7 @@ dependencies = [
 [[package]]
 name = "twinkle-input"
 version = "0.2.0"
-source = "git+https://github.com/shortontech/twinkle.git?rev=57e6e1d75e6cdfe0aacc7c1d80d4ea74c0873ee1#57e6e1d75e6cdfe0aacc7c1d80d4ea74c0873ee1"
+source = "git+https://github.com/shortontech/twinkle.git?rev=a9f2132bd9a6aba0d7fb0503449079f6c515da6b#a9f2132bd9a6aba0d7fb0503449079f6c515da6b"
 dependencies = [
  "gilrs",
  "serde",
@@ -7373,7 +7373,7 @@ dependencies = [
 [[package]]
 name = "twinkle-jsx-runtime"
 version = "0.2.0"
-source = "git+https://github.com/shortontech/twinkle.git?rev=57e6e1d75e6cdfe0aacc7c1d80d4ea74c0873ee1#57e6e1d75e6cdfe0aacc7c1d80d4ea74c0873ee1"
+source = "git+https://github.com/shortontech/twinkle.git?rev=a9f2132bd9a6aba0d7fb0503449079f6c515da6b#a9f2132bd9a6aba0d7fb0503449079f6c515da6b"
 dependencies = [
  "oxc_allocator",
  "oxc_codegen",
@@ -7390,7 +7390,7 @@ dependencies = [
 [[package]]
 name = "twinkle-macros"
 version = "0.2.0"
-source = "git+https://github.com/shortontech/twinkle.git?rev=57e6e1d75e6cdfe0aacc7c1d80d4ea74c0873ee1#57e6e1d75e6cdfe0aacc7c1d80d4ea74c0873ee1"
+source = "git+https://github.com/shortontech/twinkle.git?rev=a9f2132bd9a6aba0d7fb0503449079f6c515da6b#a9f2132bd9a6aba0d7fb0503449079f6c515da6b"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -7401,7 +7401,7 @@ dependencies = [
 [[package]]
 name = "twinkle-presentation"
 version = "0.2.0"
-source = "git+https://github.com/shortontech/twinkle.git?rev=57e6e1d75e6cdfe0aacc7c1d80d4ea74c0873ee1#57e6e1d75e6cdfe0aacc7c1d80d4ea74c0873ee1"
+source = "git+https://github.com/shortontech/twinkle.git?rev=a9f2132bd9a6aba0d7fb0503449079f6c515da6b#a9f2132bd9a6aba0d7fb0503449079f6c515da6b"
 dependencies = [
  "cssparser",
  "image",
@@ -7415,7 +7415,7 @@ dependencies = [
 [[package]]
 name = "twinkle-protocol"
 version = "0.2.0"
-source = "git+https://github.com/shortontech/twinkle.git?rev=57e6e1d75e6cdfe0aacc7c1d80d4ea74c0873ee1#57e6e1d75e6cdfe0aacc7c1d80d4ea74c0873ee1"
+source = "git+https://github.com/shortontech/twinkle.git?rev=a9f2132bd9a6aba0d7fb0503449079f6c515da6b#a9f2132bd9a6aba0d7fb0503449079f6c515da6b"
 dependencies = [
  "serde",
  "serde_json",
@@ -7424,7 +7424,7 @@ dependencies = [
 [[package]]
 name = "twinkle-render-assets"
 version = "0.2.0"
-source = "git+https://github.com/shortontech/twinkle.git?rev=57e6e1d75e6cdfe0aacc7c1d80d4ea74c0873ee1#57e6e1d75e6cdfe0aacc7c1d80d4ea74c0873ee1"
+source = "git+https://github.com/shortontech/twinkle.git?rev=a9f2132bd9a6aba0d7fb0503449079f6c515da6b#a9f2132bd9a6aba0d7fb0503449079f6c515da6b"
 dependencies = [
  "cosmic-text",
  "image",
@@ -7433,7 +7433,7 @@ dependencies = [
 [[package]]
 name = "twinkle-testkit"
 version = "0.2.0"
-source = "git+https://github.com/shortontech/twinkle.git?rev=57e6e1d75e6cdfe0aacc7c1d80d4ea74c0873ee1#57e6e1d75e6cdfe0aacc7c1d80d4ea74c0873ee1"
+source = "git+https://github.com/shortontech/twinkle.git?rev=a9f2132bd9a6aba0d7fb0503449079f6c515da6b#a9f2132bd9a6aba0d7fb0503449079f6c515da6b"
 dependencies = [
  "serde",
  "serde_json",
@@ -7444,12 +7444,12 @@ dependencies = [
 [[package]]
 name = "twinkle-theme"
 version = "0.2.0"
-source = "git+https://github.com/shortontech/twinkle.git?rev=57e6e1d75e6cdfe0aacc7c1d80d4ea74c0873ee1#57e6e1d75e6cdfe0aacc7c1d80d4ea74c0873ee1"
+source = "git+https://github.com/shortontech/twinkle.git?rev=a9f2132bd9a6aba0d7fb0503449079f6c515da6b#a9f2132bd9a6aba0d7fb0503449079f6c515da6b"
 
 [[package]]
 name = "twinkle-workbench"
 version = "0.2.0"
-source = "git+https://github.com/shortontech/twinkle.git?rev=57e6e1d75e6cdfe0aacc7c1d80d4ea74c0873ee1#57e6e1d75e6cdfe0aacc7c1d80d4ea74c0873ee1"
+source = "git+https://github.com/shortontech/twinkle.git?rev=a9f2132bd9a6aba0d7fb0503449079f6c515da6b#a9f2132bd9a6aba0d7fb0503449079f6c515da6b"
 dependencies = [
  "image",
  "twinkle",
@@ -8698,7 +8698,7 @@ checksum = "d6bbff5f0aada427a1e5a6da5f1f98158182f26556f345ac9e04d36d0ebed650"
 [[package]]
 name = "winit"
 version = "0.30.13"
-source = "git+https://github.com/shortontech/twinkle.git?rev=57e6e1d75e6cdfe0aacc7c1d80d4ea74c0873ee1#57e6e1d75e6cdfe0aacc7c1d80d4ea74c0873ee1"
+source = "git+https://github.com/shortontech/twinkle.git?rev=a9f2132bd9a6aba0d7fb0503449079f6c515da6b#a9f2132bd9a6aba0d7fb0503449079f6c515da6b"
 dependencies = [
  "ahash",
  "android-activity",
