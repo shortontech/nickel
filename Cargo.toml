@@ -129,13 +129,13 @@ pipewire-native = "0.1.4"
 pipewire-native-spa = "0.1.4"
 
 # Coherent upstream engine, executor, protocol and native window types.
-twinkle-jsx-runtime = { git = "https://github.com/shortontech/twinkle.git", rev = "d835822566fb6d448d88baccfcbe8e76b73a7b9d" }
-twinkle_ui = { package = "twinkle-ui", git = "https://github.com/shortontech/twinkle.git", rev = "d835822566fb6d448d88baccfcbe8e76b73a7b9d" }
-twinkle-presentation = { git = "https://github.com/shortontech/twinkle.git", rev = "d835822566fb6d448d88baccfcbe8e76b73a7b9d" }
-twinkle-testkit = { git = "https://github.com/shortontech/twinkle.git", rev = "d835822566fb6d448d88baccfcbe8e76b73a7b9d" }
-twinkle-input = { git = "https://github.com/shortontech/twinkle.git", rev = "d835822566fb6d448d88baccfcbe8e76b73a7b9d" }
-twinkle-macros = { git = "https://github.com/shortontech/twinkle.git", rev = "d835822566fb6d448d88baccfcbe8e76b73a7b9d" }
-twinkle-workbench = { git = "https://github.com/shortontech/twinkle.git", rev = "d835822566fb6d448d88baccfcbe8e76b73a7b9d" }
-twinkle-render-assets = { git = "https://github.com/shortontech/twinkle.git", rev = "d835822566fb6d448d88baccfcbe8e76b73a7b9d" }
-twinkle-protocol = { git = "https://github.com/shortontech/twinkle.git", rev = "d835822566fb6d448d88baccfcbe8e76b73a7b9d" }
-twinkle-theme = { git = "https://github.com/shortontech/twinkle.git", rev = "d835822566fb6d448d88baccfcbe8e76b73a7b9d" }
+twinkle-jsx-runtime = { git = "https://github.com/shortontech/twinkle.git", rev = "ff4b42cd6d3f8eb8206193ce3e6b239da9c6d08d" }
+twinkle_ui = { package = "twinkle-ui", git = "https://github.com/shortontech/twinkle.git", rev = "ff4b42cd6d3f8eb8206193ce3e6b239da9c6d08d" }
+twinkle-presentation = { git = "https://github.com/shortontech/twinkle.git", rev = "ff4b42cd6d3f8eb8206193ce3e6b239da9c6d08d" }
+twinkle-testkit = { git = "https://github.com/shortontech/twinkle.git", rev = "ff4b42cd6d3f8eb8206193ce3e6b239da9c6d08d" }
+twinkle-input = { git = "https://github.com/shortontech/twinkle.git", rev = "ff4b42cd6d3f8eb8206193ce3e6b239da9c6d08d" }
+twinkle-macros = { git = "https://github.com/shortontech/twinkle.git", rev = "ff4b42cd6d3f8eb8206193ce3e6b239da9c6d08d" }
+twinkle-workbench = { git = "https://github.com/shortontech/twinkle.git", rev = "ff4b42cd6d3f8eb8206193ce3e6b239da9c6d08d" }
+twinkle-render-assets = { git = "https://github.com/shortontech/twinkle.git", rev = "ff4b42cd6d3f8eb8206193ce3e6b239da9c6d08d" }
+twinkle-protocol = { git = "https://github.com/shortontech/twinkle.git", rev = "ff4b42cd6d3f8eb8206193ce3e6b239da9c6d08d" }
+twinkle-theme = { git = "https://github.com/shortontech/twinkle.git", rev = "ff4b42cd6d3f8eb8206193ce3e6b239da9c6d08d" }

@@ -1491,51 +1491,95 @@ impl PluginPanelApplication {
             self.reconcile_passive_effects()?;
             return Ok(true);
         }
-        let previous_data = self
-            .projection_data
-            .as_deref()
-            .unwrap_or("{\"query\":\"\",\"results\":[]}")
-            .to_owned();
-        let mut validation_rejected = false;
+        let data: Value = serde_json::from_str(&serialized).map_err(|error| error.to_string())?;
         let generation = self.next_generation;
-        self.next_generation = self.next_generation.saturating_add(1);
-        let accepted = {
+        let outcome = {
             let mut runtime = self.runtime.borrow_mut();
-            runtime.select_surface(&self.runtime_surface_id)?;
-            runtime.set_data(&serialized)?;
-            let surface = serde_json::from_str::<Value>(&serialized)
-                .ok()
-                .and_then(|data| data.get("surface").cloned())
-                .unwrap_or_else(|| serde_json::json!({}));
-            runtime.set_surface_store(
-                &format!("plugin-surface:{}", self.runtime_surface_id),
-                &surface,
-            )?;
-            let result = runtime.render_current(|value| {
-                self.accepted
-                    .readmit_validated(
-                        value,
+            runtime.begin_transaction()?;
+            let scheduled = (|| {
+                runtime.select_surface(&self.runtime_surface_id)?;
+                let surface = data
+                    .get("surface")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!({}));
+                runtime.set_surface_store(
+                    &format!("plugin-surface:{}", self.runtime_surface_id),
+                    &surface,
+                )?;
+                runtime.reconcile_data_patched(data.clone())
+            })();
+            let scheduled = match scheduled {
+                Ok(scheduled) => scheduled,
+                Err(error) => {
+                    runtime.finish_transaction(false)?;
+                    return Err(error);
+                }
+            };
+            match scheduled {
+                ScheduledPatch::Unchanged => {
+                    runtime.finish_event(true)?;
+                    runtime.finish_transaction(true)?;
+                    None
+                }
+                ScheduledPatch::Patched {
+                    patch,
+                    transport_bytes,
+                    ..
+                } => {
+                    let mut candidate = self.accepted.clone();
+                    let application_started = Instant::now();
+                    let accepted = candidate.apply_patch(
+                        &patch,
                         &self.manifest,
                         self.expected_surface_id.as_deref(),
                         &self.stylesheet,
                         generation,
-                    )
-                    .inspect_err(|_| validation_rejected = true)
-            });
-            if result.is_err() {
-                runtime.set_data(&previous_data)?;
-            }
-            match result {
-                Ok(accepted) => accepted,
-                Err(error) if validation_rejected => {
-                    self.last_error = Some(error);
-                    return Ok(false);
+                        transport_bytes,
+                    );
+                    let application_micros = application_started
+                        .elapsed()
+                        .as_micros()
+                        .min(u128::from(u64::MAX))
+                        as u64;
+                    runtime.report_typed_patch_apply(application_micros, accepted.is_ok())?;
+                    runtime.finish_patch_render(accepted.is_ok())?;
+                    runtime.finish_event(accepted.is_ok())?;
+                    runtime.finish_transaction(accepted.is_ok())?;
+                    match accepted {
+                        Ok(_) => Some((candidate, patch)),
+                        Err(error) => {
+                            self.last_error = Some(error);
+                            return Ok(false);
+                        }
+                    }
                 }
-                Err(error) => return Err(error),
             }
         };
-        self.accepted = accepted;
-        self.projection_value = serde_json::from_str(&serialized).ok();
+        if let Some((accepted, patch)) = outcome {
+            #[cfg(not(test))]
+            let _ = &patch;
+            #[cfg(test)]
+            {
+                self.diagnostic_patch_operations = self
+                    .diagnostic_patch_operations
+                    .saturating_add(patch.operations.len() as u64);
+                self.diagnostic_patch_counters.nodes_visited = self
+                    .diagnostic_patch_counters
+                    .nodes_visited
+                    .saturating_add(patch.counters.nodes_visited);
+                self.diagnostic_patch_counters.nodes_mutated = self
+                    .diagnostic_patch_counters
+                    .nodes_mutated
+                    .saturating_add(patch.counters.nodes_mutated);
+                self.diagnostic_patch_counters.tree_bytes = self
+                    .diagnostic_patch_counters
+                    .tree_bytes
+                    .saturating_add(patch.counters.tree_bytes);
+            }
+            self.accepted = accepted;
+            self.next_generation = generation.saturating_add(1);
+        }
+        self.projection_value = Some(data);
         self.projection_data = Some(serialized);
         self.last_error = None;
         self.reconcile_passive_effects()?;
@@ -8285,6 +8329,30 @@ mod tests {
             .find(|surface| surface.id == "notice")
             .unwrap();
         assert_eq!(app.resolved_surface(grant).unwrap().anchor, grant.anchor);
+    }
+
+    #[test]
+    fn standalone_host_data_updates_transport_typed_patches_not_cold_trees() {
+        let source = "function App() { return h(Panel, {}, nickel.data.cells.map(cell => h(Text, {key:cell.id,id:cell.id}, cell.value))); }";
+        let snapshot = |changed: bool| {
+            serde_json::json!({
+                "cells": (0..200).map(|index| serde_json::json!({
+                    "id": format!("cell-{index}"),
+                    "value": if changed && index < 6 { "changed" } else { "stable" },
+                })).collect::<Vec<_>>()
+            })
+        };
+        let mut app = PluginPanelApplication::new_with_manifest(
+            source,
+            manifest(),
+            Some(snapshot(false).to_string()),
+        )
+        .unwrap();
+
+        assert!(app.sync_data(&snapshot(true)).unwrap());
+        assert_eq!(app.diagnostic_patch_operations, 6);
+        assert_eq!(app.diagnostic_patch_counters.nodes_mutated, 6);
+        assert_eq!(app.diagnostic_patch_counters.tree_bytes, 0);
     }
 
     #[test]

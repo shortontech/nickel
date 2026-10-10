@@ -6,7 +6,7 @@ function __nickelCompositionSettingsPages() {
     }
     return result;
 }
-const __nickelCompositionClient = Object.freeze({...nickel, get data() { return nickel.data; },
+const __nickelCompositionClient = Object.freeze({...nickel, get data() { return __twinkleData; },
     component(contract) { return __twinkleCompositionClient.component(contract); },
     contributions(collection) { return __twinkleCompositionClient.contributions(collection); }
 });

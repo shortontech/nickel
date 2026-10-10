@@ -110,6 +110,16 @@ must be synthetic data for that surface. Host-owned resource fields take
 precedence over sample data. Validation checks the initial tree and manifest;
 use `dev` to exercise input, effects, and live resource changes.
 
+Nickel mounts a package with one complete cold render, then publishes recurring
+host snapshots through Twinkle's typed patch reconciliation. A cold render is
+reserved for initial mount, package reload, or an explicit oracle comparison;
+it must not follow ordinary clock, window, application, settings, or other live
+snapshot updates. Standalone Rust hosts must use
+`JsxRuntime::reconcile_data_patched` inside a transaction and apply the returned
+patch to their retained native tree. Calling `set_data_value` followed by
+`render_current` or `render_retained_panel` in an update loop rebuilds,
+serializes, transfers, and admits the complete tree.
+
 The selected shell package owns its taskbar, launcher, Quick Settings,
 notification, and optional Settings surfaces. Replacing an exported component
 uses ordinary package composition. Disabling or selecting a different shell

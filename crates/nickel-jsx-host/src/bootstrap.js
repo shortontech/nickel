@@ -861,7 +861,9 @@ const nickel = Object.freeze({
         confirm() { __effects.push({type: 'displays.confirm'}); },
         revert() { __effects.push({type: 'displays.revert'}); }
     }),
-    get data() { return __twinkleData; }
+    // Preserve Twinkle's component read tracking so recurring host snapshots
+    // can reconcile only the Nickel components that observed changed fields.
+    get data() { return twinkle.data; }
 });
 
 
