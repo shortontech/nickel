@@ -11,3 +11,4 @@ twinkle-jsx-runtime = { workspace = true }
 nickel-core = { path = "../nickel-core" }
 serde_json.workspace = true
 serde.workspace = true
+twinkle-protocol.workspace = true

@@ -18,6 +18,12 @@ struct Registrations {
 }
 
 pub trait SettingsRuntimeExt {
+    fn register_component_surface(
+        &mut self,
+        id: &str,
+        selection: &str,
+        registered_page: bool,
+    ) -> Result<(), String>;
     fn settings_revision(&self) -> u64;
     fn read_settings_values(
         &mut self,
@@ -36,6 +42,21 @@ pub trait SettingsRuntimeExt {
 }
 
 impl SettingsRuntimeExt for JsxRuntime {
+    fn register_component_surface(
+        &mut self,
+        id: &str,
+        selection: &str,
+        registered_page: bool,
+    ) -> Result<(), String> {
+        if !registered_page {
+            return self.register_component_mount(id, selection);
+        }
+        self.call_host_observation(
+            "__nickelRegisterComponentSurface",
+            &[Value::from(id), Value::from(selection), Value::Bool(true)],
+        )
+        .map(|_| ())
+    }
     fn settings_revision(&self) -> u64 {
         self.observation_revision()
     }

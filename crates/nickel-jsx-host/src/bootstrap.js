@@ -385,6 +385,7 @@ function __nickelRegisterComponentSurface(id, selection, registeredPage) {
         return h(registeredPage ? __nickelRegisteredPageComponent(selection) : twinkle.component(selection),
             props, ...(children ?? []));
     });
+    return true;
 }
 
 const __settings = new Map();

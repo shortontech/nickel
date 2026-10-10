@@ -1,6 +1,6 @@
 {
   "repository": "https://github.com/shortontech/twinkle",
-  "revision": "a9f2132bd9a6aba0d7fb0503449079f6c515da6b",
+  "revision": "ad072e83aebb7321efeb6b2ba711155b7887a33d",
   "path": "crates/twinkle-jsx-runtime/types/twinkle.d.ts",
   "sha256": "fcead46a899441cbe73491d54b3d05870b1c1ef31c5ab7585d001be55bd1f80a"
 }
