@@ -46,6 +46,8 @@ byte-identical to upstream and has revision/SHA provenance.
 | DMA-BUF readiness regressions | 3 passed | Producer readiness, immediate-ready commit and synchronized-parent admission |
 | Rust/native presentation dependency trees | No Nickel, V8, Oxc or JSX runtime | Default Rust consumer and no-default-features presentation |
 | Shell integration tests | 12 panel and 3 CSS tests passed | Downstream presentation and shipped CSS contracts |
+| Release admission workloads | 4 generic and 2 Nickel workloads passed | Keyed insert/remove/reorder, leaf hooks, lifecycle churn and independent mount/store revisions |
+| Aliased Windows consumer | Passed | Separate workspace uses `lights` to compile native UI/macros for Windows MSVC |
 | Selected package formatting and declaration bytes/SHA | Passed | Changed native code and packaged declaration provenance |
 
 Commands ran from the corresponding repository roots. The nested harness builds
@@ -74,9 +76,10 @@ configuration directories and shuts down its own compositor.
 - The nested harness is evidence for its listed assertions. It does not prove
   every Alt-Tab, physical-input, direct-session or multi-output requirement.
 - Release performance/cardinality evidence must be audited separately from the
-  default suite's ignored workloads. Prior focused workload results remain in
-  the active implementation specs; concurrent build timings are not a clean
-  performance baseline.
+  default suite's ignored workloads. Current focused release results are saved in
+  [twinkle-release-evidence.json](twinkle-release-evidence.json), with serialized
+  builds and six passing deterministic workloads. No comparable pre-extraction
+  timing baseline is claimed. Other ignored workloads remain individually open.
 - Existing Nickel authority/inventory/workbench assertions and the derived
   Cupertino package's unsupported CSS property failure were recorded before
   extraction. Their limits were not widened to obtain green results.
