@@ -1,6 +1,6 @@
 # Nickel JSX runtime
 
-The generic [`bootstrap.js`](https://github.com/shortontech/twinkle/blob/e9c82a0781476ece1ade311abc66ad8eaf541b84/crates/twinkle-jsx-runtime/src/bootstrap.js) defines native components, hooks, application data, and render/event transactions. Nickel installs its own [`host bootstrap`](../../crates/nickel-jsx-host/src/bootstrap.js) for Settings registration and the public `nickel` service clients inside a package context.
+The generic [`bootstrap.js`](https://github.com/shortontech/twinkle/blob/aa0a2c3a00884a7fea48cad09ca579717be99250/crates/twinkle-jsx-runtime/src/bootstrap.js) defines native components, hooks, application data, and render/event transactions. Nickel installs its own [`host bootstrap`](../../crates/nickel-jsx-host/src/bootstrap.js) for Settings registration and the public `nickel` service clients inside a package context.
 Nickel uses Oxc to erase TypeScript and lower JSX, then runs the cached JavaScript
 through direct V8 bindings without Node, Deno, a browser, or a DOM. TSX is the
 canonical authoring format; JavaScript, JSX, TypeScript, and CSS remain supported
