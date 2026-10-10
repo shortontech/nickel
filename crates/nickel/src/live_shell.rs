@@ -2890,7 +2890,7 @@ impl LiveShell {
                 application.layout.clear_selection();
                 true
             }
-            ControllerAction::Launcher
+            ControllerAction::HostMenu
             | ControllerAction::PreviousPane
             | ControllerAction::NextPane => false,
         };

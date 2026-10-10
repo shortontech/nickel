@@ -1,4 +1,4 @@
-/// <reference path="../../crates/twinkle-jsx-runtime/types/twinkle.d.ts" />
+/// <reference path="twinkle.d.ts" />
 // Nickel's global JSX API. This file is for editors and the development
 // compiler; the installed plugin still contains plain JavaScript. Components
 // and public component references are callable in JSX. Children are ordinary JSX values.

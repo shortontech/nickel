@@ -17,7 +17,7 @@ fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
-        .expect("twinkle is nested under the workspace crates directory")
+        .expect("nickel is nested under the workspace crates directory")
         .to_path_buf()
 }
 
@@ -185,9 +185,6 @@ fn consumers_cannot_grow_or_create_display_list_authority() {
             .expect("workspace source is below its root")
             .to_string_lossy()
             .replace('\\', "/");
-        if relative.starts_with("crates/twinkle/") {
-            continue;
-        }
         let source = fs::read_to_string(&path).expect("Rust source must be UTF-8");
         let references = display_list_references(&source);
         if references == 0 {
@@ -288,9 +285,6 @@ fn consumers_cannot_grow_or_create_parallel_hit_authority() {
             .expect("workspace source is below root")
             .to_string_lossy()
             .replace('\\', "/");
-        if relative.starts_with("crates/twinkle/") {
-            continue;
-        }
         let count =
             hit_authority_references(&fs::read_to_string(path).expect("Rust source must be UTF-8"));
         if count == 0 {
@@ -366,7 +360,6 @@ fn consumers_cannot_restore_file_entry_prefix_navigation() {
     rust_files(&root.join("crates"), &mut files);
     let violations = files
         .into_iter()
-        .filter(|path| !path.starts_with(root.join("crates/twinkle")))
         .filter_map(|path| {
             let source = fs::read_to_string(&path).expect("Rust source must be UTF-8");
             (code_references(&source, "strip_prefix(\"file-entry-\"") > 0).then(|| {

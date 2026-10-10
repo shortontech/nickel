@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - feature/plugins
+      - feature/twinkle
     paths:
       - ".github/workflows/plugin-windows.yml"
       - "Cargo.lock"
@@ -12,7 +13,6 @@ on:
       - "crates/nickel-jsx-host/**"
       - "crates/nickel-codex-ui/**"
       - "crates/nickel-core/**"
-      - "crates/twinkle*/**"
       - "crates/nickel-session-protocol/**"
       - "assets/plugins/**"
       - "assets/plugin-runtime/**"
@@ -25,7 +25,6 @@ on:
       - "crates/nickel-jsx-host/**"
       - "crates/nickel-codex-ui/**"
       - "crates/nickel-core/**"
-      - "crates/twinkle*/**"
       - "crates/nickel-session-protocol/**"
       - "assets/plugins/**"
       - "assets/plugin-runtime/**"
@@ -73,7 +72,7 @@ jobs:
       - name: Test the JSX host and plugin packages
         shell: pwsh
         run: |
-          cargo test --locked -p twinkle-jsx-runtime -p nickel-jsx-host
+          cargo test --locked -p nickel-jsx-host
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked -p nickel-session-protocol
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

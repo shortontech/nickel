@@ -1,6 +1,6 @@
 # Nickel JSX runtime
 
-The generic [`bootstrap.js`](../../crates/twinkle-jsx-runtime/src/bootstrap.js) defines native components, hooks, application data, and render/event transactions. Nickel installs its own [`host bootstrap`](../../crates/nickel-jsx-host/src/bootstrap.js) for Settings registration and the public `nickel` service clients inside a package context.
+The generic [`bootstrap.js`](https://github.com/shortontech/twinkle/blob/57e6e1d75e6cdfe0aacc7c1d80d4ea74c0873ee1/crates/twinkle-jsx-runtime/src/bootstrap.js) defines native components, hooks, application data, and render/event transactions. Nickel installs its own [`host bootstrap`](../../crates/nickel-jsx-host/src/bootstrap.js) for Settings registration and the public `nickel` service clients inside a package context.
 Nickel uses Oxc to erase TypeScript and lower JSX, then runs the cached JavaScript
 through direct V8 bindings without Node, Deno, a browser, or a DOM. TSX is the
 canonical authoring format; JavaScript, JSX, TypeScript, and CSS remain supported
@@ -14,7 +14,7 @@ reads registered settings and custom pages. Its controls are replaceable public
 components and inherit overridable CSS variables.
 
 `twinkle-jsx-runtime` owns module loading, hooks, render/event transactions,
-and shell composition. Packages have isolated JavaScript contexts. Foreign
+and generic component linking. `nickel-jsx-host` owns admitted shell composition. Packages have isolated JavaScript contexts. Foreign
 component callbacks retain their producing package's authority; a parent grant
 does not authorize its replacement's effects. Native component parsing, layout,
 input, rendering, and operating-system services remain host-owned.
@@ -140,3 +140,5 @@ The runtime TypeScript entry point is [`index.d.ts`](index.d.ts), which referenc
 [`nickel-plugin.d.ts`](../plugins/nickel-plugin.d.ts) ambient declarations. The compiler, validation,
 nested-development, and layout-inspection commands are documented in
 [`docs/plugins.md`](../../docs/plugins.md).
+
+The copied `assets/plugins/twinkle.d.ts` is the canonical upstream declaration artifact. Its repository revision, source path and SHA-256 are recorded in `assets/plugins/twinkle-declaration-provenance.json`; update it together with the pinned workspace dependency.

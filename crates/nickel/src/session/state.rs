@@ -1931,7 +1931,7 @@ fn controller_envelope_payload(
 
 fn controller_action_message(action: twinkle::ControllerAction) -> ControllerActionMessage {
     match action {
-        twinkle::ControllerAction::Launcher => ControllerActionMessage::Launcher,
+        twinkle::ControllerAction::HostMenu => ControllerActionMessage::Launcher,
         twinkle::ControllerAction::Up => ControllerActionMessage::Up,
         twinkle::ControllerAction::Down => ControllerActionMessage::Down,
         twinkle::ControllerAction::Left => ControllerActionMessage::Left,
@@ -1946,7 +1946,7 @@ fn controller_action_message(action: twinkle::ControllerAction) -> ControllerAct
 
 fn nickel_controller_action(action: ControllerActionMessage) -> twinkle::ControllerAction {
     match action {
-        ControllerActionMessage::Launcher => twinkle::ControllerAction::Launcher,
+        ControllerActionMessage::Launcher => twinkle::ControllerAction::HostMenu,
         ControllerActionMessage::Up => twinkle::ControllerAction::Up,
         ControllerActionMessage::Down => twinkle::ControllerAction::Down,
         ControllerActionMessage::Left => twinkle::ControllerAction::Left,
@@ -6746,7 +6746,7 @@ impl NickelSession {
             .set_controller_family(nickel_controller_family(payload.family));
         self.cancel_remote_pointer();
         self.cancel_remote_keyboard();
-        if action == Some(twinkle::ControllerAction::Launcher)
+        if action == Some(twinkle::ControllerAction::HostMenu)
             && payload.edge == nickel_session_protocol::InputState::Pressed
             && binding.1.launcher_intercepted
         {

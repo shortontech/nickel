@@ -7405,7 +7405,7 @@ fn controller_batch_drops_old_route_tail_after_launcher_changes_recipient() {
         assert!(!session.internal_shell.as_ref().unwrap().launcher_visible());
         let event = twinkle::ControllerEnvelope {
             device: twinkle_input::controller::ControllerId(7),
-            action: Some(twinkle::ControllerAction::Launcher),
+            action: Some(twinkle::ControllerAction::HostMenu),
             edge: twinkle_input::KeyEdge::Pressed,
             repeat: false,
             family: twinkle::ControllerFamily::Xbox,
@@ -7451,7 +7451,7 @@ fn queued_confirm_keeps_pre_launcher_recipient_epoch_across_batches() {
         let queued_epoch = session.refresh_controller_route().0;
         let launcher = twinkle::ControllerEnvelope {
             device: twinkle_input::controller::ControllerId(7),
-            action: Some(twinkle::ControllerAction::Launcher),
+            action: Some(twinkle::ControllerAction::HostMenu),
             edge: twinkle_input::KeyEdge::Pressed,
             repeat: false,
             family: twinkle::ControllerFamily::Xbox,

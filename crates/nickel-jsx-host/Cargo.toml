@@ -7,7 +7,7 @@ rust-version.workspace = true
 description = "Nickel package composition and authority adapters for Twinkle JSX"
 
 [dependencies]
-twinkle-jsx-runtime = { path = "../twinkle-jsx-runtime" }
+twinkle-jsx-runtime = { workspace = true }
 nickel-core = { path = "../nickel-core" }
 serde_json.workspace = true
 serde.workspace = true

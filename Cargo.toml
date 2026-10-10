@@ -1,5 +1,4 @@
 [workspace]
-exclude = ["vendor/winit"]
 members = [
     "crates/nickel-build-support",
     "crates/nickel-codex",
@@ -7,17 +6,12 @@ members = [
     "crates/nickel-codex-ui",
     "crates/nickel-remote-control",
     "crates/nickel-mcp-client",
-    "crates/twinkle-input",
-    "crates/twinkle",
-    "crates/twinkle-testkit",
-    "crates/twinkle-workbench",
     "crates/nickel-workbench",
     "crates/nickel-windows-app-probe",
     "crates/nickel-windows-shell-setup",
     "crates/nickel-watchdog",
     "crates/nickel-uwu",
     "crates/nickel-windows-uwp-target",
-    "crates/twinkle-macros",
     "crates/nickel",
     "crates/nickel-core",
     "crates/nickel-ui-host",
@@ -31,11 +25,6 @@ members = [
     "crates/nickel-i18n",
     "crates/nickel-i18n-lint",
     "crates/nickel-platform",
-    "crates/twinkle-jsx-runtime",
-    "crates/twinkle-presentation",
-    "crates/twinkle-protocol",
-    "crates/twinkle-theme",
-    "crates/twinkle-render-assets",
     "crates/nickel-session-protocol",
     "crates/nickel-terminal",
     "crates/nickel-terminal-ui",
@@ -53,7 +42,6 @@ incremental = false
 
 [patch.crates-io]
 pipewire-native = { path = "vendor/pipewire-native" }
-winit = { path = "vendor/winit" }
 
 [patch."https://github.com/Smithay/smithay.git"]
 smithay = { path = "vendor/smithay" }
@@ -130,7 +118,7 @@ tokio-util = "0.7.18"
 tempfile = "3.27.0"
 tar = "0.4.44"
 wgpu = "30.0.0"
-winit = { path = "vendor/winit", version = "0.30.13" }
+winit = { git = "https://github.com/shortontech/twinkle.git", rev = "57e6e1d75e6cdfe0aacc7c1d80d4ea74c0873ee1" }
 windows = "0.62.2"
 winresource = "0.1.31"
 xcursor = "0.3.10"
@@ -138,3 +126,15 @@ yaml_serde = "0.10.4"
 zbus = { version = "5.12.0", default-features = false, features = ["blocking-api", "async-io"] }
 pipewire-native = "0.1.4"
 pipewire-native-spa = "0.1.4"
+
+# Coherent upstream engine, executor, protocol and native window types.
+twinkle-jsx-runtime = { git = "https://github.com/shortontech/twinkle.git", rev = "57e6e1d75e6cdfe0aacc7c1d80d4ea74c0873ee1" }
+twinkle = { git = "https://github.com/shortontech/twinkle.git", rev = "57e6e1d75e6cdfe0aacc7c1d80d4ea74c0873ee1" }
+twinkle-presentation = { git = "https://github.com/shortontech/twinkle.git", rev = "57e6e1d75e6cdfe0aacc7c1d80d4ea74c0873ee1" }
+twinkle-testkit = { git = "https://github.com/shortontech/twinkle.git", rev = "57e6e1d75e6cdfe0aacc7c1d80d4ea74c0873ee1" }
+twinkle-input = { git = "https://github.com/shortontech/twinkle.git", rev = "57e6e1d75e6cdfe0aacc7c1d80d4ea74c0873ee1" }
+twinkle-macros = { git = "https://github.com/shortontech/twinkle.git", rev = "57e6e1d75e6cdfe0aacc7c1d80d4ea74c0873ee1" }
+twinkle-workbench = { git = "https://github.com/shortontech/twinkle.git", rev = "57e6e1d75e6cdfe0aacc7c1d80d4ea74c0873ee1" }
+twinkle-render-assets = { git = "https://github.com/shortontech/twinkle.git", rev = "57e6e1d75e6cdfe0aacc7c1d80d4ea74c0873ee1" }
+twinkle-protocol = { git = "https://github.com/shortontech/twinkle.git", rev = "57e6e1d75e6cdfe0aacc7c1d80d4ea74c0873ee1" }
+twinkle-theme = { git = "https://github.com/shortontech/twinkle.git", rev = "57e6e1d75e6cdfe0aacc7c1d80d4ea74c0873ee1" }

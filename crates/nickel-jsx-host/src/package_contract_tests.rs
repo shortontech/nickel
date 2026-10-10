@@ -452,7 +452,7 @@ fn plugin_declarations_match_the_bidirectional_runtime_surface() {
         "plugin-runtime/index.d.ts must route to the canonical ambient declarations"
     );
     let declarations = concat!(
-        include_str!("../../twinkle-jsx-runtime/types/twinkle.d.ts"),
+        include_str!("../../../assets/plugins/twinkle.d.ts"),
         "\n",
         include_str!("../../../assets/plugins/nickel-plugin.d.ts")
     );

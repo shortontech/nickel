@@ -946,13 +946,7 @@
         assert!(file.contains("FileGridItem::new_with_generation"));
         assert!(desktop_production.contains("FilePlaneItem::new_with_generation"));
         assert!(desktop_production.contains(".semantic_role(SemanticRole::GridCell)"));
-        let shared = include_str!("../../../../twinkle/src/ui/components.rs");
-        assert!(shared.contains("pub struct FilePlaneItem"));
-        assert!(shared.contains("fn from_image(message: Message"));
-        assert!(shared.contains("Self::from_image(message, label"));
-        assert!(shared.contains(".message(message)"));
-        assert!(shared.contains("pub fn context_message"));
-        assert!(shared.contains(".semantic_role(SemanticRole::Button)"));
+
     }
 
     #[test]

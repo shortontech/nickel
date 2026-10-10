@@ -452,7 +452,7 @@ fn controller_action_from_message(
 ) -> ControllerAction {
     use nickel_session_protocol::ControllerActionMessage::*;
     match action {
-        Launcher => ControllerAction::Launcher,
+        Launcher => ControllerAction::HostMenu,
         Up => ControllerAction::Up,
         Down => ControllerAction::Down,
         Left => ControllerAction::Left,

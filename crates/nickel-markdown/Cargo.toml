@@ -12,7 +12,7 @@ view = ["dep:twinkle"]
 
 [dependencies]
 nickel-i18n = { path = "../nickel-i18n" }
-twinkle = { path = "../twinkle", optional = true }
+twinkle = { workspace = true, optional = true }
 pulldown-cmark.workspace = true
 serde.workspace = true
 

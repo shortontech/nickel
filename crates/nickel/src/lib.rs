@@ -2158,7 +2158,7 @@ fn log_unroutable_launcher_input(
 
 #[cfg(any(test, target_os = "linux"))]
 fn controller_launcher_shortcut(action: ControllerAction) -> Option<platform::GlobalShortcut> {
-    (action == ControllerAction::Launcher).then_some(platform::GlobalShortcut::ToggleLauncher)
+    (action == ControllerAction::HostMenu).then_some(platform::GlobalShortcut::ToggleLauncher)
 }
 
 #[cfg(any(test, target_os = "linux"))]
@@ -3931,7 +3931,7 @@ mod tests {
     #[test]
     fn controller_launcher_action_toggles_launcher() {
         assert_eq!(
-            super::controller_launcher_shortcut(ControllerAction::Launcher),
+            super::controller_launcher_shortcut(ControllerAction::HostMenu),
             Some(super::platform::GlobalShortcut::ToggleLauncher)
         );
     }

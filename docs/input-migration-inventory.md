@@ -106,5 +106,5 @@ rg -n 'WindowOperationReducer|WindowPointerOperation|ControlMode::' crates/nicke
 rg -n 'cancel_all|CancellationReason::|cancel_normalized_touches|\.cancel\(self\)' \
   crates/nickel-core crates/nickel/src/session crates/nickel/src/platform/windows.rs
 rg -n 'MAX_.*(TRACE|EVENT|DIAGNOSTIC)|DEFAULT_.*(LIMIT|DEADLINE)|VecDeque' \
-  crates/nickel-core crates/twinkle crates/nickel-session-protocol crates/nickel-remote-control
+  crates/nickel-core crates/nickel-ui-host crates/nickel-session-protocol crates/nickel-remote-control
 ```

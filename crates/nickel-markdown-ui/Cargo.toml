@@ -22,11 +22,11 @@ nickel-i18n = { path = "../nickel-i18n" }
 nickel-markdown = { path = "../nickel-markdown", default-features = false }
 nickel-core = { path = "../nickel-core", optional = true }
 nickel-platform = { path = "../nickel-platform", optional = true }
-twinkle = { path = "../twinkle", optional = true }
-twinkle-testkit = { path = "../twinkle-testkit", optional = true }
+twinkle = { workspace = true, optional = true }
+twinkle-testkit = { workspace = true, optional = true }
 url.workspace = true
 
 [dev-dependencies]
 image.workspace = true
-twinkle-testkit = { path = "../twinkle-testkit" }
+twinkle-testkit = { workspace = true }
 tempfile.workspace = true

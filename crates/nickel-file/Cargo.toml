@@ -13,15 +13,15 @@ path = "src/bin/nickel-file.rs"
 [dependencies]
 nickel-ui-host = { path = "../nickel-ui-host" }
 image.workspace = true
-twinkle = { path = "../twinkle" }
+twinkle = { workspace = true }
 nucleo-matcher.workspace = true
 nickel-core = { path = "../nickel-core" }
-twinkle-input = { path = "../twinkle-input", features = ["winit"] }
+twinkle-input = { workspace = true, features = ["winit"] }
 nickel-i18n = { path = "../nickel-i18n" }
 nickel-logging = { path = "../nickel-logging" }
 nickel-platform = { path = "../nickel-platform" }
 nickel-session-protocol = { path = "../nickel-session-protocol" }
-twinkle-testkit = { path = "../twinkle-testkit", optional = true }
+twinkle-testkit = { workspace = true, optional = true }
 notify.workspace = true
 tracing.workspace = true
 sys-locale.workspace = true
@@ -32,7 +32,7 @@ raw-window-handle.workspace = true
 arboard = { version = "3.6.1", default-features = false, features = ["wayland-data-control"] }
 
 [dev-dependencies]
-twinkle-testkit = { path = "../twinkle-testkit" }
+twinkle-testkit = { workspace = true }
 sha2.workspace = true
 softbuffer.workspace = true
 tempfile = "3"
