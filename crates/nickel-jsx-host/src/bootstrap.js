@@ -377,12 +377,12 @@ function useOutputs(selector){if(__currentComponent===null)throw Error('useOutpu
     const slot=__hookIndex++,hooks=__componentHooks.get(__currentComponent),normalized=selector??null;
     const entry=__nickelSelectedStoreEntry(hooks,slot,'outputs-store',normalized,'outputs');
     entry.storeError=undefined;entry.value=__nickelSelectedValue(entry,normalized,__outputsStore.snapshot,__outputsStore.generation,'outputs');entry.generation=__outputsStore.generation;return entry.value;}
-function __nickelRegisterComponentSurface(id, selection, registeredPage) {
-    if (typeof selection !== 'string' || typeof registeredPage !== 'boolean')
-        throw Error('invalid component surface selection');
+function __nickelRegisterSettingsPageSurface(id, selection) {
+    if (typeof selection !== 'string')
+        throw Error('invalid Settings page surface selection');
     __nickelRegisterSurfaceApp(id, function App() {
         const {children, ...props} = __nickelHydrateComponentProps(__nickelData.__componentProps);
-        return h(registeredPage ? __nickelRegisteredPageComponent(selection) : twinkle.component(selection),
+        return h(__nickelRegisteredPageComponent(selection),
             props, ...(children ?? []));
     });
     return true;

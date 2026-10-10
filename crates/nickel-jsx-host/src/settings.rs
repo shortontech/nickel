@@ -52,8 +52,8 @@ impl SettingsRuntimeExt for JsxRuntime {
             return self.register_component_mount(id, selection);
         }
         self.call_host_observation(
-            "__nickelRegisterComponentSurface",
-            &[Value::from(id), Value::from(selection), Value::Bool(true)],
+            "__nickelRegisterSettingsPageSurface",
+            &[Value::from(id), Value::from(selection)],
         )
         .map(|_| ())
     }
