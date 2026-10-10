@@ -315,10 +315,8 @@ fn settings_collection_identity_matching_is_linear_and_preserves_duplicate_keys(
             super::ModuleSource { path:"entry.js", source:r#"
                 import {reconcileRows} from './settings-collection.js';
                 export function App(){return h(Column,{});}
-                globalThis.checkRows = () => {
-                    const reports = [];
-                    const original = JSON.stringify;
-                    for (const count of [100,1000,10000]) {
+                globalThis.checkRows = count => {
+                        const original = JSON.stringify;
                         const values = Array.from({length:count},(_,index)=>({name:'Row '+index,nested:{enabled:true}}));
                         const state = {rows:[],next:0};
                         reconcileRows(state,values);
@@ -330,13 +328,14 @@ fn settings_collection_identity_matching_is_linear_and_preserves_duplicate_keys(
                         reconcileRows(state,values.map(value=>({name:value.name,nested:{enabled:true}})));
                         JSON.stringify = original;
                         if (state.rows.some((row,index)=>row.key!=='row-'+index)) throw Error('reorder changed row identity');
-                        reports.push({count,references,calls});
                         const stable = state.rows;
                         if (reconcileRows(state,values.map(value=>({name:value.name,nested:{enabled:true}}))) !== stable)
                             throw Error('equal transport replaced the logical sequence');
                         if (reconcileRows(state,[...values].reverse()) === stable)
                             throw Error('reorder failed to replace the logical sequence');
-                    }
+                        return {count,references,calls};
+                };
+                globalThis.checkDuplicateRows = () => {
                     function oracle(state,values) {
                         const available=state.rows.slice();
                         const rows=values.map(value=>{
@@ -355,20 +354,24 @@ fn settings_collection_identity_matching_is_linear_and_preserves_duplicate_keys(
                         if(JSON.stringify(got)!==JSON.stringify(want)||actual.next!==expected.next)
                             throw Error('duplicate/remove/reinsert identity diverged');
                     }
-                    return reports;
+                    return true;
                 };
             "# },
             super::ModuleSource {path:"settings-collection.js",source:include_str!("../../../assets/plugins/nickel-default/src/settings-collection.js")},
         ]).unwrap();
     let mut runtime = crate::create_module_runtime(&graph, None).unwrap();
-    let reports: serde_json::Value = runtime
-        .eval_json("JSON.stringify(globalThis.checkRows())")
-        .unwrap();
-    for report in reports.as_array().unwrap() {
+    for count in [100_u64, 1_000, 10_000] {
+        // Keep each cardinality in its own bounded execution. The production
+        // deadline protects every host call; this test checks algorithmic work
+        // counts and must not combine independent workloads into one budget.
+        let report: serde_json::Value = runtime
+            .eval_json(&format!("JSON.stringify(globalThis.checkRows({count}))"))
+            .unwrap();
         let count = report["count"].as_u64().unwrap();
         assert_eq!(report["references"], 0);
         assert_eq!(report["calls"], 2 * count);
     }
+    assert!(runtime.eval_json::<bool>("checkDuplicateRows()").unwrap());
 }
 
 #[test]
