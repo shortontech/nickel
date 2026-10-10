@@ -62,6 +62,7 @@ export function Taskbar(props) {
     const localTime = new Date(clock.unixMilliseconds + clock.utcOffsetMinutes * 60000);
     const hours = localTime.getUTCHours();
     const clockText = (hours % 12 || 12) + ':' + String(localTime.getUTCMinutes()).padStart(2, '0') + (hours >= 12 ? ' PM' : ' AM');
+    const dateText = (localTime.getUTCMonth() + 1) + '/' + localTime.getUTCDate() + '/' + localTime.getUTCFullYear();
     const items = taskItems(applications, windows);
     const tray = nickel.tray.list();
     const contributions = nickel.contributions("taskbar.items");
@@ -74,5 +75,5 @@ export function Taskbar(props) {
             keyboardEnabled ? h(Button, { id: "taskbar-keyboard", className: "utility-button", accessibilityLabel: "On-screen keyboard", onClick: () => nickel.keyboard.toggle() }, "\u2328") : null,
             codexAvailable ? h(Button, { id: "taskbar-codex", className: "utility-button", icon: "codex", accessibilityLabel: "Codex projects", onClick: () => nickel.projects.toggle() }, "Codex") : null,
             tray.map(item => h(TrayItem, { key: item.id, item: item })),
-            h(Button, { id: "taskbar-control", className: "clock-button", onClick: () => nickel.surfaces.show("quick-settings") }, clockText)));
+            h(Button, { id: "taskbar-control", className: "clock-button", accessibilityLabel: clockText + ', ' + dateText + '. Open Quick Settings', onClick: () => nickel.surfaces.show("quick-settings") }, clockText + '\n' + dateText)));
 }

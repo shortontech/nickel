@@ -84,6 +84,7 @@ export function Taskbar(props) {
     const localTime = new Date(clock.unixMilliseconds + clock.utcOffsetMinutes * 60000);
     const hours = localTime.getUTCHours();
     const clockText = (hours % 12 || 12) + ':' + String(localTime.getUTCMinutes()).padStart(2, '0') + (hours >= 12 ? ' PM' : ' AM');
+    const dateText = (localTime.getUTCMonth() + 1) + '/' + localTime.getUTCDate() + '/' + localTime.getUTCFullYear();
     const items = taskItems(applications, windows);
     const tray = nickel.tray.list();
     const contributions = nickel.contributions("taskbar.items");
@@ -101,7 +102,8 @@ export function Taskbar(props) {
                 onClick={() => nickel.projects.toggle()}>Codex</Button> : null}
             {tray.map(item => <TrayItem key={item.id} item={item} />)}
             <Button id="taskbar-control" className="clock-button"
-                onClick={() => nickel.surfaces.show("quick-settings")}>{clockText}</Button>
+                accessibilityLabel={clockText + ', ' + dateText + '. Open Quick Settings'}
+                onClick={() => nickel.surfaces.show("quick-settings")}>{clockText + '\n' + dateText}</Button>
         </div>
     </FixedWindow>;
 }

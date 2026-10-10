@@ -88,7 +88,7 @@ button.dock-button, button.dock-utility, button.dock-clock {
 }
 
 button.dock-clock {
-    font-size: 18px;
+    font-size: 12px;
 }
 
 button.dock-button:hover, button.dock-utility:hover, button.dock-clock:hover,

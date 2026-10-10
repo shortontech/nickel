@@ -81,6 +81,7 @@ export function MenuBar() {
     const localTime = new Date(clock.unixMilliseconds + clock.utcOffsetMinutes * 60000);
     const hours = localTime.getUTCHours();
     const time = (hours % 12 || 12) + ":" + String(localTime.getUTCMinutes()).padStart(2, "0");
+    const date = (localTime.getUTCMonth() + 1) + "/" + localTime.getUTCDate() + "/" + localTime.getUTCFullYear();
     return <FixedWindow id="menu-bar" output="all" edge="top" width="100%" height={32}
         reserveWorkArea={true} className="cupertino-menu-bar">
         <Row className="menu-bar-content">
@@ -92,7 +93,8 @@ export function MenuBar() {
             <Button id="cupertino-menu-settings" className="menu-bar-button"
                 onClick={() => nickel.surfaces.show("settings")}>Settings</Button>
             <Button id="cupertino-menu-control" className="menu-bar-button"
-                onClick={() => nickel.surfaces.show("quick-settings")}>{time}</Button>
+                accessibilityLabel={time + ", " + date + ". Open Quick Settings"}
+                onClick={() => nickel.surfaces.show("quick-settings")}>{date + "  " + time}</Button>
         </Row>
     </FixedWindow>;
 }
@@ -110,6 +112,7 @@ export function Taskbar() {
     const localTime = new Date(clock.unixMilliseconds + clock.utcOffsetMinutes * 60000);
     const hours = localTime.getUTCHours();
     const clockText = (hours % 12 || 12) + ":" + String(localTime.getUTCMinutes()).padStart(2, "0");
+    const dateText = (localTime.getUTCMonth() + 1) + "/" + localTime.getUTCDate() + "/" + localTime.getUTCFullYear();
 
     return <FixedWindow id="taskbar" output="all" edge="bottom" bottomOffset={10} width="max-content"
         reserveWorkArea={false} className="cupertino-dock">
@@ -131,9 +134,9 @@ export function Taskbar() {
                     onClick={() => nickel.projects.toggle()}>C</Button> : null}
                 {tray.map(item => <TrayItem key={item.id} item={item} />)}
                 <Button id="cupertino-dock-control" className="dock-clock"
-                    width={70} height={52}
-                    accessibilityLabel="Open Quick Settings"
-                    onClick={() => nickel.surfaces.show("quick-settings")}>{clockText}</Button>
+                    width={82} height={52}
+                    accessibilityLabel={clockText + ", " + dateText + ". Open Quick Settings"}
+                    onClick={() => nickel.surfaces.show("quick-settings")}>{clockText + "\n" + dateText}</Button>
         </div>
     </FixedWindow>;
 }

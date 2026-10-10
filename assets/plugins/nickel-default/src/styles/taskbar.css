@@ -52,9 +52,11 @@ button.clock-button:active {
 }
 
 button.clock-button {
-    width: 112px;
-    min-width: 112px;
-    max-width: 112px;
+    width: 96px;
+    min-width: 96px;
+    max-width: 96px;
+    padding: 3px 8px;
+    font-size: 12px;
     text-align: center;
 }
 

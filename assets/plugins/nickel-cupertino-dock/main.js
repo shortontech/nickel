@@ -62,13 +62,14 @@ export function MenuBar() {
     const localTime = new Date(clock.unixMilliseconds + clock.utcOffsetMinutes * 60000);
     const hours = localTime.getUTCHours();
     const time = (hours % 12 || 12) + ":" + String(localTime.getUTCMinutes()).padStart(2, "0");
+    const date = (localTime.getUTCMonth() + 1) + "/" + localTime.getUTCDate() + "/" + localTime.getUTCFullYear();
     return h(FixedWindow, { id: "menu-bar", output: "all", edge: "top", width: "100%", height: 32, reserveWorkArea: true, className: "cupertino-menu-bar" },
         h(Row, { className: "menu-bar-content" },
             h(Button, { id: "cupertino-menu-launcher", className: "menu-bar-button", accessibilityLabel: "Open Nickel Launcher", onClick: () => nickel.surfaces.show("launcher") }, "N"),
             h(Text, { className: "menu-bar-title" }, active?.title || "Nickel"),
             h(Spacer, null),
             h(Button, { id: "cupertino-menu-settings", className: "menu-bar-button", onClick: () => nickel.surfaces.show("settings") }, "Settings"),
-            h(Button, { id: "cupertino-menu-control", className: "menu-bar-button", onClick: () => nickel.surfaces.show("quick-settings") }, time)));
+            h(Button, { id: "cupertino-menu-control", className: "menu-bar-button", accessibilityLabel: time + ", " + date + ". Open Quick Settings", onClick: () => nickel.surfaces.show("quick-settings") }, date + "  " + time)));
 }
 export function Taskbar() {
     const applications = useApplications();
@@ -83,6 +84,7 @@ export function Taskbar() {
     const localTime = new Date(clock.unixMilliseconds + clock.utcOffsetMinutes * 60000);
     const hours = localTime.getUTCHours();
     const clockText = (hours % 12 || 12) + ":" + String(localTime.getUTCMinutes()).padStart(2, "0");
+    const dateText = (localTime.getUTCMonth() + 1) + "/" + localTime.getUTCDate() + "/" + localTime.getUTCFullYear();
     return h(FixedWindow, { id: "taskbar", output: "all", edge: "bottom", bottomOffset: 10, width: "max-content", reserveWorkArea: false, className: "cupertino-dock" },
         h("div", { className: "dock-shelf" },
             h(Button, { id: "cupertino-dock-launcher", className: "dock-button launcher", width: 58, height: 58, icon: "nickel-logo", iconSize: 44, showLabel: false, accessibilityLabel: "Open Nickel Launcher", onClick: () => nickel.surfaces.show("launcher") }, "Nickel"),
@@ -92,7 +94,7 @@ export function Taskbar() {
             keyboardEnabled ? h(Button, { id: "cupertino-dock-keyboard", className: "dock-utility", width: 44, height: 52, accessibilityLabel: "On-screen keyboard", onClick: () => nickel.keyboard.toggle() }, "\u2328") : null,
             codexAvailable ? h(Button, { id: "cupertino-dock-codex", className: "dock-utility", width: 44, height: 52, icon: "codex", iconSize: 30, showLabel: false, accessibilityLabel: "Codex projects", onClick: () => nickel.projects.toggle() }, "C") : null,
             tray.map(item => h(TrayItem, { key: item.id, item: item })),
-            h(Button, { id: "cupertino-dock-control", className: "dock-clock", width: 70, height: 52, accessibilityLabel: "Open Quick Settings", onClick: () => nickel.surfaces.show("quick-settings") }, clockText)));
+            h(Button, { id: "cupertino-dock-control", className: "dock-clock", width: 82, height: 52, accessibilityLabel: clockText + ", " + dateText + ". Open Quick Settings", onClick: () => nickel.surfaces.show("quick-settings") }, clockText + "\n" + dateText)));
 }
 export function Shell() {
     const id = nickel.data.surface?.id || "taskbar";
