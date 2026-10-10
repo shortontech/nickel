@@ -48,6 +48,9 @@ byte-identical to upstream and has revision/SHA provenance.
 | Shell integration tests | 12 panel and 3 CSS tests passed | Downstream presentation and shipped CSS contracts |
 | Release admission workloads | 4 generic and 2 Nickel workloads passed | Keyed insert/remove/reorder, leaf hooks, lifecycle churn and independent mount/store revisions |
 | Aliased Windows consumer | Passed | Separate workspace uses `lights` to compile native UI/macros for Windows MSVC |
+| Minimum Rust 1.96 all-targets/all-features check | Passed on Linux and Windows MSVC | Declared minimum toolchain, including optional V8/JSX |
+| Native retained-render release unit workloads | 7 passed, 1 failed | Existing 2,000-node retained-layout timing gate also fails on isolated pre-extraction revision; spec 0280 |
+| Native cache and overlay release workloads | 4 passed | Cache admission, long-Unicode selection and retained-overlay bounds |
 | Selected package formatting and declaration bytes/SHA | Passed | Changed native code and packaged declaration provenance |
 
 Commands ran from the corresponding repository roots. The nested harness builds
@@ -79,11 +82,13 @@ configuration directories and shuts down its own compositor.
   default suite's ignored workloads. Current focused release results are saved in
   [twinkle-release-evidence.json](twinkle-release-evidence.json), with serialized
   builds and six passing deterministic workloads. No comparable pre-extraction
-  timing baseline is claimed. Other ignored workloads remain individually open.
+  timing baseline is claimed. The native retained-layout timing failure is explicitly reproduced on the
+  pre-extraction revision and recorded in active spec 0280. Other ignored
+  workloads remain individually open.
 - Existing Nickel authority/inventory/workbench assertions and the derived
   Cupertino package's unsupported CSS property failure were recorded before
   extraction. Their limits were not widened to obtain green results.
-- Additional active specs 0277–0279 track generation exhaustion and development
+- Additional active specs 0277–0280 track generation exhaustion and development
   reload recovery. Isolated candidate preflight does not make later installation
   failures transactional over arbitrary package globals.
 

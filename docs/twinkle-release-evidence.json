@@ -292,5 +292,100 @@
         "workload": "independent_mount_store_revisions"
       }
     }
-  ]
+  ],
+  "retainedLayoutComparison": {
+    "preExtraction": {
+      "result": "failed existing 20% timing gate; deterministic work assertions passed",
+      "report": {
+        "schema": 1,
+        "suite": "retained_layout",
+        "workload": "2000_node_unchanged_and_one_label",
+        "metadata": {
+          "iterations_per_sample": 2,
+          "nodes": 2000,
+          "samples": 5
+        },
+        "work": {
+          "one_label_interaction_nodes_executed": 0,
+          "one_label_nodes_measured": 0,
+          "one_label_nodes_placed": 0,
+          "one_label_paint_nodes_executed": 2,
+          "one_label_semantic_nodes_executed": 1,
+          "unchanged_interaction_nodes_executed": 0,
+          "unchanged_nodes_measured": 0,
+          "unchanged_nodes_placed": 0,
+          "unchanged_paint_nodes_executed": 0,
+          "unchanged_semantic_nodes_executed": 0
+        },
+        "timings": {
+          "cold": {
+            "p50_ns": 4093108,
+            "p95_ns": 4154113,
+            "p99_ns": 4154113,
+            "max_ns": 4154113
+          },
+          "one_label_same_size": {
+            "p50_ns": 10450718,
+            "p95_ns": 11357571,
+            "p99_ns": 11357571,
+            "max_ns": 11357571
+          },
+          "unchanged": {
+            "p50_ns": 6093851,
+            "p95_ns": 11025424,
+            "p99_ns": 11025424,
+            "max_ns": 11025424
+          }
+        }
+      }
+    },
+    "extractedFocused": {
+      "result": "failed existing 20% timing gate; deterministic work assertions passed",
+      "report": {
+        "schema": 1,
+        "suite": "retained_layout",
+        "workload": "2000_node_unchanged_and_one_label",
+        "metadata": {
+          "iterations_per_sample": 2,
+          "nodes": 2000,
+          "samples": 5
+        },
+        "work": {
+          "one_label_interaction_nodes_executed": 0,
+          "one_label_nodes_measured": 0,
+          "one_label_nodes_placed": 0,
+          "one_label_paint_nodes_executed": 2,
+          "one_label_semantic_nodes_executed": 1,
+          "unchanged_interaction_nodes_executed": 0,
+          "unchanged_nodes_measured": 0,
+          "unchanged_nodes_placed": 0,
+          "unchanged_paint_nodes_executed": 0,
+          "unchanged_semantic_nodes_executed": 0
+        },
+        "timings": {
+          "cold": {
+            "p50_ns": 4182087,
+            "p95_ns": 5611139,
+            "p99_ns": 5611139,
+            "max_ns": 5611139
+          },
+          "one_label_same_size": {
+            "p50_ns": 10352061,
+            "p95_ns": 11402577,
+            "p99_ns": 11402577,
+            "max_ns": 11402577
+          },
+          "unchanged": {
+            "p50_ns": 6892901,
+            "p95_ns": 11329749,
+            "p99_ns": 11329749,
+            "max_ns": 11329749
+          }
+        }
+      }
+    },
+    "baselineRevision": "a42901f9f4ea1ed90bf0a6d42ecf210c82a862b1",
+    "sourceSha256": "ed1818ce434254f6d6bb923273c814b09ed80b93ebb8157e3a280d43122fe3b9",
+    "scope": "Same machine, stable compiler and release profile, isolated fresh-process focused runs. Source file byte-identical. Both fail the unchanged existing gate; no broad timing regression conclusion is claimed."
+  }
 }
