@@ -1488,7 +1488,13 @@ fn import_missing_thread_projects(
         .flat_map(|project| project.roots.iter().cloned())
         .collect::<HashSet<_>>();
     let mut directories: BTreeMap<PathBuf, Vec<ThreadId>> = BTreeMap::new();
+    let mut seen_threads = HashSet::new();
     for thread in threads {
+        // Codex can list multiple rollout records for the same thread. Imports
+        // require unique thread identities, even when those records share a cwd.
+        if !seen_threads.insert(thread.id.clone()) {
+            continue;
+        }
         if runtime
             .get(&thread.id)
             .and_then(|runtime| runtime.project_id.as_ref())
@@ -1884,6 +1890,29 @@ mod tests {
 
         assert_eq!(projects.len(), 1);
         assert_eq!(projects[0].name, "nickel");
+        assert_eq!(projects[0].roots, [PathBuf::from("/projects/nickel")]);
+    }
+
+    #[test]
+    fn project_menu_imports_duplicate_rollout_records_only_once() {
+        let backend = ReplayBackend::from_json(
+            r#"{
+                "name":"duplicate-rollouts",
+                "account":{"authenticated":true,"account_type":"chatgpt","email":null},
+                "threads":[
+                    {"id":"thread","title":"Nickel work","cwd":"/projects/nickel"},
+                    {"id":"thread","title":"Nickel work","cwd":"/projects/nickel"}
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        let ControllerEvent::Ready { projects, .. } =
+            project_snapshot(&backend, "Replay fixture".into())
+        else {
+            panic!("duplicate rollout records must not disconnect the project menu");
+        };
+        assert_eq!(projects.len(), 1);
         assert_eq!(projects[0].roots, [PathBuf::from("/projects/nickel")]);
     }
 

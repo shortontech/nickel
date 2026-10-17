@@ -133,6 +133,15 @@ impl CodexBackend for ReplayBackend {
         })
     }
     fn import_project(&self, project: crate::ImportProject) -> Result<Project, CodexError> {
+        let mut seen = std::collections::HashSet::new();
+        for thread in &project.threads {
+            if !seen.insert(thread) {
+                return Err(CodexError::Protocol(format!(
+                    "duplicate thread id: {}",
+                    thread.0
+                )));
+            }
+        }
         Ok(Project {
             id: project.idempotency_key,
             name: project.name,
