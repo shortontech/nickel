@@ -3,7 +3,7 @@
 Build the participating binaries locally:
 
 ```sh
-cargo build -p nickel --no-default-features --features backend-winit \
+cargo build -p nickel -p nickel-tools --no-default-features --features nickel/backend-winit \
   --bin nickel-nested --bin nickel-test-input --bin nickel-nested-acceptance
 ./target/debug/nickel-nested-acceptance
 ```
@@ -39,6 +39,20 @@ WAYLAND_DISPLAY=does-not-exist \
 __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json \
 LIBGL_ALWAYS_SOFTWARE=1 ./target/debug/nickel-nested-acceptance
 ```
+
+## Winit unification validation, 2026-10-17
+
+Nickel and Twinkle now resolve only Winit 0.31 beta 3. The nested executable builds,
+and the workspace check includes all targets with `nickel/backend-winit` enabled.
+On the Wayland host, the Mesa software command above starts the compositor. The first full
+run fails its managed Settings resize assertion; a second full run passes the default shell,
+Settings resize, scoped Meta input, sibling/dialog/overlay lifecycle, screenshot, component
+layout, and clean-shutdown checks. The initial failure remains an intermittent result.
+Running the same harness with `--screenshot-only` separately passes capture, selection,
+cancellation, reopen, component socket layouts, and clean shutdown. The native shell host's
+30 focused unit tests also pass. A separate, explicitly run graphical-host smoke test passes
+native shell window creation, cross-thread proxy payload delivery, and sender retirement.
+Windows native validation remains deferred.
 
 The records below describe the previous harness and its previous architecture;
 they do not establish acceptance for the shared shell package.

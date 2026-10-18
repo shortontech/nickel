@@ -63,7 +63,7 @@ renderer. The last module supplies instrumentation missing from Smithay's dummy 
 not introduce another production renderer.
 
 The Windows GNU cross-check reached the shared UI, Codex UI, and file crates but the shell
-failed in the unchanged Windows adapter: `crates/nickel/src/platform/windows.rs` does not match
+failed in the unchanged Windows adapter: `crates/nickel-shell/src/platform/windows.rs` does not match
 `HotkeyAction::CancelSwitch`. This pre-existing shell build blocker is outside these eleven
 specifications. No Windows runtime acceptance is claimed.
 

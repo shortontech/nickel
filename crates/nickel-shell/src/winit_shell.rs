@@ -1,0 +1,4522 @@
+//! Winit window and event ownership for the Nickel shell.
+//!
+//! Rendering is deliberately outside this module. A renderer receives stable
+//! [`SurfaceId`] values and can attach either a software surface or an
+//! accelerated backend without owning the application event pump.
+
+use std::cell::Cell;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+#[cfg(target_os = "linux")]
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use std::time::Instant;
+
+use nickel_session_protocol::ShellRole as SessionShellRole;
+use twinkle_input::InputEvent;
+use twinkle_ui::backend::PaintCommand;
+use twinkle_ui::{AggregatePresenterCacheDiagnostics, DamageRegion, HostChangeToken};
+use winit::application::ApplicationHandler;
+use winit::dpi::{LogicalPosition, LogicalSize};
+use winit::event::{DeviceId, StartCause, WindowEvent};
+use winit::event_loop::ActiveEventLoop;
+#[cfg(not(target_os = "windows"))]
+use winit::event_loop::EventLoopProxy;
+use winit::event_loop::pump_events::{EventLoopExtPumpEvents, PumpStatus};
+use winit::event_loop::{ControlFlow, EventLoop};
+#[cfg(target_os = "linux")]
+use winit::platform::wayland::WindowAttributesWayland;
+use winit::window::{Window, WindowAttributes, WindowId};
+
+use crate::softbuffer_presenter::PresentationGeometry;
+#[cfg(not(target_os = "windows"))]
+use crate::softbuffer_presenter::{SharedGraphics, SoftbufferPresenter};
+#[cfg(target_os = "windows")]
+use crate::wgpu_presenter::{SharedGraphics, SoftbufferPresenter};
+use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
+#[cfg(target_os = "windows")]
+use windows::Win32::Foundation::{LPARAM, WPARAM};
+#[cfg(target_os = "windows")]
+use windows::Win32::System::Threading::GetCurrentThreadId;
+#[cfg(target_os = "windows")]
+use windows::Win32::UI::WindowsAndMessaging::{
+    MsgWaitForMultipleObjectsEx, PostThreadMessageW, QS_ALLINPUT, WM_APP,
+};
+
+pub const DESKTOP_TITLE: &str = "Nickel Desktop";
+pub const PANEL_TITLE: &str = "Nickel Taskbar";
+pub const CONTROL_CENTER_TITLE: &str = "Nickel Control Center";
+pub const NOTIFICATION_TITLE: &str = "Nickel Notification";
+pub const WINDOW_PREVIEW_TITLE: &str = "Nickel Window Preview";
+pub const CODEX_PROJECT_MENU_TITLE: &str = "Nickel Codex Projects";
+pub const LOCK_TITLE: &str = "Nickel Lock";
+pub const SCREENSHOT_TITLE: &str = "Nickel Screenshot";
+
+#[cfg(any(test, target_os = "windows"))]
+fn windows_wait_timeout_millis(timeout: Duration) -> u32 {
+    const MAX_FINITE_WAIT_MS: u128 = u32::MAX as u128 - 1;
+    let nanos = timeout.as_nanos();
+    let rounded_up = nanos.saturating_add(999_999) / 1_000_000;
+    rounded_up.min(MAX_FINITE_WAIT_MS) as u32
+}
+pub const PANEL_HEIGHT: u32 = 56;
+const RUNTIME_SAMPLE_CAPACITY: usize = 64;
+const OUTPUT_RETIREMENT_SETTLE: Duration = Duration::from_millis(500);
+const OUTPUT_CREATION_RETRY_MIN: Duration = Duration::from_millis(50);
+const OUTPUT_CREATION_RETRY_MAX: Duration = Duration::from_secs(2);
+#[cfg(target_os = "linux")]
+static NEXT_SHELL_SURFACE_ID: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum PanelEdge {
+    Top,
+    #[default]
+    Bottom,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ShellOptions {
+    pub create_desktop_surfaces: bool,
+    pub panel_edge: PanelEdge,
+    pub bar_on_all_displays: bool,
+}
+
+impl Default for ShellOptions {
+    fn default() -> Self {
+        Self {
+            create_desktop_surfaces: true,
+            panel_edge: PanelEdge::Bottom,
+            bar_on_all_displays: true,
+        }
+    }
+}
+
+#[derive(Default)]
+struct OutputRetirementTracker {
+    missing_since: HashMap<String, Instant>,
+}
+
+#[derive(Default)]
+struct OutputCreationRetry {
+    failures: u32,
+    deadline: Option<Instant>,
+}
+
+impl OutputCreationRetry {
+    fn failed(&mut self, now: Instant) {
+        self.failures = self.failures.saturating_add(1);
+        let multiplier = 1_u32 << self.failures.saturating_sub(1).min(6);
+        self.deadline = Some(
+            now + OUTPUT_CREATION_RETRY_MIN
+                .saturating_mul(multiplier)
+                .min(OUTPUT_CREATION_RETRY_MAX),
+        );
+    }
+
+    fn succeeded(&mut self) {
+        self.failures = 0;
+        self.deadline = None;
+    }
+}
+
+impl OutputRetirementTracker {
+    fn observe<'a>(
+        &mut self,
+        now: Instant,
+        live_outputs: &[String],
+        owned_outputs: impl IntoIterator<Item = &'a str>,
+    ) -> Vec<String> {
+        self.missing_since
+            .retain(|output, _| !live_outputs.iter().any(|live| live == output));
+
+        for output in owned_outputs {
+            if live_outputs.iter().any(|live| live == output) {
+                self.missing_since.remove(output);
+            } else {
+                self.missing_since.entry(output.to_owned()).or_insert(now);
+            }
+        }
+
+        self.missing_since
+            .iter()
+            .filter(|(_, missing_since)| {
+                now.saturating_duration_since(**missing_since) >= OUTPUT_RETIREMENT_SETTLE
+            })
+            .map(|(output, _)| output.clone())
+            .collect()
+    }
+
+    fn next_deadline(&self) -> Option<Instant> {
+        self.missing_since
+            .values()
+            .map(|missing_since| *missing_since + OUTPUT_RETIREMENT_SETTLE)
+            .min()
+    }
+}
+
+fn push_bounded<T>(samples: &mut VecDeque<T>, sample: T) {
+    if samples.len() == RUNTIME_SAMPLE_CAPACITY {
+        samples.pop_front();
+    }
+    samples.push_back(sample);
+}
+
+fn durable_presenter_peak(
+    previous_peak_bytes: usize,
+    current: &AggregatePresenterCacheDiagnostics,
+) -> usize {
+    previous_peak_bytes.max(current.peak_cache_bytes)
+}
+
+fn desired_output_surfaces(
+    output_names: &[String],
+    create_desktops: bool,
+    _bar_on_all_displays: bool,
+    _primary_output: Option<&str>,
+    active_output: Option<&str>,
+    plugin_panel_enabled: bool,
+    plugin_panel_output: nickel_core::plugins::PluginOutputScope,
+) -> HashSet<(String, SurfaceRole)> {
+    output_names
+        .iter()
+        .flat_map(|output| {
+            [SurfaceRole::Desktop, SurfaceRole::Panel, SurfaceRole::Lock]
+                .into_iter()
+                .filter(|role| {
+                    (*role != SurfaceRole::Desktop || create_desktops)
+                        && (*role != SurfaceRole::Panel
+                            || (plugin_panel_enabled
+                                && output_scope_matches(
+                                    plugin_panel_output,
+                                    output_names,
+                                    output,
+                                    active_output,
+                                )))
+                })
+                .map(|role| (output.clone(), role))
+        })
+        .collect()
+}
+
+fn desired_plugin_surfaces(
+    output_names: &[String],
+    active_output: Option<&str>,
+    panels: &std::collections::BTreeMap<
+        nickel_core::plugins::PluginSurfaceKey,
+        nickel_core::plugins::PluginSurface,
+    >,
+) -> HashSet<(String, nickel_core::plugins::PluginSurfaceKey)> {
+    panels
+        .iter()
+        .flat_map(|(key, surface)| {
+            output_names
+                .iter()
+                .enumerate()
+                .filter(move |(_, output)| {
+                    output_scope_matches(surface.output, output_names, output, active_output)
+                })
+                .map(|(_, output)| (output.clone(), key.clone()))
+        })
+        .collect()
+}
+
+fn output_scope_matches(
+    scope: nickel_core::plugins::PluginOutputScope,
+    output_names: &[String],
+    output: &str,
+    active_output: Option<&str>,
+) -> bool {
+    match scope {
+        nickel_core::plugins::PluginOutputScope::All => true,
+        nickel_core::plugins::PluginOutputScope::Primary => {
+            output_names.first().is_some_and(|name| name == output)
+        }
+        nickel_core::plugins::PluginOutputScope::Active => active_output
+            .filter(|active| output_names.iter().any(|name| name == active))
+            .map_or_else(
+                || output_names.first().is_some_and(|name| name == output),
+                |active| active == output,
+            ),
+    }
+}
+
+fn fixed_plugin_surface_key(
+    role: SurfaceRole,
+    active: &HashSet<nickel_core::plugins::PluginSurfaceKey>,
+) -> Option<nickel_core::plugins::PluginSurfaceKey> {
+    match role {
+        SurfaceRole::VolumeOsd => None,
+        SurfaceRole::WindowPreview => active
+            .iter()
+            .find(|key| key.surface_id == "window-preview")
+            .cloned(),
+        _ => None,
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct SurfaceId(WindowId);
+
+#[derive(Debug)]
+pub enum ShellUserEvent {
+    GlobalShortcut(crate::platform::GlobalShortcut),
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    TestControl(crate::platform::ShellTestRequest),
+}
+
+/// Cross-thread sender for events consumed by the shell runtime.
+///
+/// Winit 0.31 proxies only wake the loop, so payloads remain in Nickel's mailbox.
+/// Windows retains its checked thread-message wake: an unchecked PostMessageW
+/// can leave a payload stranded under compatibility runtimes. The mailbox also
+/// rejects sends after its native event-loop owner retires.
+#[derive(Clone)]
+pub struct ShellEventSender {
+    #[cfg(not(target_os = "windows"))]
+    proxy: EventLoopProxy,
+    queue: Arc<Mutex<VecDeque<ShellUserEvent>>>,
+    alive: Arc<AtomicBool>,
+    #[cfg(target_os = "windows")]
+    event_thread: u32,
+}
+
+impl ShellEventSender {
+    pub fn send_event(&self, event: ShellUserEvent) -> Result<(), ShellUserEvent> {
+        {
+            let Ok(mut queue) = self.queue.lock() else {
+                return Err(event);
+            };
+            if !self.alive.load(AtomicOrdering::Acquire) {
+                return Err(event);
+            }
+            queue.push_back(event);
+            // SAFETY: `event_thread` is captured while constructing the winit loop on
+            // its owning thread. Winit has already created that thread's message queue.
+            #[cfg(target_os = "windows")]
+            if unsafe {
+                PostThreadMessageW(
+                    self.event_thread,
+                    WM_APP + 0x4e,
+                    WPARAM::default(),
+                    LPARAM::default(),
+                )
+            }
+            .is_err()
+            {
+                return Err(queue.pop_back().expect("just queued shell event"));
+            }
+            #[cfg(not(target_os = "windows"))]
+            self.proxy.wake_up();
+            Ok(())
+        }
+    }
+}
+
+pub trait WinitWindowCompat {
+    fn size(&self) -> (u32, u32);
+    fn has_input_focus(&self) -> bool;
+}
+
+impl WinitWindowCompat for dyn Window + '_ {
+    fn size(&self) -> (u32, u32) {
+        let size = self.surface_size().to_logical::<u32>(self.scale_factor());
+        (size.width, size.height)
+    }
+
+    fn has_input_focus(&self) -> bool {
+        self.has_focus()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ShellMemoryDiagnostics {
+    /// Advances whenever shared presentation may mutate retained cache state.
+    pub presenter_cache_generation: u64,
+    /// Cache-owned bytes reported by every currently instantiated surface presenter.
+    pub presenter_caches: AggregatePresenterCacheDiagnostics,
+    /// Allocator/process-visible resident bytes from the operating system.
+    /// This is intentionally independent of `presenter_caches.live_bytes`.
+    pub process_rss_bytes: Option<usize>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ShellRuntimeDiagnostics {
+    /// Completed presents after the presenter was initialized, in microseconds.
+    pub warm_present_us: Vec<u64>,
+    /// Input receipt through the first synchronous present it caused, in microseconds.
+    pub input_to_present_us: Vec<u64>,
+    /// Process-wide allocation operations observed during each warm present.
+    pub warm_present_allocations: Vec<u64>,
+    /// Payload-free JSX admission identities joined to their native present.
+    pub correlated_presents: Vec<NativePresentSample>,
+    pub surfaces: Vec<nickel_session_protocol::SurfaceRuntimeDiagnostics>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct SurfaceRuntimeSamples {
+    present_us: VecDeque<u64>,
+    input_to_visible_us: VecDeque<u64>,
+    coalesced_present_requests: u64,
+}
+
+fn surface_runtime_diagnostics(
+    identity: &str,
+    samples: &SurfaceRuntimeSamples,
+    retained_gpu_bytes: Option<u64>,
+) -> nickel_session_protocol::SurfaceRuntimeDiagnostics {
+    let present_samples = samples.present_us.iter().copied().collect::<Vec<_>>();
+    let input_samples = samples
+        .input_to_visible_us
+        .iter()
+        .copied()
+        .collect::<Vec<_>>();
+    nickel_session_protocol::SurfaceRuntimeDiagnostics {
+        surface: identity.to_owned(),
+        present_us: nickel_session_protocol::RuntimeDistribution::from_samples(&present_samples),
+        input_to_visible_us: nickel_session_protocol::RuntimeDistribution::from_samples(
+            &input_samples,
+        ),
+        coalesced_present_requests: nickel_session_protocol::RuntimeMeasurement::available(
+            samples.coalesced_present_requests,
+        ),
+        missed_deadlines: nickel_session_protocol::RuntimeMeasurement::unavailable(
+            "native presenter does not currently measure deadline lateness",
+        ),
+        retained_cpu_bytes: nickel_session_protocol::RuntimeMeasurement::unavailable(
+            "shared presenter CPU caches are not attributable to one surface",
+        ),
+        retained_gpu_bytes: retained_gpu_bytes.map_or_else(
+            || {
+                nickel_session_protocol::RuntimeMeasurement::unavailable(
+                    "surface has no active GPU retained framebuffer",
+                )
+            },
+            nickel_session_protocol::RuntimeMeasurement::available,
+        ),
+        in_flight_bytes: nickel_session_protocol::RuntimeMeasurement::unavailable(
+            "graphics backend does not expose per-surface in-flight allocation bytes",
+        ),
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NativePresentSample {
+    pub correlation: twinkle_ui::NativeFrameCorrelation,
+    pub present_us: u64,
+    pub input_to_present_us: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum SurfaceRole {
+    Desktop,
+    Taskbar,
+    Panel,
+    Launcher,
+    ControlCenter,
+    Notification,
+    VolumeOsd,
+    WindowPreview,
+    WindowContextMenu,
+    CodexProjectMenu,
+    Lock,
+    Screenshot,
+    OnScreenKeyboard,
+    CodexChat,
+    #[cfg(target_os = "windows")]
+    TrustedControl,
+}
+
+#[cfg(target_os = "linux")]
+fn surface_is_ephemeral(role: SurfaceRole) -> bool {
+    matches!(
+        role,
+        SurfaceRole::Notification
+            | SurfaceRole::VolumeOsd
+            | SurfaceRole::WindowPreview
+            | SurfaceRole::WindowContextMenu
+            | SurfaceRole::CodexProjectMenu
+            | SurfaceRole::Screenshot
+            | SurfaceRole::OnScreenKeyboard
+    )
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DisplayGeometry {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub scale: f32,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum ShellEvent {
+    GlobalShortcut(crate::platform::GlobalShortcut),
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    TestControl(crate::platform::ShellTestRequest),
+    Quit,
+    /// The native event source can no longer deliver events. Unlike closing an
+    /// individual shell surface, this is terminal on every platform.
+    RuntimeTerminated {
+        code: i32,
+    },
+    Input {
+        surface: SurfaceId,
+        event: InputEvent,
+    },
+    FileDrop {
+        surface: SurfaceId,
+        path: std::path::PathBuf,
+    },
+    Shown(SurfaceId),
+    Hidden(SurfaceId),
+    CloseRequested(SurfaceId),
+    FocusChanged {
+        surface: SurfaceId,
+        focused: bool,
+    },
+    PointerEntered {
+        surface: SurfaceId,
+        entered: bool,
+    },
+    LogicalResize {
+        surface: SurfaceId,
+        width: u32,
+        height: u32,
+    },
+    PixelResize {
+        surface: SurfaceId,
+        width: u32,
+        height: u32,
+        scale: f32,
+    },
+    DisplayTopologyChanged,
+    Redraw(SurfaceId),
+}
+
+fn record_pump_status(pending: &mut VecDeque<ShellEvent>, status: PumpStatus) {
+    let PumpStatus::Exit(code) = status else {
+        return;
+    };
+    // A terminal native event source supersedes buffered input. Prioritizing it
+    // prevents a disconnected Wayland pump from being called again and turning
+    // the shell into an orphaned busy loop while stale events drain.
+    pending.clear();
+    pending.push_back(ShellEvent::RuntimeTerminated { code });
+}
+
+fn queue_shell_input(pending: &mut VecDeque<ShellEvent>, surface: SurfaceId, event: InputEvent) {
+    let InputEvent::Pointer(twinkle_input::PointerEvent::Motion {
+        device,
+        order,
+        position,
+        delta,
+    }) = event
+    else {
+        pending.push_back(ShellEvent::Input { surface, event });
+        return;
+    };
+    if let Some(ShellEvent::Input {
+        surface: queued_surface,
+        event:
+            InputEvent::Pointer(twinkle_input::PointerEvent::Motion {
+                device: queued_device,
+                order: queued_order,
+                position: queued_position,
+                delta: queued_delta,
+            }),
+    }) = pending.back_mut()
+        && *queued_surface == surface
+        && *queued_device == device
+    {
+        *queued_order = order;
+        *queued_position = position;
+        *queued_delta = match (*queued_delta, delta) {
+            (Some(previous), Some(next)) => Some(twinkle_input::Vector {
+                x: previous.x + next.x,
+                y: previous.y + next.y,
+            }),
+            (None, next) => next,
+            (previous, None) => previous,
+        };
+        return;
+    }
+    pending.push_back(ShellEvent::Input {
+        surface,
+        event: InputEvent::Pointer(twinkle_input::PointerEvent::Motion {
+            device,
+            order,
+            position,
+            delta,
+        }),
+    });
+}
+
+pub struct ShellSurface {
+    id: SurfaceId,
+    role: SurfaceRole,
+    plugin: Option<nickel_core::plugins::PluginSurfaceKey>,
+    plugin_surface: Option<nickel_core::plugins::PluginSurface>,
+    passive_overlay: bool,
+    application_id: String,
+    display_index: usize,
+    output_name: String,
+    display_connected: bool,
+    initial_exposed: bool,
+    presenter: Option<SoftbufferPresenter>,
+    last_host_change_token: Option<HostChangeToken>,
+    visible: bool,
+    /// Monotonic identity for this native surface incarnation. It changes when
+    /// a native window is replaced even if its logical shell role is retained.
+    diagnostic_generation: u64,
+    #[cfg(target_os = "windows")]
+    presentation_generation: u64,
+    #[cfg(target_os = "windows")]
+    presentation_failures: u64,
+    #[cfg(target_os = "windows")]
+    presented_frame_bytes: u64,
+    window: Box<dyn Window>,
+}
+
+impl ShellSurface {
+    pub fn id(&self) -> SurfaceId {
+        self.id
+    }
+
+    pub fn role(&self) -> SurfaceRole {
+        self.role
+    }
+
+    pub fn is_taskbar_plugin(&self) -> bool {
+        self.role == SurfaceRole::Panel
+            && self
+                .plugin_surface
+                .as_ref()
+                .is_some_and(|surface| surface.reserve_work_area)
+    }
+
+    pub fn is_desktop_surface(&self) -> bool {
+        self.role == SurfaceRole::Desktop
+    }
+
+    fn diagnostic_role(&self) -> SurfaceRole {
+        if self.is_taskbar_plugin() {
+            SurfaceRole::Taskbar
+        } else {
+            self.role
+        }
+    }
+
+    pub fn plugin_key(&self) -> Option<&nickel_core::plugins::PluginSurfaceKey> {
+        self.plugin.as_ref()
+    }
+
+    pub fn display_index(&self) -> usize {
+        self.display_index
+    }
+
+    pub fn output_name(&self) -> &str {
+        &self.output_name
+    }
+
+    pub fn window(&self) -> &dyn Window {
+        self.window.as_ref()
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(crate) fn test_identity(&self) -> String {
+        format!(
+            "windows:{}:{:?}",
+            self.diagnostic_generation,
+            self.diagnostic_role()
+        )
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(crate) fn is_visible(&self) -> bool {
+        self.visible
+    }
+}
+
+fn surface_runtime_identity(surface: &ShellSurface) -> String {
+    let owner = surface.plugin.as_ref().map_or_else(
+        || "native".to_owned(),
+        |key| format!("{}/{}", key.plugin_id, key.surface_id),
+    );
+    format!(
+        "{:?}:{}:{}:{}",
+        surface.diagnostic_role(),
+        surface.output_name,
+        owner,
+        surface.diagnostic_generation
+    )
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for ShellSurface {
+    fn drop(&mut self) {
+        if self.role == SurfaceRole::CodexChat
+            || self
+                .plugin_surface
+                .as_ref()
+                .is_some_and(crate::platform::native_application_windows::is_application_surface)
+        {
+            crate::platform::unregister_native_application_window(&self.window);
+        }
+        if matches!(self.role, SurfaceRole::Panel | SurfaceRole::Taskbar) {
+            crate::platform::release_panel_window(&self.window);
+        }
+    }
+}
+
+fn show_surface_native(surface: &ShellSurface) {
+    #[cfg(target_os = "windows")]
+    if matches!(
+        surface.role,
+        SurfaceRole::WindowPreview | SurfaceRole::Notification
+    ) || surface.passive_overlay
+    {
+        crate::platform::show_overlay_window_without_activation(&surface.window);
+        return;
+    }
+    surface.window.set_visible(true);
+}
+
+enum NativeEvent {
+    NewEvents,
+    CanCreate,
+    BeforeWait,
+    Window(WindowId, WindowEvent),
+}
+struct ShellPump<F> {
+    dispatch: F,
+    queued: VecDeque<(WindowId, WindowEvent)>,
+}
+impl<F: FnMut(NativeEvent, &dyn ActiveEventLoop)> ApplicationHandler for ShellPump<F> {
+    fn new_events(&mut self, active: &dyn ActiveEventLoop, _: StartCause) {
+        (self.dispatch)(NativeEvent::NewEvents, active);
+        for (id, event) in self.queued.drain(..) {
+            (self.dispatch)(NativeEvent::Window(id, event), active);
+        }
+    }
+    fn can_create_surfaces(&mut self, active: &dyn ActiveEventLoop) {
+        (self.dispatch)(NativeEvent::CanCreate, active);
+    }
+    fn about_to_wait(&mut self, active: &dyn ActiveEventLoop) {
+        (self.dispatch)(NativeEvent::BeforeWait, active);
+    }
+    fn window_event(&mut self, active: &dyn ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        (self.dispatch)(NativeEvent::Window(id, event), active);
+    }
+}
+impl Drop for WinitShell {
+    fn drop(&mut self) {
+        let _queue = self
+            .external_events
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        self.sender_alive.store(false, AtomicOrdering::Release);
+    }
+}
+
+pub struct WinitShell {
+    // Presenters borrow native window handles and must drop before the event loop.
+    surfaces: Vec<ShellSurface>,
+    graphics: Option<SharedGraphics>,
+    surface_indices: HashMap<WindowId, usize>,
+    native_surface_indices: HashMap<WindowId, usize>,
+    events: EventLoop,
+    external_events: Arc<Mutex<VecDeque<ShellUserEvent>>>,
+    sender_alive: Arc<AtomicBool>,
+    can_create_surfaces: bool,
+    deferred_window_events: VecDeque<(WindowId, WindowEvent)>,
+    pending_file_drops: HashSet<(WindowId, winit::data_transfer::DataTransferId)>,
+    #[cfg(target_os = "windows")]
+    event_thread: u32,
+    #[cfg(target_os = "windows")]
+    _window_thread_guard: crate::platform::InternalWindowThreadGuard,
+    pending_events: VecDeque<ShellEvent>,
+    displays: Vec<(DisplayGeometry, String)>,
+    input_adapters: HashMap<WindowId, twinkle_input::winit::Adapter>,
+    devices: twinkle_input::winit::DeviceRegistry,
+    warm_present_us: VecDeque<u64>,
+    input_to_present_us: VecDeque<u64>,
+    warm_present_allocations: VecDeque<u64>,
+    correlated_presents: VecDeque<NativePresentSample>,
+    surface_runtime_samples: std::collections::BTreeMap<String, SurfaceRuntimeSamples>,
+    presenter_cache_peak_bytes: Cell<usize>,
+    presenter_cache_generation: u64,
+    output_retirements: OutputRetirementTracker,
+    output_creation_retry: OutputCreationRetry,
+    pending_input_started: Option<Instant>,
+    clipboard: Option<std::cell::RefCell<arboard::Clipboard>>,
+    started: Instant,
+    options: ShellOptions,
+    primary_output_name: Option<String>,
+    active_output_name: Option<String>,
+    active_fixed_plugins: HashSet<nickel_core::plugins::PluginSurfaceKey>,
+    plugin_panel_enabled: bool,
+    plugin_panel_surface: nickel_core::plugins::PluginSurface,
+    plugin_panel_owner: String,
+    extra_plugin_panels: std::collections::BTreeMap<
+        nickel_core::plugins::PluginSurfaceKey,
+        nickel_core::plugins::PluginSurface,
+    >,
+    next_surface_diagnostic_generation: u64,
+    #[cfg(target_os = "windows")]
+    shortcut_diagnostics: Option<crate::platform::WindowsShortcutDiagnosticSource>,
+    #[cfg(target_os = "windows")]
+    remote_frame_dispatches: VecDeque<(String, u64)>,
+    #[cfg(target_os = "windows")]
+    remote_frame_dispatch_drops: u64,
+}
+
+impl WinitShell {
+    pub fn new(started: Instant) -> Result<Self, String> {
+        Self::new_with_options(started, ShellOptions::default())
+    }
+
+    pub fn new_with_options(started: Instant, options: ShellOptions) -> Result<Self, String> {
+        let mut builder = EventLoop::builder();
+        #[cfg(all(test, target_os = "windows"))]
+        {
+            use winit::platform::windows::EventLoopBuilderExtWindows;
+            // Native owner fixtures run on a Rust test thread. Shipped shell
+            // startup continues to require the main thread.
+            builder.with_any_thread(true);
+        }
+        #[cfg(all(test, target_os = "linux"))]
+        {
+            // Explicit native fixtures run on the test thread; production still requires main.
+            winit::platform::wayland::EventLoopBuilderExtWayland::with_any_thread(
+                &mut builder,
+                true,
+            );
+            winit::platform::x11::EventLoopBuilderExtX11::with_any_thread(&mut builder, true);
+        }
+        let events = builder.build().map_err(|error| error.to_string())?;
+        let external_events = Arc::new(Mutex::new(VecDeque::new()));
+        tracing::info!(
+            elapsed_ms = started.elapsed().as_secs_f64() * 1_000.0,
+            "winit event loop initialized"
+        );
+        Ok(Self {
+            surfaces: Vec::new(),
+            graphics: None,
+            surface_indices: HashMap::new(),
+            native_surface_indices: HashMap::new(),
+            events,
+            external_events,
+            sender_alive: Arc::new(AtomicBool::new(true)),
+            can_create_surfaces: false,
+            deferred_window_events: VecDeque::new(),
+            pending_file_drops: HashSet::new(),
+            #[cfg(target_os = "windows")]
+            // SAFETY: querying the identifier of the current thread has no preconditions.
+            event_thread: unsafe { GetCurrentThreadId() },
+            #[cfg(target_os = "windows")]
+            _window_thread_guard: crate::platform::register_shell_window_thread(),
+            pending_events: VecDeque::new(),
+            displays: Vec::new(),
+            input_adapters: HashMap::new(),
+            devices: twinkle_input::winit::DeviceRegistry::default(),
+            warm_present_us: VecDeque::with_capacity(RUNTIME_SAMPLE_CAPACITY),
+            input_to_present_us: VecDeque::with_capacity(RUNTIME_SAMPLE_CAPACITY),
+            warm_present_allocations: VecDeque::with_capacity(RUNTIME_SAMPLE_CAPACITY),
+            correlated_presents: VecDeque::with_capacity(RUNTIME_SAMPLE_CAPACITY),
+            surface_runtime_samples: std::collections::BTreeMap::new(),
+            presenter_cache_peak_bytes: Cell::new(0),
+            presenter_cache_generation: 0,
+            output_retirements: OutputRetirementTracker::default(),
+            output_creation_retry: OutputCreationRetry::default(),
+            pending_input_started: None,
+            clipboard: arboard::Clipboard::new().ok().map(std::cell::RefCell::new),
+            started,
+            options,
+            primary_output_name: None,
+            active_output_name: None,
+            active_fixed_plugins: [
+            ]
+            .into_iter()
+            .collect(),
+            plugin_panel_enabled: crate::plugin_panel::enabled(),
+            plugin_panel_surface: crate::plugin_panel::surface().clone(),
+            plugin_panel_owner: crate::plugin_panel::manifest().id.clone(),
+            extra_plugin_panels: std::collections::BTreeMap::new(),
+            next_surface_diagnostic_generation: 0,
+            #[cfg(target_os = "windows")]
+            shortcut_diagnostics: None,
+            #[cfg(target_os = "windows")]
+            remote_frame_dispatches: VecDeque::with_capacity(
+                nickel_remote_control::frame_trace::MAX_FRAME_TRACE_RECORDS,
+            ),
+            #[cfg(target_os = "windows")]
+            remote_frame_dispatch_drops: 0,
+        })
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(crate) fn take_remote_frame_dispatches(&mut self) -> (u64, Vec<(String, u64)>) {
+        (
+            std::mem::take(&mut self.remote_frame_dispatch_drops),
+            self.remote_frame_dispatches.drain(..).collect(),
+        )
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(crate) fn set_shortcut_diagnostics(
+        &mut self,
+        source: crate::platform::WindowsShortcutDiagnosticSource,
+    ) {
+        self.shortcut_diagnostics = Some(source);
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(crate) fn shortcut_diagnostic(
+        &self,
+        observation_generation: u64,
+        observed_at_us: u64,
+    ) -> nickel_remote_control::diagnostics::ShortcutDiagnostic {
+        self.shortcut_diagnostics.as_ref().map_or_else(
+            || nickel_remote_control::diagnostics::ShortcutDiagnostic {
+                observation_generation,
+                observed_at_us,
+                registration_revision: None,
+                capability: nickel_remote_control::diagnostics::ShortcutDiagnosticCapability::BackendUnavailable,
+                registrations: Vec::new(),
+                unprojected_bindings: 0,
+                truncated: false,
+            },
+            |source| source.snapshot(observation_generation, observed_at_us),
+        )
+    }
+
+    fn next_surface_diagnostic_generation(&mut self) -> Result<u64, String> {
+        self.next_surface_diagnostic_generation = self
+            .next_surface_diagnostic_generation
+            .checked_add(1)
+            .ok_or("shell surface diagnostic generations exhausted")?;
+        Ok(self.next_surface_diagnostic_generation)
+    }
+
+    /// Payload-free wake for coalesced remote cleanup; never locks the event queue.
+    #[cfg(target_os = "windows")]
+    pub(crate) fn remote_cleanup_wake(&self) -> nickel_remote_control::ConnectionCleanupWake {
+        let event_thread = self.event_thread;
+        nickel_remote_control::ConnectionCleanupWake::new(move || {
+            // SAFETY: winit created the captured owner thread's message queue.
+            // No pointer or borrowed payload is passed; a retired thread fails closed.
+            unsafe {
+                PostThreadMessageW(
+                    event_thread,
+                    WM_APP + 0x4e,
+                    WPARAM::default(),
+                    LPARAM::default(),
+                )
+            }
+            .is_ok()
+        })
+    }
+
+    pub fn event_sender(&self) -> ShellEventSender {
+        ShellEventSender {
+            #[cfg(not(target_os = "windows"))]
+            proxy: self.events.create_proxy(),
+            queue: Arc::clone(&self.external_events),
+            alive: Arc::clone(&self.sender_alive),
+            #[cfg(target_os = "windows")]
+            event_thread: self.event_thread,
+        }
+    }
+
+    pub fn create_shell_surfaces(&mut self) -> Result<(), String> {
+        self.surfaces.clear();
+        self.surface_indices.clear();
+        self.native_surface_indices.clear();
+        self.output_retirements = OutputRetirementTracker::default();
+        self.output_creation_retry = OutputCreationRetry::default();
+        let displays = require_displays(self.display_geometries()?)?;
+        let output_names = self.display_names()?;
+        let create_desktops =
+            self.options.create_desktop_surfaces && crate::platform::renders_desktop_background();
+        let desired = desired_output_surfaces(
+            &output_names,
+            create_desktops,
+            self.options.bar_on_all_displays,
+            self.primary_output_name.as_deref(),
+            self.active_output_name.as_deref(),
+            self.plugin_panel_enabled,
+            self.plugin_panel_surface.output,
+        );
+        let mut output_creation_failed = false;
+        for (display_index, geometry) in displays.iter().copied().enumerate() {
+            let output_name = output_names.get(display_index).ok_or_else(|| {
+                "winit output identity count changed during shell startup".to_string()
+            })?;
+            for role in [SurfaceRole::Desktop, SurfaceRole::Lock] {
+                if !desired.contains(&(output_name.clone(), role)) {
+                    continue;
+                }
+                if let Err(error) = self.create_surface(role, display_index, geometry, output_name)
+                {
+                    output_creation_failed = true;
+                    tracing::warn!(
+                        output = output_name,
+                        ?role,
+                        %error,
+                        "failed to create startup output-owned shell surface; retry scheduled"
+                    );
+                }
+            }
+        }
+        let mut panels = self.extra_plugin_panels.clone();
+        panels.retain(|key, _| !self.active_fixed_plugins.contains(key));
+        let primary_key = nickel_core::plugins::PluginSurfaceKey {
+            plugin_id: self.plugin_panel_owner.clone(),
+            surface_id: self.plugin_panel_surface.id.clone(),
+        };
+        if self.plugin_panel_enabled {
+            panels.insert(primary_key.clone(), self.plugin_panel_surface.clone());
+        }
+
+        let mut desired_panels =
+            desired_plugin_surfaces(&output_names, self.active_output_name.as_deref(), &panels);
+        let taskbar_outputs = panel_outputs(
+            &output_names,
+            self.options.bar_on_all_displays,
+            self.primary_output_name.as_deref(),
+        );
+        desired_panels.retain(|(output, key)| {
+            !panels.get(key).is_some_and(|panel| panel.reserve_work_area)
+                || taskbar_outputs.contains(output)
+        });
+        let mut panels = panels.into_iter().collect::<Vec<_>>();
+        // An owned dialog needs its ordinary panel window created first.
+        panels.sort_by_key(|(key, surface)| {
+            (
+                surface.kind == nickel_core::plugins::PluginSurfaceKind::Dialog,
+                key != &primary_key,
+            )
+        });
+        for (key, panel) in panels {
+            for (display_index, geometry) in displays.iter().copied().enumerate() {
+                let output_name = &output_names[display_index];
+                if !desired_panels.contains(&(output_name.clone(), key.clone())) {
+                    continue;
+                }
+                if let Err(error) = self.create_surface_with_plugin(
+                    SurfaceRole::Panel,
+                    display_index,
+                    geometry,
+                    output_name,
+                    Some((&key, &panel)),
+                ) {
+                    output_creation_failed = true;
+                    tracing::warn!(plugin = %key.plugin_id, output = output_name, %error, "failed to create startup plugin panel surface; retry scheduled");
+                }
+            }
+        }
+        if output_creation_failed {
+            self.output_creation_retry.failed(Instant::now());
+        }
+        let primary = displays[0];
+        let primary_name = output_names.first().ok_or_else(|| {
+            "winit reported no output identity for the primary display".to_string()
+        })?;
+
+        self.create_surface(SurfaceRole::ControlCenter, 0, primary, primary_name)?;
+        self.create_surface(SurfaceRole::Notification, 0, primary, primary_name)?;
+        {
+            let role = SurfaceRole::WindowPreview;
+            if fixed_plugin_surface_key(role, &self.active_fixed_plugins)
+                .is_some_and(|key| self.active_fixed_plugins.contains(&key))
+            {
+                self.create_surface(role, 0, primary, primary_name)?;
+            }
+        }
+
+        tracing::info!(
+            elapsed_ms = self.started.elapsed().as_secs_f64() * 1_000.0,
+            surface_count = self.surfaces.len(),
+            "winit shell windows created"
+        );
+        Ok(())
+    }
+
+    pub fn sync_display_geometry(&mut self) -> Result<(), String> {
+        let displays = self.display_geometries()?;
+        let output_names = self.display_names()?;
+        self.retire_settled_output_surfaces(&output_names, Instant::now());
+        if displays.is_empty() {
+            for surface in &mut self.surfaces {
+                #[cfg(target_os = "windows")]
+                if surface.role == SurfaceRole::TrustedControl {
+                    // The trusted owner must reconcile topology before exposure.
+                    continue;
+                }
+                surface.display_connected = false;
+                surface.presenter = None;
+                surface.window.set_visible(false);
+            }
+            self.rebuild_surface_indices();
+            self.output_creation_retry.succeeded();
+            tracing::info!("winit shell is dormant while no displays are available");
+            return Ok(());
+        }
+        let create_desktops =
+            self.options.create_desktop_surfaces && crate::platform::renders_desktop_background();
+        let desired = desired_output_surfaces(
+            &output_names,
+            create_desktops,
+            self.options.bar_on_all_displays,
+            self.primary_output_name.as_deref(),
+            self.active_output_name.as_deref(),
+            self.plugin_panel_enabled,
+            self.plugin_panel_surface.output,
+        );
+        let primary_plugin_key = nickel_core::plugins::PluginSurfaceKey {
+            plugin_id: self.plugin_panel_owner.clone(),
+            surface_id: self.plugin_panel_surface.id.clone(),
+        };
+        let mut active_panels = self.extra_plugin_panels.clone();
+        active_panels.retain(|key, _| !self.active_fixed_plugins.contains(key));
+
+        if self.plugin_panel_enabled {
+            active_panels.insert(
+                primary_plugin_key.clone(),
+                self.plugin_panel_surface.clone(),
+            );
+        }
+        let mut desired_plugin_panels = desired_plugin_surfaces(
+            &output_names,
+            self.active_output_name.as_deref(),
+            &active_panels,
+        );
+        let outputs = panel_outputs(
+            &output_names,
+            self.options.bar_on_all_displays,
+            self.primary_output_name.as_deref(),
+        );
+        desired_plugin_panels.retain(|(output, key)| {
+            !active_panels
+                .get(key)
+                .is_some_and(|panel| panel.reserve_work_area)
+                || outputs.contains(output)
+        });
+        let panel_expected = |surface: &ShellSurface| {
+            surface.plugin.as_ref().is_some_and(|key| {
+                desired_plugin_panels.contains(&(surface.output_name.clone(), key.clone()))
+                    && active_panels
+                        .get(key)
+                        .is_some_and(|panel| panel.passive == surface.passive_overlay)
+            })
+        };
+        // A settings policy change is authoritative immediately. Missing outputs remain
+        // dormant for the retirement grace period so a transient topology snapshot or a
+        // quick reconnect can preserve their stable surface identities.
+        self.surfaces.retain(|surface| match surface.role {
+            SurfaceRole::Launcher => false,
+            SurfaceRole::OnScreenKeyboard => false,
+            SurfaceRole::Screenshot => true,
+            SurfaceRole::WindowContextMenu | SurfaceRole::VolumeOsd => false,
+            SurfaceRole::Desktop => desired.contains(&(surface.output_name.clone(), surface.role)),
+            SurfaceRole::WindowPreview => {
+                fixed_plugin_surface_key(surface.role, &self.active_fixed_plugins)
+                    .is_some_and(|key| surface.plugin.as_ref() == Some(&key))
+            }
+            SurfaceRole::Panel => panel_expected(surface),
+            SurfaceRole::Taskbar => desired.contains(&(surface.output_name.clone(), surface.role)),
+            _ => true,
+        });
+        #[cfg(target_os = "windows")]
+        if let Some(surface) = self.surfaces.iter().find(|surface| {
+            surface.role == SurfaceRole::Panel
+                && surface
+                    .plugin
+                    .as_ref()
+                    .and_then(|key| active_panels.get(key))
+                    .is_some_and(|panel| panel.reserve_work_area)
+        }) {
+            crate::platform::ensure_panel_tray_host(&surface.window);
+        }
+        for surface in &mut self.surfaces {
+            #[cfg(target_os = "windows")]
+            if surface.role == SurfaceRole::TrustedControl {
+                // The trusted owner must reconcile topology before exposure.
+                continue;
+            }
+            if output_role(surface.role)
+                && if surface.role == SurfaceRole::Panel {
+                    !panel_expected(surface)
+                } else {
+                    !desired.contains(&(surface.output_name.clone(), surface.role))
+                }
+            {
+                surface.display_connected = false;
+                surface.presenter = None;
+                surface.window.set_visible(false);
+            }
+        }
+        self.rebuild_surface_indices();
+        let mut creation_failed = false;
+        for (display_index, geometry) in displays.iter().copied().enumerate() {
+            let output_name = output_names.get(display_index).ok_or_else(|| {
+                "winit output identity count changed during shell sync".to_string()
+            })?;
+            for role in [SurfaceRole::Desktop, SurfaceRole::Lock] {
+                if !desired.contains(&(output_name.clone(), role)) {
+                    continue;
+                }
+                if self.surfaces.iter().any(|surface| {
+                    surface.display_connected
+                        && surface.role == role
+                        && surface.output_name == *output_name
+                }) {
+                    continue;
+                }
+                if let Some(surface) = self.surfaces.iter_mut().find(|surface| {
+                    !surface.display_connected
+                        && surface.role == role
+                        && surface.output_name == *output_name
+                }) {
+                    surface.display_index = display_index;
+                    surface.display_connected = true;
+                    let (_, x, y, width, height, _) = surface_geometry_for_panel(
+                        role,
+                        geometry,
+                        self.options.panel_edge,
+                        &self.plugin_panel_surface,
+                    );
+                    surface
+                        .window
+                        .set_outer_position(LogicalPosition::new(x, y).into());
+                    let _ = surface
+                        .window
+                        .request_surface_size(LogicalSize::new(width, height).into());
+                    surface.window.set_visible(true);
+                } else {
+                    if let Err(error) =
+                        self.create_surface(role, display_index, geometry, output_name)
+                    {
+                        creation_failed = true;
+                        tracing::warn!(
+                            output = output_name,
+                            ?role,
+                            %error,
+                            "failed to create output-owned shell surface; retry scheduled"
+                        );
+                    }
+                }
+            }
+        }
+        let mut panels = active_panels
+            .iter()
+            .map(|(key, surface)| (key.clone(), surface.clone()))
+            .collect::<Vec<_>>();
+        // A dialog with an owner needs its ordinary window created first.
+        panels.sort_by_key(|(key, surface)| {
+            (
+                surface.kind == nickel_core::plugins::PluginSurfaceKind::Dialog,
+                key != &primary_plugin_key,
+            )
+        });
+        for (key, panel) in panels {
+            for (display_index, geometry) in displays.iter().copied().enumerate() {
+                let output_name = &output_names[display_index];
+                if !desired_plugin_panels.contains(&(output_name.clone(), key.clone())) {
+                    continue;
+                }
+                if self.surfaces.iter().any(|surface| {
+                    surface.display_connected
+                        && surface.role == SurfaceRole::Panel
+                        && surface.output_name == *output_name
+                        && surface.plugin.as_ref() == Some(&key)
+                }) {
+                    continue;
+                }
+                if let Some(existing) = self.surfaces.iter_mut().find(|surface| {
+                    !surface.display_connected
+                        && surface.role == SurfaceRole::Panel
+                        && surface.output_name == *output_name
+                        && surface.plugin.as_ref() == Some(&key)
+                }) {
+                    existing.display_index = display_index;
+                    existing.display_connected = true;
+                    existing.plugin_surface = Some(panel.clone());
+                    let (_, x, y, width, height, _) = surface_geometry_for_panel(
+                        SurfaceRole::Panel,
+                        geometry,
+                        self.options.panel_edge,
+                        &panel,
+                    );
+                    existing
+                        .window
+                        .set_outer_position(LogicalPosition::new(x, y).into());
+                    let _ = existing
+                        .window
+                        .request_surface_size(LogicalSize::new(width, height).into());
+                    existing.window.set_visible(true);
+                } else if let Err(error) = self.create_surface_with_plugin(
+                    SurfaceRole::Panel,
+                    display_index,
+                    geometry,
+                    output_name,
+                    Some((&key, &panel)),
+                ) {
+                    creation_failed = true;
+                    tracing::warn!(plugin = %key.plugin_id, %error, "failed to create plugin panel surface");
+                }
+            }
+        }
+        self.rebuild_surface_indices();
+        let primary = displays[0];
+        let primary_name = &output_names[0];
+        for role in [SurfaceRole::WindowPreview, SurfaceRole::Screenshot] {
+            if (role == SurfaceRole::Screenshot
+                || fixed_plugin_surface_key(role, &self.active_fixed_plugins)
+                    .is_some_and(|key| self.active_fixed_plugins.contains(&key)))
+                && !self.surfaces.iter().any(|surface| surface.role == role)
+                && let Err(error) = self.create_surface(role, 0, primary, primary_name)
+            {
+                creation_failed = true;
+                tracing::warn!(?role, %error, "failed to create bundled plugin surface");
+            }
+        }
+        if creation_failed {
+            self.output_creation_retry.failed(Instant::now());
+        } else {
+            self.output_creation_retry.succeeded();
+        }
+        for surface in &mut self.surfaces {
+            #[cfg(target_os = "windows")]
+            if surface.role == SurfaceRole::TrustedControl {
+                // The trusted owner must reconcile topology before exposure.
+                continue;
+            }
+            if surface.display_connected
+                || matches!(
+                    surface.role,
+                    SurfaceRole::Desktop
+                        | SurfaceRole::Taskbar
+                        | SurfaceRole::Panel
+                        | SurfaceRole::Lock
+                )
+            {
+                continue;
+            }
+            surface.display_index = 0;
+            surface.output_name.clone_from(primary_name);
+            surface.display_connected = true;
+            let (_, x, y, width, height, _) = surface_geometry_for_panel(
+                surface.role,
+                primary,
+                self.options.panel_edge,
+                &self.plugin_panel_surface,
+            );
+            surface
+                .window
+                .set_outer_position(LogicalPosition::new(x, y).into());
+            let _ = surface
+                .window
+                .request_surface_size(LogicalSize::new(width, height).into());
+        }
+        self.rebuild_surface_indices();
+
+        for surface in &mut self.surfaces {
+            #[cfg(target_os = "windows")]
+            if surface.role == SurfaceRole::TrustedControl {
+                // The trusted owner must reconcile topology before exposure.
+                continue;
+            }
+            if !surface.display_connected {
+                continue;
+            }
+            #[cfg(target_os = "linux")]
+            if surface.role == SurfaceRole::OnScreenKeyboard {
+                continue;
+            }
+            if matches!(
+                surface.role,
+                SurfaceRole::CodexChat
+                    | SurfaceRole::WindowPreview
+                    | SurfaceRole::WindowContextMenu
+            ) {
+                continue;
+            }
+            let Some(display_index) = output_names
+                .iter()
+                .position(|name| name == &surface.output_name)
+            else {
+                continue;
+            };
+            surface.display_index = display_index;
+            let Some(display) = displays.get(display_index).copied() else {
+                continue;
+            };
+            let (_, x, y, width, height, _) = surface_geometry_for_panel(
+                surface.role,
+                display,
+                self.options.panel_edge,
+                surface
+                    .plugin
+                    .as_ref()
+                    .and_then(|key| active_panels.get(key))
+                    .unwrap_or(&self.plugin_panel_surface),
+            );
+            surface
+                .window
+                .set_outer_position(LogicalPosition::new(x, y).into());
+            let _ = surface
+                .window
+                .request_surface_size(LogicalSize::new(width, height).into());
+            #[cfg(target_os = "windows")]
+            if (surface.role == SurfaceRole::Taskbar
+                || (surface.role == SurfaceRole::Panel
+                    && surface
+                        .plugin
+                        .as_ref()
+                        .and_then(|key| active_panels.get(key))
+                        .is_some_and(|panel| panel.reserve_work_area)))
+                && !crate::platform::reposition_panel_window(
+                    &surface.window,
+                    self.options.panel_edge,
+                )
+            {
+                tracing::warn!(role = ?surface.role, "failed to reposition Windows reserved panel");
+            }
+        }
+        #[cfg(target_os = "windows")]
+        self.set_plugin_dialog_owners_enabled(false);
+        Ok(())
+    }
+
+    fn active_plugin_dialog_owners(&self) -> HashSet<(String, String, String)> {
+        self.surfaces
+            .iter()
+            .filter_map(|dialog| {
+                if !dialog.display_connected || dialog.role != SurfaceRole::Panel {
+                    return None;
+                }
+                let key = dialog.plugin.as_ref()?;
+                let declaration = dialog.plugin_surface.as_ref()?;
+                if declaration.kind != nickel_core::plugins::PluginSurfaceKind::Dialog {
+                    return None;
+                }
+                Some((
+                    key.plugin_id.clone(),
+                    declaration.owner.clone()?,
+                    dialog.output_name.clone(),
+                ))
+            })
+            .collect()
+    }
+
+    #[cfg(target_os = "windows")]
+    fn set_plugin_dialog_owners_enabled(&self, enabled: bool) {
+        use winit::platform::windows::WindowExtWindows;
+
+        let owners = self.active_plugin_dialog_owners();
+        for surface in &self.surfaces {
+            if surface.role == SurfaceRole::Panel
+                && surface.plugin.as_ref().is_some_and(|key| {
+                    owners.contains(&(
+                        key.plugin_id.clone(),
+                        key.surface_id.clone(),
+                        surface.output_name.clone(),
+                    ))
+                })
+            {
+                surface.window.set_enable(enabled);
+            }
+        }
+    }
+
+    pub fn set_bar_on_all_displays(&mut self, enabled: bool) -> Result<bool, String> {
+        if self.options.bar_on_all_displays == enabled {
+            return Ok(false);
+        }
+        self.options.bar_on_all_displays = enabled;
+        self.sync_display_geometry()?;
+        Ok(true)
+    }
+
+    pub fn set_plugin_surfaces(
+        &mut self,
+        active_fixed_plugins: HashSet<nickel_core::plugins::PluginSurfaceKey>,
+        panels: Vec<(
+            nickel_core::plugins::PluginSurfaceKey,
+            nickel_core::plugins::PluginSurface,
+        )>,
+    ) -> Result<bool, String> {
+        let mut panels = panels.into_iter();
+        let primary = panels.next();
+        if primary
+            .as_ref()
+            .is_some_and(|(key, surface)| key.surface_id != surface.id)
+        {
+            return Err("mismatched primary plugin panel surface".into());
+        }
+        let mut extra = std::collections::BTreeMap::new();
+        for (key, surface) in panels {
+            if key.surface_id != surface.id || extra.insert(key, surface).is_some() {
+                return Err("duplicate or mismatched plugin panel surface".into());
+            }
+        }
+        let enabled = primary.is_some();
+        let (owner, surface) = primary.map_or_else(
+            || {
+                (
+                    crate::plugin_panel::manifest().id.clone(),
+                    crate::plugin_panel::surface().clone(),
+                )
+            },
+            |(key, surface)| (key.plugin_id, surface),
+        );
+        if enabled
+            && extra.contains_key(&nickel_core::plugins::PluginSurfaceKey {
+                plugin_id: owner.clone(),
+                surface_id: surface.id.clone(),
+            })
+        {
+            return Err("duplicate plugin panel surface".into());
+        }
+        if self.active_fixed_plugins == active_fixed_plugins
+            && self.plugin_panel_enabled == enabled
+            && self.plugin_panel_owner == owner
+            && self.plugin_panel_surface == surface
+            && self.extra_plugin_panels == extra
+        {
+            return Ok(false);
+        }
+        let mut previous_panels = self.extra_plugin_panels.clone();
+        if self.plugin_panel_enabled {
+            previous_panels.insert(
+                nickel_core::plugins::PluginSurfaceKey {
+                    plugin_id: self.plugin_panel_owner.clone(),
+                    surface_id: self.plugin_panel_surface.id.clone(),
+                },
+                self.plugin_panel_surface.clone(),
+            );
+        }
+        let mut active = extra.clone();
+
+        if enabled {
+            active.insert(
+                nickel_core::plugins::PluginSurfaceKey {
+                    plugin_id: owner.clone(),
+                    surface_id: surface.id.clone(),
+                },
+                surface.clone(),
+            );
+        }
+        #[cfg(target_os = "windows")]
+        self.set_plugin_dialog_owners_enabled(true);
+        self.surfaces.retain(|existing| {
+            existing.role != SurfaceRole::Panel
+                || existing.plugin.as_ref().is_some_and(|key| {
+                    active
+                        .get(key)
+                        .is_some_and(|surface| surface.passive == existing.passive_overlay)
+                })
+        });
+        for existing in self
+            .surfaces
+            .iter_mut()
+            .filter(|existing| existing.role == SurfaceRole::Panel && existing.display_connected)
+        {
+            let key = existing.plugin.as_ref().expect("plugin surface has owner");
+            let Some((previous, current)) = previous_panels.get(key).zip(active.get(key)) else {
+                continue;
+            };
+            if previous == current {
+                continue;
+            }
+            let Some((geometry, _)) = self.displays.get(existing.display_index) else {
+                continue;
+            };
+            let (_, x, y, width, height, _) = surface_geometry_for_panel(
+                SurfaceRole::Panel,
+                *geometry,
+                self.options.panel_edge,
+                current,
+            );
+            let requested_new_placement = (previous.anchor, previous.offset_x, previous.offset_y)
+                != (current.anchor, current.offset_x, current.offset_y);
+            if requested_new_placement
+                || !matches!(
+                    current.kind,
+                    nickel_core::plugins::PluginSurfaceKind::Window
+                        | nickel_core::plugins::PluginSurfaceKind::Dialog
+                )
+            {
+                existing
+                    .window
+                    .set_outer_position(LogicalPosition::new(x, y).into());
+            }
+            if (previous.width, previous.height) != (current.width, current.height) {
+                let _ = existing
+                    .window
+                    .request_surface_size(LogicalSize::new(width, height).into());
+            }
+            existing.plugin_surface = Some(current.clone());
+        }
+        self.rebuild_surface_indices();
+        #[cfg(target_os = "linux")]
+        for existing in self
+            .surfaces
+            .iter()
+            .filter(|existing| existing.role == SurfaceRole::Panel && existing.display_connected)
+        {
+            let key = existing.plugin.as_ref().expect("plugin surface has owner");
+            let surface = active.get(key).expect("retained plugin surface is active");
+            crate::platform::register_shell_surface(
+                nickel_session_protocol::ShellSurfaceIdentity {
+                    application_id: existing.application_id.clone(),
+                    role: if surface.reserve_work_area {
+                        SessionShellRole::Panel
+                    } else {
+                        SessionShellRole::PluginSurface
+                    },
+                    output: Some(existing.output_name.clone()),
+                    plugin_surface: Some(nickel_session_protocol::PluginSurfacePlacement {
+                        plugin_id: key.plugin_id.clone(),
+                        surface_id: surface.id.clone(),
+                        kind: protocol_plugin_surface_kind(surface.kind),
+                        width: surface.width,
+                        height: surface.height,
+                        bottom_offset: surface.bottom_offset,
+                        anchor: protocol_plugin_surface_anchor(surface.anchor),
+                        offset_x: surface.offset_x,
+                        offset_y: surface.offset_y,
+                        passive: surface.passive,
+                    }),
+                },
+            )
+            .map_err(|error| format!("failed to register plugin surface: {error}"))?;
+        }
+        self.active_fixed_plugins = active_fixed_plugins;
+        self.plugin_panel_enabled = enabled;
+        self.plugin_panel_owner = owner;
+        self.plugin_panel_surface = surface;
+        self.extra_plugin_panels = extra;
+        self.sync_display_geometry()?;
+        Ok(true)
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(crate) fn bar_on_all_displays(&self) -> bool {
+        self.options.bar_on_all_displays
+    }
+
+    pub fn set_primary_output_name(&mut self, output: Option<String>) -> Result<bool, String> {
+        if self.primary_output_name == output {
+            return Ok(false);
+        }
+        self.primary_output_name = output;
+        if !self.options.bar_on_all_displays {
+            self.sync_display_geometry()?;
+        }
+        Ok(true)
+    }
+
+    /// Records a genuine interaction point in desktop-physical coordinates.
+    /// Monitor enumeration and repaint never call this, so they cannot steal
+    /// the output used by the next global launcher invocation.
+    pub fn set_active_output_at(&mut self, point: (i32, i32)) -> bool {
+        let Some(name) = output_name_at(&self.displays, point) else {
+            return false;
+        };
+        if self.active_output_name.as_deref() == Some(name) {
+            return false;
+        }
+        self.active_output_name = Some(name.to_owned());
+        true
+    }
+
+    pub fn set_active_output_from_surface(&mut self, id: SurfaceId) -> bool {
+        let Some(name) = self.surface(id).map(|surface| surface.output_name.clone()) else {
+            return false;
+        };
+        if name.is_empty() || self.active_output_name.as_ref() == Some(&name) {
+            return false;
+        }
+        self.active_output_name = Some(name);
+        true
+    }
+
+    fn active_output_index(&self) -> Option<usize> {
+        preferred_output_index(
+            &self.displays,
+            self.active_output_name.as_deref(),
+            self.primary_output_name.as_deref(),
+        )
+    }
+
+    #[cfg(target_os = "windows")]
+    pub fn position_screenshot_on_active_output(&mut self) {
+        let Some(index) = self.active_output_index() else {
+            return;
+        };
+        let Some((geometry, _)) = self.displays.get(index) else {
+            return;
+        };
+        let Some(surface) = self
+            .surfaces
+            .iter_mut()
+            .find(|surface| surface.role == SurfaceRole::Screenshot)
+        else {
+            return;
+        };
+        surface.display_index = index;
+        surface.output_name = self.displays[index].1.clone();
+        surface
+            .window
+            .set_outer_position(LogicalPosition::new(geometry.x, geometry.y).into());
+        let size = (geometry.width, geometry.height);
+        if surface.window.size() != size {
+            let _ = surface
+                .window
+                .request_surface_size(LogicalSize::new(size.0, size.1).into());
+        }
+    }
+
+    fn relocate_to_active_output(&mut self, index: usize) {
+        let Some(display_index) = self.active_output_index() else {
+            return;
+        };
+        let Some((geometry, output_name)) = self.displays.get(display_index).cloned() else {
+            return;
+        };
+        let role = self.surfaces[index].role;
+        // Linux compositor owns the keyboard's display, dock edge and live resize.
+        // Reapplying the startup size here would fight every configure and clip keys.
+        #[cfg(target_os = "linux")]
+        if role == SurfaceRole::OnScreenKeyboard {
+            return;
+        }
+        if role != SurfaceRole::OnScreenKeyboard {
+            return;
+        }
+        let (_, x, y, width, height, _) = surface_geometry_for_panel(
+            role,
+            geometry,
+            self.options.panel_edge,
+            &self.plugin_panel_surface,
+        );
+        let surface = &mut self.surfaces[index];
+        surface.display_index = display_index;
+        surface.output_name = output_name;
+        surface
+            .window
+            .set_outer_position(LogicalPosition::new(x, y).into());
+        if surface.window.size() != (width, height) {
+            let _ = surface
+                .window
+                .request_surface_size(LogicalSize::new(width, height).into());
+        }
+    }
+
+    fn retire_settled_output_surfaces(&mut self, output_names: &[String], now: Instant) {
+        let owned_outputs = self
+            .surfaces
+            .iter()
+            .filter(|surface| output_role(surface.role))
+            .map(|surface| surface.output_name.as_str())
+            .collect::<Vec<_>>();
+        let retired = self
+            .output_retirements
+            .observe(now, output_names, owned_outputs);
+        if retired.is_empty() {
+            return;
+        }
+
+        // Preserve the durable high-water mark before dropping the last
+        // presenter diagnostics for a disconnected output.
+        let _ = self.memory_diagnostics();
+        self.surfaces.retain(|surface| {
+            !output_role_is_retired(surface.role, &surface.output_name, &retired)
+        });
+        for output in retired {
+            self.output_retirements.missing_since.remove(&output);
+        }
+        self.rebuild_surface_indices();
+    }
+
+    pub fn next_output_retirement_deadline(&self) -> Option<Instant> {
+        match (
+            self.output_retirements.next_deadline(),
+            self.output_creation_retry.deadline,
+        ) {
+            (Some(left), Some(right)) => Some(left.min(right)),
+            (left, right) => left.or(right),
+        }
+    }
+
+    fn rebuild_surface_indices(&mut self) {
+        self.surface_indices.clear();
+        self.native_surface_indices.clear();
+        for (index, surface) in self
+            .surfaces
+            .iter()
+            .enumerate()
+            .filter(|(_, surface)| surface.display_connected)
+        {
+            self.surface_indices.insert(surface.id.0, index);
+            self.native_surface_indices
+                .insert(surface.window.id(), index);
+        }
+    }
+
+    pub fn surfaces(&self) -> impl Iterator<Item = &ShellSurface> {
+        self.surfaces
+            .iter()
+            .filter(|surface| surface.display_connected)
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(crate) fn remote_shell_surface_observations(
+        &self,
+        state: &crate::live_shell::LiveShell,
+    ) -> Vec<crate::windows_shell_diagnostics::SurfaceObservation> {
+        self.surfaces()
+            .map(|surface| self.remote_shell_surface_observation_for(surface, state))
+            .collect()
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(crate) fn remote_shell_surface_observation(
+        &self,
+        id: SurfaceId,
+        state: &crate::live_shell::LiveShell,
+    ) -> Option<crate::windows_shell_diagnostics::SurfaceObservation> {
+        self.surface(id)
+            .map(|surface| self.remote_shell_surface_observation_for(surface, state))
+    }
+
+    #[cfg(target_os = "windows")]
+    fn remote_shell_surface_observation_for(
+        &self,
+        surface: &ShellSurface,
+        state: &crate::live_shell::LiveShell,
+    ) -> crate::windows_shell_diagnostics::SurfaceObservation {
+        let scale = surface.window.scale_factor();
+        let geometry = surface.window.outer_position().ok().map(|position| {
+            let position = position.to_logical::<i32>(scale);
+            let size = surface.window.surface_size().to_logical::<u32>(scale);
+            [
+                i64::from(position.x),
+                i64::from(position.y),
+                i64::from(size.width),
+                i64::from(size.height),
+            ]
+        });
+        let role = surface.diagnostic_role();
+        let scene = if let Some(key) = surface.plugin_key() {
+            state.plugin_surface_change_token(key)
+        } else {
+            state.scene_change_token(role)
+        };
+        let native = surface
+            .window
+            .window_handle()
+            .ok()
+            .and_then(|handle| match handle.as_raw() {
+                raw_window_handle::RawWindowHandle::Win32(handle) => {
+                    Some(handle.hwnd.get() as usize)
+                }
+                _ => None,
+            })
+            .unwrap_or_default();
+        crate::windows_shell_diagnostics::SurfaceObservation {
+            native,
+            role,
+            generation: surface.diagnostic_generation,
+            native_visible: surface.visible,
+            canonical_visible: state.surface_visible(role),
+            protected: state.surface_remote_access_protected(role),
+            geometry,
+            output: Some(surface.output_name.clone()),
+            scene_generation: scene.map(|token| token.frame_generation),
+            scale_factor: scale as f32,
+            redraw_pending: scene
+                .is_some_and(|token| surface.last_host_change_token != Some(token)),
+            keyboard_focused: surface.window.has_focus(),
+            presentation_generation: surface.presentation_generation,
+            presentation_failures: surface.presentation_failures,
+            presented_frame_bytes: surface.presented_frame_bytes,
+        }
+    }
+
+    pub fn surface(&self, id: SurfaceId) -> Option<&ShellSurface> {
+        self.surface_indices
+            .get(&id.0)
+            .and_then(|index| self.surfaces.get(*index))
+    }
+
+    pub fn surface_display_geometry(&self, id: SurfaceId) -> Option<DisplayGeometry> {
+        let display_index = self.surface(id)?.display_index();
+        self.display_geometries().ok()?.get(display_index).copied()
+    }
+
+    pub fn panel_edge(&self) -> PanelEdge {
+        self.options.panel_edge
+    }
+
+    pub fn surface_mut(&mut self, id: SurfaceId) -> Option<&mut ShellSurface> {
+        let index = *self.surface_indices.get(&id.0)?;
+        self.surfaces.get_mut(index)
+    }
+
+    pub fn set_surface_title(&self, id: SurfaceId, title: &str) -> bool {
+        let Some(surface) = self.surface(id) else {
+            return false;
+        };
+        if surface.window.title() == title {
+            return false;
+        }
+        surface.window.set_title(title);
+        true
+    }
+
+    pub fn mark_initial_exposed(&mut self, id: SurfaceId) -> bool {
+        let Some(surface) = self.surface_mut(id) else {
+            return false;
+        };
+        if surface.initial_exposed {
+            false
+        } else {
+            surface.initial_exposed = true;
+            true
+        }
+    }
+
+    pub fn create_codex_chat_surface(
+        &mut self,
+        title: &str,
+        application_id: &str,
+    ) -> Result<SurfaceId, String> {
+        let geometry = require_displays(self.display_geometries()?)?[0];
+        let attributes = WindowAttributes::default()
+            .with_title(title)
+            .with_surface_size(LogicalSize::new(
+                1120.min(geometry.width),
+                760.min(geometry.height),
+            ))
+            // 0246 measures Codex in logical client units; keep native resize
+            // admission aligned with the smallest layout we actually support.
+            .with_min_surface_size(LogicalSize::new(
+                nickel_codex_ui::CHAT_MINIMUM_LOGICAL_SIZE.0,
+                nickel_codex_ui::CHAT_MINIMUM_LOGICAL_SIZE.1,
+            ))
+            .with_resizable(true);
+        #[cfg(target_os = "linux")]
+        let attributes = attributes.with_platform_attributes(Box::new(
+            WindowAttributesWayland::default().with_name(application_id, application_id),
+        ));
+        #[allow(deprecated)]
+        let window = self
+            .create_native_window(attributes)
+            .map_err(|error| error.to_string())?;
+        window.set_ime_allowed(true);
+        let id = SurfaceId(window.id());
+        let index = self.surfaces.len();
+        let diagnostic_generation = self.next_surface_diagnostic_generation()?;
+        #[cfg(target_os = "windows")]
+        crate::platform::register_native_application_window(&window, application_id);
+        self.surface_indices.insert(id.0, index);
+        self.native_surface_indices.insert(window.id(), index);
+        self.surfaces.push(ShellSurface {
+            id,
+            role: SurfaceRole::CodexChat,
+            plugin: None,
+            plugin_surface: None,
+            passive_overlay: false,
+            application_id: application_id.to_owned(),
+            display_index: 0,
+            output_name: String::new(),
+            display_connected: true,
+            initial_exposed: false,
+            presenter: None,
+            #[cfg(target_os = "windows")]
+            presentation_generation: 0,
+            #[cfg(target_os = "windows")]
+            presentation_failures: 0,
+            #[cfg(target_os = "windows")]
+            presented_frame_bytes: 0,
+            last_host_change_token: None,
+            visible: true,
+            diagnostic_generation,
+            window,
+        });
+        Ok(id)
+    }
+
+    /// Create an owned, initially hidden trusted indicator on one output.
+    ///
+    /// Native accessibility and final exposure remain owned by the production
+    /// indicator coordinator. It installs the dedicated AccessKit adapter,
+    /// presents the surface, verifies capture affinity, and only then activates
+    /// the suspended remote-control lease.
+    #[cfg(target_os = "windows")]
+    pub(crate) fn create_trusted_control_surface(
+        &mut self,
+        output_name: &str,
+        leases: usize,
+    ) -> Result<SurfaceId, String> {
+        use winit::platform::windows::WindowAttributesWindows;
+        let (display_index, (geometry, _)) = self
+            .displays
+            .iter()
+            .enumerate()
+            .find(|(_, (_, name))| name == output_name)
+            .ok_or_else(|| "trusted indicator output is unavailable".to_owned())?;
+        let geometry = *geometry;
+        let (width, height) = crate::remote_indicator::indicator_physical_size(
+            leases,
+            geometry.width,
+            geometry.height,
+            geometry.scale,
+        );
+        let attributes = WindowAttributes::default()
+            .with_title(nickel_i18n::system_text(
+                "ui-winit-shell-nickel-remote-ai-control",
+            ))
+            .with_active(false)
+            .with_platform_attributes(Box::new(
+                WindowAttributesWindows::default().with_skip_taskbar(true),
+            ))
+            .with_position(winit::dpi::PhysicalPosition::new(geometry.x, geometry.y))
+            .with_surface_size(winit::dpi::PhysicalSize::new(width, height))
+            .with_decorations(false)
+            .with_resizable(false)
+            .with_visible(false);
+        #[allow(deprecated)]
+        let window = self
+            .create_native_window(attributes)
+            .map_err(|error| error.to_string())?;
+        crate::platform::prepare_trusted_control_window(&window)?;
+        let id = SurfaceId(window.id());
+        let index = self.surfaces.len();
+        let diagnostic_generation = self.next_surface_diagnostic_generation()?;
+        self.surface_indices.insert(id.0, index);
+        self.native_surface_indices.insert(window.id(), index);
+        self.surfaces.push(ShellSurface {
+            id,
+            role: SurfaceRole::TrustedControl,
+            plugin: None,
+            plugin_surface: None,
+            passive_overlay: false,
+            application_id: "nickel.trusted-remote-control".to_owned(),
+            display_index,
+            output_name: output_name.to_owned(),
+            display_connected: true,
+            initial_exposed: false,
+            presenter: None,
+            #[cfg(target_os = "windows")]
+            presentation_generation: 0,
+            #[cfg(target_os = "windows")]
+            presentation_failures: 0,
+            #[cfg(target_os = "windows")]
+            presented_frame_bytes: 0,
+            last_host_change_token: None,
+            visible: false,
+            diagnostic_generation,
+            window,
+        });
+        Ok(id)
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(crate) fn trusted_control_outputs(&self) -> Vec<(String, DisplayGeometry)> {
+        self.displays
+            .iter()
+            .map(|(geometry, name)| (name.clone(), *geometry))
+            .collect()
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(crate) fn resize_trusted_control_surface(
+        &mut self,
+        id: SurfaceId,
+        leases: usize,
+    ) -> Result<(), String> {
+        self.trusted_control_capture_affinity(id)?;
+        let surface = self.surface(id).ok_or("trusted surface disappeared")?;
+        let geometry = self
+            .displays
+            .iter()
+            .find(|(_, name)| name == &surface.output_name)
+            .map(|(geometry, _)| *geometry)
+            .ok_or("trusted output disappeared")?;
+        let (width, height) = crate::remote_indicator::indicator_physical_size(
+            leases,
+            geometry.width,
+            geometry.height,
+            geometry.scale,
+        );
+        let desired = winit::dpi::PhysicalSize::new(width, height);
+        if surface.window.surface_size() != desired {
+            let _ = surface.window.request_surface_size(desired.into());
+        }
+        Ok(())
+    }
+
+    /// Only the owning production indicator host can expose this role, after
+    /// presenting its first frame. Topmost is presentation policy, not proof of
+    /// secure-desktop persistence or readiness to grant remote control.
+    #[cfg(target_os = "windows")]
+    pub(crate) fn expose_trusted_control_surface(&mut self, id: SurfaceId) -> Result<(), String> {
+        self.trusted_control_capture_affinity(id)?;
+        let surface = self.surface_mut(id).ok_or("trusted surface disappeared")?;
+        if surface.presenter.is_none() {
+            return Err("trusted indicator has no presented frame".to_owned());
+        }
+        crate::platform::expose_trusted_control_window(&surface.window, surface.visible)?;
+        surface.visible = true;
+        Ok(())
+    }
+
+    /// Check the actual retained owned window, never a caller-supplied HWND/title.
+    #[cfg(target_os = "windows")]
+    pub(crate) fn trusted_control_capture_affinity(&self, id: SurfaceId) -> Result<(), String> {
+        let surface = self
+            .surface(id)
+            .filter(|surface| surface.role == SurfaceRole::TrustedControl)
+            .ok_or_else(|| "unknown trusted indicator".to_owned())?;
+        if !surface.display_connected
+            || !self
+                .displays
+                .iter()
+                .any(|(_, name)| name == &surface.output_name)
+        {
+            return Err("trusted indicator output is unavailable".to_owned());
+        }
+        crate::platform::verify_trusted_control_window(&surface.window)
+    }
+
+    pub fn destroy_surface(&mut self, id: SurfaceId) {
+        let Some(index) = self.surface_indices.remove(&id.0) else {
+            return;
+        };
+        #[cfg(target_os = "windows")]
+        if self.surfaces[index].role == SurfaceRole::TrustedControl {
+            // Purge queued events for a retired trusted surface before the
+            // generic close handler can mistake a stale CloseRequested for quit.
+            self.pending_events.retain(|event| !matches!(event,
+                ShellEvent::Input { surface, .. } | ShellEvent::FocusChanged { surface, .. }
+                | ShellEvent::LogicalResize { surface, .. } | ShellEvent::PixelResize { surface, .. }
+                | ShellEvent::PointerEntered { surface, .. } | ShellEvent::FileDrop { surface, .. }
+                | ShellEvent::Shown(surface) | ShellEvent::Hidden(surface)
+                | ShellEvent::CloseRequested(surface) | ShellEvent::Redraw(surface) if *surface == id));
+        }
+        // Observe the process peak before dropping the presenter's last
+        // diagnostics. A closed surface must release live bytes without
+        // erasing the process-wide high-water mark.
+        let _ = self.memory_diagnostics();
+        self.surfaces.remove(index);
+        self.rebuild_surface_indices();
+        let diagnostics = self.memory_diagnostics();
+        tracing::debug!(
+            presenters = diagnostics.presenter_caches.presenters,
+            cache_live_bytes = diagnostics.presenter_caches.live_bytes,
+            process_rss_bytes = diagnostics.process_rss_bytes,
+            "shell surface closed and presenter accounting refreshed"
+        );
+    }
+
+    pub fn memory_diagnostics(&self) -> ShellMemoryDiagnostics {
+        let mut presenter_caches = AggregatePresenterCacheDiagnostics::from_presenters(
+            self.graphics
+                .as_ref()
+                .map(SharedGraphics::cache_diagnostics),
+        );
+        let process_peak =
+            durable_presenter_peak(self.presenter_cache_peak_bytes.get(), &presenter_caches);
+        self.presenter_cache_peak_bytes.set(process_peak);
+        presenter_caches.peak_cache_bytes = process_peak;
+        ShellMemoryDiagnostics {
+            presenter_cache_generation: self.presenter_cache_generation,
+            presenter_caches,
+            process_rss_bytes: process_rss_bytes(),
+        }
+    }
+
+    pub fn presenter_roles(&self) -> Vec<SurfaceRole> {
+        self.surfaces
+            .iter()
+            .filter_map(|surface| {
+                surface
+                    .presenter
+                    .as_ref()
+                    .map(|_| surface.diagnostic_role())
+            })
+            .collect()
+    }
+
+    pub fn runtime_diagnostics(&self) -> ShellRuntimeDiagnostics {
+        let surfaces = self
+            .surface_runtime_samples
+            .iter()
+            .map(|(identity, samples)| {
+                let gpu_bytes = self
+                    .surfaces
+                    .iter()
+                    .find(|surface| surface_runtime_identity(surface) == *identity)
+                    .and_then(|surface| surface.presenter.as_ref())
+                    .and_then(SoftbufferPresenter::retained_gpu_bytes);
+                surface_runtime_diagnostics(identity, samples, gpu_bytes)
+            })
+            .collect();
+        ShellRuntimeDiagnostics {
+            warm_present_us: self.warm_present_us.iter().copied().collect(),
+            input_to_present_us: self.input_to_present_us.iter().copied().collect(),
+            warm_present_allocations: self.warm_present_allocations.iter().copied().collect(),
+            correlated_presents: self.correlated_presents.iter().copied().collect(),
+            surfaces,
+        }
+    }
+
+    fn surface_runtime_samples_mut(&mut self, identity: String) -> &mut SurfaceRuntimeSamples {
+        if !self.surface_runtime_samples.contains_key(&identity)
+            && self.surface_runtime_samples.len() == 64
+            && let Some(evicted) = self.surface_runtime_samples.keys().next().cloned()
+        {
+            self.surface_runtime_samples.remove(&evicted);
+        }
+        self.surface_runtime_samples.entry(identity).or_default()
+    }
+
+    /// Starts a bounded input-to-visible observation. Call `finish_input_observation`
+    /// after routing the input so inputs that do not paint cannot contaminate a later sample.
+    pub fn begin_input_observation(&mut self, now: Instant) {
+        self.pending_input_started = Some(now);
+    }
+
+    pub fn finish_input_observation(&mut self) {
+        self.pending_input_started = None;
+    }
+
+    pub fn clipboard_text(&self) -> Option<String> {
+        self.clipboard.as_ref()?.borrow_mut().get_text().ok()
+    }
+
+    pub fn clipboard_image(&self) -> Option<(u32, u32, Vec<u8>)> {
+        let image = self.clipboard.as_ref()?.borrow_mut().get_image().ok()?;
+        Some((
+            u32::try_from(image.width).ok()?,
+            u32::try_from(image.height).ok()?,
+            image.bytes.into_owned(),
+        ))
+    }
+
+    pub fn set_clipboard_text(&self, text: &str) {
+        if let Some(clipboard) = &self.clipboard {
+            let _ = clipboard.borrow_mut().set_text(text);
+        }
+    }
+
+    pub fn present(
+        &mut self,
+        id: SurfaceId,
+        commands: &[PaintCommand],
+    ) -> Result<DamageRegion, String> {
+        self.present_with_damage(id, commands, None)
+    }
+
+    pub fn present_with_damage(
+        &mut self,
+        id: SurfaceId,
+        commands: &[PaintCommand],
+        damage: Option<&[twinkle_ui::Rect]>,
+    ) -> Result<DamageRegion, String> {
+        let index = *self
+            .surface_indices
+            .get(&id.0)
+            .ok_or_else(|| "unknown winit shell surface".to_owned())?;
+        let surface_runtime_identity = surface_runtime_identity(&self.surfaces[index]);
+        if self.graphics.is_none() {
+            let display = self.surfaces[index]
+                .window()
+                .display_handle()
+                .map_err(|error| error.to_string())?;
+            // SAFETY: `WinitShell` drops all surfaces and shared graphics before
+            // its winit event loop, which owns this display connection.
+            #[cfg(not(target_os = "windows"))]
+            {
+                self.graphics = Some(unsafe { SharedGraphics::new(display) }?);
+            }
+            #[cfg(target_os = "windows")]
+            {
+                let window = self.surfaces[index]
+                    .window()
+                    .window_handle()
+                    .map_err(|error| error.to_string())?;
+                self.graphics = Some(unsafe { SharedGraphics::new(display, window) }?);
+            }
+        }
+        let graphics = self.graphics.as_ref().expect("shared renderer initialized");
+        let entry = &mut self.surfaces[index];
+        let warm = entry.presenter.is_some();
+        if entry.presenter.is_none() {
+            let window = entry
+                .window
+                .window_handle()
+                .map_err(|error| error.to_string())?;
+            // SAFETY: `ShellSurface` declares its presenter before its window,
+            // so Rust drops the presenter while this native window is valid.
+            entry.presenter = Some(unsafe { SoftbufferPresenter::new(window, graphics) }?);
+        }
+        let started = Instant::now();
+        let allocations_before = crate::allocation_counter::allocation_operations();
+        let physical = entry.window.surface_size();
+        let logical = physical.to_logical::<u32>(entry.window.scale_factor());
+        let geometry = PresentationGeometry {
+            pixel_width: physical.width,
+            pixel_height: physical.height,
+            logical_width: logical.width,
+            logical_height: logical.height,
+        };
+        let result = entry
+            .presenter
+            .as_mut()
+            .expect("shell presenter initialized")
+            .present_with_damage(geometry, graphics, commands, damage);
+        self.presenter_cache_generation = self.presenter_cache_generation.saturating_add(1);
+        #[cfg(target_os = "windows")]
+        if result.is_err() {
+            entry.presentation_failures = entry.presentation_failures.saturating_add(1);
+        }
+        let damage = result?;
+        let elapsed_us = started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
+        #[cfg(target_os = "windows")]
+        {
+            if !damage.is_empty() {
+                entry.presentation_generation = entry.presentation_generation.saturating_add(1);
+                entry.presented_frame_bytes = u64::from(physical.width)
+                    .saturating_mul(u64::from(physical.height))
+                    .saturating_mul(4);
+            }
+            if self.remote_frame_dispatches.len()
+                == nickel_remote_control::frame_trace::MAX_FRAME_TRACE_RECORDS
+            {
+                self.remote_frame_dispatches.pop_front();
+                self.remote_frame_dispatch_drops =
+                    self.remote_frame_dispatch_drops.saturating_add(1);
+            }
+            self.remote_frame_dispatches
+                .push_back((entry.output_name.clone(), elapsed_us));
+        }
+        if warm {
+            push_bounded(&mut self.warm_present_us, elapsed_us);
+            if let (Some(before), Some(after)) = (
+                allocations_before,
+                crate::allocation_counter::allocation_operations(),
+            ) {
+                push_bounded(
+                    &mut self.warm_present_allocations,
+                    after.saturating_sub(before),
+                );
+            }
+        }
+        let input_to_present_us = self.pending_input_started.take().map(|input_started| {
+            input_started
+                .elapsed()
+                .as_micros()
+                .min(u128::from(u64::MAX)) as u64
+        });
+        if let Some(input_us) = input_to_present_us {
+            push_bounded(&mut self.input_to_present_us, input_us);
+        }
+        if let Some(correlation) = entry
+            .last_host_change_token
+            .and_then(|token| token.native_correlation)
+        {
+            push_bounded(
+                &mut self.correlated_presents,
+                NativePresentSample {
+                    correlation,
+                    present_us: elapsed_us,
+                    input_to_present_us,
+                },
+            );
+        }
+        let surface_samples = self.surface_runtime_samples_mut(surface_runtime_identity);
+        if warm {
+            push_bounded(&mut surface_samples.present_us, elapsed_us);
+        }
+        if let Some(input_us) = input_to_present_us {
+            push_bounded(&mut surface_samples.input_to_visible_us, input_us);
+        }
+        Ok(damage)
+    }
+
+    /// Presents a canonical UI host frame only when its semantic or paint generation changed.
+    pub fn present_host_frame(
+        &mut self,
+        id: SurfaceId,
+        token: HostChangeToken,
+        commands: &[PaintCommand],
+    ) -> Result<Option<DamageRegion>, String> {
+        self.present_host_frame_with_damage(id, token, commands, None)
+    }
+
+    /// Presents a canonical UI host frame with its authoritative retained
+    /// paint damage when one was produced by the frame lifecycle.
+    pub fn present_host_frame_with_damage(
+        &mut self,
+        id: SurfaceId,
+        token: HostChangeToken,
+        commands: &[PaintCommand],
+        damage: Option<&[twinkle_ui::Rect]>,
+    ) -> Result<Option<DamageRegion>, String> {
+        let index = *self
+            .surface_indices
+            .get(&id.0)
+            .ok_or_else(|| "unknown winit shell surface".to_owned())?;
+        if self.surfaces[index].last_host_change_token == Some(token) {
+            let identity = surface_runtime_identity(&self.surfaces[index]);
+            let samples = self.surface_runtime_samples_mut(identity);
+            samples.coalesced_present_requests =
+                samples.coalesced_present_requests.saturating_add(1);
+            return Ok(None);
+        }
+        let damage = self.present_with_damage(id, commands, damage)?;
+        self.surfaces[index].last_host_change_token = Some(token);
+        Ok(Some(damage))
+    }
+
+    pub fn show(&mut self, id: SurfaceId) -> bool {
+        #[cfg(target_os = "windows")]
+        if self
+            .surface(id)
+            .is_some_and(|surface| surface.role == SurfaceRole::TrustedControl)
+        {
+            return false;
+        }
+        let Some(index) = self.surface_indices.get(&id.0).copied() else {
+            return false;
+        };
+        if matches!(
+            self.surfaces[index].role,
+            SurfaceRole::Launcher | SurfaceRole::OnScreenKeyboard
+        ) {
+            self.relocate_to_active_output(index);
+        }
+        let shown = self.surfaces.get_mut(index).is_some_and(|surface| {
+            if surface.visible {
+                // Platform adapters may have changed native visibility directly while acquiring
+                // foreground focus. Reassert the requested state even when our bookkeeping is
+                // already current so native and shell visibility cannot diverge.
+                show_surface_native(surface);
+                return false;
+            }
+            surface.visible = true;
+            surface.initial_exposed = false;
+            surface.last_host_change_token = None;
+            show_surface_native(surface);
+            surface.window.request_redraw();
+            true
+        });
+        if shown {
+            self.pending_events.push_back(ShellEvent::Shown(id));
+        }
+        shown
+    }
+
+    /// Queue a production redraw for every live winit surface. This only
+    /// requests presentation; callers must not report a presented frame until
+    /// the normal redraw path observes one.
+    #[cfg(target_os = "windows")]
+    pub(crate) fn request_all_redraws(&self) {
+        for surface in &self.surfaces {
+            surface.window.request_redraw();
+        }
+    }
+
+    pub fn hide(&mut self, id: SurfaceId) -> bool {
+        let Some(index) = self.surface_indices.get(&id.0).copied() else {
+            return false;
+        };
+        let hidden = {
+            let surface = &mut self.surfaces[index];
+            if !surface.visible {
+                // Windows launcher focus acquisition uses direct Win32 visibility calls. A
+                // subsequent focus-loss dismissal can therefore arrive while this flag still
+                // says hidden; enforce the native state instead of treating that as a no-op.
+                #[cfg(target_os = "windows")]
+                if surface.role == SurfaceRole::WindowPreview {
+                    crate::platform::hide_preview_window(&surface.window);
+                } else {
+                    surface.window.set_visible(false);
+                }
+                #[cfg(not(target_os = "windows"))]
+                surface.window.set_visible(false);
+                return false;
+            }
+            surface.visible = false;
+            // Repeated reconciliation must
+            // still release a lightweight presentation surface populated while
+            // the native window was already hidden (for example by prewarm).
+            // Drop native presentation borrows before winit tears down the
+            // Wayland surface so the null-buffer unmap can complete.
+            surface.presenter = None;
+            #[cfg(target_os = "windows")]
+            if surface.role == SurfaceRole::WindowPreview {
+                crate::platform::hide_preview_window(&surface.window);
+            } else {
+                surface.window.set_visible(false);
+            }
+            #[cfg(not(target_os = "windows"))]
+            surface.window.set_visible(false);
+            true
+        };
+        #[cfg(target_os = "linux")]
+        if hidden
+            && surface_is_ephemeral(self.surfaces[index].role)
+            && let Err(error) = self.recreate_hidden_wayland_surface(index)
+        {
+            tracing::warn!(
+                role = ?self.surfaces[index].role,
+                %error,
+                "failed to recreate hidden ephemeral Wayland surface"
+            );
+        }
+        if hidden {
+            self.pending_events.push_back(ShellEvent::Hidden(id));
+        }
+        hidden
+    }
+
+    #[cfg(target_os = "linux")]
+    fn recreate_hidden_wayland_surface(&mut self, index: usize) -> Result<(), String> {
+        let surface = &self.surfaces[index];
+        let geometry = self
+            .displays
+            .get(surface.display_index)
+            .map(|(geometry, _)| *geometry)
+            .or_else(|| self.displays.first().map(|(geometry, _)| *geometry))
+            .ok_or_else(|| "cannot recreate a shell surface without an output".to_owned())?;
+        let panel = surface
+            .plugin_surface
+            .as_ref()
+            .unwrap_or(&self.plugin_panel_surface);
+        let (base_title, x, y, width, height, _) =
+            surface_geometry_for_panel(surface.role, geometry, self.options.panel_edge, panel);
+        let title = base_title;
+        let attributes = WindowAttributes::default()
+            .with_title(title)
+            .with_position(LogicalPosition::new(x, y))
+            .with_surface_size(LogicalSize::new(width, height))
+            .with_decorations(
+                !surface_is_borderless(surface.role)
+                    || (surface.role == SurfaceRole::Panel
+                        && matches!(
+                            panel.kind,
+                            nickel_core::plugins::PluginSurfaceKind::Window
+                                | nickel_core::plugins::PluginSurfaceKind::Dialog
+                        )),
+            )
+            .with_resizable(matches!(
+                surface.role,
+                SurfaceRole::WindowPreview
+                    | SurfaceRole::WindowContextMenu
+                    | SurfaceRole::Screenshot
+                    | SurfaceRole::OnScreenKeyboard
+            ))
+            .with_visible(true)
+            .with_platform_attributes(Box::new(
+                WindowAttributesWayland::default()
+                    .with_name(&surface.application_id, &surface.application_id),
+            ));
+        let attributes = if surface.plugin.is_some() {
+            attributes.with_transparent(true)
+        } else {
+            attributes
+        };
+        let role = surface.role;
+        let retired_native_id = surface.window.id();
+        #[allow(deprecated)]
+        let replacement = self
+            .create_native_window(attributes)
+            .map_err(|error| error.to_string())?;
+        if matches!(
+            role,
+            SurfaceRole::CodexProjectMenu | SurfaceRole::Screenshot
+        ) {
+            replacement.set_ime_allowed(true);
+        }
+        if role == SurfaceRole::Screenshot {
+            replacement.set_min_surface_size(Some(LogicalSize::new(720, 480).into()));
+        }
+        let diagnostic_generation = self.next_surface_diagnostic_generation()?;
+        self.native_surface_indices.remove(&retired_native_id);
+        self.input_adapters.remove(&retired_native_id);
+        let surface = &mut self.surfaces[index];
+        surface.window = replacement;
+        surface.diagnostic_generation = diagnostic_generation;
+        surface.initial_exposed = false;
+        surface.last_host_change_token = None;
+        self.native_surface_indices
+            .insert(surface.window.id(), index);
+        Ok(())
+    }
+
+    pub fn raise(&mut self, id: SurfaceId) -> bool {
+        self.surface_mut(id).is_some_and(|surface| {
+            surface.window.focus_window();
+            true
+        })
+    }
+
+    pub fn raise_role(&mut self, role: SurfaceRole) -> bool {
+        let ids = self
+            .surfaces
+            .iter()
+            .filter(|surface| surface.role() == role)
+            .map(ShellSurface::id)
+            .collect::<Vec<_>>();
+        let mut raised = false;
+        for id in ids {
+            if let Some(surface) = self.surface_mut(id) {
+                surface.window.focus_window();
+                raised = true;
+            }
+        }
+        raised
+    }
+
+    pub fn raise_plugin_surface(&mut self, key: &nickel_core::plugins::PluginSurfaceKey) -> bool {
+        let ids = self
+            .surfaces
+            .iter()
+            .filter(|surface| surface.plugin_key() == Some(key))
+            .map(ShellSurface::id)
+            .collect::<Vec<_>>();
+        let mut raised = false;
+        for id in ids {
+            raised |= self.raise(id);
+        }
+        raised
+    }
+
+    pub fn start_text_input(&self, id: SurfaceId) -> bool {
+        self.surface(id).is_some_and(|surface| {
+            surface.window().set_ime_allowed(true);
+            true
+        })
+    }
+
+    pub fn stop_text_input(&self, id: SurfaceId) -> bool {
+        self.surface(id).is_some_and(|surface| {
+            surface.window().set_ime_allowed(false);
+            true
+        })
+    }
+
+    pub fn poll_events(&mut self) -> Vec<ShellEvent> {
+        self.drain_external_events();
+        self.pump_events(Some(Duration::ZERO));
+        self.drain_external_events();
+        self.pending_events.drain(..).collect()
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(crate) fn request_test_shutdown(&mut self) {
+        self.pending_events.push_back(ShellEvent::Quit);
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(crate) fn inject_test_pointer(
+        &mut self,
+        target: &nickel_session_protocol::ResolvedShellTarget,
+    ) -> Result<(), String> {
+        use nickel_session_protocol::{PointerInteraction, ShellRole};
+        use twinkle_input::{DeviceId, EventOrder, KeyEdge, Point, PointerButton, PointerEvent};
+
+        let role_matches = |surface: &ShellSurface| match target.role {
+            ShellRole::Panel => surface.diagnostic_role() == SurfaceRole::Taskbar,
+            ShellRole::Launcher => surface.role == SurfaceRole::Launcher,
+            ShellRole::ControlCenter => surface.role == SurfaceRole::ControlCenter,
+            ShellRole::Notification => surface.role == SurfaceRole::Notification,
+            ShellRole::VolumeOsd => surface.role == SurfaceRole::VolumeOsd,
+            ShellRole::Preview => surface.role == SurfaceRole::WindowPreview,
+            ShellRole::ContextMenu => surface.role == SurfaceRole::WindowContextMenu,
+            ShellRole::ProjectMenu => surface.role == SurfaceRole::CodexProjectMenu,
+            ShellRole::Lock => surface.role == SurfaceRole::Lock,
+            ShellRole::Screenshot => surface.role == SurfaceRole::Screenshot,
+            ShellRole::OnScreenKeyboard => surface.role == SurfaceRole::OnScreenKeyboard,
+            ShellRole::Desktop => surface.role == SurfaceRole::Desktop,
+            ShellRole::PluginSurface => surface.role == SurfaceRole::Panel,
+            ShellRole::Recovery => false,
+        };
+        let surface = self
+            .surfaces()
+            .find(|surface| {
+                role_matches(surface)
+                    && target
+                        .output
+                        .as_deref()
+                        .is_none_or(|output| surface.output_name == output)
+            })
+            .map(ShellSurface::id)
+            .ok_or_else(|| "semantic test target surface is unavailable".to_owned())?;
+        let device = DeviceId(u64::MAX - 1);
+        let position = Point {
+            x: f64::from(target.x),
+            y: f64::from(target.y),
+        };
+        self.pending_events.push_back(ShellEvent::Input {
+            surface,
+            event: InputEvent::Pointer(PointerEvent::Motion {
+                device,
+                order: EventOrder(1),
+                position,
+                delta: None,
+            }),
+        });
+        let (button, clicks) = match target.interaction {
+            PointerInteraction::Hover => return Ok(()),
+            PointerInteraction::LeftClick => (PointerButton::Primary, 1),
+            PointerInteraction::LeftDoubleClick => (PointerButton::Primary, 2),
+            PointerInteraction::RightClick => (PointerButton::Secondary, 1),
+            PointerInteraction::LeftPress => {
+                self.queue_test_pointer_button(
+                    surface,
+                    device,
+                    position,
+                    PointerButton::Primary,
+                    KeyEdge::Pressed,
+                    2,
+                );
+                return Ok(());
+            }
+            PointerInteraction::LeftRelease => {
+                self.queue_test_pointer_button(
+                    surface,
+                    device,
+                    position,
+                    PointerButton::Primary,
+                    KeyEdge::Released,
+                    2,
+                );
+                return Ok(());
+            }
+        };
+        let mut order = 2;
+        for _ in 0..clicks {
+            for edge in [KeyEdge::Pressed, KeyEdge::Released] {
+                self.queue_test_pointer_button(
+                    surface,
+                    device,
+                    position,
+                    button.clone(),
+                    edge,
+                    order,
+                );
+                order += 1;
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "windows")]
+    fn queue_test_pointer_button(
+        &mut self,
+        surface: SurfaceId,
+        device: twinkle_input::DeviceId,
+        position: twinkle_input::Point,
+        button: twinkle_input::PointerButton,
+        edge: twinkle_input::KeyEdge,
+        order: u64,
+    ) {
+        self.pending_events.push_back(ShellEvent::Input {
+            surface,
+            event: InputEvent::Pointer(twinkle_input::PointerEvent::Button {
+                device,
+                order: twinkle_input::EventOrder(order),
+                button,
+                edge,
+                position: Some(position),
+            }),
+        });
+    }
+
+    pub fn wait_event(&mut self) -> Option<ShellEvent> {
+        self.wait_event_timeout(Duration::from_secs(24 * 60 * 60))
+    }
+
+    pub fn wait_event_timeout(&mut self, timeout: Duration) -> Option<ShellEvent> {
+        self.drain_external_events();
+        if let Some(event) = self.pending_events.pop_front() {
+            return Some(event);
+        }
+        #[cfg(target_os = "windows")]
+        {
+            // Drain anything winit can translate before arming the native wait.
+            // This also establishes the queue's "seen" state so the wait below
+            // responds to messages arriving after this point.
+            self.pump_events(Some(Duration::ZERO));
+            self.drain_external_events();
+            if let Some(event) = self.pending_events.pop_front() {
+                return Some(event);
+            }
+            // Winit's pump timeout returns immediately under Wine and some Windows
+            // compatibility environments. Wait on the owning thread's message queue
+            // directly so native input and Nickel's PostThreadMessageW wake remain
+            // interruptible, then let winit translate everything without blocking.
+            // Do not use MWMO_INPUTAVAILABLE: winit may leave a previously inspected
+            // message queued, and that flag would make the wait return forever for
+            // the old message instead of waiting for new queue activity.
+            // SAFETY: this thread owns the event loop and therefore its message queue;
+            // there are no object handles, and all flag values are Win32 constants.
+            unsafe {
+                MsgWaitForMultipleObjectsEx(
+                    None,
+                    windows_wait_timeout_millis(timeout),
+                    QS_ALLINPUT,
+                    Default::default(),
+                )
+            };
+            self.pump_events(Some(Duration::ZERO));
+        }
+        #[cfg(not(target_os = "windows"))]
+        self.pump_events(Some(timeout));
+        self.drain_external_events();
+        self.pending_events.pop_front()
+    }
+
+    fn drain_external_events(&mut self) {
+        {
+            let events = {
+                let mut queue = self
+                    .external_events
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                queue.drain(..).collect::<Vec<_>>()
+            };
+            for event in events {
+                self.push_user_event(event);
+            }
+        }
+    }
+
+    fn push_user_event(&mut self, event: ShellUserEvent) {
+        match event {
+            ShellUserEvent::GlobalShortcut(shortcut) => self
+                .pending_events
+                .push_back(ShellEvent::GlobalShortcut(shortcut)),
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
+            ShellUserEvent::TestControl(request) => {
+                self.pending_events
+                    .push_back(ShellEvent::TestControl(request));
+            }
+        }
+    }
+
+    fn create_native_window(
+        &mut self,
+        attributes: WindowAttributes,
+    ) -> Result<Box<dyn Window>, String> {
+        self.pump_native_events(Some(Duration::ZERO), Some(attributes))
+            .unwrap_or_else(|| Err("native event loop cannot currently create surfaces".into()))
+    }
+
+    fn pump_events(&mut self, timeout: Option<Duration>) {
+        self.pump_native_events(timeout, None);
+    }
+
+    fn pump_native_events(
+        &mut self,
+        timeout: Option<Duration>,
+        mut attributes: Option<WindowAttributes>,
+    ) -> Option<Result<Box<dyn Window>, String>> {
+        #[cfg(target_os = "linux")]
+        let modal_owners = self.active_plugin_dialog_owners();
+        let indices = &self.native_surface_indices;
+        let surfaces = &self.surfaces;
+        let adapters = &mut self.input_adapters;
+        let devices = &mut self.devices;
+        let pending = &mut self.pending_events;
+        let displays = &mut self.displays;
+        let can_create = &mut self.can_create_surfaces;
+        let queued = std::mem::take(&mut self.deferred_window_events);
+        let deferred = &mut self.deferred_window_events;
+        let file_drops = &mut self.pending_file_drops;
+        let mut created = None;
+        self.events.set_control_flow(ControlFlow::Wait);
+        let mut handler = ShellPump {
+            queued,
+            dispatch: |event, active: &dyn ActiveEventLoop| {
+                if matches!(event, NativeEvent::CanCreate) {
+                    *can_create = true;
+                }
+                if *can_create && matches!(event, NativeEvent::NewEvents | NativeEvent::CanCreate) {
+                    if let Some(attributes) = attributes.take() {
+                        created = Some(
+                            active
+                                .create_window(attributes)
+                                .map_err(|error| error.to_string()),
+                        );
+                    }
+                }
+                match event {
+                    NativeEvent::CanCreate | NativeEvent::BeforeWait => {
+                        *displays = active
+                            .available_monitors()
+                            .enumerate()
+                            .map(|(index, display)| {
+                                let position = display.position().unwrap_or_default();
+                                let size = display
+                                    .current_video_mode()
+                                    .map(|mode| mode.size())
+                                    .unwrap_or_default();
+                                (
+                                    DisplayGeometry {
+                                        x: position.x,
+                                        y: position.y,
+                                        width: size.width.max(1),
+                                        height: size.height.max(1),
+                                        scale: display.scale_factor().max(1.0) as f32,
+                                    },
+                                    display
+                                        .name()
+                                        .map(|name| name.into_owned())
+                                        .unwrap_or_else(|| format!("display-{index}")),
+                                )
+                            })
+                            .collect();
+                    }
+                    NativeEvent::Window(window_id, event) => {
+                        if !indices.contains_key(&window_id) {
+                            if created.as_ref().is_some_and(|result| {
+                                result.as_ref().is_ok_and(|window| window.id() == window_id)
+                            }) {
+                                deferred.push_back((window_id, event));
+                            }
+                            return;
+                        }
+                        let Some(&index) = indices.get(&window_id) else {
+                            return;
+                        };
+                        let surface = surfaces[index].id;
+                        let scale = surfaces[index].window.scale_factor();
+                        let native_device = window_event_device(&event);
+                        // Missing native IDs use the reserved synthetic identity; hardware
+                        // devices are assigned nonzero identities by Twinkle's registry.
+                        let device = native_device
+                            .map(|native| devices.get_or_insert(native))
+                            .unwrap_or(twinkle_input::DeviceId(0));
+                        let adapter = adapters.entry(window_id).or_default();
+                        #[cfg(target_os = "linux")]
+                        let blocked_by_dialog = surfaces[index].role == SurfaceRole::Panel
+                            && surfaces[index].plugin.as_ref().is_some_and(|key| {
+                                modal_owners.contains(&(
+                                    key.plugin_id.clone(),
+                                    key.surface_id.clone(),
+                                    surfaces[index].output_name.clone(),
+                                ))
+                            });
+                        for input in adapter.normalize_at_scale(device, scale, &event) {
+                            #[cfg(target_os = "linux")]
+                            if blocked_by_dialog {
+                                continue;
+                            }
+                            queue_shell_input(pending, surface, input);
+                        }
+                        if let Some(event) = translate_window_event(surface, scale as f32, &event) {
+                            #[cfg(target_os = "linux")]
+                            if blocked_by_dialog
+                                && matches!(
+                                    event,
+                                    ShellEvent::PointerEntered { .. } | ShellEvent::FileDrop { .. }
+                                )
+                            {
+                                return;
+                            }
+                            pending.push_back(event);
+                        }
+
+                        #[cfg(target_os = "linux")]
+                        if blocked_by_dialog {
+                            return;
+                        }
+                        match &event {
+                            WindowEvent::DragEntered { id, .. } => {
+                                let _ = active.set_valid_dnd_actions(
+                                    *id,
+                                    &[winit::event_loop::DndAction::Copy],
+                                );
+                            }
+                            WindowEvent::DragDropped { id, .. } => {
+                                if active
+                                    .fetch_data_transfer(
+                                        *id,
+                                        &winit::data_transfer::TypeHint::UriList,
+                                    )
+                                    .is_ok()
+                                {
+                                    file_drops.insert((window_id, *id));
+                                }
+                            }
+                            WindowEvent::DragLeft { id } => {
+                                file_drops.remove(&(window_id, *id));
+                            }
+                            WindowEvent::DataTransferReceived { id, value, .. } => {
+                                if file_drops.remove(&(window_id, *id)) {
+                                    if let Ok(paths) = value.try_as_file_paths() {
+                                        for path in paths {
+                                            pending
+                                                .push_back(ShellEvent::FileDrop { surface, path });
+                                        }
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    NativeEvent::NewEvents => {}
+                }
+            },
+        };
+        let status = self.events.pump_app_events(timeout, &mut handler);
+        drop(handler);
+        if matches!(status, PumpStatus::Exit(_)) {
+            let _queue = self
+                .external_events
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            self.sender_alive.store(false, AtomicOrdering::Release);
+        }
+        record_pump_status(pending, status);
+        created
+    }
+
+    pub fn display_geometries(&self) -> Result<Vec<DisplayGeometry>, String> {
+        Ok(self
+            .displays
+            .iter()
+            .map(|(geometry, _)| *geometry)
+            .collect())
+    }
+
+    pub(crate) fn output_names(&self) -> Vec<String> {
+        self.displays.iter().map(|(_, name)| name.clone()).collect()
+    }
+
+    fn display_names(&self) -> Result<Vec<String>, String> {
+        Ok(self.displays.iter().map(|(_, name)| name.clone()).collect())
+    }
+
+    fn create_surface(
+        &mut self,
+        role: SurfaceRole,
+        display_index: usize,
+        geometry: DisplayGeometry,
+        output_name: &str,
+    ) -> Result<(), String> {
+        self.create_surface_with_plugin(role, display_index, geometry, output_name, None)
+    }
+
+    fn create_surface_with_plugin(
+        &mut self,
+        role: SurfaceRole,
+        display_index: usize,
+        geometry: DisplayGeometry,
+        output_name: &str,
+        plugin: Option<(
+            &nickel_core::plugins::PluginSurfaceKey,
+            &nickel_core::plugins::PluginSurface,
+        )>,
+    ) -> Result<(), String> {
+        let panel = plugin
+            .map(|(_, surface)| surface.clone())
+            .or_else(|| {
+                fixed_plugin_surface_key(role, &self.active_fixed_plugins)
+                    .and_then(|key| self.extra_plugin_panels.get(&key).cloned())
+            })
+            .unwrap_or_else(|| self.plugin_panel_surface.clone());
+        let plugin_key = match role {
+            SurfaceRole::Taskbar => None,
+            SurfaceRole::VolumeOsd => None,
+            SurfaceRole::WindowPreview => {
+                fixed_plugin_surface_key(role, &self.active_fixed_plugins)
+            }
+            SurfaceRole::Panel => Some(plugin.map_or_else(
+                || nickel_core::plugins::PluginSurfaceKey {
+                    plugin_id: self.plugin_panel_owner.clone(),
+                    surface_id: panel.id.clone(),
+                },
+                |(key, _)| key.clone(),
+            )),
+            _ => None,
+        };
+        let (base_title, x, y, width, height, hidden) =
+            surface_geometry_for_panel(role, geometry, self.options.panel_edge, &panel);
+        let title = base_title;
+        let session_role = match role {
+            SurfaceRole::Desktop => SessionShellRole::Desktop,
+            SurfaceRole::Taskbar => SessionShellRole::Panel,
+            SurfaceRole::Panel if panel.reserve_work_area => SessionShellRole::Panel,
+            SurfaceRole::Panel => SessionShellRole::PluginSurface,
+            SurfaceRole::Launcher => SessionShellRole::Launcher,
+            SurfaceRole::ControlCenter => SessionShellRole::ControlCenter,
+            SurfaceRole::Notification => SessionShellRole::Notification,
+            SurfaceRole::VolumeOsd => SessionShellRole::VolumeOsd,
+            SurfaceRole::WindowPreview => SessionShellRole::Preview,
+            SurfaceRole::WindowContextMenu => SessionShellRole::ContextMenu,
+            SurfaceRole::CodexProjectMenu => SessionShellRole::ProjectMenu,
+            SurfaceRole::Lock => SessionShellRole::Lock,
+            SurfaceRole::Screenshot => SessionShellRole::Screenshot,
+            SurfaceRole::OnScreenKeyboard => SessionShellRole::OnScreenKeyboard,
+            SurfaceRole::CodexChat => unreachable!("chat surfaces are dynamic"),
+            #[cfg(target_os = "windows")]
+            SurfaceRole::TrustedControl => unreachable!("trusted surfaces are dynamic"),
+        };
+        #[cfg(not(target_os = "linux"))]
+        let application_id = session_role.application_id().to_owned();
+        #[cfg(target_os = "linux")]
+        let application_id = {
+            let application_id = format!(
+                "{}{}.{}",
+                nickel_session_protocol::SHELL_SURFACE_APPLICATION_ID_PREFIX,
+                std::process::id(),
+                NEXT_SHELL_SURFACE_ID.fetch_add(1, Ordering::Relaxed)
+            );
+            let output = matches!(
+                role,
+                SurfaceRole::Desktop
+                    | SurfaceRole::Taskbar
+                    | SurfaceRole::Panel
+                    | SurfaceRole::Lock
+            )
+            .then(|| output_name.to_owned());
+            crate::platform::register_shell_surface(
+                nickel_session_protocol::ShellSurfaceIdentity {
+                    application_id: application_id.clone(),
+                    role: session_role,
+                    output,
+                    plugin_surface: plugin_key.as_ref().map(|key| {
+                        nickel_session_protocol::PluginSurfacePlacement {
+                            plugin_id: key.plugin_id.clone(),
+                            surface_id: panel.id.clone(),
+                            kind: protocol_plugin_surface_kind(panel.kind),
+                            width: panel.width,
+                            height: panel.height,
+                            bottom_offset: panel.bottom_offset,
+                            anchor: protocol_plugin_surface_anchor(panel.anchor),
+                            offset_x: panel.offset_x,
+                            offset_y: panel.offset_y,
+                            passive: panel.passive,
+                        }
+                    }),
+                },
+            )
+            .map_err(|error| format!("failed to register shell surface: {error}"))?;
+            application_id
+        };
+        let attributes = WindowAttributes::default()
+            .with_title(title)
+            .with_position(LogicalPosition::new(x, y))
+            .with_surface_size(LogicalSize::new(width, height))
+            .with_decorations(
+                !surface_is_borderless(role)
+                    || (role == SurfaceRole::Panel
+                        && matches!(
+                            panel.kind,
+                            nickel_core::plugins::PluginSurfaceKind::Window
+                                | nickel_core::plugins::PluginSurfaceKind::Dialog
+                        )),
+            )
+            .with_resizable(matches!(
+                role,
+                SurfaceRole::WindowPreview
+                    | SurfaceRole::WindowContextMenu
+                    | SurfaceRole::Screenshot
+                    | SurfaceRole::OnScreenKeyboard
+            ))
+            .with_visible(!hidden || cfg!(target_os = "linux"));
+        let attributes = if plugin_key.is_some() {
+            attributes.with_transparent(true)
+        } else {
+            attributes
+        };
+        #[cfg(target_os = "windows")]
+        let attributes = if panel.kind == nickel_core::plugins::PluginSurfaceKind::Dialog {
+            if let Some(owner_id) = &panel.owner {
+                use raw_window_handle::RawWindowHandle;
+                use winit::platform::windows::WindowAttributesWindows;
+                let owner = self.surfaces.iter().find(|surface| {
+                    surface.display_connected
+                        && surface.output_name == output_name
+                        && surface.plugin.as_ref().is_some_and(|key| {
+                            plugin_key.as_ref().is_some_and(|dialog_key| {
+                                key.plugin_id == dialog_key.plugin_id && key.surface_id == *owner_id
+                            })
+                        })
+                });
+                let hwnd = owner
+                    .and_then(|surface| surface.window.window_handle().ok())
+                    .and_then(|handle| match handle.as_raw() {
+                        RawWindowHandle::Win32(handle) => Some(handle.hwnd.get()),
+                        _ => None,
+                    })
+                    .ok_or_else(|| format!("plugin dialog owner {owner_id:?} is unavailable"))?;
+                attributes.with_platform_attributes(Box::new(
+                    WindowAttributesWindows::default().with_owner_window(hwnd),
+                ))
+            } else {
+                attributes
+            }
+        } else {
+            attributes
+        };
+        #[cfg(target_os = "linux")]
+        let attributes = attributes.with_platform_attributes(Box::new(
+            WindowAttributesWayland::default()
+                .with_name(application_id.clone(), application_id.clone()),
+        ));
+        #[allow(deprecated)]
+        let window = self
+            .create_native_window(attributes)
+            .map_err(|error| error.to_string())?;
+        #[cfg(target_os = "windows")]
+        match role {
+            SurfaceRole::Desktop => {
+                if !crate::platform::configure_desktop_window(
+                    &window,
+                    (geometry.x, geometry.y),
+                    (geometry.width, geometry.height),
+                ) {
+                    tracing::warn!(?role, "failed to configure Windows shell window");
+                }
+            }
+            SurfaceRole::Taskbar => {
+                if !crate::platform::configure_panel_window(&window, self.options.panel_edge) {
+                    tracing::warn!(?role, "failed to configure Windows shell window");
+                }
+            }
+            SurfaceRole::Panel => {
+                if panel.reserve_work_area {
+                    if !crate::platform::configure_panel_window(&window, self.options.panel_edge) {
+                        tracing::warn!(?role, "failed to configure Windows reserved panel window");
+                    }
+                } else if matches!(
+                    panel.kind,
+                    nickel_core::plugins::PluginSurfaceKind::Panel
+                        | nickel_core::plugins::PluginSurfaceKind::Dock
+                ) && !crate::platform::configure_preview_window(&window)
+                {
+                    tracing::warn!(?role, "failed to configure Windows plugin panel window");
+                }
+                if matches!(
+                    panel.kind,
+                    nickel_core::plugins::PluginSurfaceKind::Dialog
+                        | nickel_core::plugins::PluginSurfaceKind::Overlay
+                ) && !crate::platform::configure_plugin_dialog_window(&window)
+                {
+                    tracing::warn!(?role, "failed to configure Windows plugin transient window");
+                }
+            }
+            SurfaceRole::Launcher => {
+                if !crate::platform::configure_launcher_window(&window) {
+                    tracing::warn!(?role, "failed to configure Windows shell window");
+                }
+            }
+            SurfaceRole::Notification => {
+                if !crate::platform::configure_notification_window(&window) {
+                    return Err("failed to configure trusted Windows notification".to_owned());
+                }
+            }
+            SurfaceRole::WindowPreview => {
+                if !crate::platform::configure_preview_window(&window) {
+                    tracing::warn!(?role, "failed to configure Windows shell window");
+                }
+            }
+
+            _ => {}
+        }
+        if role == SurfaceRole::Screenshot {
+            window.set_min_surface_size(Some(LogicalSize::new(720, 480).into()));
+            #[cfg(target_os = "windows")]
+            if !crate::platform::configure_screenshot_window(&window) {
+                tracing::warn!("failed to configure Nickel screenshot utility window");
+            }
+        }
+        if role == SurfaceRole::CodexProjectMenu {
+            window.set_ime_allowed(true);
+        }
+        if role == SurfaceRole::Launcher {
+            window.set_ime_allowed(true);
+        }
+        if role == SurfaceRole::Lock {
+            window.set_ime_allowed(true);
+        }
+        let id = SurfaceId(window.id());
+        let index = self.surfaces.len();
+        let diagnostic_generation = self.next_surface_diagnostic_generation()?;
+        #[cfg(target_os = "windows")]
+        if let Some(key) = plugin_key
+            .as_ref()
+            .filter(|_| crate::platform::native_application_windows::is_application_surface(&panel))
+        {
+            crate::platform::register_native_application_window(&window, &key.plugin_id);
+        }
+        self.surface_indices.insert(id.0, index);
+        self.native_surface_indices.insert(window.id(), index);
+        self.surfaces.push(ShellSurface {
+            id,
+            role,
+            plugin_surface: plugin_key.as_ref().map(|_| panel.clone()),
+            plugin: plugin_key,
+            passive_overlay: role == SurfaceRole::Panel && panel.passive,
+            application_id,
+            display_index,
+            output_name: output_name.to_owned(),
+            display_connected: true,
+            initial_exposed: false,
+            presenter: None,
+            #[cfg(target_os = "windows")]
+            presentation_generation: 0,
+            #[cfg(target_os = "windows")]
+            presentation_failures: 0,
+            #[cfg(target_os = "windows")]
+            presented_frame_bytes: 0,
+            last_host_change_token: None,
+            // Start reconciled as visible even when the native window was
+            // requested hidden so the first policy pass performs the real
+            // platform hide transition. This matters on Wayland, where the
+            // winit visibility hint itself is intentionally a no-op.
+            visible: true,
+            diagnostic_generation,
+            window,
+        });
+        Ok(())
+    }
+}
+
+fn output_name_at(displays: &[(DisplayGeometry, String)], point: (i32, i32)) -> Option<&str> {
+    displays
+        .iter()
+        .find(|(geometry, _)| {
+            let right = i64::from(geometry.x) + i64::from(geometry.width);
+            let bottom = i64::from(geometry.y) + i64::from(geometry.height);
+            i64::from(point.0) >= i64::from(geometry.x)
+                && i64::from(point.0) < right
+                && i64::from(point.1) >= i64::from(geometry.y)
+                && i64::from(point.1) < bottom
+        })
+        .map(|(_, name)| name.as_str())
+}
+
+fn preferred_output_index(
+    displays: &[(DisplayGeometry, String)],
+    active: Option<&str>,
+    primary: Option<&str>,
+) -> Option<usize> {
+    active
+        .and_then(|name| displays.iter().position(|(_, candidate)| candidate == name))
+        .or_else(|| {
+            primary.and_then(|name| displays.iter().position(|(_, candidate)| candidate == name))
+        })
+        .or_else(|| {
+            displays
+                .iter()
+                .enumerate()
+                .min_by(|(_, (_, left)), (_, (_, right))| left.cmp(right))
+                .map(|(index, _)| index)
+        })
+}
+
+fn panel_outputs(
+    output_names: &[String],
+    all_displays: bool,
+    primary_output: Option<&str>,
+) -> Vec<String> {
+    if all_displays {
+        output_names.to_vec()
+    } else {
+        primary_output
+            .filter(|primary| output_names.iter().any(|output| output == primary))
+            .map(str::to_owned)
+            .or_else(|| output_names.iter().min().cloned())
+            .into_iter()
+            .collect()
+    }
+}
+
+fn window_event_device(event: &WindowEvent) -> Option<DeviceId> {
+    match event {
+        WindowEvent::KeyboardInput { device_id, .. }
+        | WindowEvent::PointerMoved { device_id, .. }
+        | WindowEvent::PointerEntered { device_id, .. }
+        | WindowEvent::PointerLeft { device_id, .. }
+        | WindowEvent::MouseWheel { device_id, .. }
+        | WindowEvent::PointerButton { device_id, .. }
+        | WindowEvent::TouchpadPressure { device_id, .. } => *device_id,
+        _ => None,
+    }
+}
+
+fn translate_window_event(
+    surface: SurfaceId,
+    scale: f32,
+    event: &WindowEvent,
+) -> Option<ShellEvent> {
+    match event {
+        WindowEvent::CloseRequested => Some(ShellEvent::CloseRequested(surface)),
+        WindowEvent::Focused(focused) => Some(ShellEvent::FocusChanged {
+            surface,
+            focused: *focused,
+        }),
+        // Touch entry/exit is handled by Twinkle's touch adapter, not mouse-hover policy.
+        WindowEvent::PointerEntered {
+            kind: winit::event::PointerKind::Touch(_),
+            ..
+        }
+        | WindowEvent::PointerLeft {
+            kind: winit::event::PointerKind::Touch(_),
+            ..
+        } => None,
+        WindowEvent::PointerEntered { .. } => Some(ShellEvent::PointerEntered {
+            surface,
+            entered: true,
+        }),
+        WindowEvent::PointerLeft { .. } => Some(ShellEvent::PointerEntered {
+            surface,
+            entered: false,
+        }),
+        WindowEvent::SurfaceResized(size) => Some(ShellEvent::PixelResize {
+            surface,
+            width: size.width,
+            height: size.height,
+            scale,
+        }),
+        WindowEvent::ScaleFactorChanged { .. } => Some(ShellEvent::DisplayTopologyChanged),
+        WindowEvent::RedrawRequested => Some(ShellEvent::Redraw(surface)),
+        WindowEvent::Destroyed => Some(ShellEvent::Hidden(surface)),
+        _ => None,
+    }
+}
+
+fn protocol_plugin_surface_kind(
+    kind: nickel_core::plugins::PluginSurfaceKind,
+) -> nickel_session_protocol::PluginSurfacePlacementKind {
+    use nickel_core::plugins::PluginSurfaceKind;
+    use nickel_session_protocol::PluginSurfacePlacementKind;
+    match kind {
+        PluginSurfaceKind::Panel => PluginSurfacePlacementKind::Panel,
+        PluginSurfaceKind::Dock => PluginSurfacePlacementKind::Dock,
+        PluginSurfaceKind::Window => PluginSurfacePlacementKind::Window,
+        PluginSurfaceKind::Dialog => PluginSurfacePlacementKind::Dialog,
+        PluginSurfaceKind::Overlay => PluginSurfacePlacementKind::Overlay,
+        PluginSurfaceKind::Desktop => PluginSurfacePlacementKind::Desktop,
+    }
+}
+
+fn protocol_plugin_surface_anchor(
+    anchor: nickel_core::plugins::PluginSurfaceAnchor,
+) -> nickel_session_protocol::PluginSurfaceAnchor {
+    use nickel_core::plugins::PluginSurfaceAnchor as Core;
+    use nickel_session_protocol::PluginSurfaceAnchor as Protocol;
+    match anchor {
+        Core::Center => Protocol::Center,
+        Core::TopLeft => Protocol::TopLeft,
+        Core::TopCenter => Protocol::TopCenter,
+        Core::TopRight => Protocol::TopRight,
+        Core::BottomLeft => Protocol::BottomLeft,
+        Core::BottomCenter => Protocol::BottomCenter,
+        Core::BottomRight => Protocol::BottomRight,
+    }
+}
+
+fn surface_geometry_for_panel(
+    role: SurfaceRole,
+    geometry: DisplayGeometry,
+    panel_edge: PanelEdge,
+    panel: &nickel_core::plugins::PluginSurface,
+) -> (&'static str, i32, i32, u32, u32, bool) {
+    if role == SurfaceRole::Panel {
+        let width = panel.width.min(geometry.width);
+        let height = panel.height.min(geometry.height);
+        if panel.reserve_work_area {
+            return (
+                PANEL_TITLE,
+                geometry.x,
+                match panel_edge {
+                    PanelEdge::Top => geometry.y,
+                    PanelEdge::Bottom => geometry.y + geometry.height.saturating_sub(height) as i32,
+                },
+                geometry.width,
+                height,
+                false,
+            );
+        }
+        if matches!(
+            panel.kind,
+            nickel_core::plugins::PluginSurfaceKind::Window
+                | nickel_core::plugins::PluginSurfaceKind::Dialog
+                | nickel_core::plugins::PluginSurfaceKind::Overlay
+        ) {
+            let (x, y) = panel.anchor.position(
+                (geometry.x, geometry.y, geometry.width, geometry.height),
+                (width, height),
+                (panel.offset_x, panel.offset_y),
+            );
+            return (
+                match panel.kind {
+                    nickel_core::plugins::PluginSurfaceKind::Dialog => "Nickel Plugin Dialog",
+                    nickel_core::plugins::PluginSurfaceKind::Overlay => "Nickel Plugin Overlay",
+                    _ => "Nickel Plugin Window",
+                },
+                x,
+                y,
+                width,
+                height,
+                panel.passive,
+            );
+        }
+        return (
+            "Nickel Plugin Panel",
+            geometry.x + geometry.width.saturating_sub(width) as i32 / 2,
+            geometry.y
+                + geometry
+                    .height
+                    .saturating_sub(height.saturating_add(panel.bottom_offset))
+                    as i32,
+            width,
+            height,
+            true,
+        );
+    }
+    surface_geometry(role, geometry, panel_edge)
+}
+
+fn surface_geometry(
+    role: SurfaceRole,
+    geometry: DisplayGeometry,
+    panel_edge: PanelEdge,
+) -> (&'static str, i32, i32, u32, u32, bool) {
+    match role {
+        SurfaceRole::Desktop => (
+            DESKTOP_TITLE,
+            geometry.x,
+            geometry.y,
+            geometry.width,
+            geometry.height,
+            false,
+        ),
+        SurfaceRole::Taskbar => {
+            let height = 0;
+            (
+                PANEL_TITLE,
+                geometry.x,
+                match panel_edge {
+                    PanelEdge::Top => geometry.y,
+                    PanelEdge::Bottom => geometry.y + geometry.height.saturating_sub(height) as i32,
+                },
+                geometry.width,
+                height,
+                false,
+            )
+        }
+        SurfaceRole::Panel => (
+            "Nickel Plugin Panel",
+            geometry.x
+                + geometry
+                    .width
+                    .saturating_sub(crate::plugin_panel::surface().width) as i32
+                    / 2,
+            geometry.y
+                + geometry.height.saturating_sub(
+                    crate::plugin_panel::surface()
+                        .height
+                        .saturating_add(crate::plugin_panel::bottom_offset()),
+                ) as i32,
+            crate::plugin_panel::surface().width.min(geometry.width),
+            crate::plugin_panel::surface().height.min(geometry.height),
+            true,
+        ),
+        SurfaceRole::Launcher => unreachable!("launcher uses an ordinary plugin window"),
+        SurfaceRole::ControlCenter => (
+            CONTROL_CENTER_TITLE,
+            geometry.x + geometry.width.saturating_sub(438) as i32,
+            geometry.y + geometry.height.saturating_sub(672) as i32,
+            420.min(geometry.width),
+            600.min(geometry.height),
+            true,
+        ),
+        SurfaceRole::Notification => {
+            let width = 420.min(geometry.width);
+            let height = 180.min(geometry.height);
+            (
+                NOTIFICATION_TITLE,
+                geometry.x + geometry.width.saturating_sub(width + 18) as i32,
+                geometry.y + 24,
+                width,
+                height,
+                true,
+            )
+        }
+        SurfaceRole::VolumeOsd => ("Retired volume surface", 0, 0, 0, 0, true),
+        SurfaceRole::WindowPreview => (
+            WINDOW_PREVIEW_TITLE,
+            geometry.x + geometry.width.saturating_sub(1160.min(geometry.width)) as i32 / 2,
+            geometry.y + geometry.height.saturating_sub(220.min(geometry.height)) as i32 / 2,
+            1160.min(geometry.width),
+            220.min(geometry.height),
+            true,
+        ),
+        SurfaceRole::WindowContextMenu => ("Retired window menu surface", 0, 0, 0, 0, true),
+        SurfaceRole::CodexProjectMenu => (
+            CODEX_PROJECT_MENU_TITLE,
+            geometry.x + geometry.width.saturating_sub(464) as i32,
+            geometry.y + geometry.height.saturating_sub(476) as i32,
+            360.min(geometry.width),
+            420.min(geometry.height.saturating_sub(PANEL_HEIGHT)),
+            true,
+        ),
+        SurfaceRole::Lock => (
+            LOCK_TITLE,
+            geometry.x,
+            geometry.y,
+            geometry.width,
+            geometry.height,
+            true,
+        ),
+        SurfaceRole::Screenshot => (
+            SCREENSHOT_TITLE,
+            geometry.x,
+            geometry.y,
+            geometry.width,
+            geometry.height,
+            true,
+        ),
+        SurfaceRole::CodexChat => unreachable!("chat surfaces are created dynamically"),
+        #[cfg(target_os = "windows")]
+        SurfaceRole::TrustedControl => unreachable!("trusted surfaces are created dynamically"),
+        SurfaceRole::OnScreenKeyboard => {
+            let height = nickel_core::on_screen_keyboard::KEYBOARD_HEIGHT
+                .min(geometry.height.saturating_sub(1));
+            (
+                "On-screen keyboard — Nickel",
+                geometry.x,
+                geometry.y + geometry.height.saturating_sub(height) as i32,
+                geometry.width,
+                height,
+                true,
+            )
+        }
+    }
+}
+
+fn require_displays(displays: Vec<DisplayGeometry>) -> Result<Vec<DisplayGeometry>, String> {
+    if displays.is_empty() {
+        Err("winit reported no displays; refusing to start a headless Nickel shell".into())
+    } else {
+        Ok(displays)
+    }
+}
+
+fn output_role(role: SurfaceRole) -> bool {
+    matches!(
+        role,
+        SurfaceRole::Desktop | SurfaceRole::Taskbar | SurfaceRole::Panel | SurfaceRole::Lock
+    )
+}
+
+fn output_role_is_retired(role: SurfaceRole, output_name: &str, retired: &[String]) -> bool {
+    output_role(role) && retired.iter().any(|output| output == output_name)
+}
+
+#[cfg(test)]
+mod runtime_diagnostics_tests {
+    use super::{
+        RUNTIME_SAMPLE_CAPACITY, SurfaceRuntimeSamples, push_bounded, surface_runtime_diagnostics,
+    };
+    use std::collections::VecDeque;
+
+    #[test]
+    fn runtime_samples_are_bounded_and_keep_the_newest_observations() {
+        let mut samples = VecDeque::new();
+        for sample in 0..(RUNTIME_SAMPLE_CAPACITY as u64 + 7) {
+            push_bounded(&mut samples, sample);
+        }
+        assert_eq!(samples.len(), RUNTIME_SAMPLE_CAPACITY);
+        assert_eq!(samples.front(), Some(&7));
+        assert_eq!(samples.back(), Some(&(RUNTIME_SAMPLE_CAPACITY as u64 + 6)));
+    }
+
+    #[test]
+    fn surface_runtime_summary_is_deterministic_and_marks_missing_evidence() {
+        let samples = SurfaceRuntimeSamples {
+            present_us: VecDeque::from([9, 1, 5, 3]),
+            input_to_visible_us: VecDeque::from([20, 10]),
+            coalesced_present_requests: 4,
+        };
+        let diagnostics = surface_runtime_diagnostics("Launcher:DP-1:launcher:7", &samples, None);
+        assert_eq!(diagnostics.present_us.p50_us, Some(3));
+        assert_eq!(diagnostics.present_us.p95_us, Some(9));
+        assert_eq!(diagnostics.present_us.p99_us, Some(9));
+        assert_eq!(diagnostics.present_us.max_us, Some(9));
+        assert_eq!(diagnostics.coalesced_present_requests.value, Some(4));
+        assert_eq!(diagnostics.missed_deadlines.value, None);
+        assert!(diagnostics.missed_deadlines.unavailable_reason.is_some());
+        assert_eq!(diagnostics.retained_gpu_bytes.value, None);
+        assert!(diagnostics.in_flight_bytes.unavailable_reason.is_some());
+    }
+}
+
+fn surface_is_borderless(role: SurfaceRole) -> bool {
+    // Linux shell roles are compositor-owned chrome. In particular, allowing the runtime to decorate the
+    // screenshot utility adds client-side shadow/titlebar extents to its Wayland geometry, so the
+    // compositor can no longer translate renderer-owned local input targets correctly. Windows
+    // intentionally keeps the screenshot utility as a conventional decorated tool window.
+    role != SurfaceRole::Screenshot || cfg!(target_os = "linux")
+}
+
+#[cfg(target_os = "linux")]
+fn process_rss_bytes() -> Option<usize> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    parse_proc_status_rss(&status)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn process_rss_bytes() -> Option<usize> {
+    None
+}
+
+pub(crate) fn parse_proc_status_rss(status: &str) -> Option<usize> {
+    let kibibytes = status.lines().find_map(|line| {
+        let value = line.strip_prefix("VmRSS:")?.trim();
+        let number = value.strip_suffix("kB")?.trim().parse::<usize>().ok()?;
+        Some(number)
+    })?;
+    kibibytes.checked_mul(1024)
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(target_os = "linux")]
+    use super::surface_is_ephemeral;
+    use super::{
+        DisplayGeometry, OUTPUT_CREATION_RETRY_MAX, OUTPUT_CREATION_RETRY_MIN,
+        OUTPUT_RETIREMENT_SETTLE, OutputCreationRetry, OutputRetirementTracker, PanelEdge,
+        ShellEvent, SurfaceRole, desired_output_surfaces, desired_plugin_surfaces,
+        durable_presenter_peak, output_name_at, output_role_is_retired, output_scope_matches,
+        panel_outputs, parse_proc_status_rss, preferred_output_index, queue_shell_input,
+        record_pump_status, require_displays, surface_geometry, surface_is_borderless,
+    };
+
+    use std::collections::{BTreeMap, HashSet, VecDeque};
+    use std::time::{Duration, Instant};
+    use twinkle_input::{
+        DeviceId, EventOrder, InputEvent, KeyEdge, Point, PointerButton, PointerEvent, Vector,
+    };
+    use twinkle_ui::AggregatePresenterCacheDiagnostics;
+    use winit::event_loop::pump_events::PumpStatus;
+
+    #[test]
+    fn terminal_native_pump_status_supersedes_buffered_events_once() {
+        let mut pending = VecDeque::from([ShellEvent::Quit]);
+        record_pump_status(&mut pending, PumpStatus::Continue);
+        assert!(matches!(pending.front(), Some(ShellEvent::Quit)));
+
+        record_pump_status(&mut pending, PumpStatus::Exit(1));
+        assert_eq!(pending.len(), 1);
+        assert!(matches!(
+            pending.front(),
+            Some(ShellEvent::RuntimeTerminated { code: 1 })
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires a graphical host; run alone to own the native event loop"]
+    fn winit_031_native_creation_and_cross_thread_wakeup_preserve_payloads() {
+        use super::{ShellUserEvent, WinitShell};
+        use crate::platform::GlobalShortcut;
+        let mut shell = WinitShell::new(std::time::Instant::now()).unwrap();
+        shell.pump_events(Some(Duration::ZERO));
+        assert!(!shell.displays.is_empty());
+        let id = shell
+            .create_codex_chat_surface("Nickel Winit migration smoke", "nickel-winit-smoke")
+            .unwrap();
+        assert_eq!(
+            shell.surface(id).unwrap().window().title(),
+            "Nickel Winit migration smoke"
+        );
+        assert!(shell.surface(id).unwrap().window().surface_size().width > 0);
+        shell.poll_events();
+        let sender = shell.event_sender();
+        let worker_sender = sender.clone();
+        let worker = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            assert!(
+                worker_sender
+                    .send_event(ShellUserEvent::GlobalShortcut(
+                        GlobalShortcut::ReloadShellSettings
+                    ))
+                    .is_ok()
+            );
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            if matches!(
+                shell.wait_event_timeout(Duration::from_millis(100)),
+                Some(ShellEvent::GlobalShortcut(
+                    GlobalShortcut::ReloadShellSettings
+                ))
+            ) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "native proxy did not deliver its queued payload"
+            );
+        }
+        worker.join().unwrap();
+        drop(shell);
+        assert!(
+            sender
+                .send_event(ShellUserEvent::GlobalShortcut(
+                    GlobalShortcut::ReloadShellSettings
+                ))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn winit_031_pointer_and_resize_events_preserve_shell_surface_identity() {
+        use winit::{
+            dpi::{PhysicalPosition, PhysicalSize},
+            event::{PointerKind, WindowEvent},
+        };
+        let surface = super::SurfaceId(winit::window::WindowId::from_raw(7));
+        let device = winit::event::DeviceId::from_raw(23);
+        let entered = WindowEvent::PointerEntered {
+            device_id: Some(device),
+            position: PhysicalPosition::new(12.0, 24.0),
+            primary: true,
+            kind: PointerKind::Mouse,
+        };
+        assert_eq!(super::window_event_device(&entered), Some(device));
+        assert!(
+            matches!(super::translate_window_event(surface, 2.0, &entered), Some(ShellEvent::PointerEntered { surface: actual, entered: true }) if actual == surface)
+        );
+        let touch_left = WindowEvent::PointerLeft {
+            device_id: Some(device),
+            position: None,
+            primary: true,
+            kind: PointerKind::Touch(winit::event::FingerId::from_raw(3)),
+        };
+        assert!(super::translate_window_event(surface, 2.0, &touch_left).is_none());
+        let resized = WindowEvent::SurfaceResized(PhysicalSize::new(800, 600));
+        assert_eq!(super::window_event_device(&resized), None);
+        assert!(
+            matches!(super::translate_window_event(surface, 2.0, &resized), Some(ShellEvent::PixelResize { surface: actual, width: 800, height: 600, scale: 2.0 }) if actual == surface)
+        );
+    }
+
+    #[test]
+    fn shell_pointer_motion_keeps_latest_position_and_accumulated_delta() {
+        let surface = super::SurfaceId(winit::window::WindowId::from_raw(1));
+        let mut pending = VecDeque::new();
+        for (order, position, delta) in [
+            (1, Point { x: 10.0, y: 20.0 }, Vector { x: 1.0, y: 2.0 }),
+            (2, Point { x: 14.0, y: 26.0 }, Vector { x: 4.0, y: 6.0 }),
+        ] {
+            queue_shell_input(
+                &mut pending,
+                surface,
+                InputEvent::Pointer(PointerEvent::Motion {
+                    device: DeviceId(7),
+                    order: EventOrder(order),
+                    position,
+                    delta: Some(delta),
+                }),
+            );
+        }
+
+        assert_eq!(pending.len(), 1);
+        assert!(matches!(
+            pending.front(),
+            Some(ShellEvent::Input {
+                surface: queued_surface,
+                event: InputEvent::Pointer(PointerEvent::Motion {
+                    device: DeviceId(7),
+                    order: EventOrder(2),
+                    position: Point { x: 14.0, y: 26.0 },
+                    delta: Some(Vector { x: 5.0, y: 8.0 }),
+                }),
+            }) if *queued_surface == surface
+        ));
+    }
+
+    #[test]
+    fn shell_pointer_motion_never_crosses_button_or_device_boundaries() {
+        let surface = super::SurfaceId(winit::window::WindowId::from_raw(1));
+        let motion = |device, order| {
+            InputEvent::Pointer(PointerEvent::Motion {
+                device: DeviceId(device),
+                order: EventOrder(order),
+                position: Point {
+                    x: order as f64,
+                    y: 0.0,
+                },
+                delta: Some(Vector { x: 1.0, y: 0.0 }),
+            })
+        };
+        let mut pending = VecDeque::new();
+        queue_shell_input(&mut pending, surface, motion(1, 1));
+        queue_shell_input(&mut pending, surface, motion(2, 2));
+        queue_shell_input(
+            &mut pending,
+            surface,
+            InputEvent::Pointer(PointerEvent::Button {
+                device: DeviceId(2),
+                order: EventOrder(3),
+                button: PointerButton::Primary,
+                edge: KeyEdge::Released,
+                position: Some(Point { x: 2.0, y: 0.0 }),
+            }),
+        );
+        queue_shell_input(&mut pending, surface, motion(2, 4));
+
+        assert_eq!(pending.len(), 4);
+    }
+
+    #[test]
+    fn active_output_selection_uses_interaction_then_primary_then_stable_identity() {
+        let displays = vec![
+            (
+                DisplayGeometry {
+                    x: 0,
+                    y: 0,
+                    width: 1920,
+                    height: 1080,
+                    scale: 1.0,
+                },
+                "z-primary".to_owned(),
+            ),
+            (
+                DisplayGeometry {
+                    x: -2560,
+                    y: -200,
+                    width: 2560,
+                    height: 1440,
+                    scale: 1.5,
+                },
+                "a-wide".to_owned(),
+            ),
+        ];
+        assert_eq!(output_name_at(&displays, (-200, 400)), Some("a-wide"));
+        assert_eq!(output_name_at(&displays, (0, 0)), Some("z-primary"));
+        assert_eq!(output_name_at(&displays, (1920, 100)), None);
+        assert_eq!(
+            preferred_output_index(&displays, Some("a-wide"), Some("z-primary")),
+            Some(1)
+        );
+        assert_eq!(
+            preferred_output_index(&displays, Some("missing"), Some("z-primary")),
+            Some(0),
+            "a stale interaction output falls through to the configured primary"
+        );
+        assert_eq!(preferred_output_index(&displays, None, None), Some(1));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn wayland_surface_lifecycle_keeps_only_high_frequency_chrome_warm() {
+        for role in [
+            SurfaceRole::Notification,
+            SurfaceRole::WindowPreview,
+            SurfaceRole::CodexProjectMenu,
+            SurfaceRole::Screenshot,
+        ] {
+            assert!(surface_is_ephemeral(role), "{role:?}");
+        }
+        for role in [
+            SurfaceRole::Desktop,
+            SurfaceRole::Taskbar,
+            SurfaceRole::Lock,
+            SurfaceRole::Launcher,
+            SurfaceRole::ControlCenter,
+            SurfaceRole::CodexChat,
+        ] {
+            assert!(!surface_is_ephemeral(role), "{role:?}");
+        }
+    }
+
+    #[test]
+    fn process_presenter_peak_survives_destroyed_presenters() {
+        let live = AggregatePresenterCacheDiagnostics {
+            presenters: 2,
+            live_bytes: 220,
+            peak_cache_bytes: 320,
+            ..AggregatePresenterCacheDiagnostics::default()
+        };
+        let peak = durable_presenter_peak(0, &live);
+        assert_eq!(
+            durable_presenter_peak(peak, &AggregatePresenterCacheDiagnostics::default()),
+            320
+        );
+
+        let reopened = AggregatePresenterCacheDiagnostics {
+            presenters: 1,
+            live_bytes: 80,
+            peak_cache_bytes: 140,
+            ..AggregatePresenterCacheDiagnostics::default()
+        };
+        assert_eq!(durable_presenter_peak(peak, &reopened), 320);
+    }
+
+    #[test]
+    fn linux_screenshot_shell_surface_has_no_client_decoration_extents() {
+        if cfg!(target_os = "linux") {
+            assert!(surface_is_borderless(SurfaceRole::Screenshot));
+        }
+    }
+
+    #[test]
+    fn screenshot_surface_covers_the_complete_active_output() {
+        let display = DisplayGeometry {
+            x: 1920,
+            y: -120,
+            width: 2560,
+            height: 1440,
+            scale: 1.5,
+        };
+        let (_, x, y, width, height, initially_hidden) =
+            surface_geometry(SurfaceRole::Screenshot, display, PanelEdge::Bottom);
+        assert_eq!((x, y, width, height), (1920, -120, 2560, 1440));
+        assert!(initially_hidden);
+    }
+
+    #[test]
+    fn rejects_a_headless_shell_startup() {
+        assert_eq!(
+            require_displays(Vec::new()).unwrap_err(),
+            "winit reported no displays; refusing to start a headless Nickel shell"
+        );
+    }
+
+    #[test]
+    fn accepts_visible_displays() {
+        let display = DisplayGeometry {
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+            scale: 1.0,
+        };
+        assert_eq!(require_displays(vec![display]).unwrap(), vec![display]);
+    }
+
+    #[test]
+    fn panel_scope_reconciles_primary_and_all_display_topologies() {
+        let outputs = vec!["DP-1".to_owned(), "HDMI-A-1".to_owned()];
+        assert_eq!(
+            panel_outputs(&outputs, false, Some("HDMI-A-1")),
+            vec!["HDMI-A-1"]
+        );
+        assert_eq!(
+            panel_outputs(&outputs, false, Some("missing")),
+            vec!["DP-1"]
+        );
+        assert_eq!(panel_outputs(&outputs, true, Some("HDMI-A-1")), outputs);
+        assert_eq!(panel_outputs(&[], false, None), Vec::<String>::new());
+    }
+
+    #[test]
+    fn multiple_plugin_surface_keys_can_target_the_same_output() {
+        let mut panels = BTreeMap::new();
+        for (id, surface_id, scope) in [
+            (
+                "org.example.clock",
+                "main",
+                nickel_core::plugins::PluginOutputScope::Primary,
+            ),
+            (
+                "org.example.mail",
+                "main",
+                nickel_core::plugins::PluginOutputScope::All,
+            ),
+            (
+                "org.example.mail",
+                "dock",
+                nickel_core::plugins::PluginOutputScope::Primary,
+            ),
+        ] {
+            let mut surface = crate::plugin_panel::surface().clone();
+            surface.id = surface_id.into();
+            surface.output = scope;
+            panels.insert(
+                nickel_core::plugins::PluginSurfaceKey {
+                    plugin_id: id.into(),
+                    surface_id: surface.id.clone(),
+                },
+                surface,
+            );
+        }
+        let desired = desired_plugin_surfaces(&["DP-1".into(), "DP-2".into()], None, &panels);
+        assert_eq!(desired.len(), 4);
+        assert_eq!(
+            desired
+                .iter()
+                .filter(|(output, _)| output == "DP-1")
+                .count(),
+            3
+        );
+        assert_eq!(
+            desired
+                .iter()
+                .filter(|(output, _)| output == "DP-2")
+                .count(),
+            1
+        );
+        assert!(
+            desired
+                .iter()
+                .any(|(output, key)| { output == "DP-2" && key.plugin_id == "org.example.mail" })
+        );
+    }
+
+    #[test]
+    fn active_plugin_surface_follows_the_interaction_output() {
+        let outputs = ["DP-1".into(), "DP-2".into()];
+        assert!(output_scope_matches(
+            nickel_core::plugins::PluginOutputScope::Active,
+            &outputs,
+            "DP-2",
+            Some("DP-2")
+        ));
+        assert!(!output_scope_matches(
+            nickel_core::plugins::PluginOutputScope::Active,
+            &outputs,
+            "DP-1",
+            Some("DP-2")
+        ));
+    }
+
+    #[test]
+    fn primary_panel_policy_is_stable_across_reorder_hotplug_and_fallback() {
+        let original = vec!["DP-1".to_owned(), "HDMI-A-1".to_owned()];
+        let reordered = vec!["HDMI-A-1".to_owned(), "DP-1".to_owned()];
+        let expanded = vec![
+            "USB-C-1".to_owned(),
+            "HDMI-A-1".to_owned(),
+            "DP-1".to_owned(),
+        ];
+        for outputs in [&original, &reordered, &expanded] {
+            assert_eq!(
+                panel_outputs(outputs, false, Some("HDMI-A-1")),
+                vec!["HDMI-A-1"]
+            );
+        }
+        assert_eq!(
+            panel_outputs(&["USB-C-1".into(), "DP-1".into()], false, Some("HDMI-A-1")),
+            vec!["DP-1"]
+        );
+        assert_eq!(
+            panel_outputs(&reordered, false, Some("HDMI-A-1")),
+            vec!["HDMI-A-1"]
+        );
+    }
+
+    #[test]
+    fn every_enabled_output_requires_wallpaper_and_lock() {
+        let outputs = vec!["DP-1".to_owned(), "HDMI-A-1".to_owned()];
+        let desired = desired_output_surfaces(
+            &outputs,
+            true,
+            true,
+            None,
+            None,
+            false,
+            nickel_core::plugins::PluginOutputScope::Primary,
+        );
+        assert_eq!(desired.len(), 4);
+        for output in outputs {
+            for role in [SurfaceRole::Desktop, SurfaceRole::Lock] {
+                assert!(
+                    desired.contains(&(output.clone(), role)),
+                    "{output} {role:?}"
+                );
+            }
+            assert!(!desired.contains(&(output, SurfaceRole::Taskbar)));
+        }
+    }
+
+    #[test]
+    fn installed_panel_geometry_uses_its_manifest() {
+        let geometry = DisplayGeometry {
+            x: 100,
+            y: 200,
+            width: 1920,
+            height: 1080,
+            scale: 1.0,
+        };
+        for kind in [
+            nickel_core::plugins::PluginSurfaceKind::Panel,
+            nickel_core::plugins::PluginSurfaceKind::Dock,
+        ] {
+            let panel = nickel_core::plugins::PluginSurface {
+                initially_open: true,
+                id: "main".into(),
+                kind,
+                width: 360,
+                height: 96,
+                bottom_offset: 12,
+                anchor: nickel_core::plugins::PluginSurfaceAnchor::Center,
+                offset_x: 0,
+                offset_y: 0,
+                passive: false,
+                reserve_work_area: false,
+                output: nickel_core::plugins::PluginOutputScope::Primary,
+                owner: None,
+            };
+            let (_, x, y, width, height, hidden) = super::surface_geometry_for_panel(
+                SurfaceRole::Panel,
+                geometry,
+                PanelEdge::Bottom,
+                &panel,
+            );
+            assert_eq!((x, y, width, height), (880, 1172, 360, 96));
+            assert!(hidden);
+            let desired = desired_output_surfaces(
+                &["DP-1".into(), "DP-2".into()],
+                true,
+                true,
+                None,
+                None,
+                true,
+                panel.output,
+            );
+            assert!(desired.contains(&("DP-1".into(), SurfaceRole::Panel)));
+            assert!(!desired.contains(&("DP-2".into(), SurfaceRole::Panel)));
+        }
+    }
+
+    #[test]
+    fn installed_window_geometry_centers_on_its_output() {
+        let geometry = DisplayGeometry {
+            x: 100,
+            y: 200,
+            width: 1920,
+            height: 1080,
+            scale: 1.5,
+        };
+        let window = nickel_core::plugins::PluginSurface {
+            initially_open: true,
+            id: "main".into(),
+            kind: nickel_core::plugins::PluginSurfaceKind::Window,
+            width: 520,
+            height: 340,
+            bottom_offset: 0,
+            anchor: nickel_core::plugins::PluginSurfaceAnchor::Center,
+            offset_x: 0,
+            offset_y: 0,
+            passive: false,
+            reserve_work_area: false,
+            output: nickel_core::plugins::PluginOutputScope::Primary,
+            owner: None,
+        };
+        let (title, x, y, width, height, hidden) = super::surface_geometry_for_panel(
+            SurfaceRole::Panel,
+            geometry,
+            PanelEdge::Bottom,
+            &window,
+        );
+        assert_eq!(title, "Nickel Plugin Window");
+        assert_eq!((x, y, width, height), (800, 570, 520, 340));
+        assert!(!hidden);
+        assert_eq!(
+            super::protocol_plugin_surface_kind(window.kind),
+            nickel_session_protocol::PluginSurfacePlacementKind::Window
+        );
+
+        let mut overlay = window;
+        overlay.kind = nickel_core::plugins::PluginSurfaceKind::Overlay;
+        overlay.anchor = nickel_core::plugins::PluginSurfaceAnchor::TopRight;
+        overlay.offset_x = -18;
+        overlay.offset_y = 24;
+        overlay.passive = true;
+        let (_, x, y, width, height, hidden) = super::surface_geometry_for_panel(
+            SurfaceRole::Panel,
+            geometry,
+            PanelEdge::Bottom,
+            &overlay,
+        );
+        assert_eq!((x, y, width, height), (1482, 224, 520, 340));
+        assert!(hidden);
+    }
+
+    #[test]
+    fn hotplug_requires_output_chrome_even_when_the_existing_panel_is_healthy() {
+        let before = desired_output_surfaces(
+            &["DP-1".to_owned()],
+            true,
+            false,
+            None,
+            None,
+            false,
+            nickel_core::plugins::PluginOutputScope::Primary,
+        );
+        let after = desired_output_surfaces(
+            &["DP-1".to_owned(), "HDMI-A-1".to_owned()],
+            true,
+            false,
+            None,
+            None,
+            false,
+            nickel_core::plugins::PluginOutputScope::Primary,
+        );
+        let added = after.difference(&before).cloned().collect::<HashSet<_>>();
+        assert_eq!(
+            added,
+            HashSet::from([
+                ("HDMI-A-1".to_owned(), SurfaceRole::Desktop),
+                ("HDMI-A-1".to_owned(), SurfaceRole::Lock),
+            ])
+        );
+        assert!(!after.contains(&("DP-1".to_owned(), SurfaceRole::Taskbar)));
+        assert!(!after.contains(&("HDMI-A-1".to_owned(), SurfaceRole::Taskbar)));
+    }
+
+    #[test]
+    fn output_reordering_does_not_change_stable_surface_ownership() {
+        let forward = desired_output_surfaces(
+            &["DP-1".to_owned(), "HDMI-A-1".to_owned()],
+            true,
+            true,
+            None,
+            None,
+            false,
+            nickel_core::plugins::PluginOutputScope::Primary,
+        );
+        let reversed = desired_output_surfaces(
+            &["HDMI-A-1".to_owned(), "DP-1".to_owned()],
+            true,
+            true,
+            None,
+            None,
+            false,
+            nickel_core::plugins::PluginOutputScope::Primary,
+        );
+        assert_eq!(forward, reversed);
+    }
+
+    #[test]
+    fn desktop_policy_does_not_suppress_per_output_bars() {
+        let desired = desired_output_surfaces(
+            &["DP-1".to_owned(), "HDMI-A-1".to_owned()],
+            false,
+            true,
+            None,
+            None,
+            false,
+            nickel_core::plugins::PluginOutputScope::Primary,
+        );
+        assert_eq!(desired.len(), 2);
+        assert!(desired.iter().all(|(_, role)| *role == SurfaceRole::Lock));
+    }
+
+    #[test]
+    fn failed_output_surface_creation_retries_with_a_bounded_backoff() {
+        let started = Instant::now();
+        let mut retry = OutputCreationRetry::default();
+        retry.failed(started);
+        assert_eq!(retry.deadline, Some(started + OUTPUT_CREATION_RETRY_MIN));
+        for step in 1..12 {
+            retry.failed(started + Duration::from_secs(step));
+        }
+        assert_eq!(
+            retry.deadline,
+            Some(started + Duration::from_secs(11) + OUTPUT_CREATION_RETRY_MAX)
+        );
+        retry.succeeded();
+        assert_eq!(retry.deadline, None);
+        assert_eq!(retry.failures, 0);
+    }
+
+    #[test]
+    fn proc_rss_is_allocator_visible_and_parsed_independently() {
+        assert_eq!(
+            parse_proc_status_rss("Name:\tnickel\nVmRSS:\t   12345 kB\nThreads:\t1\n"),
+            Some(12_641_280)
+        );
+        assert_eq!(parse_proc_status_rss("VmRSS:\tunknown kB\n"), None);
+        assert_eq!(parse_proc_status_rss("VmSize:\t123 kB\n"), None);
+    }
+
+    #[test]
+    fn shell_surfaces_follow_updated_display_geometry() {
+        let display = DisplayGeometry {
+            x: 40,
+            y: 20,
+            width: 1920,
+            height: 1006,
+            scale: 1.5,
+        };
+        assert_eq!(
+            surface_geometry(SurfaceRole::Desktop, display, PanelEdge::Bottom),
+            ("Nickel Desktop", 40, 20, 1920, 1006, false)
+        );
+        assert_eq!(
+            surface_geometry(SurfaceRole::Taskbar, display, PanelEdge::Bottom),
+            ("Nickel Taskbar", 40, 1026, 1920, 0, false),
+            "the retired taskbar host must not reserve work area"
+        );
+        assert_eq!(
+            surface_geometry(SurfaceRole::Taskbar, display, PanelEdge::Top),
+            ("Nickel Taskbar", 40, 20, 1920, 0, false),
+            "the retired taskbar host must not reserve work area"
+        );
+    }
+
+    #[test]
+    fn unchanged_output_surface_ids_survive_transient_missing_snapshots() {
+        let started = Instant::now();
+        let mut tracker = OutputRetirementTracker::default();
+        let mut surfaces = vec![
+            (SurfaceRole::Desktop, "winit".to_owned(), 11_u32),
+            (SurfaceRole::Taskbar, "winit".to_owned(), 12),
+            (SurfaceRole::Lock, "winit".to_owned(), 13),
+        ];
+
+        assert!(
+            tracker
+                .observe(started, &[], ["winit", "winit", "winit"])
+                .is_empty()
+        );
+        assert!(
+            tracker
+                .observe(
+                    started + Duration::from_millis(100),
+                    &["winit".to_owned()],
+                    ["winit", "winit", "winit"],
+                )
+                .is_empty()
+        );
+        surfaces.retain(|(role, output, _)| !output_role_is_retired(*role, output, &[]));
+        assert_eq!(
+            surfaces.iter().map(|(_, _, id)| *id).collect::<Vec<_>>(),
+            vec![11, 12, 13],
+            "transient snapshots must not replace unchanged-output surfaces"
+        );
+        assert_eq!(tracker.next_deadline(), None);
+    }
+
+    #[test]
+    fn removed_output_roles_retire_only_after_settled_confirmation() {
+        let started = Instant::now();
+        let mut tracker = OutputRetirementTracker::default();
+        assert!(tracker.observe(started, &[], ["memory-a"]).is_empty());
+        assert!(
+            tracker
+                .observe(
+                    started + OUTPUT_RETIREMENT_SETTLE - Duration::from_millis(1),
+                    &[],
+                    ["memory-a"],
+                )
+                .is_empty()
+        );
+        let retired = tracker.observe(started + OUTPUT_RETIREMENT_SETTLE, &[], ["memory-a"]);
+        assert_eq!(retired, vec!["memory-a".to_owned()]);
+        let mut surfaces = vec![
+            (SurfaceRole::Desktop, "winit".to_owned(), 11_u32),
+            (SurfaceRole::Desktop, "memory-a".to_owned(), 21),
+            (SurfaceRole::Taskbar, "memory-a".to_owned(), 22),
+            (SurfaceRole::Lock, "memory-a".to_owned(), 23),
+        ];
+        surfaces.retain(|(role, output, _)| !output_role_is_retired(*role, output, &retired));
+        assert_eq!(
+            surfaces,
+            vec![(SurfaceRole::Desktop, "winit".to_owned(), 11)]
+        );
+    }
+
+    #[test]
+    fn reconnect_after_retirement_starts_a_fresh_settlement_generation() {
+        let started = Instant::now();
+        let mut tracker = OutputRetirementTracker::default();
+        assert!(tracker.observe(started, &[], ["memory-a"]).is_empty());
+        let retired = tracker.observe(started + OUTPUT_RETIREMENT_SETTLE, &[], ["memory-a"]);
+        assert_eq!(retired, vec!["memory-a".to_owned()]);
+        let retired_ids = [21_u32, 22, 23];
+
+        let reconnected = started + OUTPUT_RETIREMENT_SETTLE + Duration::from_millis(1);
+        assert!(
+            tracker
+                .observe(reconnected, &["memory-a".to_owned()], ["memory-a"])
+                .is_empty()
+        );
+        assert!(
+            tracker
+                .observe(reconnected + Duration::from_millis(1), &[], ["memory-a"])
+                .is_empty()
+        );
+        assert_eq!(
+            tracker.next_deadline(),
+            Some(reconnected + Duration::from_millis(1) + OUTPUT_RETIREMENT_SETTLE)
+        );
+        let fresh_ids = [31_u32, 32, 33];
+        assert_ne!(retired_ids, fresh_ids);
+    }
+
+    #[test]
+    fn unique_output_name_churn_has_one_bounded_pending_generation() {
+        let started = Instant::now();
+        let mut tracker = OutputRetirementTracker::default();
+        let mut now = started;
+
+        for generation in 0..512 {
+            let historical = format!("memory-{generation}");
+            assert!(
+                tracker
+                    .observe(now, &["winit".to_owned()], ["winit", &historical])
+                    .is_empty()
+            );
+            now += Duration::from_millis(1);
+            assert!(
+                tracker
+                    .observe(now, &["winit".to_owned()], ["winit", &historical])
+                    .is_empty()
+            );
+            now += OUTPUT_RETIREMENT_SETTLE;
+            assert_eq!(
+                tracker.observe(now, &["winit".to_owned()], ["winit", &historical]),
+                vec![historical]
+            );
+            tracker.missing_since.clear();
+            assert_eq!(tracker.missing_since.len(), 0);
+            now += Duration::from_millis(1);
+        }
+    }
+
+    #[test]
+    fn windows_message_wait_rounds_sub_millisecond_deadlines_up() {
+        assert_eq!(super::windows_wait_timeout_millis(Duration::ZERO), 0);
+        assert_eq!(
+            super::windows_wait_timeout_millis(Duration::from_nanos(1)),
+            1
+        );
+        assert_eq!(
+            super::windows_wait_timeout_millis(Duration::from_millis(15)),
+            15
+        );
+        assert_eq!(
+            super::windows_wait_timeout_millis(Duration::from_millis(15) + Duration::from_nanos(1)),
+            16
+        );
+    }
+
+    #[test]
+    fn windows_message_wait_keeps_infinite_sentinel_reserved() {
+        assert_eq!(
+            super::windows_wait_timeout_millis(Duration::from_secs(u64::MAX)),
+            u32::MAX - 1
+        );
+    }
+}

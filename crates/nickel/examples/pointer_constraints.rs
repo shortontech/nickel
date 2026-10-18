@@ -17,8 +17,8 @@ use winit::{
 
 struct PointerConstraintProbe {
     graphics: softbuffer::Context<OwnedDisplayHandle>,
-    window: Option<Rc<Window>>,
-    surface: Option<softbuffer::Surface<OwnedDisplayHandle, Rc<Window>>>,
+    window: Option<Rc<dyn Window>>,
+    surface: Option<softbuffer::Surface<OwnedDisplayHandle, Rc<dyn Window>>>,
     constraint: ProbeConstraint,
     input: twinkle_input::winit::Adapter,
 }
@@ -63,19 +63,22 @@ impl PointerConstraintProbe {
 }
 
 impl ApplicationHandler for PointerConstraintProbe {
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+    fn can_create_surfaces(&mut self, event_loop: &dyn ActiveEventLoop) {
         if self.window.is_some() {
             return;
         }
         match event_loop.create_window(
             WindowAttributes::default()
                 .with_title("Nickel pointer constraints — P toggles, Escape exits")
-                .with_inner_size(LogicalSize::new(640, 420)),
+                .with_surface_size(LogicalSize::new(640, 420)),
         ) {
             Ok(window) => {
-                let window = Rc::new(window);
+                let window: Rc<dyn Window> = Rc::from(window);
                 window.set_ime_allowed(true);
-                window.set_ime_cursor_area(LogicalPosition::new(24, 24), LogicalSize::new(1, 24));
+                window.set_ime_cursor_area(
+                    LogicalPosition::new(24, 24).into(),
+                    LogicalSize::new(1, 24).into(),
+                );
                 match softbuffer::Surface::new(&self.graphics, window.clone()) {
                     Ok(surface) => {
                         window.request_redraw();
@@ -97,7 +100,7 @@ impl ApplicationHandler for PointerConstraintProbe {
 
     fn window_event(
         &mut self,
-        event_loop: &ActiveEventLoop,
+        event_loop: &dyn ActiveEventLoop,
         _window_id: WindowId,
         event: WindowEvent,
     ) {
@@ -143,7 +146,7 @@ impl ApplicationHandler for PointerConstraintProbe {
                 let Some(surface) = &mut self.surface else {
                     return;
                 };
-                let size = window.inner_size();
+                let size = window.surface_size();
                 let width = NonZeroU32::new(size.width.max(1)).expect("nonzero width");
                 let height = NonZeroU32::new(size.height.max(1)).expect("nonzero height");
                 if let Err(error) = surface.resize(width, height) {
@@ -160,7 +163,7 @@ impl ApplicationHandler for PointerConstraintProbe {
                     Err(error) => eprintln!("buffer-error error={error}"),
                 }
             }
-            WindowEvent::CursorMoved { position, .. } => {
+            WindowEvent::PointerMoved { position, .. } => {
                 println!("cursor x={} y={}", position.x, position.y);
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
@@ -172,11 +175,11 @@ impl ApplicationHandler for PointerConstraintProbe {
 
     fn device_event(
         &mut self,
-        _event_loop: &ActiveEventLoop,
-        _device_id: DeviceId,
+        _event_loop: &dyn ActiveEventLoop,
+        _device_id: Option<DeviceId>,
         event: DeviceEvent,
     ) {
-        if let DeviceEvent::MouseMotion { delta } = event {
+        if let DeviceEvent::PointerMotion { delta } = event {
             println!("relative dx={} dy={}", delta.0, delta.1);
         }
     }
@@ -186,5 +189,5 @@ fn main() -> Result<(), winit::error::EventLoopError> {
     let event_loop = EventLoop::new()?;
     let graphics = softbuffer::Context::new(event_loop.owned_display_handle())
         .expect("softbuffer context should initialize");
-    event_loop.run_app(&mut PointerConstraintProbe::new(graphics))
+    event_loop.run_app(PointerConstraintProbe::new(graphics))
 }

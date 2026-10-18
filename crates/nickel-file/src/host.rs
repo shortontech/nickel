@@ -10,7 +10,7 @@ use twinkle_ui::{
     AdapterOutcome, Application, ControllerFence, EventDisposition, HostAdapter, HostServices,
     Point, ReadingDirection, SemanticNodeSnapshot, ShortcutOutcome, UiHost,
 };
-use winit_next::{
+use winit::{
     dpi::LogicalSize,
     icon::{Icon, RgbaIcon},
     window::Window,
@@ -694,6 +694,7 @@ impl FileApp {
             changed,
             disposition,
             exit: host.application().exit_requested,
+            ..AdapterOutcome::default()
         }
     }
 }
@@ -744,16 +745,16 @@ impl HostAdapter<FileApp> for FileHostAdapter {
     fn event(
         &mut self,
         _host: &mut UiHost<FileApp>,
-        event: &winit_next::event::WindowEvent,
+        event: &winit::event::WindowEvent,
         _services: HostServices<'_>,
     ) -> Result<AdapterOutcome, Box<dyn std::error::Error>> {
-        if let winit_next::event::WindowEvent::KeyboardInput { event: key, .. } = event
+        if let winit::event::WindowEvent::KeyboardInput { event: key, .. } = event
             && !key.repeat
             && let twinkle_input::PhysicalKey::Code(key_code) =
                 twinkle_input::winit::physical_key(key.physical_key)
             && let Some(shortcut) = &self.focused_shortcut
         {
-            let edge = if key.state == winit_next::event::ElementState::Pressed {
+            let edge = if key.state == winit::event::ElementState::Pressed {
                 KeyEdge::Pressed
             } else {
                 KeyEdge::Released

@@ -22,7 +22,7 @@ use twinkle_ui::{
     HostServices, Insets, Justify, OverlayAnchor, OverlayMenu, OverlayMenuItem, Row, SemanticRole,
     Text, TextField, UiHost, UiId, View, ViewContext,
 };
-use winit_next::event::WindowEvent;
+use winit::event::WindowEvent;
 
 const INITIAL_COLUMNS: u16 = 100;
 const INITIAL_LINES: u16 = 30;
@@ -1020,6 +1020,7 @@ impl HostAdapter<TerminalApp> for TerminalAdapter {
                 changed,
                 disposition: twinkle_ui::EventDisposition::Handled,
                 exit: host.application().exit_requested,
+                ..AdapterOutcome::default()
             });
         }
         if completed_command_key_dismisses(host.application().active().session.exit_state(), input)
@@ -1030,6 +1031,7 @@ impl HostAdapter<TerminalApp> for TerminalAdapter {
                 changed,
                 disposition: twinkle_ui::EventDisposition::Handled,
                 exit: host.application().exit_requested,
+                ..AdapterOutcome::default()
             });
         }
         let pointer_command = self.pointer.translate(
@@ -1052,6 +1054,7 @@ impl HostAdapter<TerminalApp> for TerminalAdapter {
             changed,
             disposition: twinkle_ui::EventDisposition::Handled,
             exit: false,
+            ..AdapterOutcome::default()
         })
     }
 

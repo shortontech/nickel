@@ -1,10 +1,124 @@
 # Nickel code-reuse disposition ledger
 
-Audit date: 2026-09-04; implementation dispositions and inventory refreshed through 2026-09-10.
-Scope: all 344 inventoried Rust sources under `crates/`. The exact per-crate snapshot is checked in at
+Audit date: 2026-09-04; composition and local source inventory refreshed 2026-10-17.
+Scope: all 438 inventoried Rust sources under `crates/`. Twinkle is now pinned upstream and is excluded from this local source inventory. The exact per-crate snapshot is checked in at
 `assets/code-reuse-source-inventory.tsv`; `reuse_authority` fails whenever a source or crate appears
 or disappears without review. Candidates were grouped by behavior, then traced through callers and
 tests; same-named trait implementations and platform translations were not treated as duplication.
+
+The current composition snapshot counts raw Rust lines, including tests, comments, build scripts,
+and examples. It measures source ownership, not linked binary size:
+
+| Package | Rust sources | Raw lines | Responsibility |
+|---|---:|---:|---|
+| `nickel` | 16 | 3,144 | Product entry points and installation integration |
+| `nickel-shell` | 114 | 116,368 | Cross-platform shell state, presentation, native shell adapters |
+| `nickel-linux-session` | 78 | 79,218 | Linux compositor and login-session runtime |
+| `nickel-tools` | 9 | 10,163 | Acceptance clients and developer harnesses |
+| `nickel-codex-ui` | 17 | 17,751 | One chat application with separated presentation modules |
+
+The October composition pass keeps one chat state owner while separating Codex presentation
+modules and test sources. `live_shell::preview::PreviewState` owns preview generations,
+hover deadlines, and retained images behind lifecycle methods; `LiveShell` still dispatches
+native effects and hosts. `session::state::remote_bridge` owns bounded remote request delivery
+and worker staging, while the compositor retains native state and final permit checks.
+`session::state::preview::PreviewRetries` owns backoff failures, pending retry work, timer
+registration, and epochs behind admission, scheduling, completion, and retirement operations;
+the compositor still owns native capture and redraw effects.
+
+`nickel-tools` owns six protocol clients and acceptance harnesses without a dependency on the
+shell library. Its Windows input harness uses `nickel-core` and the upstream input adapter;
+Linux clients use the session protocol and D-Bus. The product retains login, shell, nested
+runtime, package tooling, screenshots, and the feature-gated launcher verifier. Cargo executable
+names and sibling executable discovery are unchanged; package-qualified build commands changed.
+
+`nickel-shell` owns the cross-platform shell library, its private presentation and native
+shell adapters, bundled package embedding, and shell integration tests. `nickel-linux-session`
+owns the Linux compositor, native backends, protocols, in-process `SessionHost`, and Codex
+coordinator. The `nickel` package owns executable entry points above both libraries; neither
+library depends on the product package. Structured diagnostic categorization recognizes the
+new library log targets while retaining historical target names. The compositor consumes an explicit
+`nickel_shell::compositor_host` facade rather than making implementation modules public.
+Prepared settings expose read-only accessors, and coordinator operations retain normal
+registry validation instead of exposing mutable presentation internals.
+
+`LiveShell` retains one `ShellProfile` storage owner. Persistent desktops use the existing
+configuration paths and validated transactions. Embedded runtime tests retain a private
+profile directory through the final asynchronous preference write, using the same approval
+checks and persistence transactions without changing process-wide configuration variables.
+Preview retention and remote request staging remain separate lifecycle owners.
+
+Logind power discovery/actions and display-manager handoff live in
+`nickel-platform::session_services`, retaining OS authorization. Reusable OS operations
+belong in `nickel-platform`; operations requiring the live shell registry or event loop remain
+shell-owned. `cargo check -p nickel-shell --lib` builds without the Smithay compositor crate in its dependency
+tree (Wayland client-toolkit dependencies remain).
+Both Linux product backends forward their features to the runtime package. These changes do
+not claim measured binary-size or compile-time improvements; Windows/native interaction
+coverage remains separate from Linux source and unit verification.
+
+Validation of the October owner/tool split on Linux: the relocated in-process session host
+passes all 10 tests, and the moved system session adapters pass both authorization/handoff tests.
+Additionally, 57 preview-related shell tests pass
+(two release measurements remain ignored), all eight tool binary unit tests pass, the tools
+pass Clippy with warnings denied, and the refreshed source inventory check passes. The previous
+full shell run had 11 failures reproduced against the pre-refactor panel/compositor sources;
+the display-list and hit-authority inventory checks also retain pre-existing failures. Those
+failures were not admitted by increasing their authority budgets.
+
+After physical crate extraction, `cargo check --workspace --all-targets` passes, as do the
+default product binary check and the workbench check with `shell-provider` enabled.
+All 15 `nickel-core` reuse checks pass, including the refreshed 438-source inventory; workspace
+formatting and patch whitespace checks pass. Shell integration tests pass both asset-manifest
+checks, all 12 package-panel checks, and five of seven declarative authority checks. The two
+authority failures match the previously reproduced baseline above. All three stylesheet contract
+tests fail on unresolved `--nickel-*` custom properties; that test source is byte-identical to
+the pre-extraction copy and uses the same pinned Twinkle dependency. This is an existing CSS
+contract incompatibility, not a moved asset lookup. The extracted shell library completes with
+702 passed, 10 failed, and 27 ignored; all ten failures are in the previously reproduced
+pre-refactor set. Before the final retry-owner extraction, the runtime library completes with
+533 passed, one failed, and seven ignored; the sole failure is the previously reproduced
+internal plugin-window placement assertion. The relocated
+session-host tests remain in that runtime suite, and the new profile lifetime/approval test
+passes in the shell suite. After the retry-owner extraction, all 18 tests selected by `preview`
+and all eight selected by `retry` pass, including stale-epoch, capture-cadence, backoff, and
+source-churn scenarios. The structured-log regression test also passes. The final Codex UI
+run passes 200 library tests (three ignored), one binary test, and both CLI tests.
+With `workbench-fixtures` enabled, the desktop fixture test passes while the registration test retains its pre-extraction mismatch: the
+provider registers projection recovery in place of the expected control center. Both that
+test and its fixture provider are unchanged by extraction. A mapped-file comparison against
+the pre-extraction package finds no missing files or removed test declarations.
+
+The subsequent Winit unification removes Nickel's 0.30 dependency, the `winit-next` alias,
+and every `twinkle-input/winit-030` consumer. Nickel and the pinned Twinkle revision now
+resolve one Winit, 0.31 beta 3. The native shell uses `ApplicationHandler` callbacks and a
+payload mailbox with proxy wakeups; windows are created during the active-loop callback,
+with initial native events retained until their shell identity is registered. Platform
+appearance and accessibility adapters accept the current native window trait. The pointer
+constraint probe uses the same API, and vendored Smithay handles non-exhaustive native events
+without retaining a reference to the removed `DragMoved` variant.
+
+`cargo check --workspace --all-targets --features nickel/backend-winit` passes after this
+migration, as do all 30 native shell host tests. An explicitly run graphical-host smoke test
+also passes native window creation, cross-thread proxy payload delivery, and sender retirement. The nested executable builds and starts on
+the Wayland host using Mesa software rendering. Its screenshot acceptance mode passes capture,
+selection, cancellation, reopen, component socket layouts, and clean shutdown. The first full nested run fails its Settings resize assertion; a second full run passes the
+default shell, Settings resize, scoped Meta input, sibling/dialog/overlay lifecycle, screenshot,
+component layout, and clean-shutdown checks. The initial failure remains a recorded
+intermittent result, rather than a claim of consistently passing native acceptance. The Windows platform adapter cross-check passes,
+but full Windows checking is deferred: the GNU V8 archive and bindings are unavailable, and
+native Windows execution was not performed.
+
+The composition requirements have the following concrete owners and evidence:
+
+| Requirement | Result | Evidence |
+|---|---|---|
+| Cohesive session and shell state | Remote bridge owns bounded delivery/staging; session retry owner owns backoff/timer lifecycle; shell preview state owns retained image and hover lifecycle; shell profile owns storage lifetime | Runtime and shell library suites above, profile approval/lifetime test, existing preview scenarios |
+| Reusable OS adapters versus shell integration | Shared session services reside in `nickel-platform`; registry/event-loop operations remain in their native shell/runtime owners | Authorization and display-manager delegation tests; workspace compilation |
+| Independent Linux runtime | `nickel-linux-session` depends on `nickel-shell` through the explicit host facade; product entry points depend on both | Manifests, default workspace compile, no Smithay compositor dependency in shell tree |
+| Independent developer tools | Six binaries reside in `nickel-tools` without a shell dependency | All eight tool unit tests and tool Clippy checks; unchanged executable names |
+| Preserve policy and existing work | Prepared settings use read-only accessors; coordinator operations retain registry checks; profile storage uses the existing validated transactions | Permit/lease and in-process host suites, approval regression, mapped-file/source review |
+| Explain validation limits | Existing failures remain visible without raising authority budgets; nested and native Windows acceptance are not claimed | Exact outcomes above and the nested interaction limitation above |
 
 | Candidate locations | Shared behavior | Intended authority | Disposition | Migration order / evidence | Tests | Status |
 |---|---|---|---|---|---|---|
@@ -15,9 +129,9 @@ tests; same-named trait implementations and platform translations were not treat
 | `twinkle-input::{lib,winit,windows,global}`; session and UI consumers | Native input normalization and shortcut suppression | `twinkle-input` normalized events; `twinkle::FocusedInputDispatcher` for widget policy | adapter-only | Native scan codes/COM details remain in adapters. Moving widget focus policy down would create a dependency inversion. | adapter traces and correlated-text tests | complete |
 | `nickel-core::{hotkeys,window_input,workspaces}` | Shell shortcut meaning | `nickel-core` reducers | share-primitive | Chord normalization is shared; workspace/window policy remains separate reducers because their state/effects differ. | hotkey and workspace tables | complete |
 | `nickel-core::{active_output,output_layout}`; session shell layout; UI overlay geometry | Output selection versus rectangle placement | Core active-output/output-layout policy and UI popup collision | keep-distinct | Similar rectangle operations have different coordinate spaces and owners: compositor global outputs versus application-local popup work areas. Combining them would import compositor semantics into UI. | mixed-output core and overlay placement matrices | verified distinct |
-| `nickel-core::dpi`, `nickel-session::shell_layout`, `nickel-shell::platform::linux` | Signed logical-rectangle intersection area | `nickel-core::geometry::LogicalRect` | share-primitive | The refreshed audit found three byte-for-byte-equivalent overlap algorithms. Domain-specific placement and capture policy remain separate, while arithmetic and hostile-coordinate handling now have one portable authority. | core extreme-coordinate tests plus existing DPI, placement, and capture selection tests | complete |
+| `nickel-core::dpi`, `nickel-linux-session::session::shell_layout`, `nickel-shell::platform::linux` | Signed logical-rectangle intersection area | `nickel-core::geometry::LogicalRect` | share-primitive | The refreshed audit found three byte-for-byte-equivalent overlap algorithms. Domain-specific placement and capture policy remain separate, while arithmetic and hostile-coordinate handling now have one portable authority. | core extreme-coordinate tests plus existing DPI, placement, and capture selection tests | complete |
 | `nickel-core::{display_projection,dpi}`, Nickel Settings, and session-protocol translations | Fractional display scale representation | `nickel-core::dpi::Scale120`; raw `u32` only at native/wire translations | share-primitive | Projection and Settings presentation policy now store the validated scale type instead of parallel raw-number representations. Session protocol and monitor snapshots retain integer fields as translation boundaries and validate them before policy or compositor application. | projection plan/rollback, Settings scale/apply, scale conversion, session layout validation | complete |
-| `nickel-session` DRM/udev backends | Connector discovery | session backend contract | adapter-only | DRM object enumeration and udev lifecycle are native mechanics; portable state consumes typed output facts. | scanner/udev contract tests | complete |
+| `nickel-linux-session` DRM/udev backends | Connector discovery | session backend contract | adapter-only | DRM object enumeration and udev lifecycle are native mechanics; portable state consumes typed output facts. | scanner/udev contract tests | complete |
 | Nickel Settings and Shell Linux adapters | NetworkManager saved-connection discovery | `nickel-platform::network_manager_saved_wifi_connections` | consolidate | The shared platform layer now performs D-Bus profile discovery once; Settings and Shell retain product-specific presentation and activation policy. | Settings/Shell network suites | complete |
 | `nickel-platform::linux` and `nickel-shell::desktop_entries` | Bounded desktop-entry loading and application-type admission | `nickel-platform::{desktop_entry_from_path,desktop_entry_is_application}` | consolidate | The platform crate owns file-type/size limits, parsing, and application-type recognition. Shell applies launcher-specific visibility, executable, desktop, localization, and ranking policy to the admitted record instead of reopening native input. | malformed/oversized desktop-entry tests and launcher discovery tests | complete |
 | `nickel-shell::platform::{linux,windows,unsupported}` | Launch, enumerate apps, tray/audio/control effects | shell platform trait | adapter-only | Repeated method names are required trait translations. Policy is in launcher/model/live-shell; adapters contain only OS effects. | synthetic platform and native contract tests | complete |

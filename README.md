@@ -164,6 +164,10 @@ accessibility, hardware integration, and the direct Linux session.
   setup and diagnostics.
 - [UwU research notes](crates/nickel-uwu/README.md) — Windows UWP discovery,
   experiments, and diagnostics.
+- Developer protocol clients and live acceptance harnesses live in `crates/nickel-tools/`.
+  Build them with `cargo build -p nickel-tools`; they do not link the shell library.
+  Build `nickel-nested` separately when running nested acceptance. The screenshot
+  utility remains in the product package.
 - [Codex backend diagnostics](docs/codex-backend-diagnostics.md) — offline
   replay and backend tests.
 - [Plugin and shell packages](assets/plugins/README.md) — package validation,

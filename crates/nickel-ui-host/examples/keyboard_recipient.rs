@@ -24,11 +24,11 @@ impl HostAdapter<Recipient> for SessionAdapter {
     fn event(
         &mut self,
         _host: &mut twinkle_ui::UiHost<Recipient>,
-        event: &winit_next::event::WindowEvent,
+        event: &winit::event::WindowEvent,
         _services: HostServices<'_>,
     ) -> Result<twinkle_ui::AdapterOutcome, Box<dyn std::error::Error>> {
         if self.hold_receipts {
-            use winit_next::{
+            use winit::{
                 event::{ButtonSource, ElementState, MouseButton, WindowEvent},
                 keyboard::{KeyCode, PhysicalKey},
             };

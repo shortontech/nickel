@@ -1,0 +1,221 @@
+use crate::{
+    desktop::Wallpaper,
+    launcher::Launcher,
+    model::{Application, ApplicationDiscovery, OpenWindow, TrayItem, WindowId, WindowPreview},
+    platform::{FeedState, GlobalShortcut, NotificationSource, ShellCommand, TraySource},
+};
+
+pub fn active_display_point() -> Option<(i32, i32)> {
+    None
+}
+
+pub fn wallpaper() -> Wallpaper {
+    Wallpaper::default()
+}
+
+pub fn network_status() -> super::NetworkStatus {
+    super::NetworkStatus::default()
+}
+
+pub fn set_wifi_enabled(_enabled: bool) -> bool {
+    false
+}
+
+pub fn activate_wifi_network(_id: &str) -> bool {
+    false
+}
+
+pub fn bluetooth_status() -> super::BluetoothStatus {
+    super::BluetoothStatus::default()
+}
+
+pub fn refresh_connectivity_status() -> Result<super::ConnectivityRefresh, String> {
+    Err("connectivity refresh is unsupported on this platform".into())
+}
+
+pub fn set_bluetooth_powered(_powered: bool) -> bool {
+    false
+}
+
+pub fn set_bluetooth_discovery(_discovering: bool) -> bool {
+    false
+}
+
+pub fn toggle_bluetooth_device(_id: &str) -> bool {
+    false
+}
+
+pub fn audio_status() -> super::AudioStatus {
+    super::AudioStatus::default()
+}
+
+pub fn refresh_audio_status() -> Result<super::AudioRefresh, String> {
+    Err("audio refresh is unsupported on this platform".into())
+}
+
+pub fn set_audio_volume(_volume_percent: u8) -> bool {
+    false
+}
+
+pub fn handle_consumer_control(_control: nickel_session_protocol::ConsumerControl) -> bool {
+    false
+}
+
+pub fn capture_pointer(_window: &impl raw_window_handle::HasWindowHandle) -> bool {
+    false
+}
+
+pub fn capture_active_window() -> Result<(), String> {
+    Err("active-window capture is unsupported on this platform".into())
+}
+
+pub fn capture_active_window_to_file() -> Result<(), String> {
+    Err("active-window file capture is unsupported on this platform".into())
+}
+
+pub fn capture_desktop() -> Result<super::DesktopCapture, String> {
+    Err("desktop capture is unsupported on this platform".into())
+}
+
+pub fn copy_image_to_clipboard(_image: image::RgbaImage) -> Result<(), String> {
+    Err("image clipboard support is unavailable on this platform".into())
+}
+
+pub fn copy_temp_image_path(_image: &image::RgbaImage) -> Result<std::path::PathBuf, String> {
+    Err("temporary screenshot export is unavailable on this platform".into())
+}
+
+pub fn release_pointer() {}
+
+pub fn select_audio_device(_id: &str) -> bool {
+    false
+}
+
+pub fn update_panel_fullscreen_state() {}
+
+pub fn applications() -> Vec<Application> {
+    Vec::new()
+}
+
+pub fn application_discovery() -> ApplicationDiscovery {
+    ApplicationDiscovery::ready(applications())
+}
+
+pub fn prepare_application_discovery() -> ApplicationDiscovery {
+    application_discovery()
+}
+
+pub fn publish_application_discovery(_: &ApplicationDiscovery) {}
+
+pub fn launcher_hotkey_receiver() -> super::GlobalShortcutFeed {
+    super::GlobalShortcutFeed::unavailable(
+        twinkle_input::global::UnavailableReason::UnsupportedPlatform,
+    )
+}
+
+pub fn handle_focused_shortcut(_: nickel_core::hotkeys::KeyCode, _: nickel_core::hotkeys::KeyEdge) {
+}
+
+pub fn execute_run_command(_: &str) -> Result<(), super::LaunchError> {
+    Err(super::LaunchError::Platform(String::new()))
+}
+
+pub fn launch_application(_: &Application) -> Result<Option<u32>, super::LaunchError> {
+    Err(super::LaunchError::Platform(String::new()))
+}
+
+pub fn launcher_visibility_applied(_: bool) {}
+
+pub fn launcher_has_foreground_focus() -> bool {
+    false
+}
+
+pub fn application_icon(_: &str) -> Option<image::RgbaImage> {
+    None
+}
+
+pub struct TrayFeed;
+impl TrayFeed {
+    pub fn new() -> Self {
+        Self
+    }
+}
+impl TraySource for TrayFeed {
+    fn snapshot(&self) -> Vec<TrayItem> {
+        Vec::new()
+    }
+    fn activate(&self, _: &str) {}
+    fn context_menu(&self, _: &str) {}
+}
+
+pub struct NotificationFeed;
+impl NotificationFeed {
+    pub fn new() -> Result<Self, String> {
+        Ok(Self)
+    }
+}
+impl NotificationSource for NotificationFeed {
+    fn snapshot(&self) -> Option<crate::notification::DesktopNotification> {
+        None
+    }
+    fn dismiss(&self, _: u32) {}
+    fn invoke(&self, _: u32, _: &str) {}
+}
+
+pub fn send_shell_command(_: ShellCommand) -> bool {
+    false
+}
+
+pub fn register_session_shell() -> Result<(), super::SessionRequestError> {
+    Ok(())
+}
+
+pub fn configured_primary_output() -> Option<String> {
+    None
+}
+
+pub struct WindowFeed;
+
+pub fn show_window_system_menu(_: WindowId) -> bool {
+    false
+}
+
+impl WindowFeed {
+    pub fn launcher_visible(&self) -> Option<bool> {
+        None
+    }
+    pub fn new() -> Self {
+        Self
+    }
+
+    pub fn snapshot(&self, _: &Launcher) -> FeedState<Vec<OpenWindow>> {
+        FeedState::Disconnected
+    }
+
+    pub fn window_output(&self, _: WindowId) -> Option<String> {
+        None
+    }
+
+    pub fn workspaces(&self) -> FeedState<Vec<super::WorkspaceSummary>> {
+        FeedState::Disconnected
+    }
+
+    pub fn preview(&self, _: WindowId) -> Option<WindowPreview> {
+        None
+    }
+
+    pub fn supports_previews(&self) -> bool {
+        false
+    }
+
+    pub fn icon(&self, _: WindowId) -> Option<image::RgbaImage> {
+        None
+    }
+}
+
+pub fn disconnect_wifi_network(_id: &str) -> bool {
+    false
+}
+pub fn pair_bluetooth_device(_id: &str) -> bool {
+    false
+}

@@ -16,7 +16,7 @@ release their images. This tests the production refresh helper; broader live acc
 
 Release command, 2026-09-07:
 
-`CARGO_BUILD_JOBS=4 cargo test -p nickel --lib --release owned_preview_refresh_release_evidence -- --ignored --nocapture`
+`CARGO_BUILD_JOBS=4 cargo test -p nickel-shell -p nickel-linux-session --lib --release owned_preview_refresh_release_evidence -- --ignored --nocapture`
 
 For 1,000 updates at 240×135 RGBA:
 
@@ -52,7 +52,7 @@ dispatch with zero/legacy subscribers, rejection handling, no optimistic result 
 commands, unchanged keyboard focus, and OSD expiry. State/placement tests cover startup/metadata/
 reconnect suppression, volume/mute changes, and requested-output/fallback placement.
 
-`CARGO_BUILD_JOBS=4 cargo test -p nickel --lib --quiet` passed: 613 passed, 11 ignored.
+`CARGO_BUILD_JOBS=4 cargo test -p nickel-shell -p nickel-linux-session --lib --quiet` passed: 613 passed, 11 ignored.
 `cargo fmt --all --check`, `git diff --check`, and
 `CARGO_BUILD_JOBS=4 cargo clippy -p nickel --all-targets --all-features -- -D warnings` also passed.
 The previously run `native_` subset passed 16 tests before the final placement regression was added.
@@ -78,13 +78,13 @@ LiveShell keyboard operations now use the injected host. The native generic UI a
 epoch rather than preference generation. Show/hide no longer recursively refreshes an unacknowledged
 auto-show snapshot, which could otherwise recurse while the command waits on the same event loop.
 
-`CARGO_BUILD_JOBS=4 cargo test -p nickel --lib keyboard_ --quiet` passed 17 tests. New cases verify
+`CARGO_BUILD_JOBS=4 cargo test -p nickel-shell -p nickel-linux-session --lib keyboard_ --quiet` passed 17 tests. New cases verify
 snapshot replacement, typed configuration/input payloads, unequal epoch/generation, closed-channel
 errors, actual calloop authority application before snapshot acknowledgement, and nonrecursive queued
 auto-show. These tests do not inject input into the running desktop or modify saved preferences.
 
 After correcting the focus-callback lock ordering, the full
-`CARGO_BUILD_JOBS=4 cargo test -p nickel --lib --quiet` run passed: 616 passed, 11 ignored.
+`CARGO_BUILD_JOBS=4 cargo test -p nickel-shell -p nickel-linux-session --lib --quiet` run passed: 616 passed, 11 ignored.
 `cargo fmt --all --check` and `git diff --check` also passed. The running executable was not rebuilt
 or replaced; only development/test artifacts changed.
 `CARGO_BUILD_JOBS=4 cargo clippy -p nickel --all-targets --all-features -- -D warnings` passed.
@@ -110,7 +110,7 @@ affinity and parked viewport storage remains bounded. The initial test incorrect
 grid cell: existing policy can preserve global (0, 0) within a negative-origin output. The corrected
 assertion checks exact model-to-surface projection and visible bounds, without changing that policy.
 
-`CARGO_BUILD_JOBS=4 cargo test -p nickel --lib --quiet` passed: 617 passed, 11 ignored.
+`CARGO_BUILD_JOBS=4 cargo test -p nickel-shell -p nickel-linux-session --lib --quiet` passed: 617 passed, 11 ignored.
 `cargo fmt --all --check`, `git diff --check`, and
 `CARGO_BUILD_JOBS=4 cargo clippy -p nickel --all-targets --all-features -- -D warnings` passed.
 This is rendering/topology evidence, not native input or live acceptance. The UI-only native event
@@ -154,7 +154,7 @@ also passed. Runtime contract coverage is not physical-device or native desktop 
 ## 0223: bounded native system-status delivery (implementation checkpoint)
 
 Release retention evidence, 2026-09-07:
-`CARGO_BUILD_JOBS=4 cargo test -p nickel --lib --release status_mailbox_retention_evidence -- --ignored --nocapture`
+`CARGO_BUILD_JOBS=4 cargo test -p nickel-shell -p nickel-linux-session --lib --release status_mailbox_retention_evidence -- --ignored --nocapture`
 passed. The synthetic workload publishes 1,000 changing audio snapshots with 64 devices to three
 stalled subscribers. One historical unbounded fanout stage retained 3,000 device-list payloads
 totaling 40,128,000 bytes of vector/string capacity. The mailbox retained one shared latest payload
@@ -504,7 +504,7 @@ cancellation, worktree `/external/.worktrees/nickel-normalized-touch`, branch
 
 Additional checks for the 0224 implementation passed:
 
-- `CARGO_BUILD_JOBS=4 cargo test -p nickel --lib live_shell::tests --quiet`: 88 passed, 3 ignored.
+- `CARGO_BUILD_JOBS=4 cargo test -p nickel-shell -p nickel-linux-session --lib live_shell::tests --quiet`: 88 passed, 3 ignored.
 - `cargo fmt --all --check` and `git diff --check`.
 - `CARGO_BUILD_JOBS=4 cargo clippy -p nickel --all-targets --all-features -- -D warnings`.
 
@@ -607,7 +607,7 @@ Release status result: 1,000 updates, 64 devices, three stalled subscribers; his
 40,128,000 bytes across 3,000 historical snapshots versus 13,376 bytes in one shared mailbox payload.
 Mailbox wakes: three. Publication timings in this allocator-instrumented run: 40.695845 ms versus
 4.067046 ms. This is one historical queue stage, not a whole-process before/after measurement.
-Command: `CARGO_BUILD_JOBS=4 cargo test -p nickel --lib --release status_mailbox_retention_evidence -- --ignored --nocapture`.
+Command: `CARGO_BUILD_JOBS=4 cargo test -p nickel-shell -p nickel-linux-session --lib --release status_mailbox_retention_evidence -- --ignored --nocapture`.
 
 0224 warmed release refresh result (1,000 frames, 240×135 RGBA; map admission and provider allocation
 outside sampling): unchanged frames **2,000 → 0 allocation calls**, changing frames **2,000 → 1,000**.
@@ -615,7 +615,7 @@ Both workloads remove 129,600,000 bytes of redundant pixel-copy payload. Counts 
 allocations; payload does not include Arc headers. Measured times: unchanged 4.422661 → 2.344318 ms,
 changing 2.101509 → 0.077754 ms. The changing path still allocates one Arc header per replacement;
 the provider still allocates its incoming pixels. No steady-state PSS or GPU saving is inferred.
-Command: `CARGO_BUILD_JOBS=4 cargo test -p nickel --lib --release owned_preview_refresh_release_evidence -- --ignored --nocapture`.
+Command: `CARGO_BUILD_JOBS=4 cargo test -p nickel-shell -p nickel-linux-session --lib --release owned_preview_refresh_release_evidence -- --ignored --nocapture`.
 Strict Nickel all-target/all-feature Clippy passed after adding the counters; the subsequent warming
 change is test-only. An all-feature library run checks the allocator-enabled test binary separately.
 
@@ -750,7 +750,7 @@ the sample. Timings from this single instrumented run (old → new): 240×135 un
 4.476306 → 2.372421 ms, changing 2.404410 → 0.092266 ms; 480×270 unchanged
 172.447491 → 11.669688 ms, changing 9.460208 → 0.089812 ms. Timing is observational, not a latency
 guarantee or a claim that compositor stalls are resolved. Command:
-`CARGO_BUILD_JOBS=4 cargo test -p nickel --lib --release owned_preview_refresh_release_evidence -- --ignored --nocapture`.
+`CARGO_BUILD_JOBS=4 cargo test -p nickel-shell -p nickel-linux-session --lib --release owned_preview_refresh_release_evidence -- --ignored --nocapture`.
 
 Requirement mapping for 0224: production refresh provides owned-frame admission, borrowed content
 comparison, unchanged Arc identity, pixel/dimension replacement and close retirement; bounded group
@@ -760,7 +760,7 @@ identity across theme changes, source-aspect containment, semantic activation ge
 No production renderer or activation policy was changed by the copy removal. This scoped evidence
 does not substitute for 0225 native GPU/readback or DisplayLink responsiveness acceptance.
 
-Final focused command `CARGO_BUILD_JOBS=4 cargo test -p nickel --lib preview -- --nocapture`:
+Final focused command `CARGO_BUILD_JOBS=4 cargo test -p nickel-shell -p nickel-linux-session --lib preview -- --nocapture`:
 **48 passed, 2 ignored**. The ignored allocation comparison was run separately in release mode as
 recorded above. Formatting and diff checks passed. Spec 0224 is archived under `specs/done/`;
 the remaining five specs stay active. The keyboard agent's reviewed commit `ff956b3` is ready but
@@ -797,7 +797,7 @@ The implementation comment now states that exact scope rather than promising fie
 Spec 0222 is not archived, and no running desktop, audio, clipboard or input state was changed.
 
 Post-follow-up full all-feature library run completed with exit 0:
-`CARGO_BUILD_JOBS=4 cargo test -p nickel -p twinkle --lib --all-features --quiet`.
+`CARGO_BUILD_JOBS=4 cargo test -p nickel-shell -p nickel-linux-session -p twinkle --lib --all-features --quiet`.
 Nickel: **671 passed, 12 ignored**; twinkle: **336 passed, 2 ignored**. Strict workspace
 all-target/all-feature Clippy was rerun after the hidden-control guard and passed; formatting and
 diff checks passed. The integrated keyboard worktree was clean, with no remaining agent build,

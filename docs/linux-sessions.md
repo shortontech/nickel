@@ -43,15 +43,15 @@ With the `NICKEL_SESSION_CONTROL` and `NICKEL_SESSION_TOKEN` variables issued on
 `nickel-test-input` can inspect registered windows and inject individual production input events:
 
 ```bash
-cargo run -p nickel --bin nickel-test-input -- windows
-cargo run -p nickel --bin nickel-test-input -- workspaces
-cargo run -p nickel --bin nickel-test-input -- outputs
-cargo run -p nickel --bin nickel-test-input -- surfaces
-cargo run -p nickel --bin nickel-test-input -- caches
-cargo run -p nickel --bin nickel-test-input -- move 64 700
-cargo run -p nickel --bin nickel-test-input -- wheel 0 -120
-cargo run -p nickel --bin nickel-test-input -- button left pressed
-cargo run -p nickel --bin nickel-test-input -- button left released
+cargo run -p nickel-tools --bin nickel-test-input -- windows
+cargo run -p nickel-tools --bin nickel-test-input -- workspaces
+cargo run -p nickel-tools --bin nickel-test-input -- outputs
+cargo run -p nickel-tools --bin nickel-test-input -- surfaces
+cargo run -p nickel-tools --bin nickel-test-input -- caches
+cargo run -p nickel-tools --bin nickel-test-input -- move 64 700
+cargo run -p nickel-tools --bin nickel-test-input -- wheel 0 -120
+cargo run -p nickel-tools --bin nickel-test-input -- button left pressed
+cargo run -p nickel-tools --bin nickel-test-input -- button left released
 ```
 
 The same capability provides semantic workspace commands, nested output hotplug, and lock-boundary
@@ -61,13 +61,13 @@ actions. Run `nickel-test-input --help` for the complete command set.
 Renderer-owned shell targets can be exercised without copying panel or overlay coordinates:
 
 ```bash
-cargo run -p nickel --bin nickel-test-input -- \
+cargo run -p nickel-tools --bin nickel-test-input -- \
   semantic panel-app org.nickel.Terminal hover
-cargo run -p nickel --bin nickel-test-input -- \
+cargo run -p nickel-tools --bin nickel-test-input -- \
   semantic preview 10 menu
-cargo run -p nickel --bin nickel-test-input -- \
+cargo run -p nickel-tools --bin nickel-test-input -- \
   semantic menu 10 minimize
-cargo run -p nickel --bin nickel-test-input -- \
+cargo run -p nickel-tools --bin nickel-test-input -- \
   scenario grouped-windows org.nickel.Terminal
 ```
 

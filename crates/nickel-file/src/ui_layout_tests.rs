@@ -3575,7 +3575,7 @@ fn headless_software_resize_pipeline_benchmark() {
 #[ignore = "requires a dedicated offscreen X11 display"]
 fn offscreen_presented_software_resize_benchmark() {
     use std::{num::NonZeroU32, sync::Arc, time::Instant};
-    use winit_next::{
+    use winit::{
         application::ApplicationHandler,
         dpi::{LogicalSize, PhysicalSize},
         event::WindowEvent,

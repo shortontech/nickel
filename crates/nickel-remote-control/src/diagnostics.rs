@@ -576,6 +576,14 @@ impl DiagnosticLogRecord {
     }
 }
 
+// Keep historical callsites recognizable while library owners have distinct crate names.
+fn nickel_owner_target(target: &str, module: &str) -> bool {
+    target.split_once("::").is_some_and(|(owner, path)| {
+        matches!(owner, "nickel" | "nickel_shell" | "nickel_linux_session")
+            && path.starts_with(module)
+    })
+}
+
 fn diagnostic_log_category(target: &str) -> DiagnosticLogCategory {
     if target.starts_with("nickel_remote_control") {
         DiagnosticLogCategory::RemoteControl
@@ -584,17 +592,17 @@ fn diagnostic_log_category(target: &str) -> DiagnosticLogCategory {
         || target.contains("on_screen_keyboard")
     {
         DiagnosticLogCategory::Input
-    } else if target.starts_with("nickel::session::backend")
-        || target.starts_with("nickel::winit_shell")
+    } else if nickel_owner_target(target, "session::backend")
+        || nickel_owner_target(target, "winit_shell")
     {
         DiagnosticLogCategory::Presentation
-    } else if target.starts_with("nickel::session") {
+    } else if nickel_owner_target(target, "session") {
         DiagnosticLogCategory::Compositor
-    } else if target.starts_with("nickel::platform") || target.starts_with("nickel_platform") {
+    } else if nickel_owner_target(target, "platform") || target.starts_with("nickel_platform") {
         DiagnosticLogCategory::Platform
-    } else if target.starts_with("nickel::live_shell")
-        || target.starts_with("nickel::launcher")
-        || target.starts_with("nickel::control_view")
+    } else if nickel_owner_target(target, "live_shell")
+        || nickel_owner_target(target, "launcher")
+        || nickel_owner_target(target, "control_view")
     {
         DiagnosticLogCategory::Shell
     } else if target.starts_with("nickel_storage") {
@@ -1119,6 +1127,17 @@ mod output_identification_tests {
             ("nickel::session::backend::udev", Category::Presentation),
             ("nickel::platform::linux", Category::Platform),
             ("nickel::live_shell", Category::Shell),
+            ("nickel_linux_session::session::input", Category::Input),
+            ("nickel_linux_session::session::state", Category::Compositor),
+            (
+                "nickel_linux_session::session::backend::udev",
+                Category::Presentation,
+            ),
+            ("nickel_shell::winit_shell", Category::Presentation),
+            ("nickel_shell::platform::linux", Category::Platform),
+            ("nickel_shell::live_shell", Category::Shell),
+            ("nickel_shell::launcher", Category::Shell),
+            ("nickel_shell::control_view", Category::Shell),
             ("nickel_storage::atomic", Category::Storage),
             ("third_party::worker", Category::Other),
         ] {

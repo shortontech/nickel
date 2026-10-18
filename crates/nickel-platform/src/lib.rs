@@ -1,4 +1,12 @@
 //! Shared native platform adapters used by Nickel applications.
+//!
+//! Put reusable operating-system operations here when they can run without the
+//! shell's window registry, compositor state, or event loop. Shell-owned native
+//! window integration belongs in `nickel`'s `platform` module. Trusted policy
+//! remains with its domain owner rather than moving into an OS adapter.
+
+#[cfg(target_os = "linux")]
+pub mod session_services;
 
 mod associations_capability;
 #[cfg(target_os = "linux")]
@@ -196,7 +204,7 @@ pub fn appearance() -> nickel_core::theme::Appearance {
 
 #[cfg(not(target_os = "windows"))]
 pub fn apply_window_appearance(
-    _window: &winit::window::Window,
+    _window: &dyn winit::window::Window,
     _appearance: nickel_core::theme::Appearance,
 ) {
 }

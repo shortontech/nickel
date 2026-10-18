@@ -1,0 +1,52 @@
+[package]
+name = "nickel-tools"
+version = "0.2.0"
+autobins = false
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Protocol clients and acceptance tools independent of the Nickel shell library"
+
+[dependencies]
+nickel-session-protocol = { path = "../nickel-session-protocol" }
+serde_json.workspace = true
+base64.workspace = true
+image.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus.workspace = true
+
+[target.'cfg(target_os = "windows")'.dependencies]
+nickel-core = { path = "../nickel-core" }
+twinkle-input = { workspace = true, features = ["windows"] }
+uds_windows = "1.2.1"
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[[bin]]
+name = "nickel-test-input"
+path = "src/bin/nickel-test-input.rs"
+
+[[bin]]
+name = "nickel-test-notification"
+path = "src/bin/nickel-test-notification.rs"
+
+[[bin]]
+name = "nickel-test-tray"
+path = "src/bin/nickel-test-tray.rs"
+
+[[bin]]
+name = "nickel-input-harness"
+path = "src/bin/nickel-input-harness.rs"
+
+[[bin]]
+name = "nickel-nested-acceptance"
+path = "src/bin/nickel-nested-acceptance.rs"
+
+[[bin]]
+name = "nickel-linux-remote-control-acceptance"
+path = "src/bin/nickel-linux-remote-control-acceptance.rs"

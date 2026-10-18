@@ -1,0 +1,84 @@
+[package]
+name = "nickel-linux-session"
+version = "0.2.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[features]
+default = ["backend-udev"]
+backend-winit = ["smithay/backend_winit", "twinkle-input/winit"]
+backend-udev = [
+    "smithay/backend_drm",
+    "smithay/backend_egl",
+    "smithay/backend_gbm",
+    "smithay/backend_libinput",
+    "smithay/backend_session_libseat",
+    "smithay/backend_udev",
+    "smithay/renderer_gl",
+    "smithay/renderer_multi",
+]
+
+[target.'cfg(target_os = "linux")'.dependencies]
+nickel-shell = { path = "../nickel-shell" }
+
+nickel-ui-host = { path = "../nickel-ui-host" }
+base64.workspace = true
+image.workspace = true
+dirs.workspace = true
+jiff.workspace = true
+sha2.workspace = true
+url.workspace = true
+twinkle_ui = { workspace = true }
+nickel-core = { path = "../nickel-core" }
+nickel-file = { path = "../nickel-file" }
+nickel-codex = { path = "../nickel-codex" }
+nickel-codex-ui = { path = "../nickel-codex-ui" }
+nickel-i18n = { path = "../nickel-i18n" }
+twinkle-input = { workspace = true, features = ["winit", "windows"] }
+nickel-remote-control = { path = "../nickel-remote-control" }
+nickel-logging = { path = "../nickel-logging" }
+twinkle-render-assets = { workspace = true }
+nickel-storage = { path = "../nickel-storage" }
+nickel-session-protocol = { path = "../nickel-session-protocol" }
+nucleo-matcher.workspace = true
+resvg.workspace = true
+raw-window-handle.workspace = true
+softbuffer.workspace = true
+tracing.workspace = true
+winit.workspace = true
+zeroize.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile = "3.25.0"
+ctrlc.workspace = true
+
+
+nickel-platform = { path = "../nickel-platform" }
+freedesktop-desktop-entry.workspace = true
+freedesktop-icons.workspace = true
+shlex.workspace = true
+zbus.workspace = true
+async-io = "2.6.0"
+futures-lite = "2.6.1"
+wayland-scanner = "0.31.11"
+wayland-server = "0.31.14"
+libloading.workspace = true
+libc.workspace = true
+notify.workspace = true
+pipewire-native.workspace = true
+pipewire-native-spa.workspace = true
+smithay.workspace = true
+evdev = "0.13.2"
+bitflags.workspace = true
+nix.workspace = true
+thiserror.workspace = true
+xcursor.workspace = true
+
+
+[dev-dependencies]
+twinkle-testkit = { workspace = true }
+toml.workspace = true
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+smithay-client-toolkit = "0.20.0"

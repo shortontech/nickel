@@ -50,7 +50,7 @@ hotkeys remain responsive when a target app is busy. The historical freeze's
 exact native stack remains unverified.
 
 
-Validation on Windows: all 87 tests selected by `cargo test -p nickel --lib
+Validation on Windows: all 87 tests selected by `cargo test -p nickel-shell -p nickel-linux-session --lib
 launcher` passed, including the native unresponsive-window regression. Formatting
 and diff whitespace checks passed. Strict package Clippy was blocked in the
 unchanged dependency `nickel-codex/src/process.rs:56` by
@@ -116,7 +116,7 @@ Terminal-to-Chrome checks both passed. These are asynchronous effects, so the
 test waits for both instead of treating request dispatch as completion.
 
 Set decimal `NICKEL_FOCUS_TEST_HWND` and `NICKEL_FOCUS_TEST_OTHER_HWND`, then run
-`cargo test -p nickel --lib explicitly_selected_live_window_receives_foreground
+`cargo test -p nickel-shell -p nickel-linux-session --lib explicitly_selected_live_window_receives_foreground
 -- --ignored --nocapture`. This changes focus and is excluded from normal tests.
 The user confirmed that the rebuilt shell works after testing the changes for
 Alt+Tab, panel clicks, and the Windows key.

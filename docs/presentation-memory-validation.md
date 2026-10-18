@@ -42,7 +42,7 @@ reuse, and repeated text-owner suspension with another visible consumer.
 Run the reproducible CPU workload with:
 
 ```sh
-cargo test -p nickel --lib --release measure_fallback_damage_workloads -- --ignored --nocapture
+cargo test -p nickel-shell -p nickel-linux-session --lib --release measure_fallback_damage_workloads -- --ignored --nocapture
 ```
 
 This reports 120-frame partial/full workloads at 1080p and 4K, current owned CPU bytes,

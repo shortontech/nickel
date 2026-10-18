@@ -104,7 +104,7 @@ Review every match; native boundary matches are intentional.
 rg -n 'winit::keyboard::|gilrs::|KBDLLHOOKSTRUCT|RegisterHotKey|SetWindowPos|Keysym' crates
 rg -n 'WindowOperationReducer|WindowPointerOperation|ControlMode::' crates/nickel-core crates/nickel
 rg -n 'cancel_all|CancellationReason::|cancel_normalized_touches|\.cancel\(self\)' \
-  crates/nickel-core crates/nickel/src/session crates/nickel/src/platform/windows.rs
+  crates/nickel-core crates/nickel-linux-session/src/session crates/nickel-shell/src/platform/windows.rs
 rg -n 'MAX_.*(TRACE|EVENT|DIAGNOSTIC)|DEFAULT_.*(LIMIT|DEADLINE)|VecDeque' \
   crates/nickel-core crates/nickel-ui-host crates/nickel-session-protocol crates/nickel-remote-control
 ```

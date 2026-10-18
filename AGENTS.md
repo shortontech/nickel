@@ -4,7 +4,10 @@
 
 Nickel is a cross-platform desktop shell targeting Windows and Linux. Its native host is a Cargo workspace, while its production shell presentation is supplied by capability-constrained JSX/CSS packages under `assets/plugins/`:
 
-- `crates/nickel/`: application binaries, session orchestration, and platform entry points.
+- `crates/nickel/`: product binaries and platform entry points.
+- `crates/nickel-shell/`: reusable shell state, presentation, and the typed compositor host interface.
+- `crates/nickel-linux-session/`: Linux compositor, native state, and session orchestration.
+- `crates/nickel-tools/`: protocol test clients and live acceptance harnesses, independent of the shell library.
 - `crates/nickel-core/`: platform-neutral application state and domain logic.
 - Pinned upstream `twinkle` libraries: native rendering, layout, input, widgets, JSX execution and native presentation. The revision is declared in the root `Cargo.toml`.
 - `crates/nickel-platform/`: narrow Windows and Linux adapters.

@@ -1,6 +1,6 @@
 #[cfg(target_os = "linux")]
 fn main() -> Result<(), String> {
-    nickel_shell::session::run_nested().map_err(|error| error.to_string())
+    nickel_linux_session::session::run_nested().map_err(|error| error.to_string())
 }
 
 #[cfg(not(target_os = "linux"))]

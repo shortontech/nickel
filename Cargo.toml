@@ -1,5 +1,8 @@
 [workspace]
 members = [
+    "crates/nickel-shell",
+    "crates/nickel-linux-session",
+    "crates/nickel-tools",
     "crates/nickel-build-support",
     "crates/nickel-codex",
     "crates/nickel-codex-fixture",
@@ -118,8 +121,7 @@ tokio-util = "0.7.18"
 tempfile = "3.27.0"
 tar = "0.4.44"
 wgpu = "30.0.0"
-winit = "0.30.13"
-winit-next = { package = "winit", version = "0.31.0-beta.3" }
+winit = "0.31.0-beta.3"
 windows = "0.62.2"
 winresource = "0.1.31"
 xcursor = "0.3.10"
@@ -129,13 +131,13 @@ pipewire-native = "0.1.4"
 pipewire-native-spa = "0.1.4"
 
 # Coherent upstream engine, executor, protocol and native window types.
-twinkle-jsx-runtime = { git = "https://github.com/shortontech/twinkle.git", rev = "ff4b42cd6d3f8eb8206193ce3e6b239da9c6d08d" }
-twinkle_ui = { package = "twinkle-ui", git = "https://github.com/shortontech/twinkle.git", rev = "ff4b42cd6d3f8eb8206193ce3e6b239da9c6d08d" }
-twinkle-presentation = { git = "https://github.com/shortontech/twinkle.git", rev = "ff4b42cd6d3f8eb8206193ce3e6b239da9c6d08d" }
-twinkle-testkit = { git = "https://github.com/shortontech/twinkle.git", rev = "ff4b42cd6d3f8eb8206193ce3e6b239da9c6d08d" }
-twinkle-input = { git = "https://github.com/shortontech/twinkle.git", rev = "ff4b42cd6d3f8eb8206193ce3e6b239da9c6d08d" }
-twinkle-macros = { git = "https://github.com/shortontech/twinkle.git", rev = "ff4b42cd6d3f8eb8206193ce3e6b239da9c6d08d" }
-twinkle-workbench = { git = "https://github.com/shortontech/twinkle.git", rev = "ff4b42cd6d3f8eb8206193ce3e6b239da9c6d08d" }
-twinkle-render-assets = { git = "https://github.com/shortontech/twinkle.git", rev = "ff4b42cd6d3f8eb8206193ce3e6b239da9c6d08d" }
-twinkle-protocol = { git = "https://github.com/shortontech/twinkle.git", rev = "ff4b42cd6d3f8eb8206193ce3e6b239da9c6d08d" }
-twinkle-theme = { git = "https://github.com/shortontech/twinkle.git", rev = "ff4b42cd6d3f8eb8206193ce3e6b239da9c6d08d" }
+twinkle-jsx-runtime = { git = "https://github.com/shortontech/twinkle.git", rev = "1f4379c7dc2f6878db706e2ded4a1bbd58faa263" }
+twinkle_ui = { package = "twinkle-ui", git = "https://github.com/shortontech/twinkle.git", rev = "1f4379c7dc2f6878db706e2ded4a1bbd58faa263" }
+twinkle-presentation = { git = "https://github.com/shortontech/twinkle.git", rev = "1f4379c7dc2f6878db706e2ded4a1bbd58faa263" }
+twinkle-testkit = { git = "https://github.com/shortontech/twinkle.git", rev = "1f4379c7dc2f6878db706e2ded4a1bbd58faa263" }
+twinkle-input = { git = "https://github.com/shortontech/twinkle.git", rev = "1f4379c7dc2f6878db706e2ded4a1bbd58faa263" }
+twinkle-macros = { git = "https://github.com/shortontech/twinkle.git", rev = "1f4379c7dc2f6878db706e2ded4a1bbd58faa263" }
+twinkle-workbench = { git = "https://github.com/shortontech/twinkle.git", rev = "1f4379c7dc2f6878db706e2ded4a1bbd58faa263" }
+twinkle-render-assets = { git = "https://github.com/shortontech/twinkle.git", rev = "1f4379c7dc2f6878db706e2ded4a1bbd58faa263" }
+twinkle-protocol = { git = "https://github.com/shortontech/twinkle.git", rev = "1f4379c7dc2f6878db706e2ded4a1bbd58faa263" }
+twinkle-theme = { git = "https://github.com/shortontech/twinkle.git", rev = "1f4379c7dc2f6878db706e2ded4a1bbd58faa263" }

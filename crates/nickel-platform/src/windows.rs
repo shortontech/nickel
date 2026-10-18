@@ -87,7 +87,7 @@ pub fn appearance() -> Appearance {
     }
 }
 
-pub fn apply_window_appearance(window: &Window, appearance: Appearance) {
+pub fn apply_window_appearance(window: &dyn Window, appearance: Appearance) {
     let palette = ThemePalette::from_appearance(appearance);
     window.set_theme(Some(match appearance.mode {
         ThemeMode::Light => Theme::Light,

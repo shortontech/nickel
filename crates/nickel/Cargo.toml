@@ -7,151 +7,35 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
-# Preserve the Rust library name while downstream crates migrate to the unified
-# package. The product package and primary executable are both named `nickel`.
-[lib]
-name = "nickel_shell"
-
 [features]
 default = ["backend-udev"]
-workbench-fixtures = ["dep:twinkle-testkit", "nickel-codex-ui/workbench-fixtures"]
-backend-winit = ["smithay/backend_winit", "twinkle-input/winit-030"]
-backend-udev = [
-    "smithay/backend_drm",
-    "smithay/backend_egl",
-    "smithay/backend_gbm",
-    "smithay/backend_libinput",
-    "smithay/backend_session_libseat",
-    "smithay/backend_udev",
-    "smithay/renderer_gl",
-    "smithay/renderer_multi",
-]
+compositor = ["dep:nickel-linux-session"]
+backend-udev = ["compositor", "nickel-linux-session/backend-udev"]
+backend-winit = ["compositor", "nickel-linux-session/backend-winit"]
+workbench-fixtures = ["nickel-shell/workbench-fixtures", "dep:twinkle-testkit"]
 
 [dependencies]
-nickel-ui-host = { path = "../nickel-ui-host" }
-base64.workspace = true
-image.workspace = true
-dirs.workspace = true
-jiff.workspace = true
-sha2.workspace = true
-url.workspace = true
-twinkle_ui = { workspace = true }
+nickel-shell = { path = "../nickel-shell" }
 nickel-core = { path = "../nickel-core" }
-nickel-file = { path = "../nickel-file" }
-nickel-codex = { path = "../nickel-codex" }
-nickel-codex-ui = { path = "../nickel-codex-ui" }
-nickel-i18n = { path = "../nickel-i18n" }
-twinkle-input = { workspace = true, features = ["winit-030", "windows"] }
-nickel-remote-control = { path = "../nickel-remote-control" }
-nickel-logging = { path = "../nickel-logging" }
-nickel-jsx-host = { path = "../nickel-jsx-host" }
-twinkle-presentation = { workspace = true, features = ["jsx"] }
-twinkle-render-assets = { workspace = true }
-nickel-storage = { path = "../nickel-storage" }
 nickel-session-protocol = { path = "../nickel-session-protocol" }
-nucleo-matcher.workspace = true
-resvg.workspace = true
-raw-window-handle.workspace = true
-softbuffer.workspace = true
-tracing.workspace = true
-winit.workspace = true
-zeroize.workspace = true
-twinkle-testkit = { workspace = true, optional = true }
-serde.workspace = true
+nickel-jsx-host = { path = "../nickel-jsx-host" }
+image.workspace = true
+ctrlc.workspace = true
 serde_json.workspace = true
 tempfile = "3.25.0"
-ctrlc.workspace = true
+twinkle-input = { workspace = true }
+twinkle-presentation = { workspace = true, features = ["jsx"] }
+twinkle_ui = { workspace = true }
+twinkle-testkit = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-accesskit = "0.24.1"
-accesskit_unix = "0.22.0"
-arboard = { version = "3.6.1", default-features = false, features = ["image-data", "wayland-data-control"] }
-nickel-platform = { path = "../nickel-platform" }
-freedesktop-desktop-entry.workspace = true
-freedesktop-icons.workspace = true
-shlex.workspace = true
-zbus.workspace = true
-async-io = "2.6.0"
-futures-lite = "2.6.1"
-wayland-scanner = "0.31.11"
-wayland-server = "0.31.14"
-libloading.workspace = true
-libc.workspace = true
-notify.workspace = true
-pipewire = "0.10.1"
-spa_sys = { package = "libspa-sys", version = "0.10" }
-pipewire-native.workspace = true
-pipewire-native-spa.workspace = true
-smithay.workspace = true
-evdev = "0.13.2"
-bitflags.workspace = true
-nix.workspace = true
-thiserror.workspace = true
-xcursor.workspace = true
-
-[target.'cfg(not(target_os = "linux"))'.dependencies]
-arboard = "3.6.1"
-
-[target.'cfg(target_os = "windows")'.dependencies]
-uds_windows = "1.2.1"
-nickel-uwu = { path = "../nickel-uwu", default-features = false }
-accesskit = "0.24.1"
-accesskit_windows = "0.34.0"
-nickel-platform = { path = "../nickel-platform" }
-notify.workspace = true
-pollster.workspace = true
-wgpu.workspace = true
-bytemuck.workspace = true
-windows-core = "0.62.2"
-windows = { workspace = true, features = [
-    "Foundation",
-    "ApplicationModel",
-    "Media_Control",
-    "System",
-    "UI_Notifications",
-    "UI_Notifications_Management",
-    "Win32_Foundation",
-    "Win32_Globalization",
-    "Win32_Graphics_Dwm",
-    "Win32_Graphics_Gdi",
-    "Win32_Devices_Display",
-    "Win32_Devices_FunctionDiscovery",
-    "Win32_Media_Audio",
-    "Win32_Media_Audio_Endpoints",
-    "Win32_NetworkManagement_WiFi",
-    "Win32_Storage_FileSystem",
-    "Win32_Security",
-    "Win32_System_DataExchange",
-    "Win32_System_Diagnostics_ToolHelp",
-    "Win32_System_Com",
-    "Win32_System_Com_StructuredStorage",
-    "Win32_System_LibraryLoader",
-    "Win32_System_Memory",
-    "Win32_System_Ole",
-    "Win32_System_Pipes",
-    "Win32_System_Variant",
-    "Win32_System_Threading",
-    "Win32_System_RemoteDesktop",
-    "Win32_System_Shutdown",
-    "Win32_System_StationsAndDesktops",
-    "Win32_UI_Accessibility",
-    "Win32_UI_Controls",
-    "Win32_System_SystemInformation",
-    "Win32_System_WinRT",
-    "Win32_UI_Input_KeyboardAndMouse",
-    "Win32_UI_HiDpi",
-    "Win32_UI_Shell",
-    "Win32_UI_Shell_PropertiesSystem",
-    "Win32_UI_WindowsAndMessaging",
-] }
+nickel-linux-session = { path = "../nickel-linux-session", default-features = false, optional = true }
 
 [dev-dependencies]
-accesskit = "0.24.1"
-twinkle-testkit = { workspace = true }
-sha2.workspace = true
-serde_json.workspace = true
-tempfile = "3.25.0"
+winit.workspace = true
+softbuffer.workspace = true
 toml.workspace = true
+twinkle-testkit = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 smithay-client-toolkit = "0.20.0"
@@ -177,32 +61,6 @@ path = "src/bin/nickel-login.rs"
 [[bin]]
 name = "nickel-screenshot"
 path = "src/bin/nickel-screenshot.rs"
-
-[[bin]]
-name = "nickel-test-input"
-path = "src/bin/nickel-test-input.rs"
-
-[[bin]]
-name = "nickel-nested-acceptance"
-path = "src/bin/nickel-nested-acceptance.rs"
-required-features = ["backend-winit"]
-
-[[bin]]
-name = "nickel-linux-remote-control-acceptance"
-path = "src/bin/nickel-linux-remote-control-acceptance.rs"
-required-features = ["backend-winit"]
-
-[[bin]]
-name = "nickel-test-notification"
-path = "src/bin/nickel-test-notification.rs"
-
-[[bin]]
-name = "nickel-test-tray"
-path = "src/bin/nickel-test-tray.rs"
-
-[[bin]]
-name = "nickel-input-harness"
-path = "src/bin/nickel-input-harness.rs"
 
 [[bin]]
 name = "nickel-launcher-verify"

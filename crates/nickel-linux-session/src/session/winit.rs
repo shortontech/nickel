@@ -1,0 +1,1420 @@
+use std::{
+    path::{Path, PathBuf},
+    time::{Duration, Instant},
+};
+
+use smithay::{
+    backend::{
+        allocator::Fourcc,
+        renderer::{
+            Bind, Color32F, ExportMem, Frame, ImportAll, ImportDma, ImportMem, Offscreen, Renderer,
+            TextureMapping,
+            damage::OutputDamageTracker,
+            element::{
+                AsRenderElements, Kind,
+                memory::{MemoryRenderBuffer, MemoryRenderBufferRenderElement},
+                solid::{SolidColorBuffer, SolidColorRenderElement},
+                surface::{WaylandSurfaceRenderElement, render_elements_from_surface_tree},
+                utils::{ConstrainAlign, ConstrainScaleBehavior, constrain_render_elements},
+            },
+            gles::{GlesRenderer, GlesTarget, GlesTexture},
+            utils::draw_render_elements,
+        },
+        winit::{self, WinitEvent},
+    },
+    desktop::{
+        Window,
+        space::{SpaceElement, SpaceRenderElements, space_render_element_groups},
+    },
+    output::{Mode, Output, PhysicalProperties, Subpixel},
+    reexports::{calloop::EventLoop, wayland_server::Resource},
+    utils::{Buffer, Clock, Monotonic, Rectangle, Scale, Transform},
+    wayland::seat::WaylandFocus,
+};
+
+use nickel_core::{
+    shell_settings::ShellSettings,
+    theme::{Appearance, ThemePalette},
+};
+
+use crate::session::{
+    NickelSession,
+    state::{OrdinarySceneWindow, PreviewFrame},
+};
+
+const PREVIEW_CAPTURE_INTERVAL: Duration = Duration::from_millis(200);
+
+fn parse_nested_size(value: &str) -> Option<(u32, u32)> {
+    let (width, height) = value.split_once('x')?;
+    let width = width.parse().ok()?;
+    let height = height.parse().ok()?;
+    ((320..=8192).contains(&width) && (320..=8192).contains(&height)).then_some((width, height))
+}
+
+fn preview_retry_delay(last_capture: Instant, now: Instant) -> Duration {
+    PREVIEW_CAPTURE_INTERVAL.saturating_sub(now.saturating_duration_since(last_capture))
+}
+
+struct BackdropCache {
+    material: crate::session::internal_ui::BackdropMaterial,
+    buffer: MemoryRenderBuffer,
+}
+
+smithay::backend::renderer::element::render_elements! {
+    WinitFrameElement<R> where R: ImportAll + ImportMem;
+    Surface=WaylandSurfaceRenderElement<R>,
+    Memory=MemoryRenderBufferRenderElement<R>,
+    Solid=SolidColorRenderElement,
+    Internal=crate::session::internal_ui::InternalUiRenderElement<R>,
+}
+
+smithay::backend::renderer::element::render_elements! {
+    WinitBaseElement<R, E> where R: ImportAll + ImportMem;
+    Space=SpaceRenderElements<R, E>,
+    Internal=crate::session::internal_ui::InternalUiRenderElement<R>,
+    Memory=MemoryRenderBufferRenderElement<R>,
+    Frame=WinitFrameElement<R>,
+}
+
+fn advance_output_capture(
+    pending: &mut Option<PathBuf>,
+    requested: Option<PathBuf>,
+) -> (Option<PathBuf>, bool) {
+    let ready = pending.take();
+    let request_another_frame = requested.is_some();
+    *pending = requested;
+    (ready, request_another_frame)
+}
+
+pub fn init_winit(
+    event_loop: &mut EventLoop<NickelSession>,
+    data: &mut NickelSession,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let display_handle = data.display_handle.clone();
+    let state = data;
+
+    let renderer_owner = nickel_core::resource_owner::try_acquire_smithay_renderer_owner()?;
+    let physical_emergency_order = std::env::var("NICKEL_PHYSICAL_EMERGENCY_ORDER")
+        .ok()
+        .and_then(|value| match value.as_str() {
+            "left-right" => Some("LEFT Control, then RIGHT Control"),
+            "right-left" => Some("RIGHT Control, then LEFT Control"),
+            _ => None,
+        });
+    let title = physical_emergency_order.map_or_else(
+        || "Nickel nested session".to_owned(),
+        |order| format!("Nickel physical emergency test — press {order}"),
+    );
+    use smithay::reexports::winit::platform::{
+        wayland::WindowAttributesWayland, x11::WindowAttributesX11,
+    };
+    let (width, height) = match std::env::var("NICKEL_NESTED_SIZE") {
+        Ok(size) => parse_nested_size(&size)
+            .ok_or("NICKEL_NESTED_SIZE must be WIDTHxHEIGHT, each between 320 and 8192")?,
+        Err(_) => (1280, 800),
+    };
+    let attributes = smithay::reexports::winit::window::WindowAttributes::default()
+        .with_surface_size(smithay::reexports::winit::dpi::LogicalSize::new(
+            width, height,
+        ))
+        .with_decorations(true)
+        .with_title(title)
+        .with_visible(true);
+    let attributes = if std::env::var_os("WAYLAND_DISPLAY").is_some()
+        || std::env::var_os("WAYLAND_SOCKET").is_some()
+    {
+        attributes.with_platform_attributes(Box::new(
+            WindowAttributesWayland::default().with_name("nickel-nested", "nickel-nested"),
+        ))
+    } else {
+        attributes.with_platform_attributes(Box::new(
+            WindowAttributesX11::default().with_name("nickel-nested", "nickel-nested"),
+        ))
+    };
+    let (mut backend, winit) = winit::init_from_attributes::<GlesRenderer>(attributes)?;
+    if physical_emergency_order.is_some() {
+        use smithay::reexports::winit::window::UserAttentionType;
+        backend
+            .window()
+            .request_user_attention(Some(UserAttentionType::Critical));
+        backend.window().focus_window();
+    }
+    state.set_winit_redraw_window(
+        backend.window(),
+        winit.wake_proxy(),
+        winit.capture_redraw_requester(),
+    );
+    state.advertise_dmabuf_formats(backend.renderer().dmabuf_formats().iter().copied(), None);
+    let startup_frame_pump_until = Instant::now() + Duration::from_secs(3);
+
+    let mode = Mode {
+        size: backend.window_size(),
+        refresh: 60_000,
+    };
+
+    let output = Output::new(
+        "winit".to_string(),
+        PhysicalProperties {
+            size: (0, 0).into(),
+            subpixel: Subpixel::Unknown,
+            make: "Smithay".into(),
+            model: "Winit".into(),
+            serial_number: String::new(),
+        },
+    );
+    let _global = output.create_global::<NickelSession>(&display_handle);
+    // Winit reports framebuffer dimensions in physical pixels. Its host scale
+    // is therefore the authoritative conversion to this nested output's
+    // logical coordinate space; using a persisted native-output preference
+    // here makes both shell placement and absolute pointer input drift when
+    // the nested window crosses a mixed-DPI host seam.
+    let host_scale = backend.scale_factor();
+    output.change_current_state(
+        Some(mode),
+        Some(Transform::Flipped180),
+        Some(smithay::output::Scale::Fractional(host_scale)),
+        Some((0, 0).into()),
+    );
+    output.set_preferred(mode);
+
+    state.space.map_output(&output, (0, 0));
+    state.primary_output_name = Some(output.name());
+
+    let mut damage_tracker = OutputDamageTracker::from_output(&output);
+    let mut last_preview_capture = Instant::now() - Duration::from_secs(1);
+    let mut last_preview_highlight = None;
+    let mut identification_cache = None;
+    let mut pending_output_capture = None;
+    let mut presentation_sequence = 0_u64;
+    let frame_icons = crate::session::window_frame::FrameIcons::load();
+    let mut task_switcher_cache: Option<crate::session::task_switcher_render::BufferCache> = None;
+    let mut backdrop_cache = Vec::<BackdropCache>::new();
+
+    // SAFETY: startup is single-threaded and no child process is spawned until
+    // after this function returns.
+    unsafe { std::env::set_var("WAYLAND_DISPLAY", &state.socket_name) };
+
+    event_loop
+        .handle()
+        .insert_source(winit, move |event, _, data| {
+            // Keep lifecycle accounting adjacent to the backend captured by
+            // this source; both are released when the event source drops.
+            let _ = &renderer_owner;
+            let mut display = data.display_handle.clone();
+            let state = data;
+
+            let capture_only_frame = matches!(&event, WinitEvent::CaptureRedraw);
+            match event {
+                WinitEvent::Resized { size, scale_factor } => {
+                    let mode = Mode {
+                        size,
+                        refresh: 60_000,
+                    };
+                    output.set_preferred(mode);
+                    output.change_current_state(
+                        Some(mode),
+                        None,
+                        Some(smithay::output::Scale::Fractional(scale_factor)),
+                        None,
+                    );
+                    damage_tracker = OutputDamageTracker::from_output(&output);
+                    backdrop_cache.clear();
+                    state.space.refresh();
+                    state.refresh_surface_scales();
+                    state.relayout_shell_surfaces();
+                    state.reconcile_internal_shell_outputs();
+                    state.reconcile_stationary_pointer_after_topology_change();
+                    let _ = display.flush_clients();
+                    state.request_output_redraw();
+                    eprintln!("nickel: output resized to {}x{}", size.w, size.h);
+                }
+                WinitEvent::Input(event) => {
+                    let _ = state.process_input_event(event);
+                    let _ = display.flush_clients();
+                    state.request_output_redraw();
+                }
+                WinitEvent::Focus(false) => {
+                    state.release_pressed_keys_on_host_focus_loss();
+                }
+                WinitEvent::Focus(true) => {}
+                WinitEvent::Redraw | WinitEvent::CaptureRedraw => {
+                    let trace_started = Instant::now();
+                    state.poll_task_switcher_peek(trace_started);
+                    state.flush_desktop_scenes_for_frame();
+                    match state.effective_cursor_image() {
+                        smithay::input::pointer::CursorImageStatus::Hidden => {
+                            backend.window().set_cursor_visible(false);
+                        }
+                        smithay::input::pointer::CursorImageStatus::Named(icon) => {
+                            backend.window().set_cursor_visible(true);
+                            backend.window().set_cursor(
+                                smithay::reexports::winit::cursor::Cursor::Icon(icon),
+                            );
+                        }
+                        smithay::input::pointer::CursorImageStatus::Surface(_) => {
+                            backend.window().set_cursor_visible(true);
+                            backend.window().set_cursor(
+                                smithay::reexports::winit::cursor::Cursor::Icon(
+                                    ::winit::cursor::CursorIcon::Default,
+                                ),
+                            );
+                        }
+                    }
+                    let size = backend.window_size();
+                    let damage = Rectangle::from_size(size);
+                    if state.preview_highlight.is_some()
+                        || state.preview_highlight != last_preview_highlight
+                    {
+                        damage_tracker = OutputDamageTracker::from_output(&output);
+                    }
+                    last_preview_highlight = state.preview_highlight;
+                    let image_copy_requested = state.has_pending_image_copy_frames(&output);
+                    let requested_output_capture = state.output_capture_path.take();
+                    if requested_output_capture.is_some() {
+                        state.output_capture_name = None;
+                    }
+                    let (output_capture_path, request_another_frame) =
+                        advance_output_capture(
+                            &mut pending_output_capture,
+                            requested_output_capture,
+                        );
+                    if request_another_frame || output_capture_path.is_some() {
+                        tracing::trace!(request_another_frame, ready = output_capture_path.is_some(), "nested native capture frame phase");
+                    }
+                    if request_another_frame {
+                        // Capture the following fully rendered frame. This prevents a surface
+                        // commit queued beside the capture request (notably an overlay unmap)
+                        // from exposing a compositor transition buffer to the screenshot.
+                        state.request_capture_redraw();
+                    }
+                    let capture_requested = image_copy_requested || output_capture_path.is_some();
+                    if capture_requested {
+                        // Buffer-age preservation is sufficient for presentation, but capture
+                        // reads the current backbuffer before it becomes the frontbuffer. Force a
+                        // complete repaint so undefined regions from a newly selected backbuffer
+                        // can never leak into screenshots or portal frames.
+                        damage_tracker = OutputDamageTracker::from_output(&output);
+                    }
+
+                    let identification = state.output_identification_index(&output);
+                    let identify_badge = identification.map(|(generation, index)| {
+                        let cached = identification_cache.get_or_insert_with(|| (
+                            generation,
+                            index,
+                            crate::session::output_identification::identify_badge(index + 1),
+                        ));
+                        if cached.0 != generation || cached.1 != index {
+                            *cached = (
+                                generation,
+                                index,
+                                crate::session::output_identification::identify_badge(index + 1),
+                            );
+                        }
+                        cached.2.clone()
+                    });
+                    if identification.is_none() {
+                        identification_cache = None;
+                    }
+                    let ordinary_scene = state.ordinary_scene_order();
+                    let (captured_frame, render_states) = {
+                        let (renderer, mut framebuffer) = backend.bind().unwrap();
+                        let frame_palette = ThemePalette::from_appearance(
+                            ShellSettings::load_default().resolve_appearance(Appearance::default()),
+                        );
+                        let mut frame_groups = window_frame_groups(
+                            state,
+                            renderer,
+                            &output,
+                            frame_icons.as_ref(),
+                            &frame_palette,
+                        );
+                        let background_elements = state
+                            .internal_ui
+                            .render_elements_for_layer(
+                                renderer,
+                                &output.name(),
+                                (0, 0).into(),
+                                Some(crate::session::InternalSurfaceLayer::Background),
+                            )
+                            .into_iter();
+                        let (upper, groups, lower) = space_render_element_groups::<_, Window>(
+                            renderer,
+                            &state.space,
+                            &output,
+                            1.0,
+                        )
+                        .unwrap();
+                        let mut base_elements = upper
+                            .into_iter()
+                            .map(WinitBaseElement::from)
+                            .collect::<Vec<_>>();
+                        let mut clients = groups
+                            .into_iter()
+                            .map(|(window, elements)| (window.clone(), Some(elements)))
+                            .collect::<Vec<_>>();
+                        for (window, elements) in &mut clients {
+                            if window.z_index() > 30 {
+                                base_elements.extend(
+                                    elements.take().into_iter().flatten().map(WinitBaseElement::from),
+                                );
+                            }
+                        }
+                        for window in ordinary_scene {
+                            match window {
+                                OrdinarySceneWindow::Internal(surface) => base_elements.extend(
+                                    state
+                                        .internal_ui
+                                        .render_application_elements(renderer, (0, 0).into(), surface)
+                                        .into_iter()
+                                        .map(WinitBaseElement::from),
+                                ),
+                                OrdinarySceneWindow::Client(window) => {
+                                    if let Some((_, elements)) = clients.iter_mut().find(|(candidate, _)| *candidate == window) {
+                                        if let Some(group) = frame_groups.iter_mut().find(|group| group.window == window) {
+                                            base_elements.extend(group.foreground.drain(..).map(WinitBaseElement::from));
+                                        }
+                                        base_elements.extend(elements.take().into_iter().flatten().map(WinitBaseElement::from));
+                                        if let Some(group) = frame_groups.iter_mut().find(|group| group.window == window) {
+                                            base_elements.extend(group.background.drain(..).map(WinitBaseElement::from));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        for (window, elements) in clients {
+                            if let Some(group) = frame_groups.iter_mut().find(|group| group.window == window) {
+                                base_elements.extend(group.foreground.drain(..).map(WinitBaseElement::from));
+                            }
+                            base_elements.extend(elements.into_iter().flatten().map(WinitBaseElement::from));
+                            if let Some(group) = frame_groups.iter_mut().find(|group| group.window == window) {
+                                base_elements.extend(group.background.drain(..).map(WinitBaseElement::from));
+                            }
+                        }
+                        base_elements.extend(lower.into_iter().map(WinitBaseElement::from));
+                        base_elements.extend(background_elements.map(WinitBaseElement::from));
+                        let render_result = damage_tracker
+                            .render_output(
+                                renderer,
+                                &mut framebuffer,
+                                0,
+                                &base_elements,
+                                [0.1, 0.1, 0.1, 1.0],
+                            )
+                            .unwrap();
+
+                        let mut overlay_elements = Vec::new();
+                        overlay_elements.extend(
+                            state
+                                .internal_ui
+                                .render_elements_without_trusted(
+                                    renderer,
+                                    &output.name(),
+                                    (0, 0).into(),
+                                    Some(crate::session::InternalSurfaceLayer::Overlay),
+                                )
+                                .into_iter()
+                                .map(WinitFrameElement::from),
+                        );
+                        let blur_regions = state.internal_ui.backdrop_blur_regions(
+                            &output.name(),
+                            (0, 0).into(),
+                            size.w.max(0) as u32,
+                        );
+                        backdrop_cache.retain(|cached| blur_regions.contains(&cached.material));
+                        let base_damage = render_result.damage.cloned().unwrap_or_default();
+                        for material in blur_regions {
+                            let (x, y, width, height) =
+                                (material.x, material.y, material.width, material.height);
+                            let physical_region = Rectangle::new(
+                                (x, y).into(),
+                                (width as i32, height as i32).into(),
+                            );
+                            let scene_changed = base_damage
+                                .iter()
+                                .any(|damage| damage.overlaps(physical_region));
+                            let cached_index = backdrop_cache
+                                .iter()
+                                .position(|cached| cached.material == material);
+                            let stale = cached_index.is_none() || scene_changed;
+                            if stale {
+                                let refreshed = blurred_backdrop_buffer(
+                                    renderer,
+                                    &framebuffer,
+                                    x,
+                                    y,
+                                    width,
+                                    height,
+                                    material.blur,
+                                    material.radius,
+                                );
+                                if let Some(buffer) = refreshed {
+                                    let cached = BackdropCache { material, buffer };
+                                    if let Some(index) = cached_index {
+                                        backdrop_cache[index] = cached;
+                                    } else {
+                                        backdrop_cache.push(cached);
+                                    }
+                                }
+                            }
+                            if let Some(buffer) = backdrop_cache
+                                .iter()
+                                .find(|cached| cached.material == material)
+                                .map(|cached| &cached.buffer)
+                                && let Ok(element) = MemoryRenderBufferRenderElement::from_buffer(
+                                renderer,
+                                (f64::from(x), f64::from(y)),
+                                buffer,
+                                None,
+                                None,
+                                None,
+                                Kind::Unspecified,
+                            ) {
+                                // Render elements are front-to-back. The surface remains
+                                // in front while this sampled material sits directly behind it.
+                                overlay_elements.push(WinitFrameElement::from(element));
+                            }
+                        }
+                        if !state.locked
+                            && let Some(highlight) = state.preview_highlight
+                        {
+                            let shell_surfaces = state
+                                .shell_windows()
+                                .filter_map(|shell| {
+                                    shell.toplevel().map(|surface| surface.wl_surface().id())
+                                })
+                                .collect::<Vec<_>>();
+                            let desktop_surfaces = state
+                                .desktop_windows
+                                .iter()
+                                .filter_map(|desktop| {
+                                    desktop.toplevel().map(|surface| surface.wl_surface().id())
+                                })
+                                .collect::<Vec<_>>();
+                            for shell in state.space.elements().rev().filter(|shell| {
+                                shell.toplevel().is_some_and(|surface| {
+                                    shell_surfaces.contains(&surface.wl_surface().id())
+                                        && !desktop_surfaces.contains(&surface.wl_surface().id())
+                                })
+                            }) {
+                                let Some(location) = state.space.element_location(shell) else {
+                                    continue;
+                                };
+                                let render_location = location - shell.geometry().loc;
+                                overlay_elements.extend(
+                                    shell
+                                        .render_elements::<
+                                            WaylandSurfaceRenderElement<GlesRenderer>,
+                                        >(
+                                            renderer,
+                                            render_location.to_physical_precise_round(1),
+                                            Scale::from(1.0),
+                                            1.0,
+                                        )
+                                    .into_iter()
+                                    .map(WinitFrameElement::from),
+                                );
+                            }
+                            if let Some(window) = state.space.elements().find(|window| {
+                                window
+                                    .wl_surface()
+                                    .and_then(|surface| state.surface_windows.get(&surface.id()))
+                                    .copied()
+                                    == Some(highlight)
+                            }) {
+                                let location =
+                                    state.space.element_location(window).unwrap_or_default();
+                                let render_location = location - window.geometry().loc;
+                                overlay_elements.extend(
+                                    window
+                                        .render_elements::<
+                                            WaylandSurfaceRenderElement<GlesRenderer>,
+                                        >(
+                                            renderer,
+                                            render_location.to_physical_precise_round(1),
+                                            Scale::from(1.0),
+                                            1.0,
+                                        )
+                                        .into_iter()
+                                        .map(WinitFrameElement::from),
+                                );
+                            } else if let Some(surface) =
+                                state.internal_surface_for_window(highlight)
+                            {
+                                overlay_elements.extend(
+                                    state
+                                        .internal_ui
+                                        .render_application_elements(
+                                            renderer,
+                                            (0, 0).into(),
+                                            surface,
+                                        )
+                                        .into_iter()
+                                        .map(WinitFrameElement::from),
+                                );
+                            }
+                            let dim_buffer =
+                                SolidColorBuffer::new(
+                                    size.to_logical(1),
+                                    crate::session::state::shell_scrim(0.62),
+                                );
+                            overlay_elements.push(WinitFrameElement::from(
+                                SolidColorRenderElement::from_buffer(
+                                    &dim_buffer,
+                                    (0, 0),
+                                    1.0,
+                                    1.0,
+                                    Kind::Unspecified,
+                                ),
+                            ));
+                        }
+                        if state.dimmed && !state.locked {
+                            let dim =
+                                SolidColorBuffer::new(
+                                    size.to_logical(1),
+                                    crate::session::state::shell_scrim(0.48),
+                                );
+                            overlay_elements.insert(
+                                0,
+                                WinitFrameElement::from(SolidColorRenderElement::from_buffer(
+                                    &dim,
+                                    (0, 0),
+                                    1.0,
+                                    1.0,
+                                    Kind::Unspecified,
+                                )),
+                            );
+                        }
+                        let owns_switcher = state
+                            .task_switcher_output_name()
+                            .is_some_and(|name| name == output.name());
+                        if !state.locked && owns_switcher {
+                            let key = crate::session::task_switcher_render::key(state, size);
+                            let stale = task_switcher_cache
+                                .as_ref()
+                                .is_none_or(|cached| cached.key != key);
+                            if stale {
+                                task_switcher_cache =
+                                    crate::session::task_switcher_render::buffer(state, size).map(
+                                        |(buffer, size)| {
+                                            crate::session::task_switcher_render::BufferCache {
+                                                key,
+                                                buffer,
+                                                size,
+                                            }
+                                        },
+                                    );
+                            }
+                            if let Some(cached) = task_switcher_cache.as_ref() {
+                                let location = (
+                                    (size.w - cached.size.w).max(0) / 2,
+                                    (size.h - cached.size.h).max(0) / 2,
+                                );
+                                match MemoryRenderBufferRenderElement::from_buffer(
+                                    renderer,
+                                    (f64::from(location.0), f64::from(location.1)),
+                                    &cached.buffer,
+                                    None,
+                                    None,
+                                    None,
+                                    Kind::Unspecified,
+                                ) {
+                                    Ok(element) => overlay_elements
+                                        .insert(0, WinitFrameElement::from(element)),
+                                    Err(error) => tracing::warn!(
+                                        ?error,
+                                        "failed to upload nested task switcher"
+                                    ),
+                                }
+                            }
+                        } else {
+                            task_switcher_cache = None;
+                        }
+                        if state.locked {
+                            let cover = SolidColorBuffer::new(
+                                size.to_logical(1),
+                                [0.015, 0.02, 0.035, 1.0],
+                            );
+                            // Render elements are front-to-back. The lock
+                            // surface stays before this opaque cover; every
+                            // ordinary client remains behind it.
+                            overlay_elements.push(WinitFrameElement::from(
+                                SolidColorRenderElement::from_buffer(
+                                    &cover,
+                                    (0, 0),
+                                    1.0,
+                                    1.0,
+                                    Kind::Unspecified,
+                                ),
+                            ));
+                        }
+
+                        if !state.locked
+                            && let Some(icon) = state.dnd_icon.as_ref()
+                        {
+                            let pointer = state.seat.get_pointer().unwrap().current_location();
+                            let location = crate::session::state::drag_icon_location(
+                                pointer,
+                                Rectangle::from_size(size.to_logical(1)),
+                            )
+                            .expect("nested pointer remains inside its only output")
+                            .to_physical(1);
+                            let icon_elements = render_elements_from_surface_tree::<
+                                _,
+                                WaylandSurfaceRenderElement<GlesRenderer>,
+                            >(
+                                renderer,
+                                icon,
+                                location,
+                                Scale::from(1.0),
+                                1.0,
+                                Kind::Cursor,
+                            )
+                            .into_iter()
+                            .map(WinitFrameElement::from);
+                            overlay_elements.splice(0..0, icon_elements);
+                        }
+
+                        if let Some(badge) = identify_badge.as_ref()
+                            && let Ok(element) = MemoryRenderBufferRenderElement::from_buffer(
+                                renderer,
+                                (f64::from((size.w - 180).max(0) / 2), f64::from((size.h - 180).max(0) / 2)),
+                                badge, None, None, None, Kind::Unspecified,
+                            )
+                        {
+                            overlay_elements.insert(0, WinitFrameElement::from(element));
+                        }
+                        overlay_elements.splice(
+                            0..0,
+                            state.internal_ui
+                                .render_trusted_controls(renderer, &output.name(), (0, 0).into())
+                                .into_iter().map(WinitFrameElement::from),
+                        );
+                        let recovery_visible = state.shell_recovery_visible();
+                        if !recovery_visible {
+                            state.recovery_ui.release_raster();
+                        }
+                        let recovery_banner = recovery_visible.then(|| {
+                                let panel = state.recovery_ui.render_buffer();
+                                let panel_geometry = crate::session::recovery_ui::RecoveryUi::panel_geometry(
+                                    crate::session::shell_layout::Geometry {
+                                        x: 0,
+                                        y: 0,
+                                        width: size.w,
+                                        height: size.h,
+                                    },
+                                );
+                                MemoryRenderBufferRenderElement::from_buffer(
+                                    renderer,
+                                    (f64::from(panel_geometry.x), f64::from(panel_geometry.y)),
+                                    &panel,
+                                    None,
+                                    None,
+                                    Some((panel_geometry.width, panel_geometry.height).into()),
+                                    Kind::Unspecified,
+                                )
+                                .map_err(|error| {
+                                    tracing::error!(?error, "failed to import recovery panel")
+                                })
+                                .ok()
+                                .map(WinitFrameElement::from)
+                            }).flatten();
+
+                        if !overlay_elements.is_empty() || recovery_banner.is_some() {
+                            if let Some(banner) = recovery_banner {
+                                overlay_elements.insert(0, banner);
+                            }
+                            let mut frame = renderer
+                                .render(&mut framebuffer, size, output.current_transform())
+                                .unwrap();
+                            draw_render_elements(&mut frame, 1.0, &overlay_elements, &[damage])
+                                .unwrap();
+                            let sync = frame.finish().unwrap();
+                            if capture_requested {
+                                sync.wait().unwrap();
+                            }
+                        }
+                        let captured = capture_requested.then(|| {
+                            let mut frame = renderer
+                                .render(&mut framebuffer, size, output.current_transform())
+                                .map_err(|error| error.to_string())?;
+                            frame
+                                .clear([0.1, 0.1, 0.1, 1.0].into(), &[damage])
+                                .map_err(|error| error.to_string())?;
+                            draw_render_elements(&mut frame, 1.0, &base_elements, &[damage])
+                                .map_err(|error| error.to_string())?;
+                            draw_render_elements(&mut frame, 1.0, &overlay_elements, &[damage])
+                                .map_err(|error| error.to_string())?;
+                            frame
+                                .finish()
+                                .map_err(|error| error.to_string())?
+                                .wait()
+                                .map_err(|error| error.to_string())?;
+                            let captured = capture_bound_framebuffer(
+                                renderer,
+                                &framebuffer,
+                                size,
+                                output_capture_path.is_some(),
+                                |mapped, flipped| {
+                                    if image_copy_requested {
+                                        state.complete_image_copy_frames(
+                                            &output,
+                                            mapped,
+                                            size.w as usize,
+                                            size.h as usize,
+                                            flipped,
+                                        );
+                                    }
+                                },
+                            );
+                            // Mapping a GLES framebuffer changes the active EGL target. Restore
+                            // the presentation target before the winit backend swaps it.
+                            let rebind = renderer
+                                .render(&mut framebuffer, size, output.current_transform())
+                                .and_then(|frame| frame.finish());
+                            if let Err(error) = rebind {
+                                return Err(error.to_string());
+                            }
+                            captured
+                        });
+                        (captured, render_result.states)
+                    };
+                    state.update_output_primary_scanout(&output, &render_states);
+                    // Captures render the compositor's pixels even when the host has withheld
+                    // frame callbacks (for example an occluded nested window). They do not swap
+                    // host buffers or claim presentation feedback for an unpresented frame.
+                    if capture_only_frame {
+                        // The tracker saw a render but the host did not receive a buffer swap.
+                        // Force the next presented frame to repaint instead of preserving damage
+                        // history for a framebuffer that was consumed only by the capture owner.
+                        damage_tracker = OutputDamageTracker::from_output(&output);
+                    } else {
+                        let mut presentation_feedback = state.take_output_presentation_feedback(&output, Some(&render_states));
+                        backend.submit(Some(&[damage])).unwrap();
+                        presentation_sequence = presentation_sequence.wrapping_add(1);
+                        presentation_feedback.presented(
+                            Clock::<Monotonic>::new().now(),
+                            smithay::wayland::presentation::Refresh::fixed(Duration::from_nanos(1_000_000_000_000_u64 / 60_000)),
+                            presentation_sequence,
+                            smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::empty(),
+                        );
+                    }
+
+                    if image_copy_requested
+                        && captured_frame
+                            .as_ref()
+                            .expect("requested capture has a framebuffer result")
+                            .is_err()
+                    {
+                        match captured_frame
+                            .as_ref()
+                            .expect("requested capture has a framebuffer result")
+                        {
+                            Ok(_) => unreachable!("successful portal delivery completed while mapped"),
+                            Err(error) => {
+                                tracing::warn!(%error, "failed to capture nested portal frame");
+                                state.fail_image_copy_frames(
+                                    &output,
+                                    smithay::wayland::image_copy_capture::CaptureFailureReason::Unknown,
+                                );
+                            }
+                        }
+                    }
+
+                    if let Some(started) = state.launcher_show_requested_at.take()
+                        && std::env::var_os("NICKEL_PERF_METRICS").is_some()
+                    {
+                        eprintln!(
+                            "launcher_open_to_visible_ms={:.3}",
+                            started.elapsed().as_secs_f64() * 1_000.0
+                        );
+                    }
+
+                    if let Some(path) = output_capture_path {
+                        let captured_frame = captured_frame
+                            .as_ref()
+                            .expect("requested capture has a framebuffer result");
+                        let result = save_output_capture(
+                            captured_frame
+                                .as_ref()
+                                .map(|rgba| rgba.as_deref().expect("file capture retains encoder input"))
+                                .map_err(String::as_str),
+                            size,
+                            &path,
+                        );
+                        tracing::trace!(saved = matches!(result, nickel_session_protocol::CaptureResult::Saved { .. }), "nested native capture framebuffer completed");
+                        state.complete_output_capture(&path, result);
+                    }
+
+                    if state.remote_capture_pending() {
+                        let (renderer, _) = backend.bind().unwrap();
+                        state.poll_remote_capture(renderer, (0, 0));
+                    }
+
+                    if !state.locked && last_preview_capture.elapsed() >= PREVIEW_CAPTURE_INTERVAL
+                    {
+                        let wave = state.begin_preview_render_wave();
+                        let windows = state.preview_capture_candidates(wave);
+                        let (renderer, _) = backend.bind().unwrap();
+                        for (id, window) in windows {
+                            let (rgba, previous_dimensions) = state.take_preview_capture_buffer(id);
+                            let mut rgba = rgba;
+                            if let Some((width, height)) =
+                                capture_preview(renderer, &window, &mut rgba)
+                            {
+                                state.store_preview(
+                                    id,
+                                    PreviewFrame {
+                                        width,
+                                        height,
+                                        rgba,
+                                    },
+                                );
+                            } else {
+                                state.preview_capture_failed(id, rgba, previous_dimensions);
+                            }
+                        }
+                        last_preview_capture = Instant::now();
+                        state.schedule_preview_retry_after(preview_retry_delay(
+                            last_preview_capture,
+                            Instant::now(),
+                        ));
+                    }
+
+                    state.space.elements().for_each(|window| {
+                        window.send_frame(
+                            &output,
+                            state.start_time.elapsed(),
+                            Some(Duration::ZERO),
+                            |_, _| Some(output.clone()),
+                        )
+                    });
+                    if let Some(icon) = state.dnd_icon.as_ref() {
+                        smithay::desktop::utils::send_frames_surface_tree(
+                            icon,
+                            &output,
+                            state.start_time.elapsed(),
+                            Some(Duration::ZERO),
+                            |_, _| Some(output.clone()),
+                        );
+                    }
+
+                    state.space.refresh();
+                    state.refresh_surface_scales();
+                    state.popups.cleanup();
+                    let _ = display.flush_clients();
+
+                    state.record_remote_frame_dispatch(&output.name(), trace_started.elapsed());
+
+                    // Keep a bounded bootstrap pump so the initial XDG
+                    // configure is flushed before clients can submit buffers.
+                    // After startup, commits and explicit state changes request
+                    // frames and an unchanged desktop stays idle.
+                    if Instant::now() < startup_frame_pump_until {
+                        state.request_output_redraw();
+                    }
+                }
+                WinitEvent::CloseRequested => {
+                    state.loop_signal.stop();
+                }
+            };
+        })?;
+
+    Ok(())
+}
+
+struct WinitWindowFrameGroup {
+    window: Window,
+    foreground: Vec<WinitFrameElement<GlesRenderer>>,
+    background: Vec<WinitFrameElement<GlesRenderer>>,
+}
+
+fn window_frame_groups(
+    state: &NickelSession,
+    renderer: &mut GlesRenderer,
+    output: &Output,
+    icons: Option<&crate::session::window_frame::FrameIcons>,
+    palette: &ThemePalette,
+) -> Vec<WinitWindowFrameGroup> {
+    crate::session::window_frame::retain_titlebars_for_windows(state.titlebar_cache_owners());
+    let Some(output_geometry) = state.space.output_geometry(output) else {
+        return Vec::new();
+    };
+    let shell_surfaces = state
+        .shell_windows()
+        .filter_map(|window| window.toplevel().map(|surface| surface.wl_surface().id()))
+        .collect::<Vec<_>>();
+    let mut groups = Vec::new();
+    for window in state.space.elements().rev() {
+        if state.locked && !state.lock_windows.contains(window) {
+            continue;
+        }
+        let Some(bounds) = state.space.element_bbox(window) else {
+            continue;
+        };
+        if !output_geometry.overlaps(bounds) {
+            continue;
+        }
+        let Some(location) = state.space.element_location(window) else {
+            continue;
+        };
+        let render_location = location - window.geometry().loc - output_geometry.loc;
+        let client_elements = window.render_elements::<WaylandSurfaceRenderElement<GlesRenderer>>(
+            renderer,
+            render_location.to_physical_precise_round(1),
+            Scale::from(1.0),
+            1.0,
+        );
+        if client_elements.is_empty() {
+            continue;
+        }
+        if state.is_shell_owned_window(window) {
+            continue;
+        }
+        let mut frame = Vec::new();
+        let mut shadow_elements = Vec::new();
+        let Some(surface) = window.wl_surface() else {
+            continue;
+        };
+        if shell_surfaces.contains(&surface.id()) || state.is_fullscreen_window(window) {
+            continue;
+        }
+        let server_decorated = state.is_server_decorated(window);
+        let registry_id = state.surface_windows.get(&surface.id()).copied();
+        let active = registry_id.is_some_and(|id| state.windows.is_active(id));
+        let title = registry_id
+            .and_then(|id| state.windows.title(id))
+            .unwrap_or_default();
+        let foreground = if active { palette.text } else { palette.muted };
+        // Popups expand element_bbox, but they do not resize their owner's frame.
+        let Some(frame_bounds) = state.space.element_geometry(window) else {
+            continue;
+        };
+        let titlebar_geometry = crate::session::window_frame::titlebar_geometry(
+            crate::session::shell_layout::Geometry {
+                x: frame_bounds.loc.x,
+                y: frame_bounds.loc.y,
+                width: frame_bounds.size.w,
+                height: frame_bounds.size.h,
+            },
+        );
+        if server_decorated
+            && let Some(titlebar) = crate::session::window_frame::render_titlebar_for_state(
+                registry_id.map(|id| id.0),
+                titlebar_geometry.width,
+                title,
+                palette.panel,
+                foreground,
+                active,
+            )
+            && let Ok(element) = MemoryRenderBufferRenderElement::from_buffer(
+                renderer,
+                (
+                    f64::from(titlebar_geometry.x - output_geometry.loc.x),
+                    f64::from(titlebar_geometry.y - output_geometry.loc.y),
+                ),
+                &titlebar,
+                None,
+                None,
+                Some((titlebar_geometry.width, titlebar_geometry.height).into()),
+                Kind::Unspecified,
+            )
+        {
+            frame.push(element.into());
+        }
+        let border_color =
+            crate::session::window_frame::frame_border_color(palette.panel, foreground, active);
+        let border_layers = if server_decorated {
+            crate::session::window_frame::content_border_layers(
+                frame_bounds.size.w,
+                frame_bounds.size.h,
+                border_color,
+            )
+        } else {
+            crate::session::window_frame::client_border_layers(
+                frame_bounds.size.w,
+                frame_bounds.size.h,
+                border_color,
+            )
+        };
+        for border in border_layers {
+            frame.push(
+                SolidColorRenderElement::from_buffer(
+                    &border.buffer,
+                    (
+                        frame_bounds.loc.x - output_geometry.loc.x + border.offset.0,
+                        frame_bounds.loc.y - output_geometry.loc.y + border.offset.1,
+                    ),
+                    1.0,
+                    1.0,
+                    Kind::Unspecified,
+                )
+                .into(),
+            );
+        }
+        if server_decorated && let Some(icons) = icons {
+            let icon_y = crate::session::window_frame::frame_icon_y(
+                frame_bounds.loc.y
+                    - output_geometry.loc.y
+                    - crate::session::window_frame::TITLEBAR_HEIGHT,
+            );
+            let icon_x = frame_bounds.loc.x - output_geometry.loc.x + frame_bounds.size.w;
+            let maximized = state.is_maximized_window(window);
+            for (buffer, offset) in [
+                (&icons.close, 35),
+                (
+                    if maximized {
+                        &icons.restore
+                    } else {
+                        &icons.maximize
+                    },
+                    81,
+                ),
+                (&icons.minimize, 127),
+            ] {
+                if let Ok(icon) = MemoryRenderBufferRenderElement::from_buffer(
+                    renderer,
+                    ((icon_x - offset) as f64, icon_y as f64),
+                    buffer,
+                    None,
+                    None,
+                    None,
+                    Kind::Unspecified,
+                ) {
+                    frame.insert(0, icon.into());
+                }
+            }
+        }
+        if !state.is_maximized_window(window) {
+            let titlebar_height = if server_decorated {
+                crate::session::window_frame::TITLEBAR_HEIGHT
+            } else {
+                0
+            };
+            let frame_height = frame_bounds.size.h + titlebar_height;
+            let shadows = crate::session::window_frame::shadow_layers(
+                frame_bounds.size.w,
+                frame_height,
+                active,
+            );
+            for shadow in shadows.images {
+                if let Ok(element) = MemoryRenderBufferRenderElement::from_buffer(
+                    renderer,
+                    (
+                        f64::from(frame_bounds.loc.x - output_geometry.loc.x + shadow.offset.0),
+                        f64::from(
+                            frame_bounds.loc.y - output_geometry.loc.y - titlebar_height
+                                + shadow.offset.1,
+                        ),
+                    ),
+                    &shadow.buffer,
+                    None,
+                    None,
+                    Some(shadow.size.into()),
+                    Kind::Unspecified,
+                ) {
+                    shadow_elements.push(element.into());
+                }
+            }
+        }
+        groups.push(WinitWindowFrameGroup {
+            window: window.clone(),
+            foreground: frame,
+            background: shadow_elements,
+        });
+    }
+    groups
+}
+
+fn save_output_capture(
+    rgba: Result<&[u8], &str>,
+    size: smithay::utils::Size<i32, smithay::utils::Physical>,
+    path: &Path,
+) -> nickel_session_protocol::CaptureResult {
+    let result = (|| -> Result<(), String> {
+        let rgba = rgba.map_err(str::to_owned)?;
+        image::save_buffer(
+            path,
+            rgba,
+            size.w as u32,
+            size.h as u32,
+            image::ColorType::Rgba8,
+        )
+        .map_err(|error| error.to_string())
+    })();
+    match result {
+        Ok(()) => nickel_session_protocol::CaptureResult::Saved {
+            backend: nickel_session_protocol::CaptureBackend::Nested,
+        },
+        Err(message) => nickel_session_protocol::CaptureResult::Failed { message },
+    }
+}
+
+fn capture_bound_framebuffer(
+    renderer: &mut GlesRenderer,
+    framebuffer: &GlesTarget<'_>,
+    size: smithay::utils::Size<i32, smithay::utils::Physical>,
+    retain_normalized: bool,
+    mut consume_mapped: impl FnMut(&[u8], bool),
+) -> Result<Option<Vec<u8>>, String> {
+    if size.w <= 0 || size.h <= 0 {
+        return Err("output has no drawable size".into());
+    }
+    let buffer_size = smithay::utils::Size::<i32, Buffer>::from((size.w, size.h));
+    let region = Rectangle::<i32, Buffer>::from_size(buffer_size);
+    let mapping = renderer
+        .copy_framebuffer(framebuffer, region, Fourcc::Abgr8888)
+        .map_err(|error| error.to_string())?;
+    let mapped = renderer
+        .map_texture(&mapping)
+        .map_err(|error| error.to_string())?;
+    // The nested output uses `Flipped180` for presentation, so restore its
+    // mapped framebuffer rows to top-down image order unconditionally.
+    consume_mapped(mapped, false);
+    if retain_normalized {
+        normalize_capture_rows(mapped, size.w as usize, size.h as usize, false).map(Some)
+    } else {
+        Ok(None)
+    }
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the rendering helper mirrors an explicit framebuffer rectangle and blur radius"
+)]
+fn blurred_backdrop_buffer(
+    renderer: &mut GlesRenderer,
+    framebuffer: &GlesTarget<'_>,
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+    blur: f32,
+    radius: f32,
+) -> Option<MemoryRenderBuffer> {
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let region = Rectangle::<i32, Buffer>::new(
+        (x, y).into(),
+        (i32::try_from(width).ok()?, i32::try_from(height).ok()?).into(),
+    );
+    let mapping = renderer
+        .copy_framebuffer(framebuffer, region, Fourcc::Abgr8888)
+        .ok()?;
+    let flipped = mapping.flipped();
+    let mapped = renderer.map_texture(&mapping).ok()?;
+    let stride = width as usize * 4;
+    let mut pixels = mapped.to_vec();
+    if flipped {
+        let mut normalized = vec![0; pixels.len()];
+        for row in 0..height as usize {
+            let source = row * stride;
+            let target = (height as usize - row - 1) * stride;
+            normalized[target..target + stride].copy_from_slice(&pixels[source..source + stride]);
+        }
+        pixels = normalized;
+    }
+    let image = image::RgbaImage::from_raw(width, height, pixels)?;
+    let mut blurred = image::imageops::blur(&image, blur);
+    mask_rounded_backdrop(&mut blurred, radius);
+    Some(MemoryRenderBuffer::from_slice(
+        blurred.as_raw(),
+        Fourcc::Abgr8888,
+        (i32::try_from(width).ok()?, i32::try_from(height).ok()?),
+        1,
+        Transform::Normal,
+        None,
+    ))
+}
+
+fn mask_rounded_backdrop(image: &mut image::RgbaImage, radius: f32) {
+    let (width, height) = image.dimensions();
+    let left = 0.0_f32;
+    let top = 0.0_f32;
+    let right = width as f32;
+    let bottom = height as f32;
+    let radius = radius.min((right - left) * 0.5).min((bottom - top) * 0.5);
+    let center_x = (left + right) * 0.5;
+    let center_y = (top + bottom) * 0.5;
+    let half_width = (right - left) * 0.5;
+    let half_height = (bottom - top) * 0.5;
+    for (x, y, pixel) in image.enumerate_pixels_mut() {
+        let px = x as f32 + 0.5;
+        let py = y as f32 + 0.5;
+        let qx = (px - center_x).abs() - (half_width - radius);
+        let qy = (py - center_y).abs() - (half_height - radius);
+        let outside = qx.max(0.0).hypot(qy.max(0.0));
+        let inside = qx.max(qy).min(0.0);
+        let signed_distance = outside + inside - radius;
+        let coverage = (0.5 - signed_distance).clamp(0.0, 1.0);
+        for channel in &mut pixel.0[..3] {
+            *channel = (f32::from(*channel) * coverage).round() as u8;
+        }
+        pixel.0[3] = (f32::from(pixel.0[3]) * coverage).round() as u8;
+        if pixel.0[3] == 0 {
+            pixel.0[..3].fill(0);
+        }
+    }
+}
+
+fn capture_preview(
+    renderer: &mut GlesRenderer,
+    window: &Window,
+    rgba: &mut Vec<u8>,
+) -> Option<(u16, u16)> {
+    (|| {
+        let geometry = window.geometry();
+        let dimensions =
+            crate::session::state::preview_capture_dimensions(geometry.size.w, geometry.size.h)?;
+        let width = i32::from(dimensions.0);
+        let height = i32::from(dimensions.1);
+        let mut texture = Offscreen::<GlesTexture>::create_buffer(
+            renderer,
+            Fourcc::Abgr8888,
+            (width, height).into(),
+        )
+        .ok()?;
+        let mut framebuffer = renderer.bind(&mut texture).ok()?;
+        let elements = window.render_elements::<WaylandSurfaceRenderElement<GlesRenderer>>(
+            renderer,
+            (-geometry.loc.x, -geometry.loc.y).into(),
+            Scale::from(1.0),
+            1.0,
+        );
+        let damage = Rectangle::from_size((width, height).into());
+        let reference = Rectangle::from_size(geometry.size.to_physical(1));
+        let elements = constrain_render_elements(
+            elements,
+            (0, 0),
+            damage,
+            reference,
+            ConstrainScaleBehavior::Fit,
+            ConstrainAlign::TOP
+                | ConstrainAlign::BOTTOM
+                | ConstrainAlign::LEFT
+                | ConstrainAlign::RIGHT,
+            1.0,
+        )
+        .collect::<Vec<_>>();
+        let frame = renderer
+            .render(&mut framebuffer, (width, height).into(), Transform::Normal)
+            .ok()?;
+        crate::session::preview_submission::finish_preview_submission(
+            frame,
+            |frame| {
+                frame.clear(Color32F::new(0.03, 0.04, 0.06, 1.0), &[damage])?;
+                draw_render_elements(frame, 1.0, &elements, &[damage]).map(|_| ())
+            },
+            Frame::finish,
+        )
+        .ok()?
+        .wait()
+        .ok()?;
+        let buffer_region = Rectangle::<i32, Buffer>::from_size((width, height).into());
+        let mapping = renderer
+            .copy_framebuffer(&framebuffer, buffer_region, Fourcc::Abgr8888)
+            .ok()?;
+        let mapped = renderer.map_texture(&mapping).ok()?;
+        if !crate::session::state::preview_mapping_has_exact_size(
+            mapped,
+            dimensions.0,
+            dimensions.1,
+        ) {
+            return None;
+        }
+        let replacement = crate::session::state::reuse_preview_pixels(std::mem::take(rgba), mapped);
+        *rgba = replacement;
+        Some(dimensions)
+    })()
+}
+
+fn normalize_capture_rows(
+    mapped: &[u8],
+    width: usize,
+    height: usize,
+    flipped: bool,
+) -> Result<Vec<u8>, String> {
+    let row_bytes = width
+        .checked_mul(4)
+        .ok_or_else(|| "capture row size overflowed".to_owned())?;
+    let expected = row_bytes
+        .checked_mul(height)
+        .ok_or_else(|| "capture buffer size overflowed".to_owned())?;
+    if mapped.len() < expected {
+        return Err(format!(
+            "renderer returned {} bytes for a {} byte output",
+            mapped.len(),
+            expected
+        ));
+    }
+    let mut rgba = vec![0; expected];
+    for destination_y in 0..height {
+        let source_y = if flipped {
+            destination_y
+        } else {
+            height - 1 - destination_y
+        };
+        rgba[destination_y * row_bytes..(destination_y + 1) * row_bytes]
+            .copy_from_slice(&mapped[source_y * row_bytes..(source_y + 1) * row_bytes]);
+    }
+    Ok(rgba)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        path::PathBuf,
+        time::{Duration, Instant},
+    };
+
+    use super::{
+        PREVIEW_CAPTURE_INTERVAL, advance_output_capture, mask_rounded_backdrop,
+        preview_retry_delay,
+    };
+
+    #[test]
+    fn explicit_nested_sizes_are_bounded_and_keep_720p_exact() {
+        assert_eq!(super::parse_nested_size("1280x720"), Some((1280, 720)));
+        for invalid in ["1280", "0x720", "1280x0", "8193x720", "1280x999999999999"] {
+            assert!(super::parse_nested_size(invalid).is_none());
+        }
+    }
+
+    #[test]
+    fn output_capture_waits_for_the_frame_after_its_request() {
+        let mut pending = None;
+        let request = PathBuf::from("capture.png");
+        assert_eq!(
+            advance_output_capture(&mut pending, Some(request.clone())),
+            (None, true)
+        );
+        assert_eq!(pending, Some(request.clone()));
+        assert_eq!(
+            advance_output_capture(&mut pending, None),
+            (Some(request), false)
+        );
+        assert_eq!(pending, None);
+    }
+
+    #[test]
+    fn nested_preview_retry_deadline_matches_capture_eligibility() {
+        let last_capture = Instant::now();
+        assert_eq!(
+            preview_retry_delay(last_capture, last_capture + Duration::from_millis(16)),
+            PREVIEW_CAPTURE_INTERVAL - Duration::from_millis(16)
+        );
+        assert_eq!(
+            preview_retry_delay(last_capture, last_capture + PREVIEW_CAPTURE_INTERVAL),
+            Duration::ZERO
+        );
+    }
+
+    #[test]
+    fn rounded_backdrop_mask_antialiases_edges() {
+        let mut image = image::RgbaImage::from_pixel(580, 92, image::Rgba([80, 120, 160, 255]));
+        mask_rounded_backdrop(&mut image, 18.0);
+        assert_eq!(image.get_pixel(0, 0).0, [0, 0, 0, 0]);
+        assert_eq!(image.get_pixel(300, 40).0[3], 255);
+        assert!(image.pixels().any(|pixel| (1..255).contains(&pixel.0[3])));
+    }
+}

@@ -1,0 +1,688 @@
+//! Production-owner state for the scrubbed MCP peripheral projection.
+use nickel_platform::{
+    PeripheralError, PeripheralFailureClass, PeripheralSnapshot, PrintJobState as NativeJobState,
+    PrinterState as NativePrinterState, VolumeState as NativeVolumeState,
+};
+#[cfg(any(test, target_os = "linux"))]
+use nickel_platform::{PeripheralOutcome, RemotePeripheralControl};
+use nickel_remote_control::peripheral_controls as wire;
+#[cfg(any(test, target_os = "linux"))]
+use nickel_remote_control::semantics::SurfaceSemanticCompletion as Completion;
+use std::collections::{BTreeMap, VecDeque};
+
+const MAX_OBSERVATIONS: usize = 16;
+
+/// Preserve the native failure class without returning provider text, which may
+/// contain private printer names, document titles, or volume paths.
+#[cfg_attr(
+    not(any(test, target_os = "windows")),
+    expect(dead_code, reason = "the observation adapter is owned by Windows")
+)]
+pub(crate) fn observation_failure(error: PeripheralError) -> String {
+    match error.class {
+        PeripheralFailureClass::Authorization => "peripheral observation permission denied",
+        PeripheralFailureClass::Busy => "peripheral observation provider is busy",
+        PeripheralFailureClass::ProviderUnavailable => {
+            "peripheral observation provider is unavailable"
+        }
+        PeripheralFailureClass::InvalidTarget => "peripheral observation target is stale",
+        PeripheralFailureClass::Unknown => "peripheral observation failed",
+    }
+    .into()
+}
+
+/// Keep the native outcome class while discarding details that can include
+/// printer names, document titles, addresses, or volume paths.
+#[cfg(any(target_os = "linux", test))]
+pub fn control_failure_reason(outcome: &PeripheralOutcome) -> Option<&'static str> {
+    match outcome {
+        PeripheralOutcome::Busy { .. } => Some("peripheral control provider is busy"),
+        PeripheralOutcome::AuthorizationRequired { .. } => {
+            Some("peripheral control permission denied")
+        }
+        PeripheralOutcome::Unsupported { .. } => Some("peripheral control provider is unavailable"),
+        PeripheralOutcome::Rejected { .. } => Some("peripheral control was rejected"),
+        PeripheralOutcome::Accepted
+        | PeripheralOutcome::Cancelled
+        | PeripheralOutcome::Uncertain => None,
+    }
+}
+
+#[derive(Default)]
+pub struct State {
+    next_generation: u64,
+    observations: VecDeque<Observation>,
+}
+
+// Native IDs are retained only when the Linux mutation owner is available.
+// Windows projects the snapshot and drops this temporary lookup.
+#[cfg_attr(all(target_os = "windows", not(test)), allow(dead_code))]
+struct Observation {
+    generation: u64,
+    printers: BTreeMap<String, ObservedPrinter>,
+}
+
+#[cfg_attr(all(target_os = "windows", not(test)), allow(dead_code))]
+struct ObservedPrinter {
+    native_id: String,
+    is_default: bool,
+    jobs: BTreeMap<String, ObservedJob>,
+}
+
+#[cfg_attr(all(target_os = "windows", not(test)), allow(dead_code))]
+struct ObservedJob {
+    native_id: String,
+    state: wire::PrintJobState,
+}
+
+#[cfg(any(test, target_os = "linux"))]
+pub struct Prepared {
+    pub action: RemotePeripheralControl,
+    expected: Expected,
+}
+
+#[cfg(any(test, target_os = "linux"))]
+enum Expected {
+    DefaultPrinter {
+        native_printer: String,
+    },
+    CancelledJob {
+        native_printer: String,
+        native_job: String,
+    },
+}
+
+impl State {
+    #[cfg(any(test, target_os = "linux"))]
+    pub fn invalidate(&mut self) {
+        self.observations.clear();
+    }
+
+    pub fn observe(
+        &mut self,
+        native: PeripheralSnapshot,
+        observed_at_micros: u64,
+        control_unavailable_reason: Option<&'static str>,
+    ) -> Result<wire::Snapshot, String> {
+        self.project(Some(native), observed_at_micros, control_unavailable_reason)
+    }
+
+    fn project(
+        &mut self,
+        native: Option<PeripheralSnapshot>,
+        observed_at_micros: u64,
+        control_unavailable_reason: Option<&'static str>,
+    ) -> Result<wire::Snapshot, String> {
+        self.next_generation = self
+            .next_generation
+            .checked_add(1)
+            .ok_or("peripheral observation generation exhausted")?;
+        let generation = self.next_generation;
+        let mut observed_printers = BTreeMap::new();
+        let mut printer_entries = Vec::new();
+        let mut volume_entries = Vec::new();
+        let mut omitted_printers = 0_u32;
+        let mut omitted_jobs = 0_u32;
+        let mut omitted_volumes = 0_u32;
+        let (printers, removable_volumes) = if let Some(native) = native {
+            omitted_printers = native.omitted_printers.min(u32::MAX as usize) as u32;
+            omitted_jobs = native.omitted_jobs.min(u32::MAX as usize) as u32;
+            omitted_volumes = native.omitted_volumes.min(u32::MAX as usize) as u32;
+            let printers = match native.printers {
+                Ok(printers) => {
+                    omitted_printers = omitted_printers.saturating_add(
+                        printers
+                            .len()
+                            .saturating_sub(wire::MAX_PRINTERS)
+                            .min(u32::MAX as usize) as u32,
+                    );
+                    omitted_jobs = printers.iter().skip(wire::MAX_PRINTERS).fold(
+                        omitted_jobs,
+                        |count, printer| {
+                            count.saturating_add(printer.jobs.len().min(u32::MAX as usize) as u32)
+                        },
+                    );
+                    let mut retained_jobs = 0_usize;
+                    for (printer_index, printer) in
+                        printers.into_iter().take(wire::MAX_PRINTERS).enumerate()
+                    {
+                        let opaque = format!("printer-{generation}-{printer_index}");
+                        let state = printer_state(printer.state);
+                        let remaining = wire::MAX_PRINT_JOBS.saturating_sub(retained_jobs);
+                        omitted_jobs = omitted_jobs.saturating_add(
+                            printer
+                                .jobs
+                                .len()
+                                .saturating_sub(remaining)
+                                .min(u32::MAX as usize) as u32,
+                        );
+                        let mut jobs = BTreeMap::new();
+                        let mut projected_jobs = Vec::new();
+                        for (job_index, job) in printer.jobs.into_iter().take(remaining).enumerate()
+                        {
+                            let job_opaque =
+                                format!("job-{generation}-{printer_index}-{job_index}");
+                            let job_state = job_state(job.state);
+                            jobs.insert(
+                                job_opaque.clone(),
+                                ObservedJob {
+                                    native_id: job.id,
+                                    state: job_state,
+                                },
+                            );
+                            projected_jobs.push(wire::PrintJob {
+                                id: job_opaque,
+                                state: job_state,
+                            });
+                            retained_jobs += 1;
+                        }
+                        observed_printers.insert(
+                            opaque.clone(),
+                            ObservedPrinter {
+                                native_id: printer.id,
+                                is_default: printer.is_default,
+                                jobs,
+                            },
+                        );
+                        printer_entries.push(wire::Printer {
+                            id: opaque,
+                            state,
+                            is_default: printer.is_default,
+                            jobs: projected_jobs,
+                        });
+                    }
+                    wire::Availability::Available
+                }
+                Err(_) => wire::Availability::Unavailable,
+            };
+            let volumes = match native.volumes {
+                Ok(volumes) => {
+                    omitted_volumes = omitted_volumes.saturating_add(
+                        volumes
+                            .len()
+                            .saturating_sub(wire::MAX_VOLUMES)
+                            .min(u32::MAX as usize) as u32,
+                    );
+                    for (index, volume) in volumes.into_iter().take(wire::MAX_VOLUMES).enumerate() {
+                        volume_entries.push(wire::RemovableVolume {
+                            id: format!("volume-{generation}-{index}"),
+                            state: volume_state(volume.state),
+                            ejectable: volume.ejectable,
+                            capacity_bytes: volume.capacity_bytes,
+                            available_bytes: volume
+                                .available_bytes
+                                .zip(volume.capacity_bytes)
+                                .map(|(available, capacity)| available.min(capacity)),
+                        });
+                    }
+                    wire::Availability::Available
+                }
+                Err(_) => wire::Availability::Unavailable,
+            };
+            (printers, volumes)
+        } else {
+            (
+                wire::Availability::Unavailable,
+                wire::Availability::Unavailable,
+            )
+        };
+        if control_unavailable_reason.is_none() {
+            if self.observations.len() == MAX_OBSERVATIONS {
+                self.observations.pop_front();
+            }
+            self.observations.push_back(Observation {
+                generation,
+                printers: observed_printers,
+            });
+        }
+        Ok(wire::Snapshot {
+            generation,
+            observed_at_micros,
+            printers,
+            removable_volumes,
+            printer_controls: if control_unavailable_reason.is_none() {
+                wire::Availability::Available
+            } else {
+                wire::Availability::Unavailable
+            },
+            printer_controls_unavailable_reason: control_unavailable_reason.map(str::to_owned),
+            printer_entries,
+            removable_volume_entries: volume_entries,
+            omitted_printers,
+            omitted_print_jobs: omitted_jobs,
+            omitted_removable_volumes: omitted_volumes,
+        })
+    }
+
+    #[cfg(any(test, target_os = "linux"))]
+    pub fn prepare(&mut self, transaction: wire::Transaction) -> Result<Prepared, String> {
+        if !transaction.valid() {
+            return Err("invalid peripheral transaction".into());
+        }
+        let index = self
+            .observations
+            .iter()
+            .position(|observation| observation.generation == transaction.generation)
+            .ok_or("peripheral observation is stale; read again")?;
+        let observation = self
+            .observations
+            .remove(index)
+            .ok_or("peripheral observation is stale; read again")?;
+        match transaction.action {
+            wire::Action::SetDefaultPrinter {
+                printer_id,
+                prior_is_default,
+            } => {
+                let printer = observation
+                    .printers
+                    .get(&printer_id)
+                    .ok_or("opaque printer identity is stale or unavailable")?;
+                if printer.is_default != prior_is_default {
+                    return Err("printer prior state changed; read again".into());
+                }
+                Ok(Prepared {
+                    action: RemotePeripheralControl::SetDefaultPrinter {
+                        printer_id: printer.native_id.clone(),
+                        prior_is_default,
+                    },
+                    expected: Expected::DefaultPrinter {
+                        native_printer: printer.native_id.clone(),
+                    },
+                })
+            }
+            wire::Action::CancelPrintJob {
+                printer_id,
+                job_id,
+                prior_state,
+            } => {
+                let printer = observation
+                    .printers
+                    .get(&printer_id)
+                    .ok_or("opaque printer identity is stale or unavailable")?;
+                let job = printer
+                    .jobs
+                    .get(&job_id)
+                    .ok_or("opaque print-job identity is stale or unavailable")?;
+                if job.state != prior_state {
+                    return Err("print-job prior state changed; read again".into());
+                }
+                Ok(Prepared {
+                    action: RemotePeripheralControl::CancelPrintJob {
+                        printer_id: printer.native_id.clone(),
+                        job_id: job.native_id.clone(),
+                        prior_state: native_job_state(prior_state),
+                    },
+                    expected: Expected::CancelledJob {
+                        native_printer: printer.native_id.clone(),
+                        native_job: job.native_id.clone(),
+                    },
+                })
+            }
+        }
+    }
+}
+
+#[cfg(any(test, target_os = "linux"))]
+impl Prepared {
+    pub fn completion(
+        &self,
+        outcome: PeripheralOutcome,
+        refreshed: Option<&PeripheralSnapshot>,
+    ) -> Completion {
+        match outcome {
+            PeripheralOutcome::Cancelled => Completion::Cancelled,
+            PeripheralOutcome::Uncertain => Completion::Uncertain,
+            PeripheralOutcome::Unsupported { .. } => Completion::Unavailable,
+            PeripheralOutcome::Busy { .. }
+            | PeripheralOutcome::AuthorizationRequired { .. }
+            | PeripheralOutcome::Rejected { .. } => Completion::Unavailable,
+            PeripheralOutcome::Accepted => {
+                let Some(refreshed) = refreshed else {
+                    return Completion::Requested;
+                };
+                let Ok(printers) = &refreshed.printers else {
+                    return Completion::Requested;
+                };
+                let confirmed = match &self.expected {
+                    Expected::DefaultPrinter { native_printer } => printers
+                        .iter()
+                        .any(|printer| printer.id == *native_printer && printer.is_default),
+                    Expected::CancelledJob {
+                        native_printer,
+                        native_job,
+                    } => printers
+                        .iter()
+                        .find(|printer| printer.id == *native_printer)
+                        .is_some_and(|printer| {
+                            printer.jobs.iter().all(|job| job.id != *native_job)
+                        }),
+                };
+                if confirmed {
+                    Completion::Confirmed
+                } else {
+                    Completion::Requested
+                }
+            }
+        }
+    }
+}
+
+fn printer_state(state: NativePrinterState) -> wire::PrinterState {
+    match state {
+        NativePrinterState::Ready => wire::PrinterState::Ready,
+        NativePrinterState::Busy => wire::PrinterState::Busy,
+        NativePrinterState::Offline => wire::PrinterState::Offline,
+        NativePrinterState::Error => wire::PrinterState::Error,
+    }
+}
+
+fn job_state(state: NativeJobState) -> wire::PrintJobState {
+    match state {
+        NativeJobState::Pending => wire::PrintJobState::Pending,
+        NativeJobState::Printing => wire::PrintJobState::Printing,
+        NativeJobState::Held => wire::PrintJobState::Held,
+        NativeJobState::Failed => wire::PrintJobState::Failed,
+    }
+}
+
+#[cfg(any(test, target_os = "linux"))]
+fn native_job_state(state: wire::PrintJobState) -> NativeJobState {
+    match state {
+        wire::PrintJobState::Pending => NativeJobState::Pending,
+        wire::PrintJobState::Printing => NativeJobState::Printing,
+        wire::PrintJobState::Held => NativeJobState::Held,
+        wire::PrintJobState::Failed => NativeJobState::Failed,
+    }
+}
+
+fn volume_state(state: NativeVolumeState) -> wire::VolumeState {
+    match state {
+        NativeVolumeState::Unmounted => wire::VolumeState::Unmounted,
+        NativeVolumeState::Mounted => wire::VolumeState::Mounted,
+        NativeVolumeState::Busy => wire::VolumeState::Busy,
+        NativeVolumeState::Error => wire::VolumeState::Error,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nickel_platform::{
+        FilesystemUsage, PeripheralProvider, PrintJob, Printer, RemovableVolume,
+    };
+
+    #[test]
+    fn observation_failures_keep_categories_without_private_provider_text() {
+        for (class, category) in [
+            (PeripheralFailureClass::Authorization, "permission denied"),
+            (PeripheralFailureClass::Busy, "provider is busy"),
+            (
+                PeripheralFailureClass::ProviderUnavailable,
+                "provider is unavailable",
+            ),
+            (PeripheralFailureClass::InvalidTarget, "target is stale"),
+            (PeripheralFailureClass::Unknown, "observation failed"),
+        ] {
+            let result = observation_failure(PeripheralError {
+                class,
+                detail: "Secret printer /private/volume".into(),
+            });
+            assert!(result.contains(category));
+            assert!(!result.contains("Secret"));
+            assert!(!result.contains("/private"));
+        }
+    }
+
+    #[test]
+    fn control_failures_keep_categories_without_private_provider_text() {
+        for (outcome, category) in [
+            (
+                PeripheralOutcome::Busy {
+                    detail: "Secret printer /private/volume".into(),
+                },
+                "provider is busy",
+            ),
+            (
+                PeripheralOutcome::AuthorizationRequired {
+                    detail: "Secret printer /private/volume".into(),
+                },
+                "permission denied",
+            ),
+            (
+                PeripheralOutcome::Unsupported {
+                    detail: "Secret printer /private/volume".into(),
+                },
+                "provider is unavailable",
+            ),
+            (
+                PeripheralOutcome::Rejected {
+                    detail: "Secret printer /private/volume".into(),
+                },
+                "was rejected",
+            ),
+        ] {
+            let reason = control_failure_reason(&outcome).unwrap();
+            assert!(reason.contains(category));
+            assert!(!reason.contains("Secret"));
+            assert!(!reason.contains("/private"));
+        }
+    }
+
+    fn raw() -> PeripheralSnapshot {
+        PeripheralSnapshot {
+            provider: PeripheralProvider::Unsupported {
+                platform: "fixture".into(),
+            },
+            printers: Ok(vec![Printer {
+                id: "private-native-printer".into(),
+                name: "Secret office printer".into(),
+                is_default: false,
+                state: NativePrinterState::Ready,
+                jobs: vec![PrintJob {
+                    id: "private-native-job".into(),
+                    name: "Secret document".into(),
+                    state: NativeJobState::Printing,
+                }],
+            }]),
+            volumes: Ok(vec![RemovableVolume {
+                id: "/dev/private".into(),
+                name: "Private volume".into(),
+                capacity_bytes: Some(100),
+                available_bytes: Some(120),
+                mount_path: Some("/private/path".into()),
+                state: NativeVolumeState::Mounted,
+                ejectable: true,
+                detail: Some("secret".into()),
+            }]),
+            filesystems: Ok(vec![FilesystemUsage {
+                id: "private".into(),
+                name: "private".into(),
+                mount_path: "/private/path".into(),
+                capacity_bytes: 100,
+                available_bytes: 50,
+            }]),
+            omitted_printers: 0,
+            omitted_jobs: 0,
+            omitted_volumes: 0,
+            omitted_filesystems: 0,
+        }
+    }
+
+    #[test]
+    fn projection_scrubs_native_text_paths_and_clamps_capacity() {
+        let mut state = State::default();
+        let snapshot = state.observe(raw(), 42, None).unwrap();
+        let json = serde_json::to_string(&snapshot).unwrap();
+        for secret in [
+            "private-native-printer",
+            "Secret office printer",
+            "private-native-job",
+            "Secret document",
+            "/dev/private",
+            "/private/path",
+        ] {
+            assert!(!json.contains(secret));
+        }
+        assert_eq!(
+            snapshot.removable_volume_entries[0].available_bytes,
+            Some(100)
+        );
+        assert_eq!(state.observations.len(), 1);
+    }
+
+    #[test]
+    fn empty_devices_and_partial_provider_failure_keep_independent_availability() {
+        let mut state = State::default();
+        let mut empty = raw();
+        empty.printers = Ok(Vec::new());
+        empty.volumes = Ok(Vec::new());
+        let observed = state
+            .observe(empty, 41, Some("controls unavailable"))
+            .unwrap();
+        assert_eq!(observed.printers, wire::Availability::Available);
+        assert_eq!(observed.removable_volumes, wire::Availability::Available);
+        assert!(observed.printer_entries.is_empty());
+        assert!(observed.removable_volume_entries.is_empty());
+
+        let mut partial = raw();
+        partial.printers = Err("Secret printer /private/device".into());
+        partial.volumes = Ok(Vec::new());
+        let observed = state
+            .observe(partial, 42, Some("controls unavailable"))
+            .unwrap();
+        assert_eq!(observed.printers, wire::Availability::Unavailable);
+        assert_eq!(observed.removable_volumes, wire::Availability::Available);
+        assert!(observed.printer_entries.is_empty());
+        assert!(observed.removable_volume_entries.is_empty());
+        assert!(
+            !serde_json::to_string(&observed)
+                .unwrap()
+                .contains("Secret printer")
+        );
+    }
+
+    #[test]
+    fn printer_limit_counts_jobs_on_omitted_printers() {
+        let mut native = raw();
+        let printer = native.printers.as_ref().unwrap()[0].clone();
+        native.printers = Ok(vec![printer; wire::MAX_PRINTERS + 1]);
+        native.omitted_printers = 2;
+        native.omitted_jobs = 4;
+
+        let projected = State::default().observe(native, 42, None).unwrap();
+        assert_eq!(projected.printer_entries.len(), wire::MAX_PRINTERS);
+        assert_eq!(projected.omitted_printers, 3);
+        assert_eq!(projected.omitted_print_jobs, 5);
+    }
+
+    #[test]
+    fn unavailable_printer_controls_report_owner_limit_without_native_details() {
+        let mut state = State::default();
+        let snapshot = state
+            .observe(
+                raw(),
+                42,
+                Some("native Windows printer calls lack a cancellable remote owner"),
+            )
+            .unwrap();
+        assert_eq!(snapshot.printer_controls, wire::Availability::Unavailable);
+        assert_eq!(
+            snapshot.printer_controls_unavailable_reason.as_deref(),
+            Some("native Windows printer calls lack a cancellable remote owner")
+        );
+        let json = serde_json::to_string(&snapshot).unwrap();
+        assert!(!json.contains("Secret office printer"));
+        assert!(!json.contains("/private/path"));
+        assert!(state.observations.is_empty());
+    }
+
+    #[test]
+    fn observation_is_consumed_and_prior_state_is_required() {
+        let mut state = State::default();
+        let snapshot = state.observe(raw(), 42, None).unwrap();
+        let printer = &snapshot.printer_entries[0];
+        let job = &printer.jobs[0];
+        let transaction = wire::Transaction {
+            generation: snapshot.generation,
+            action: wire::Action::CancelPrintJob {
+                printer_id: printer.id.clone(),
+                job_id: job.id.clone(),
+                prior_state: wire::PrintJobState::Printing,
+            },
+        };
+        let prepared = state.prepare(transaction).unwrap();
+        assert!(matches!(
+            prepared.action,
+            RemotePeripheralControl::CancelPrintJob { .. }
+        ));
+        assert!(
+            state
+                .prepare(wire::Transaction {
+                    generation: snapshot.generation,
+                    action: wire::Action::SetDefaultPrinter {
+                        printer_id: printer.id.clone(),
+                        prior_is_default: false,
+                    },
+                })
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn accepted_controls_require_fresh_native_confirmation_and_invalidation() {
+        let mut state = State::default();
+        let snapshot = state.observe(raw(), 42, None).unwrap();
+        let printer = &snapshot.printer_entries[0];
+        let job = &printer.jobs[0];
+        let cancel = wire::Transaction {
+            generation: snapshot.generation,
+            action: wire::Action::CancelPrintJob {
+                printer_id: printer.id.clone(),
+                job_id: job.id.clone(),
+                prior_state: wire::PrintJobState::Printing,
+            },
+        };
+        let prepared = state.prepare(cancel.clone()).unwrap();
+        assert_eq!(
+            prepared.completion(PeripheralOutcome::Accepted, Some(&raw())),
+            Completion::Requested
+        );
+        let mut after_cancel = raw();
+        after_cancel.printers.as_mut().unwrap()[0].jobs.clear();
+        assert_eq!(
+            prepared.completion(PeripheralOutcome::Accepted, Some(&after_cancel)),
+            Completion::Confirmed
+        );
+        assert_eq!(
+            prepared.completion(PeripheralOutcome::Accepted, None),
+            Completion::Requested
+        );
+        assert!(state.prepare(cancel).is_err());
+
+        let snapshot = state.observe(raw(), 43, None).unwrap();
+        let set_default = wire::Transaction {
+            generation: snapshot.generation,
+            action: wire::Action::SetDefaultPrinter {
+                printer_id: snapshot.printer_entries[0].id.clone(),
+                prior_is_default: false,
+            },
+        };
+        let prepared = state.prepare(set_default).unwrap();
+        let mut after_default = raw();
+        after_default.printers.as_mut().unwrap()[0].is_default = true;
+        assert_eq!(
+            prepared.completion(PeripheralOutcome::Accepted, Some(&after_default)),
+            Completion::Confirmed
+        );
+        let latest = state.observe(raw(), 44, None).unwrap();
+        let invalidated = wire::Transaction {
+            generation: latest.generation,
+            action: wire::Action::SetDefaultPrinter {
+                printer_id: latest.printer_entries[0].id.clone(),
+                prior_is_default: false,
+            },
+        };
+        state.invalidate();
+        assert!(state.prepare(invalidated).is_err());
+    }
+}

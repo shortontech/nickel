@@ -1,0 +1,4229 @@
+#[cfg(target_os = "linux")]
+pub mod compositor_host;
+
+pub mod appearance_capabilities;
+pub mod appearance_service;
+pub mod application_scale_capability;
+mod audio_capabilities;
+mod display_capabilities;
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+mod remote_default_associations;
+mod remote_indicator;
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+mod remote_peripheral_controls;
+#[cfg(any(test, target_os = "linux", target_os = "windows"))]
+mod remote_policy;
+mod remote_preferred_applications;
+mod remote_surface_authority;
+mod remote_terminal_launch_policy;
+pub mod run_capabilities;
+mod session_capabilities;
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[cfg(any(test, target_os = "linux", target_os = "windows"))]
+mod trusted_accessibility;
+pub mod wallpaper_service;
+#[cfg(any(test, target_os = "windows"))]
+mod windows_application_registry;
+#[cfg(any(test, target_os = "windows"))]
+mod windows_emergency_chord;
+#[cfg(target_os = "windows")]
+mod windows_external_accessibility;
+#[cfg(target_os = "windows")]
+pub(crate) mod windows_plugin_display;
+#[cfg(any(test, target_os = "windows"))]
+#[cfg_attr(all(test, not(target_os = "windows")), allow(dead_code))]
+mod windows_remote_application_scale;
+#[cfg(any(test, target_os = "windows"))]
+#[cfg_attr(all(test, not(target_os = "windows")), allow(dead_code))]
+mod windows_remote_codex;
+#[cfg(target_os = "windows")]
+mod windows_remote_control;
+#[cfg(target_os = "windows")]
+mod windows_remote_display_topology;
+#[cfg(target_os = "windows")]
+mod windows_remote_input;
+#[cfg(any(test, target_os = "windows"))]
+#[cfg_attr(all(test, not(target_os = "windows")), allow(dead_code))]
+mod windows_remote_launcher_favorites;
+#[cfg(any(test, target_os = "windows"))]
+#[cfg_attr(all(test, not(target_os = "windows")), allow(dead_code))]
+mod windows_remote_settings;
+#[cfg(any(test, target_os = "windows"))]
+#[cfg_attr(all(test, not(target_os = "windows")), allow(dead_code))]
+mod windows_remote_terminal_presentation;
+#[cfg(any(test, target_os = "windows"))]
+#[cfg_attr(all(test, not(target_os = "windows")), allow(dead_code))]
+mod windows_resource_owner;
+#[cfg(any(test, target_os = "windows"))]
+mod windows_shell_diagnostics;
+#[cfg(any(test, target_os = "windows"))]
+#[cfg_attr(all(test, not(target_os = "windows")), allow(dead_code))]
+mod windows_virtual_workspaces;
+use nickel_codex::ThreadId;
+use nickel_codex_ui::{
+    ChatApplication, ConnectionStatus, ShellRequest, shell_application_with_backend,
+};
+use nickel_core::optional_features::{
+    CodexAvailabilityProjection, CodexSource, FeatureEffectiveState, FeatureHealth,
+    FeatureInstallation, FeatureSupport, OptionalFeatureRuntime, OptionalFeatureSettings,
+};
+use std::{
+    collections::HashSet,
+    path::{Component, Path},
+    time::{Duration, Instant},
+};
+use twinkle_input::{
+    AggregateModifier, InputEvent, KeyEdge, LogicalKey, PointerButton, PointerEvent,
+};
+#[cfg(any(test, target_os = "linux"))]
+use twinkle_ui::ControllerAction;
+use twinkle_ui::{
+    Application, HostBatch, HostChangeToken, HostEvent, HostEventOutcome, HostFailure,
+    HostFailureStage, UiHost,
+};
+
+#[doc(hidden)]
+pub mod allocation_counter;
+#[cfg(target_os = "linux")]
+mod process_memory;
+
+pub fn is_clipboard_paste(event: &InputEvent) -> bool {
+    matches!(event, InputEvent::Key(key)
+        if key.edge == KeyEdge::Pressed
+        && matches!(&key.logical, LogicalKey::Character(value) if value.eq_ignore_ascii_case("v"))
+        && (key.modifiers.aggregate(AggregateModifier::Control)
+            || key.modifiers.aggregate(AggregateModifier::Super)))
+}
+
+#[allow(dead_code)]
+mod desktop {
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+    pub enum WallpaperPosition {
+        Center,
+        Tile,
+        Stretch,
+        Fit,
+        Span,
+        #[default]
+        Fill,
+    }
+
+    #[derive(Clone, Debug, Default)]
+    pub struct Wallpaper {
+        pub image: Option<image::RgbaImage>,
+        pub color: [u8; 3],
+        pub position: WallpaperPosition,
+    }
+}
+pub mod bundled_plugin_assets;
+#[cfg(target_os = "linux")]
+mod executable_index;
+mod file_window_host;
+#[allow(clippy::needless_borrow, dead_code)]
+mod icons;
+#[allow(clippy::manual_is_multiple_of, dead_code)]
+mod launcher;
+mod launcher_icon_cache;
+#[cfg(target_os = "linux")]
+mod lock_auth;
+use launcher::{DashboardProject, DashboardSection, ProjectActivity, normalize_dashboard_projects};
+mod application_capabilities;
+pub mod associations_capabilities;
+mod clock_capabilities;
+pub mod connectivity_capabilities;
+mod control_view;
+pub mod feature_capabilities;
+#[allow(dead_code)] // Wired into the Smithay runtime by the next integration slice.
+#[cfg(target_os = "linux")]
+mod internal_shell;
+mod live_shell;
+mod local_cues;
+#[allow(dead_code)]
+mod model;
+mod notification;
+mod notification_view;
+#[allow(dead_code)]
+mod places;
+#[allow(dead_code, unused_imports)]
+mod platform;
+pub mod plugin_panel;
+pub mod plugins_capabilities;
+pub mod preferences_capabilities;
+mod projection_recovery;
+mod screenshot;
+mod session_host;
+mod shortcut_capabilities;
+mod softbuffer_presenter;
+mod wallpaper_previews;
+mod wallpaper_selection;
+#[cfg(target_os = "windows")]
+mod wgpu_presenter;
+mod window_preview;
+#[cfg(target_os = "windows")]
+mod windows_launch_broker;
+#[cfg(target_os = "windows")]
+mod windows_uwu;
+#[allow(dead_code)]
+mod winit_shell;
+pub mod workspace_capabilities;
+
+#[cfg(feature = "workbench-fixtures")]
+mod workbench_fixtures;
+
+#[cfg(feature = "workbench-fixtures")]
+pub use workbench_fixtures::ShellFixtureProvider;
+
+use live_shell::LiveShell;
+use winit_shell::{
+    PanelEdge, ShellEvent, ShellOptions, ShellUserEvent, SurfaceId, SurfaceRole, WinitShell,
+    WinitWindowCompat,
+};
+
+const NO_DESKTOP_WINDOWS_FLAG: &str = "--no-desktop-windows";
+const PANEL_TOP_FLAG: &str = "--panel-top";
+const SAFE_MODE_FLAG: &str = "--safe-mode";
+const TEST_CONTROL_FLAG: &str = "--test-control";
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct CommandLineOptions {
+    no_desktop_windows: bool,
+    panel_top: bool,
+    safe_mode: bool,
+    test_control: bool,
+}
+
+impl CommandLineOptions {
+    fn parse(arguments: impl IntoIterator<Item = std::ffi::OsString>) -> Result<Self, String> {
+        let mut options = Self::default();
+        let arguments = arguments.into_iter();
+        for argument in arguments {
+            let argument = argument
+                .into_string()
+                .map_err(|_| "Nickel shell arguments must be valid UTF-8".to_string())?;
+            match argument.as_str() {
+                NO_DESKTOP_WINDOWS_FLAG => options.no_desktop_windows = true,
+                PANEL_TOP_FLAG => options.panel_top = true,
+                SAFE_MODE_FLAG => options.safe_mode = true,
+                TEST_CONTROL_FLAG => options.test_control = true,
+                _ => {
+                    return Err(format!(
+                        "unknown Nickel shell argument {argument:?}; supported acceptance flags: \
+                         {NO_DESKTOP_WINDOWS_FLAG}, {PANEL_TOP_FLAG}, {SAFE_MODE_FLAG}, \
+                         {TEST_CONTROL_FLAG}"
+                    ));
+                }
+            }
+        }
+        Ok(options)
+    }
+
+    fn shell_options(self) -> ShellOptions {
+        ShellOptions {
+            create_desktop_surfaces: !self.no_desktop_windows,
+            panel_edge: if self.panel_top {
+                PanelEdge::Top
+            } else {
+                PanelEdge::Bottom
+            },
+            bar_on_all_displays: true,
+        }
+    }
+}
+
+#[cfg(test)]
+mod command_line_tests {
+    use super::{CommandLineOptions, NO_DESKTOP_WINDOWS_FLAG, PANEL_TOP_FLAG, SAFE_MODE_FLAG};
+    use crate::winit_shell::{PanelEdge, ShellOptions};
+    use std::ffi::OsString;
+
+    fn parse(arguments: &[&str]) -> Result<CommandLineOptions, String> {
+        CommandLineOptions::parse(arguments.iter().map(OsString::from))
+    }
+
+    #[test]
+    fn production_defaults_create_desktops_and_place_panel_at_bottom() {
+        assert_eq!(parse(&[]).unwrap().shell_options(), ShellOptions::default());
+    }
+
+    #[test]
+    fn acceptance_flags_are_independent_and_composable() {
+        assert_eq!(
+            parse(&[NO_DESKTOP_WINDOWS_FLAG]).unwrap().shell_options(),
+            ShellOptions {
+                create_desktop_surfaces: false,
+                panel_edge: PanelEdge::Bottom,
+                bar_on_all_displays: true,
+            }
+        );
+        assert_eq!(
+            parse(&[PANEL_TOP_FLAG]).unwrap().shell_options(),
+            ShellOptions {
+                create_desktop_surfaces: true,
+                panel_edge: PanelEdge::Top,
+                bar_on_all_displays: true,
+            }
+        );
+        assert_eq!(
+            parse(&[NO_DESKTOP_WINDOWS_FLAG, PANEL_TOP_FLAG])
+                .unwrap()
+                .shell_options(),
+            ShellOptions {
+                create_desktop_surfaces: false,
+                panel_edge: PanelEdge::Top,
+                bar_on_all_displays: true,
+            }
+        );
+    }
+
+    #[test]
+    fn safe_mode_is_an_explicit_shell_startup_option() {
+        assert!(parse(&[SAFE_MODE_FLAG]).unwrap().safe_mode);
+        assert!(!parse(&[]).unwrap().safe_mode);
+    }
+
+    #[test]
+    fn unknown_arguments_fail_closed() {
+        let error = parse(&["--desktop-ish"]).unwrap_err();
+        assert!(error.contains("unknown Nickel shell argument"));
+        assert!(error.contains(NO_DESKTOP_WINDOWS_FLAG));
+        assert!(error.contains(PANEL_TOP_FLAG));
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
+fn p95_u64(samples: &[u64]) -> Option<u64> {
+    let mut samples = samples.to_vec();
+    if samples.is_empty() {
+        return None;
+    }
+    samples.sort_unstable();
+    let index = ((samples.len() * 95).div_ceil(100)).saturating_sub(1);
+    samples.get(index).copied()
+}
+
+fn codex_availability(
+    status: ConnectionStatus,
+    authenticated: bool,
+) -> Option<(FeatureInstallation, FeatureHealth)> {
+    match status {
+        ConnectionStatus::Loading => None,
+        ConnectionStatus::Unavailable => {
+            Some((FeatureInstallation::Missing, FeatureHealth::Failed))
+        }
+        ConnectionStatus::Incompatible => {
+            Some((FeatureInstallation::Incompatible, FeatureHealth::Failed))
+        }
+        ConnectionStatus::Disconnected => {
+            Some((FeatureInstallation::Installed, FeatureHealth::Failed))
+        }
+        ConnectionStatus::Ready if authenticated => {
+            Some((FeatureInstallation::Installed, FeatureHealth::Ready))
+        }
+        ConnectionStatus::Ready => Some((FeatureInstallation::Installed, FeatureHealth::SignedOut)),
+    }
+}
+
+pub fn codex_projection(
+    settings: &OptionalFeatureSettings,
+    known_installation: FeatureInstallation,
+    status: ConnectionStatus,
+    authenticated: bool,
+    reason: Option<String>,
+) -> CodexAvailabilityProjection {
+    let (installation, health) = codex_availability(status, authenticated)
+        .unwrap_or((known_installation, FeatureHealth::Loading));
+    CodexAvailabilityProjection::new(
+        FeatureSupport::Supported,
+        installation,
+        settings.codex_enabled,
+        health,
+        settings.codex_generation,
+        reason,
+    )
+}
+
+#[cfg(test)]
+mod allocation_summary_tests {
+    use nickel_codex_ui::ConnectionStatus;
+
+    use nickel_core::optional_features::{FeatureHealth, FeatureInstallation};
+
+    #[test]
+    fn allocation_p95_requires_samples_and_uses_nearest_rank() {
+        assert_eq!(super::p95_u64(&[]), None);
+        assert_eq!(super::p95_u64(&[9, 0, 1, 2, 3]), Some(9));
+        assert_eq!(super::p95_u64(&[0; 64]), Some(0));
+    }
+
+    #[test]
+    fn codex_backend_state_projects_truthful_shell_availability() {
+        assert_eq!(
+            super::codex_availability(ConnectionStatus::Loading, false),
+            None
+        );
+        assert_eq!(
+            super::codex_availability(ConnectionStatus::Unavailable, false),
+            Some((FeatureInstallation::Missing, FeatureHealth::Failed))
+        );
+        assert_eq!(
+            super::codex_availability(ConnectionStatus::Incompatible, false),
+            Some((FeatureInstallation::Incompatible, FeatureHealth::Failed))
+        );
+        assert_eq!(
+            super::codex_availability(ConnectionStatus::Ready, false),
+            Some((FeatureInstallation::Installed, FeatureHealth::SignedOut))
+        );
+        assert_eq!(
+            super::codex_availability(ConnectionStatus::Ready, true),
+            Some((FeatureInstallation::Installed, FeatureHealth::Ready))
+        );
+        assert_eq!(
+            super::codex_availability(ConnectionStatus::Disconnected, true),
+            Some((FeatureInstallation::Installed, FeatureHealth::Failed))
+        );
+    }
+
+    #[test]
+    fn preference_and_backend_state_remain_separate_in_shell_projection() {
+        let mut settings = nickel_core::optional_features::OptionalFeatureSettings {
+            codex_enabled: false,
+            codex_generation: 44,
+            ..Default::default()
+        };
+        let disabled = super::codex_projection(
+            &settings,
+            FeatureInstallation::Missing,
+            ConnectionStatus::Ready,
+            true,
+            None,
+        );
+        assert_eq!(disabled.installation, FeatureInstallation::Installed);
+        assert_eq!(
+            disabled.presentation(),
+            nickel_core::optional_features::CodexPresentation::Hidden
+        );
+        settings.codex_enabled = true;
+        let signed_out = super::codex_projection(
+            &settings,
+            FeatureInstallation::Installed,
+            ConnectionStatus::Ready,
+            false,
+            Some("Sign in".into()),
+        );
+        assert_eq!(signed_out.generation, 44);
+        assert_eq!(signed_out.health, FeatureHealth::SignedOut);
+        assert_eq!(
+            signed_out.presentation(),
+            nickel_core::optional_features::CodexPresentation::Recoverable
+        );
+        let loading = super::codex_projection(
+            &settings,
+            FeatureInstallation::Installed,
+            ConnectionStatus::Loading,
+            false,
+            None,
+        );
+        assert_eq!(loading.installation, FeatureInstallation::Installed);
+        assert_eq!(loading.health, FeatureHealth::Loading);
+        assert_eq!(
+            loading.presentation(),
+            nickel_core::optional_features::CodexPresentation::Recoverable
+        );
+    }
+}
+
+struct CodexSurfaces {
+    enabled: bool,
+    source: CodexSource,
+    project_menu_cwd: std::path::PathBuf,
+    project_menu_host: Option<EmbeddedUiSurface<ChatApplication>>,
+    project_menu_surface: Option<SurfaceId>,
+    chats: Vec<CodexChatSurface>,
+    writer_leases: WriterLeases,
+    installation: FeatureInstallation,
+    theme: twinkle_ui::SemanticTheme,
+}
+
+struct CodexChatSurface {
+    id: SurfaceId,
+    project_id: String,
+    host: EmbeddedUiSurface<ChatApplication>,
+    thread_id: Option<ThreadId>,
+    pending_thread: Option<ThreadId>,
+}
+
+struct CodexRuntimeInput {
+    enabled: bool,
+    generation: u64,
+    status: Option<ConnectionStatus>,
+    authenticated: bool,
+    active_windows: u32,
+    cache_entries: u32,
+    source_label: String,
+    diagnostic: Option<String>,
+    installation: FeatureInstallation,
+}
+
+fn codex_runtime_from(input: CodexRuntimeInput) -> OptionalFeatureRuntime {
+    if !input.enabled {
+        return OptionalFeatureRuntime {
+            codex_generation: input.generation,
+            codex_support: FeatureSupport::Supported,
+            codex_installation: input.installation,
+            source_label: input.source_label,
+            ..Default::default()
+        };
+    }
+    let (effective, health) = match input.status {
+        None | Some(ConnectionStatus::Loading) => {
+            (FeatureEffectiveState::Enabling, FeatureHealth::Loading)
+        }
+        Some(ConnectionStatus::Ready) if !input.authenticated => {
+            (FeatureEffectiveState::Enabled, FeatureHealth::SignedOut)
+        }
+        Some(ConnectionStatus::Ready) => (FeatureEffectiveState::Enabled, FeatureHealth::Ready),
+        Some(
+            ConnectionStatus::Unavailable
+            | ConnectionStatus::Disconnected
+            | ConnectionStatus::Incompatible,
+        ) => (FeatureEffectiveState::Rejected, FeatureHealth::Failed),
+    };
+    let owned = u32::from(input.status.is_some());
+    OptionalFeatureRuntime {
+        codex_generation: input.generation,
+        codex_effective: effective,
+        codex_health: health,
+        codex_support: FeatureSupport::Supported,
+        codex_installation: input.installation,
+        active_windows: input.active_windows,
+        background_workers: owned,
+        subscriptions: owned + input.active_windows,
+        // The one-pixel discovery UiHost is still retained even without a native menu window.
+        warm_surfaces: owned + input.active_windows,
+        cache_entries: input.cache_entries,
+        source_label: input.source_label,
+        diagnostic: input.diagnostic,
+        ..Default::default()
+    }
+}
+
+struct EmbeddedUiSurface<A: Application> {
+    host: UiHost<A>,
+    change_token: HostChangeToken,
+}
+
+#[cfg(any(test, target_os = "linux"))]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct EmbeddedControllerTransition {
+    open_keyboard: bool,
+    changed: bool,
+}
+
+fn poll_due_codex_hosts(
+    project_menu: Option<&mut EmbeddedUiSurface<ChatApplication>>,
+    chats: &mut [CodexChatSurface],
+    now: Instant,
+) -> (bool, Vec<SurfaceId>) {
+    let project_menu_changed = project_menu
+        .and_then(|host| host.poll_due(now))
+        .is_some_and(|outcome| outcome.changed);
+    let changed_chats = chats
+        .iter_mut()
+        .filter_map(|chat| {
+            chat.host
+                .poll_due(now)
+                .is_some_and(|outcome| outcome.changed)
+                .then_some(chat.id)
+        })
+        .collect();
+    (project_menu_changed, changed_chats)
+}
+
+impl<A: Application> EmbeddedUiSurface<A> {
+    fn new(application: A, width: u32, height: u32, now: Instant) -> Self {
+        Self {
+            host: UiHost::new_at(application, width, height, now),
+            change_token: HostChangeToken::default(),
+        }
+    }
+
+    fn application_mut(&mut self) -> &mut A {
+        self.host.application_mut()
+    }
+
+    fn commands(&self) -> &[twinkle_ui::backend::PaintCommand] {
+        self.host.commands()
+    }
+
+    fn retained_paint_damage(&self) -> Option<&[twinkle_ui::Rect]> {
+        self.host.retained_paint_damage()
+    }
+
+    #[cfg(test)]
+    fn accessibility_nodes(&self) -> &[twinkle_ui::AccessibilityNode] {
+        self.host.accessibility_nodes()
+    }
+
+    fn inspection(&self) -> twinkle_ui::HostInspection {
+        self.host.inspect()
+    }
+
+    #[cfg(test)]
+    fn normalized_input(
+        &mut self,
+        input: InputEvent,
+        clipboard_text: Option<String>,
+    ) -> HostEventOutcome {
+        self.step(HostBatch {
+            events: vec![HostEvent::Normalized {
+                input,
+                clipboard_text,
+            }],
+            ..HostBatch::default()
+        })
+    }
+
+    fn normalized_ingress(
+        &mut self,
+        event: HostEvent,
+        authority: twinkle_ui::NormalizedIngressAuthority,
+    ) -> HostEventOutcome {
+        self.step(HostBatch {
+            events: vec![event],
+            normalized_authorities: vec![authority],
+            ..HostBatch::default()
+        })
+    }
+
+    fn paste_clipboard_image(&mut self, width: u32, height: u32, rgba: &[u8]) -> bool {
+        self.host.paste_clipboard_image(width, height, rgba)
+    }
+
+    fn window_focus(&mut self, focused: bool) -> HostEventOutcome {
+        self.step(HostBatch {
+            window_focused: Some(focused),
+            ..HostBatch::default()
+        })
+    }
+
+    fn suspend(&mut self) -> HostEventOutcome {
+        self.step(HostBatch {
+            events: vec![HostEvent::Ui(twinkle_ui::UiEvent::Suspended)],
+            ..HostBatch::default()
+        })
+    }
+
+    fn step(&mut self, batch: HostBatch) -> HostEventOutcome {
+        let outcome = self.host.step(batch);
+        self.change_token = outcome.change_token;
+        outcome
+    }
+
+    fn deadline(&self) -> Option<Instant> {
+        self.host.next_deadline()
+    }
+
+    fn poll_due(&mut self, now: Instant) -> Option<HostEventOutcome> {
+        let deadline = self.host.next_deadline()?;
+        if now < deadline {
+            return None;
+        }
+        let outcome = self.step(HostBatch {
+            now: Some(now),
+            events: vec![HostEvent::Poll],
+            ..HostBatch::default()
+        });
+        Some(outcome)
+    }
+}
+
+#[cfg(any(test, target_os = "linux"))]
+fn step_embedded_codex_controller(
+    host: &mut EmbeddedUiSurface<ChatApplication>,
+    action: ControllerAction,
+) -> EmbeddedControllerTransition {
+    let outcome = host.step(HostBatch {
+        events: vec![HostEvent::Controller(action)],
+        ..HostBatch::default()
+    });
+    EmbeddedControllerTransition {
+        changed: outcome.changed,
+        open_keyboard: action == ControllerAction::Confirm
+            && outcome.text_input_active
+            && host.host.controller_targets_text_input(),
+    }
+}
+
+#[derive(Default)]
+struct WriterLeases(HashSet<ThreadId>);
+
+impl WriterLeases {
+    fn acquire(&mut self, thread: &ThreadId) -> bool {
+        self.0.insert(thread.clone())
+    }
+
+    fn release(&mut self, thread: &ThreadId) -> bool {
+        self.0.remove(thread)
+    }
+
+    #[cfg(test)]
+    fn contains(&self, thread: &ThreadId) -> bool {
+        self.0.contains(thread)
+    }
+}
+
+pub fn codex_project_application_id(project_id: Option<&str>, root: &Path) -> String {
+    let identity = project_id.map(str::as_bytes).map_or_else(
+        || {
+            root.components()
+                .filter_map(|component| match component {
+                    Component::Prefix(prefix) => {
+                        Some(prefix.as_os_str().to_string_lossy().into_owned())
+                    }
+                    Component::RootDir => Some(String::new()),
+                    Component::Normal(part) => Some(part.to_string_lossy().into_owned()),
+                    Component::ParentDir => Some("..".into()),
+                    Component::CurDir => None,
+                })
+                .collect::<Vec<_>>()
+                .join("/")
+                .into_bytes()
+        },
+        <[u8]>::to_vec,
+    );
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in identity {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("io.nickel.codex.project.{hash:016x}")
+}
+
+impl CodexSurfaces {
+    #[cfg(target_os = "windows")]
+    fn remote_runtime_state(&self, generation: u64) -> crate::windows_remote_codex::RuntimeState {
+        crate::windows_remote_codex::RuntimeState {
+            generation,
+            enabled: self.enabled && self.project_menu_host.is_some(),
+            active_chat_windows: self.chats.len() as u32,
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn active_chat_count(&self) -> usize {
+        self.chats.len()
+    }
+
+    #[cfg(target_os = "windows")]
+    fn installation(&self) -> FeatureInstallation {
+        self.installation
+    }
+
+    fn set_theme(&mut self, theme: twinkle_ui::SemanticTheme) -> bool {
+        if self.theme == theme {
+            return false;
+        }
+        self.theme = theme;
+        if let Some(host) = self.project_menu_host.as_mut()
+            && host.application_mut().set_theme(theme)
+        {
+            host.step(HostBatch {
+                events: vec![HostEvent::Poll],
+                ..HostBatch::default()
+            });
+        }
+        for chat in &mut self.chats {
+            if chat.host.application_mut().set_theme(theme) {
+                chat.host.step(HostBatch {
+                    events: vec![HostEvent::Poll],
+                    ..HostBatch::default()
+                });
+            }
+        }
+        true
+    }
+
+    fn next_deadline(&self) -> Option<Instant> {
+        self.project_menu_host
+            .as_ref()
+            .and_then(EmbeddedUiSurface::deadline)
+            .into_iter()
+            .chain(self.chats.iter().filter_map(|chat| chat.host.deadline()))
+            .min()
+    }
+
+    fn poll_due(&mut self, now: Instant) -> (bool, Vec<SurfaceId>) {
+        if !self.enabled {
+            return (false, Vec::new());
+        }
+        let (project_menu_changed, redraw) =
+            poll_due_codex_hosts(self.project_menu_host.as_mut(), &mut self.chats, now);
+        (project_menu_changed, redraw)
+    }
+
+    fn approval_notifications(
+        &self,
+    ) -> Vec<(
+        crate::live_shell::CodexApprovalOwner,
+        nickel_codex_ui::CodexApprovalNotification,
+    )> {
+        self.chats
+            .iter()
+            .flat_map(|chat| {
+                chat.host
+                    .host
+                    .application()
+                    .approval_notifications()
+                    .into_iter()
+                    .map(move |approval| {
+                        (
+                            crate::live_shell::CodexApprovalOwner::Winit(chat.id),
+                            approval,
+                        )
+                    })
+            })
+            .collect()
+    }
+
+    fn new(
+        settings: &OptionalFeatureSettings,
+        theme: twinkle_ui::SemanticTheme,
+    ) -> Result<Self, String> {
+        Ok(Self {
+            enabled: settings.codex_enabled,
+            source: settings.codex_source.clone(),
+            project_menu_cwd: std::env::current_dir().map_err(|error| error.to_string())?,
+            project_menu_host: None,
+            project_menu_surface: None,
+            chats: Vec::new(),
+            writer_leases: WriterLeases::default(),
+            // UI-host construction and a previous successful connection are not
+            // installation probes. The canonical selector will classify this
+            // source through its first connection snapshot.
+            installation: FeatureInstallation::Missing,
+            theme,
+        })
+    }
+
+    fn ensure_project_menu(&mut self) -> Result<(), String> {
+        if !self.enabled {
+            return Ok(());
+        }
+        if self.project_menu_host.is_some() {
+            return Ok(());
+        }
+        let mut application = shell_application_with_backend(
+            self.project_menu_cwd.clone(),
+            true,
+            None,
+            None,
+            self.backend_choice(),
+        )?;
+        application.set_theme(self.theme);
+        self.project_menu_host = Some(EmbeddedUiSurface::new(
+            application,
+            360,
+            420,
+            Instant::now(),
+        ));
+        Ok(())
+    }
+
+    fn set_enabled(&mut self, shell: &mut WinitShell, enabled: bool) -> bool {
+        if self.enabled == enabled {
+            return false;
+        }
+        self.enabled = enabled;
+        if !enabled {
+            self.project_menu_host = None;
+            self.writer_leases.0.clear();
+            for chat in self.chats.drain(..) {
+                shell.destroy_surface(chat.id);
+            }
+        }
+        true
+    }
+
+    fn apply_settings(
+        &mut self,
+        shell: &mut WinitShell,
+        settings: &OptionalFeatureSettings,
+    ) -> bool {
+        let source_changed = self.source != settings.codex_source;
+        let enabled_changed = self.enabled != settings.codex_enabled;
+        if !source_changed && !enabled_changed {
+            return false;
+        }
+        if self.enabled {
+            self.set_enabled(shell, false);
+        }
+        self.source = settings.codex_source.clone();
+        if source_changed {
+            self.installation = FeatureInstallation::Missing;
+        }
+        if settings.codex_enabled {
+            self.set_enabled(shell, true);
+        }
+        true
+    }
+
+    fn backend_choice(&self) -> Option<nickel_codex::BackendChoice> {
+        match &self.source {
+            CodexSource::CompatibleInstalled => Some(nickel_codex::BackendChoice::Installed),
+            CodexSource::Bundled => Some(nickel_codex::BackendChoice::Bundled),
+            CodexSource::ApprovedRemote => None,
+            CodexSource::Executable(path) => Some(nickel_codex::BackendChoice::Path(path.clone())),
+        }
+    }
+
+    fn runtime_snapshot(&mut self, generation: u64) -> OptionalFeatureRuntime {
+        let (status, authenticated, cache_entries, diagnostic) = self
+            .project_menu_host
+            .as_mut()
+            .map_or((None, false, 0, None), |host| {
+                let state = &host.application_mut().state;
+                (
+                    Some(state.status.clone()),
+                    state.account.authenticated,
+                    state.projects.len().saturating_add(state.threads.len()) as u32,
+                    matches!(
+                        state.status,
+                        ConnectionStatus::Unavailable
+                            | ConnectionStatus::Disconnected
+                            | ConnectionStatus::Incompatible
+                    )
+                    .then(|| state.provenance.clone()),
+                )
+            });
+        if let Some(status) = status.as_ref()
+            && let Some((installation, _)) = codex_availability(status.clone(), authenticated)
+        {
+            self.installation = installation;
+        }
+        codex_runtime_from(CodexRuntimeInput {
+            enabled: self.enabled,
+            generation,
+            status,
+            authenticated,
+            active_windows: self.chats.len() as u32,
+            cache_entries,
+            source_label: format!("{:?}", self.source),
+            diagnostic,
+            installation: self.installation,
+        })
+    }
+
+    fn present(&mut self, shell: &mut WinitShell, surface: SurfaceId) -> Result<(), HostFailure> {
+        if !self.enabled {
+            return Ok(());
+        }
+        if let Some(host) = self.host_mut(surface) {
+            shell
+                .present_with_damage(surface, host.commands(), host.retained_paint_damage())
+                .map_err(|detail| HostFailure {
+                    surface: format!("{surface:?}"),
+                    stage: HostFailureStage::Presenter,
+                    optional: false,
+                    detail,
+                })?;
+        }
+        Ok(())
+    }
+
+    fn host_mut(&mut self, surface: SurfaceId) -> Option<&mut EmbeddedUiSurface<ChatApplication>> {
+        if self.project_menu_surface == Some(surface) {
+            return self.project_menu_host.as_mut();
+        }
+        self.chats
+            .iter_mut()
+            .find(|chat| chat.id == surface)
+            .map(|chat| &mut chat.host)
+    }
+
+    fn remove(&mut self, shell: &mut WinitShell, surface: SurfaceId) {
+        if let Some(index) = self.chats.iter().position(|chat| chat.id == surface) {
+            let chat = self.chats.remove(index);
+            if let Some(thread) = chat.thread_id {
+                self.writer_leases.release(&thread);
+            }
+            if let Some(thread) = chat.pending_thread {
+                self.writer_leases.release(&thread);
+            }
+            shell.destroy_surface(surface);
+        }
+    }
+
+    fn resume_requests(&mut self, shell: &mut WinitShell) {
+        let owners = self
+            .chats
+            .iter()
+            .filter_map(|chat| {
+                chat.thread_id
+                    .as_ref()
+                    .map(|thread| (thread.clone(), chat.id))
+            })
+            .collect::<std::collections::HashMap<_, _>>();
+        for chat in &mut self.chats {
+            let requests = chat.host.application_mut().take_shell_requests();
+            for request in requests {
+                match request {
+                    ShellRequest::ResumeThread(thread) => {
+                        if chat.pending_thread.is_some() {
+                            continue;
+                        }
+                        if let Some(owner) = owners.get(&thread) {
+                            shell.show(*owner);
+                            shell.raise(*owner);
+                            chat.host.application_mut().report_resume_owner_activation();
+                            continue;
+                        }
+                        if chat
+                            .host
+                            .application_mut()
+                            .state
+                            .thread_runtime
+                            .get(&thread)
+                            .is_some_and(|runtime| {
+                                runtime.status == nickel_codex::ThreadRuntimeStatus::Active
+                            })
+                        {
+                            chat.host.application_mut().report_resume_rejection(
+                                "Conversation is active outside this Nickel session",
+                            );
+                            continue;
+                        }
+                        if !chat.host.application_mut().prepare_shell_resume(&thread) {
+                            continue;
+                        }
+                        if !self.writer_leases.acquire(&thread) {
+                            chat.host.application_mut().report_resume_rejection(format!(
+                                "Conversation {} already has a Nickel writer",
+                                thread.0
+                            ));
+                            continue;
+                        }
+                        if let Err(error) =
+                            chat.host.application_mut().resume_thread(thread.clone())
+                        {
+                            self.writer_leases.release(&thread);
+                            chat.host.application_mut().report_resume_rejection(error);
+                            continue;
+                        }
+                        chat.pending_thread = Some(thread);
+                    }
+                    ShellRequest::ResumeSucceeded(thread)
+                        if chat.pending_thread.as_ref() == Some(&thread) =>
+                    {
+                        if let Some(previous) = chat.thread_id.replace(thread) {
+                            self.writer_leases.release(&previous);
+                        }
+                        chat.pending_thread = None;
+                    }
+                    ShellRequest::ResumeFailed(thread) => {
+                        if chat.pending_thread.as_ref() == Some(&thread) {
+                            self.writer_leases.release(&thread);
+                            chat.pending_thread = None;
+                        } else if chat.thread_id.as_ref() == Some(&thread) {
+                            self.writer_leases.release(&thread);
+                            chat.thread_id = None;
+                        }
+                    }
+                    ShellRequest::ResumeSucceeded(_) => {}
+                    ShellRequest::OpenProject { .. } | ShellRequest::CloseProjectMenu => {}
+                }
+            }
+        }
+    }
+
+    fn open_project(
+        &mut self,
+        shell: &mut WinitShell,
+        cwd: std::path::PathBuf,
+        project_id: String,
+        name: String,
+        initial_thread: Option<ThreadId>,
+    ) -> Result<(), String> {
+        if !self.enabled {
+            return Err("Codex integration is disabled".into());
+        }
+        if let Some(chat) = self.chats.iter().find(|chat| {
+            chat.project_id == project_id
+                && (initial_thread.is_some() && chat.thread_id == initial_thread
+                    || initial_thread.is_none() && chat.thread_id.is_none())
+        }) {
+            shell.show(chat.id);
+            shell.raise(chat.id);
+            return Ok(());
+        }
+        if let Some(thread) = &initial_thread
+            && !self.writer_leases.acquire(thread)
+        {
+            return Err(format!("thread {} already has a Nickel writer", thread.0));
+        }
+        let result = (|| {
+            let title = nickel_i18n::system_value("ui-codex-surface-title", "name", &name);
+            let application_id = codex_project_application_id(Some(&project_id), &cwd);
+            let id = shell.create_codex_chat_surface(&title, &application_id)?;
+            let (width, height) = shell
+                .surface(id)
+                .map(|surface| surface.window().size())
+                .unwrap_or((1120, 760));
+            let mut application = shell_application_with_backend(
+                cwd,
+                false,
+                initial_thread.clone(),
+                Some(project_id.clone()),
+                self.backend_choice(),
+            )?;
+            application.set_theme(self.theme);
+            let host = EmbeddedUiSurface::new(application, width, height, Instant::now());
+            self.chats.push(CodexChatSurface {
+                id,
+                project_id,
+                host,
+                thread_id: initial_thread.clone(),
+                pending_thread: None,
+            });
+            self.present(shell, id)
+                .map_err(|error| format!("{error:?}"))?;
+            shell.show(id);
+            Ok(())
+        })();
+        if result.is_err()
+            && let Some(thread) = &initial_thread
+        {
+            self.writer_leases.release(thread);
+        }
+        result
+    }
+
+    fn open_project_by_id(
+        &mut self,
+        shell: &mut WinitShell,
+        project_id: &str,
+    ) -> Result<(), String> {
+        let (project, initial_thread) = {
+            let state = &self
+                .project_menu_host
+                .as_mut()
+                .ok_or_else(|| "Codex project data is still loading".to_owned())?
+                .application_mut()
+                .state;
+            if state.status != nickel_codex_ui::ConnectionStatus::Ready
+                || !state.account.authenticated
+            {
+                return Err("Codex project backend is unavailable".to_owned());
+            }
+            let project = state
+                .projects
+                .iter()
+                .find(|project| project.id == project_id)
+                .cloned()
+                .ok_or_else(|| format!("Codex project {project_id} is unavailable"))?;
+            let initial_thread = state
+                .threads
+                .iter()
+                .filter(|thread| {
+                    state
+                        .thread_runtime
+                        .get(&thread.id)
+                        .and_then(|runtime| runtime.project_id.as_deref())
+                        .map_or_else(
+                            || {
+                                thread.cwd.as_ref().is_some_and(|cwd| {
+                                    project
+                                        .roots
+                                        .iter()
+                                        .any(|root| cwd == root || cwd.starts_with(root))
+                                })
+                            },
+                            |id| id == project.id,
+                        )
+                })
+                .max_by_key(|thread| thread.last_used_at)
+                .map(|thread| thread.id.clone());
+            (project, initial_thread)
+        };
+        let cwd = project
+            .roots
+            .first()
+            .cloned()
+            .ok_or_else(|| format!("Codex project {} has no root", project.id))?;
+        self.open_project(shell, cwd, project.id, project.name, initial_thread)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct DomainSubscriptionSchedule {
+    minimum: Duration,
+    maximum: Duration,
+    interval: Duration,
+    deadline: Instant,
+    change_token: u64,
+}
+
+impl DomainSubscriptionSchedule {
+    fn new(now: Instant, minimum: Duration, maximum: Duration) -> Self {
+        Self {
+            minimum,
+            maximum: maximum.max(minimum),
+            interval: minimum,
+            deadline: now + minimum,
+            change_token: 0,
+        }
+    }
+
+    fn deadline(self) -> Instant {
+        self.deadline
+    }
+
+    fn is_due(self, now: Instant) -> bool {
+        now >= self.deadline
+    }
+
+    fn observed(&mut self, now: Instant, changed: bool) {
+        if changed {
+            self.change_token = self.change_token.saturating_add(1);
+            self.interval = self.minimum;
+        } else {
+            self.interval = self.interval.saturating_mul(2).min(self.maximum);
+        }
+        self.deadline = now + self.interval;
+    }
+}
+
+fn scene_for_native_surface(
+    shell: &WinitShell,
+    state: &mut LiveShell,
+    id: SurfaceId,
+    width: u32,
+    height: u32,
+) -> Option<(
+    Vec<twinkle_ui::backend::PaintCommand>,
+    Option<Vec<twinkle_ui::Rect>>,
+)> {
+    let surface = shell.surface(id)?;
+    let plugin_key = surface.plugin_key().cloned();
+    let commands = if let Some(key) = plugin_key.as_ref() {
+        state.plugin_surface_scene_for_output(key, Some(surface.output_name()), width, height)
+    } else if surface.role() == SurfaceRole::Panel {
+        return None;
+    } else {
+        Some(state.scene(surface.role(), width, height))
+    };
+    if surface.role() == SurfaceRole::Panel
+        && let Some(title) = surface
+            .plugin_key()
+            .and_then(|key| state.plugin_panel_title(key))
+    {
+        shell.set_surface_title(id, title);
+    }
+    let damage = plugin_key.as_ref().and_then(|key| {
+        state
+            .plugin_surface_retained_paint_damage(key)
+            .map(<[_]>::to_vec)
+    });
+    commands.map(|commands| (commands, damage))
+}
+
+fn scene_change_token_for_native_surface(
+    shell: &WinitShell,
+    state: &LiveShell,
+    id: SurfaceId,
+    role: SurfaceRole,
+) -> Option<HostChangeToken> {
+    if let Some(key) = shell.surface(id)?.plugin_key() {
+        state.plugin_surface_change_token(key)
+    } else {
+        state.scene_change_token(role)
+    }
+}
+
+fn render_all(shell: &mut WinitShell, state: &mut LiveShell) -> Result<(), String> {
+    sync_desktop_outputs(shell, state);
+    let surfaces = shell
+        .surfaces()
+        .map(|surface| {
+            let (logical_width, logical_height) = surface.window().size();
+            (
+                surface.id(),
+                surface.role(),
+                surface.is_taskbar_plugin(),
+                surface.output_name().to_owned(),
+                logical_width,
+                logical_height,
+            )
+        })
+        .collect::<Vec<_>>();
+    for (id, role, taskbar, output, logical_width, logical_height) in surfaces {
+        if matches!(role, SurfaceRole::CodexChat | SurfaceRole::CodexProjectMenu) {
+            continue;
+        }
+        if !state.native_surface_visible(
+            role,
+            shell.surface(id).and_then(|surface| surface.plugin_key()),
+        ) {
+            continue;
+        }
+        if taskbar {
+            state.set_panel_output(output);
+        } else if role == SurfaceRole::Desktop
+            && let Some((origin, scale)) = state.desktop_output_projection(&output)
+        {
+            state.set_desktop_output(output, origin.x, origin.y, scale);
+        }
+        let Some((commands, damage)) =
+            scene_for_native_surface(shell, state, id, logical_width, logical_height)
+        else {
+            continue;
+        };
+        if let Some(token) = scene_change_token_for_native_surface(shell, state, id, role) {
+            shell.present_host_frame_with_damage(id, token, &commands, damage.as_deref())?;
+        } else {
+            shell.present_with_damage(id, &commands, damage.as_deref())?;
+        }
+    }
+    shell.set_plugin_surfaces(
+        state.shell_fixed_surface_keys(),
+        state.shell_panel_surfaces(),
+    )?;
+    Ok(())
+}
+
+fn render_role(
+    shell: &mut WinitShell,
+    state: &mut LiveShell,
+    wanted: SurfaceRole,
+) -> Result<(), String> {
+    if wanted == SurfaceRole::Desktop {
+        sync_desktop_outputs(shell, state);
+    }
+    let surfaces = shell
+        .surfaces()
+        .filter(|surface| {
+            surface.role() == wanted
+                || (wanted == SurfaceRole::Taskbar && surface.is_taskbar_plugin())
+                || (wanted == SurfaceRole::ControlCenter
+                    && surface.plugin_key()
+                        == Some(&state.active_shell_surface_key("quick-settings")))
+        })
+        .map(|surface| {
+            let (logical_width, logical_height) = surface.window().size();
+            (
+                surface.id(),
+                surface.role(),
+                surface.is_taskbar_plugin(),
+                surface.output_name().to_owned(),
+                logical_width,
+                logical_height,
+            )
+        })
+        .collect::<Vec<_>>();
+    for (id, role, taskbar, output, logical_width, logical_height) in surfaces {
+        if !state.native_surface_visible(
+            role,
+            shell.surface(id).and_then(|surface| surface.plugin_key()),
+        ) {
+            continue;
+        }
+        if taskbar {
+            state.set_panel_output(output);
+        } else if role == SurfaceRole::Desktop
+            && let Some((origin, scale)) = state.desktop_output_projection(&output)
+        {
+            state.set_desktop_output(output, origin.x, origin.y, scale);
+        }
+        let Some((commands, damage)) =
+            scene_for_native_surface(shell, state, id, logical_width, logical_height)
+        else {
+            continue;
+        };
+        if let Some(token) = scene_change_token_for_native_surface(shell, state, id, role) {
+            shell.present_host_frame_with_damage(id, token, &commands, damage.as_deref())?;
+        } else {
+            shell.present_with_damage(id, &commands, damage.as_deref())?;
+        }
+    }
+    if wanted == SurfaceRole::Panel {
+        shell.set_plugin_surfaces(
+            state.shell_fixed_surface_keys(),
+            state.shell_panel_surfaces(),
+        )?;
+    }
+    Ok(())
+}
+
+fn sync_desktop_outputs(shell: &WinitShell, state: &mut LiveShell) {
+    let configured_primary = state.primary_output_name();
+    let reserved_outputs = if state.taskbar_reservation_height() > 0 {
+        shell
+            .surfaces()
+            .filter(|surface| surface.is_taskbar_plugin())
+            .map(|surface| surface.output_name().to_owned())
+            .collect()
+    } else {
+        HashSet::new()
+    };
+    let outputs = shell
+        .surfaces()
+        .filter(|surface| surface.role() == SurfaceRole::Desktop)
+        .filter_map(|surface| {
+            let geometry = shell.surface_display_geometry(surface.id())?;
+            Some((surface.output_name().to_owned(), geometry))
+        })
+        .collect();
+    let outputs = desktop_logical_outputs(
+        outputs,
+        configured_primary.as_deref(),
+        &reserved_outputs,
+        state.taskbar_reservation_height() as f32,
+        shell.panel_edge(),
+    );
+    state.set_desktop_outputs(outputs);
+}
+
+fn desktop_logical_outputs(
+    mut facts: Vec<(String, winit_shell::DisplayGeometry)>,
+    configured_primary: Option<&str>,
+    reserved_outputs: &HashSet<String>,
+    taskbar_height: f32,
+    panel_edge: PanelEdge,
+) -> Vec<nickel_file::desktop::DesktopOutput> {
+    facts.sort_by(|left, right| left.0.cmp(&right.0));
+    facts.dedup_by(|left, right| left.0 == right.0);
+    if facts.is_empty() {
+        return Vec::new();
+    }
+    let primary = configured_primary
+        .and_then(|wanted| facts.iter().position(|(name, _)| name == wanted))
+        .unwrap_or(0);
+    let mut origins = vec![None; facts.len()];
+    let anchor = facts[primary].1;
+    origins[primary] = Some((
+        anchor.x as f32 / anchor.scale,
+        anchor.y as f32 / anchor.scale,
+    ));
+
+    let overlaps = |a0: i64, a1: i64, b0: i64, b1: i64| a0 < b1 && b0 < a1;
+    loop {
+        let mut advanced = false;
+        for placed in 0..facts.len() {
+            let Some((logical_x, logical_y)) = origins[placed] else {
+                continue;
+            };
+            let a = facts[placed].1;
+            let ax = i64::from(a.x);
+            let ay = i64::from(a.y);
+            let ar = ax + i64::from(a.width);
+            let ab = ay + i64::from(a.height);
+            for candidate in 0..facts.len() {
+                if origins[candidate].is_some() {
+                    continue;
+                }
+                let b = facts[candidate].1;
+                let bx = i64::from(b.x);
+                let by = i64::from(b.y);
+                let br = bx + i64::from(b.width);
+                let bb = by + i64::from(b.height);
+                let adjacent = if a.x == b.x && a.y == b.y {
+                    Some((logical_x, logical_y))
+                } else if ar.abs_diff(bx) <= 1 && overlaps(ay, ab, by, bb) {
+                    Some((
+                        logical_x + a.width as f32 / a.scale,
+                        logical_y + (by - ay) as f32 / a.scale,
+                    ))
+                } else if br.abs_diff(ax) <= 1 && overlaps(ay, ab, by, bb) {
+                    Some((
+                        logical_x - b.width as f32 / b.scale,
+                        logical_y + (by - ay) as f32 / a.scale,
+                    ))
+                } else if ab.abs_diff(by) <= 1 && overlaps(ax, ar, bx, br) {
+                    Some((
+                        logical_x + (bx - ax) as f32 / a.scale,
+                        logical_y + a.height as f32 / a.scale,
+                    ))
+                } else if bb.abs_diff(ay) <= 1 && overlaps(ax, ar, bx, br) {
+                    Some((
+                        logical_x + (bx - ax) as f32 / a.scale,
+                        logical_y - b.height as f32 / b.scale,
+                    ))
+                } else {
+                    None
+                };
+                if let Some(origin) = adjacent {
+                    origins[candidate] = Some(origin);
+                    advanced = true;
+                }
+            }
+        }
+        if !advanced {
+            break;
+        }
+    }
+
+    let anchor_origin = origins[primary].expect("primary origin is initialized");
+    facts
+        .into_iter()
+        .enumerate()
+        .map(|(index, (id, geometry))| {
+            let (x, y) = origins[index].unwrap_or_else(|| {
+                (
+                    anchor_origin.0
+                        + (i64::from(geometry.x) - i64::from(anchor.x)) as f32 / anchor.scale,
+                    anchor_origin.1
+                        + (i64::from(geometry.y) - i64::from(anchor.y)) as f32 / anchor.scale,
+                )
+            });
+            let reservation = if reserved_outputs.contains(&id) {
+                taskbar_height.min(geometry.height as f32 / geometry.scale)
+            } else {
+                0.0
+            };
+            nickel_file::desktop::DesktopOutput {
+                id,
+                primary: index == primary,
+                work_area: nickel_file::desktop::Rect {
+                    x,
+                    y: y + if panel_edge == PanelEdge::Top {
+                        reservation
+                    } else {
+                        0.0
+                    },
+                    width: geometry.width as f32 / geometry.scale,
+                    height: (geometry.height as f32 / geometry.scale - reservation).max(1.0),
+                },
+                scale: geometry.scale,
+            }
+        })
+        .collect()
+}
+
+fn prewarm_role(
+    shell: &mut WinitShell,
+    state: &mut LiveShell,
+    wanted: SurfaceRole,
+) -> Result<(), String> {
+    let surfaces = shell
+        .surfaces()
+        .filter(|surface| surface.role() == wanted)
+        .map(|surface| {
+            let (logical_width, logical_height) = surface.window().size();
+            (surface.id(), logical_width, logical_height)
+        })
+        .collect::<Vec<_>>();
+    for (id, logical_width, logical_height) in surfaces {
+        let Some((commands, damage)) =
+            scene_for_native_surface(shell, state, id, logical_width, logical_height)
+        else {
+            continue;
+        };
+        if let Some(token) = scene_change_token_for_native_surface(shell, state, id, wanted) {
+            shell.present_host_frame_with_damage(id, token, &commands, damage.as_deref())?;
+        } else {
+            shell.present_with_damage(id, &commands, damage.as_deref())?;
+        }
+    }
+    Ok(())
+}
+
+fn sync_visibility(shell: &mut WinitShell, state: &mut LiveShell) {
+    let surfaces = shell
+        .surfaces()
+        .map(|surface| (surface.id(), surface.role(), surface.plugin_key().cloned()))
+        .collect::<Vec<_>>();
+    for (id, role, plugin) in surfaces {
+        #[cfg(target_os = "windows")]
+        if role == SurfaceRole::TrustedControl {
+            continue;
+        }
+        #[cfg(target_os = "linux")]
+        if role == SurfaceRole::Launcher {
+            continue;
+        }
+        set_surface_visibility(
+            shell,
+            id,
+            role,
+            state.native_surface_visible(role, plugin.as_ref()),
+        );
+    }
+    #[cfg(target_os = "windows")]
+    if let Some(key) = state.take_pending_plugin_surface_focus() {
+        shell.raise_plugin_surface(&key);
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn sync_panel_popover_anchor(shell: &WinitShell, state: &LiveShell) {
+    let preferred = match shell.panel_edge() {
+        PanelEdge::Top => nickel_session_protocol::AnchorSide::Below,
+        PanelEdge::Bottom => nickel_session_protocol::AnchorSide::Above,
+    };
+    let Some((role, anchor)) = state.popover_anchor(preferred) else {
+        return;
+    };
+    if role == nickel_session_protocol::ShellRole::ControlCenter
+        && state.native_surface_visible(
+            SurfaceRole::Panel,
+            Some(&state.active_shell_surface_key("quick-settings")),
+        )
+    {
+        let _ = state.dispatch_session_command(
+            "place-anchored-plugin-popover",
+            platform::ShellCommand::ShowAnchoredPluginSurface {
+                key: state.active_shell_surface_key("quick-settings"),
+                anchor,
+            },
+        );
+        return;
+    }
+    let _ = state.dispatch_session_command(
+        "place-anchored-shell-popover",
+        platform::ShellCommand::ShowAnchoredShellRole { role, anchor },
+    );
+}
+
+#[cfg(not(target_os = "linux"))]
+fn sync_panel_popover_anchor(_shell: &WinitShell, _state: &LiveShell) {}
+
+fn set_surface_visibility(shell: &mut WinitShell, id: SurfaceId, role: SurfaceRole, visible: bool) {
+    let changed = if visible {
+        shell.show(id)
+    } else {
+        shell.hide(id)
+    };
+    #[cfg(target_os = "linux")]
+    if changed
+        && let Some(role) = session_visibility_role(role)
+        && let Err(error) = session_host::SessionHost::dispatch(
+            &session_host::PlatformSessionHost,
+            platform::ShellCommand::SetShellRoleVisible { role, visible },
+        )
+    {
+        tracing::warn!(?role, visible, %error, "failed to reconcile compositor shell visibility");
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = (changed, role);
+}
+
+#[cfg(target_os = "linux")]
+fn session_visibility_role(role: SurfaceRole) -> Option<nickel_session_protocol::ShellRole> {
+    use nickel_session_protocol::ShellRole;
+    match role {
+        SurfaceRole::ControlCenter => Some(ShellRole::ControlCenter),
+        SurfaceRole::Notification => Some(ShellRole::Notification),
+        SurfaceRole::VolumeOsd => Some(ShellRole::VolumeOsd),
+        SurfaceRole::WindowPreview => Some(ShellRole::Preview),
+        SurfaceRole::WindowContextMenu => Some(ShellRole::ContextMenu),
+        SurfaceRole::CodexProjectMenu => Some(ShellRole::ProjectMenu),
+        SurfaceRole::Screenshot => Some(ShellRole::Screenshot),
+        SurfaceRole::OnScreenKeyboard => Some(ShellRole::OnScreenKeyboard),
+        SurfaceRole::Desktop
+        | SurfaceRole::Taskbar
+        | SurfaceRole::Panel
+        | SurfaceRole::Launcher
+        | SurfaceRole::Lock
+        | SurfaceRole::CodexChat => None,
+    }
+}
+
+fn focus_visible_overlay(shell: &mut WinitShell, state: &LiveShell) {
+    for role in [
+        SurfaceRole::Lock,
+        SurfaceRole::Launcher,
+        SurfaceRole::ControlCenter,
+        SurfaceRole::WindowPreview,
+        SurfaceRole::Screenshot,
+        SurfaceRole::CodexProjectMenu,
+    ] {
+        #[cfg(target_os = "linux")]
+        if role == SurfaceRole::Launcher {
+            continue;
+        }
+        #[cfg(target_os = "windows")]
+        if role == SurfaceRole::WindowPreview {
+            continue;
+        }
+        if state.native_surface_visible(role, None) {
+            shell.raise_role(role);
+        }
+    }
+    #[cfg(target_os = "windows")]
+    if state.native_surface_visible(
+        SurfaceRole::Panel,
+        Some(&state.active_shell_surface_key("quick-settings")),
+    ) {
+        shell.raise_plugin_surface(&state.active_shell_surface_key("quick-settings"));
+    }
+}
+
+fn handle_codex_event(
+    codex: &mut CodexSurfaces,
+    shell: &mut WinitShell,
+    event: &ShellEvent,
+    state: &mut LiveShell,
+) -> Result<bool, String> {
+    let surface = match event {
+        ShellEvent::Input { surface, .. }
+        | ShellEvent::FocusChanged { surface, .. }
+        | ShellEvent::LogicalResize { surface, .. }
+        | ShellEvent::PixelResize { surface, .. }
+        | ShellEvent::Shown(surface)
+        | ShellEvent::Hidden(surface)
+        | ShellEvent::Redraw(surface)
+        | ShellEvent::CloseRequested(surface) => *surface,
+        _ => return Ok(false),
+    };
+    if !shell.surface(surface).is_some_and(|entry| {
+        matches!(
+            entry.role(),
+            SurfaceRole::CodexChat | SurfaceRole::CodexProjectMenu
+        )
+    }) {
+        return Ok(false);
+    }
+    let menu = shell
+        .surface(surface)
+        .is_some_and(|entry| entry.role() == SurfaceRole::CodexProjectMenu);
+    if menu {
+        if !codex.enabled || codex.project_menu_host.is_none() {
+            return Ok(true);
+        }
+        codex.project_menu_surface = Some(surface);
+    }
+    if matches!(event, ShellEvent::FocusChanged { focused: false, .. }) {
+        shell.stop_text_input(surface);
+    }
+    if matches!(event, ShellEvent::CloseRequested(_)) {
+        shell.stop_text_input(surface);
+        if menu {
+            state.hide_overlay(SurfaceRole::CodexProjectMenu);
+            sync_visibility(shell, state);
+        } else {
+            codex.remove(shell, surface);
+        }
+        return Ok(true);
+    }
+    if matches!(event, ShellEvent::Hidden(_)) {
+        shell.stop_text_input(surface);
+        if let Some(host) = codex.host_mut(surface) {
+            host.suspend();
+        }
+        return Ok(true);
+    }
+    if matches!(event, ShellEvent::Shown(_)) {
+        codex
+            .present(shell, surface)
+            .map_err(|error| format!("{error:?}"))?;
+        return Ok(true);
+    }
+    if matches!(
+        event,
+        ShellEvent::LogicalResize { .. } | ShellEvent::PixelResize { .. }
+    ) {
+        let (width, height) = shell
+            .surface(surface)
+            .map(|entry| entry.window().size())
+            .unwrap_or((1, 1));
+        if let Some(host) = codex.host_mut(surface) {
+            host.step(HostBatch {
+                surface_size: Some((width, height)),
+                ..HostBatch::default()
+            });
+            codex
+                .present(shell, surface)
+                .map_err(|error| format!("{error:?}"))?;
+        }
+        return Ok(true);
+    }
+    let outcome = match event {
+        ShellEvent::Input { event, .. } => {
+            let image_pasted = if is_clipboard_paste(event) {
+                shell
+                    .clipboard_image()
+                    .is_some_and(|(width, height, bytes)| {
+                        codex
+                            .host_mut(surface)
+                            .expect("Codex host exists")
+                            .paste_clipboard_image(width, height, &bytes)
+                    })
+            } else {
+                false
+            };
+            if image_pasted {
+                HostEventOutcome {
+                    changed: true,
+                    ..HostEventOutcome::default()
+                }
+            } else {
+                let host = codex.host_mut(surface).expect("Codex host exists");
+                let (ingress, authority) = crate::live_shell::internal_normalized_ingress(
+                    event.clone(),
+                    shell.clipboard_text(),
+                    "codex",
+                    host.inspection(),
+                    None,
+                );
+                host.normalized_ingress(ingress, authority)
+            }
+        }
+        ShellEvent::FocusChanged { focused, .. } => codex
+            .host_mut(surface)
+            .expect("Codex host exists")
+            .window_focus(*focused),
+        _ => HostEventOutcome::default(),
+    };
+    if matches!(
+        event,
+        ShellEvent::Input { .. } | ShellEvent::FocusChanged { .. }
+    ) {
+        if outcome.text_input_active {
+            shell.start_text_input(surface);
+        } else {
+            shell.stop_text_input(surface);
+        }
+    }
+    for failure in &outcome.failures {
+        tracing::warn!(
+            ?failure,
+            "embedded UI transition reported recoverable failure"
+        );
+    }
+    if let Some(text) = outcome.clipboard_text {
+        shell.set_clipboard_text(&text);
+    }
+    if outcome.changed {
+        codex
+            .present(shell, surface)
+            .map_err(|error| format!("{error:?}"))?;
+    }
+    if menu {
+        let requests = codex
+            .project_menu_host
+            .as_mut()
+            .map(|host| host.application_mut().take_shell_requests())
+            .unwrap_or_default();
+        for request in requests {
+            if matches!(request, ShellRequest::CloseProjectMenu) {
+                state.hide_overlay(SurfaceRole::CodexProjectMenu);
+                sync_visibility(shell, state);
+            }
+            if let ShellRequest::OpenProject { project_id, .. } = request {
+                match codex.open_project_by_id(shell, &project_id) {
+                    Ok(()) => {
+                        state.hide_overlay(SurfaceRole::CodexProjectMenu);
+                        sync_visibility(shell, state);
+                    }
+                    Err(error) => tracing::warn!(%error,"native project selection rejected"),
+                }
+            }
+        }
+    }
+    codex.resume_requests(shell);
+    Ok(true)
+}
+
+fn handle_shell_input(
+    shell: &mut WinitShell,
+    state: &mut LiveShell,
+    surface: SurfaceId,
+    event: InputEvent,
+    hover_repaint: &mut Option<(SurfaceRole, Instant)>,
+) -> Result<(), String> {
+    let Some(role) = shell.surface(surface).map(|entry| entry.role()) else {
+        return Ok(());
+    };
+    if shell
+        .surface(surface)
+        .is_some_and(|entry| entry.is_taskbar_plugin())
+        && let Some(output) = shell
+            .surface(surface)
+            .map(|entry| entry.output_name().to_owned())
+    {
+        state.set_panel_output(output);
+    }
+    if shell
+        .surface(surface)
+        .is_some_and(|entry| entry.is_desktop_surface())
+    {
+        let coalesce_motion = matches!(&event, InputEvent::Pointer(PointerEvent::Motion { .. }));
+        if !select_desktop_surface_for_input(shell, state, surface) {
+            return Ok(());
+        }
+        let changed = state.desktop_input(event);
+        if changed {
+            if coalesce_motion {
+                *hover_repaint = Some((
+                    SurfaceRole::Desktop,
+                    Instant::now() + Duration::from_millis(16),
+                ));
+            } else {
+                *hover_repaint = None;
+                render_role(shell, state, SurfaceRole::Desktop)?;
+            }
+        }
+        return Ok(());
+    }
+    if role == SurfaceRole::Desktop {
+        return Ok(());
+    }
+    if role == SurfaceRole::Lock {
+        let (width, height) = shell
+            .surface(surface)
+            .map(|entry| entry.window().size())
+            .unwrap_or_default();
+        if state.lock_host_input(event, width, height) {
+            render_role(shell, state, SurfaceRole::Lock)?;
+        }
+        return Ok(());
+    }
+    if matches!(role, SurfaceRole::Panel | SurfaceRole::Taskbar) {
+        let Some(entry) = shell.surface(surface) else {
+            return Ok(());
+        };
+        if !entry
+            .plugin_key()
+            .is_some_and(|key| state.plugin_surface_matches(key))
+        {
+            return Ok(());
+        }
+        let (width, height) = entry.window().size();
+        let key = entry.plugin_key().unwrap().clone();
+        let taskbar = entry.is_taskbar_plugin();
+        let taskbar_motion =
+            taskbar && matches!(&event, InputEvent::Pointer(PointerEvent::Motion { .. }));
+        if taskbar {
+            if matches!(
+                &event,
+                InputEvent::Pointer(PointerEvent::Button {
+                    edge: KeyEdge::Pressed,
+                    ..
+                }) | InputEvent::Touch(twinkle_input::TouchEvent::Ended { .. })
+            ) {
+                shell.set_active_output_from_surface(surface);
+            }
+            if let Some(display) = shell.surface_display_geometry(surface) {
+                state.set_panel_origin_x(display.x);
+                state.set_panel_origin_y(display.y);
+            }
+        }
+        let plugin_surfaces_before = state.shell_panel_surfaces();
+        if state.plugin_panel_host_input_for(&key, event, width, height) {
+            let plugin_surfaces_after = state.shell_panel_surfaces();
+            if plugin_surfaces_after != plugin_surfaces_before {
+                shell
+                    .set_plugin_surfaces(state.shell_fixed_surface_keys(), plugin_surfaces_after)?;
+            }
+            if taskbar {
+                state.sync_transient_overlays();
+            }
+            sync_visibility(shell, state);
+            if taskbar {
+                sync_panel_popover_anchor(shell, state);
+            }
+            if taskbar_motion {
+                *hover_repaint = Some((
+                    SurfaceRole::Taskbar,
+                    Instant::now() + Duration::from_millis(24),
+                ));
+            } else {
+                render_role(shell, state, role)?;
+            }
+            render_role(shell, state, SurfaceRole::Launcher)?;
+            if taskbar {
+                render_role(shell, state, SurfaceRole::ControlCenter)?;
+                render_role(shell, state, SurfaceRole::WindowPreview)?;
+                render_role(shell, state, SurfaceRole::WindowContextMenu)?;
+                if !taskbar_motion {
+                    focus_visible_overlay(shell, state);
+                }
+            }
+        }
+        return Ok(());
+    }
+    if role == SurfaceRole::OnScreenKeyboard {
+        let (width, height) = shell
+            .surface(surface)
+            .map(|entry| entry.window().size())
+            .unwrap_or_default();
+        if state.keyboard_host_input(event, width, height) {
+            sync_visibility(shell, state);
+            render_role(shell, state, role)?;
+        }
+        return Ok(());
+    }
+
+    if role == SurfaceRole::WindowPreview {
+        let outcome = state.preview_host_input(event);
+        for failure in &outcome.failures {
+            eprintln!("window preview host failure: {failure:?}");
+        }
+        if outcome.changed {
+            sync_visibility(shell, state);
+            state.sync_transient_overlays();
+            render_role(shell, state, SurfaceRole::WindowPreview)?;
+            render_role(shell, state, SurfaceRole::WindowContextMenu)?;
+        }
+        return Ok(());
+    }
+    match event {
+        InputEvent::Text(twinkle_input::TextEvent::Commit { .. }) => {
+            log_unroutable_launcher_input(role, "text-commit", "non-launcher-surface");
+        }
+        InputEvent::Text(twinkle_input::TextEvent::Preedit { .. }) => {
+            log_unroutable_launcher_input(role, "text-preedit", "non-launcher-surface");
+        }
+        InputEvent::Key(key) if key.edge == KeyEdge::Pressed => {
+            let keycode = match key.physical {
+                twinkle_input::PhysicalKey::Code(key) => Some(key),
+                twinkle_input::PhysicalKey::Native(_) => None,
+            };
+            let (width, height) = shell
+                .surface(surface)
+                .map(|entry| entry.window().size())
+                .unwrap_or_default();
+            let changed = match role {
+                SurfaceRole::Lock => false,
+                SurfaceRole::ControlCenter => state.control_key(keycode, width, height),
+                SurfaceRole::WindowPreview => state.preview_key(keycode),
+                SurfaceRole::WindowContextMenu => false,
+                SurfaceRole::Notification => state.notification_key(keycode),
+                SurfaceRole::Launcher => false,
+                SurfaceRole::Screenshot => state.screenshot_key(keycode),
+                _ => false,
+            };
+            if changed {
+                sync_visibility(shell, state);
+                render_role(shell, state, role)?;
+                if role == SurfaceRole::WindowPreview {
+                    render_role(shell, state, SurfaceRole::WindowPreview)?;
+                    render_role(shell, state, SurfaceRole::WindowContextMenu)?;
+                }
+            }
+        }
+        InputEvent::Pointer(PointerEvent::Button {
+            button,
+            edge,
+            position: Some(position),
+            ..
+        }) => {
+            let x = position.x as f32;
+            let y = position.y as f32;
+            if role == SurfaceRole::Screenshot {
+                let (width, height) = shell
+                    .surface(surface)
+                    .map(|entry| entry.window().size())
+                    .unwrap_or_default();
+                let changed = match edge {
+                    KeyEdge::Pressed => state.screenshot_pointer_pressed(x, y, width, height),
+                    KeyEdge::Released => state.screenshot_pointer_released(),
+                };
+                if changed {
+                    sync_visibility(shell, state);
+                    render_role(shell, state, SurfaceRole::Screenshot)?;
+                }
+            } else if edge == KeyEdge::Pressed && role == SurfaceRole::WindowPreview {
+                if state.preview_click(x, y, button == PointerButton::Secondary) {
+                    sync_visibility(shell, state);
+                    state.sync_transient_overlays();
+                    render_role(shell, state, SurfaceRole::WindowPreview)?;
+                    render_role(shell, state, SurfaceRole::WindowContextMenu)?;
+                }
+            } else if edge == KeyEdge::Pressed && role == SurfaceRole::Notification {
+                let (width, height) = shell
+                    .surface(surface)
+                    .map(|entry| entry.window().size())
+                    .unwrap_or_default();
+                if state.notification_click(x, y, width, height) {
+                    sync_visibility(shell, state);
+                }
+            } else if edge == KeyEdge::Pressed && role == SurfaceRole::ControlCenter {
+                let (width, height) = shell
+                    .surface(surface)
+                    .map(|entry| entry.window().size())
+                    .unwrap_or_default();
+                let changed = match role {
+                    SurfaceRole::ControlCenter => state.control_click(x, y, width, height),
+                    _ => false,
+                };
+                if changed {
+                    sync_visibility(shell, state);
+                    render_role(shell, state, role)?;
+                }
+            }
+        }
+        InputEvent::Pointer(PointerEvent::Motion { position, .. }) => {
+            let x = position.x as f32;
+            let y = position.y as f32;
+            if role == SurfaceRole::Screenshot {
+                let (width, height) = shell
+                    .surface(surface)
+                    .map(|entry| entry.window().size())
+                    .unwrap_or_default();
+                if state.screenshot_pointer_moved(x, y, width, height) {
+                    render_role(shell, state, SurfaceRole::Screenshot)?;
+                }
+            } else if role == SurfaceRole::WindowPreview && state.preview_pointer_moved(x, y) {
+                *hover_repaint = Some((
+                    SurfaceRole::WindowPreview,
+                    Instant::now() + Duration::from_millis(24),
+                ));
+            }
+        }
+        InputEvent::Pointer(PointerEvent::Axis { delta, .. }) => {
+            if role == SurfaceRole::ControlCenter {
+                let started = Instant::now();
+                if state.scroll(delta.y as f32) {
+                    render_role(shell, state, role)?;
+                    if std::env::var_os("NICKEL_PERF_METRICS").is_some() {
+                        eprintln!(
+                            "launcher_scroll_frame_ms={:.3}",
+                            started.elapsed().as_secs_f64() * 1_000.0
+                        );
+                    }
+                }
+            }
+        }
+        InputEvent::FocusLost { .. } if role == SurfaceRole::ControlCenter => {
+            if state.dismiss_ephemeral_on_focus_loss(role) {
+                sync_visibility(shell, state);
+            }
+        }
+        InputEvent::FocusGained { .. }
+        | InputEvent::FocusLost { .. }
+        | InputEvent::DeviceRemoved { .. }
+        | InputEvent::Key(_)
+        | InputEvent::Pointer(_)
+        | InputEvent::Touch(_) => {}
+    }
+    Ok(())
+}
+
+fn select_desktop_surface_for_input(
+    shell: &WinitShell,
+    state: &mut LiveShell,
+    surface: SurfaceId,
+) -> bool {
+    let Some(entry) = shell
+        .surface(surface)
+        .filter(|entry| entry.is_desktop_surface())
+    else {
+        return false;
+    };
+    let Some(display) = shell.surface_display_geometry(surface) else {
+        return false;
+    };
+    let output = entry.output_name();
+    let (width, height) = entry.window().size();
+    state.set_desktop_output(
+        output.to_owned(),
+        display.x as f32 / display.scale,
+        display.y as f32 / display.scale,
+        display.scale,
+    );
+    // Another output may have left the shared host with a different tree.
+    // Rebuild the invoking surface before hit testing or dispatching a menu.
+    let _ = state.scene(SurfaceRole::Desktop, width, height);
+    true
+}
+
+fn log_unroutable_launcher_input(
+    role: SurfaceRole,
+    event_class: &'static str,
+    rejection_reason: &'static str,
+) {
+    static LAST_DIAGNOSTIC: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+    let Ok(mut last) = LAST_DIAGNOSTIC.lock() else {
+        return;
+    };
+    let now = Instant::now();
+    if last.is_some_and(|previous| now.duration_since(previous) < Duration::from_secs(30)) {
+        return;
+    }
+    *last = Some(now);
+    tracing::warn!(
+        surface_role = ?role,
+        focus_ownership = "event-delivered-to-surface",
+        event_class,
+        rejection_reason,
+        "launcher input could not be routed"
+    );
+}
+
+#[cfg(any(test, target_os = "linux"))]
+fn controller_launcher_shortcut(action: ControllerAction) -> Option<platform::GlobalShortcut> {
+    (action == ControllerAction::HostMenu).then_some(platform::GlobalShortcut::ToggleLauncher)
+}
+
+#[cfg(any(test, target_os = "linux"))]
+fn modal_controller_target(
+    screenshot_visible: bool,
+    keyboard_visible: bool,
+) -> Option<SurfaceRole> {
+    if screenshot_visible {
+        Some(SurfaceRole::Screenshot)
+    } else if keyboard_visible {
+        Some(SurfaceRole::OnScreenKeyboard)
+    } else {
+        None
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn handle_controller_action(
+    shell: &mut WinitShell,
+    state: &mut LiveShell,
+    codex: &mut CodexSurfaces,
+    action: ControllerAction,
+    _family: twinkle_ui::ControllerFamily,
+) -> Result<(), String> {
+    if !state.surface_visible(SurfaceRole::Screenshot)
+        && controller_launcher_shortcut(action).is_some()
+    {
+        let changed = state.request_launcher_toggle();
+        if changed {
+            sync_visibility(shell, state);
+            focus_visible_overlay(shell, state);
+            render_role(shell, state, SurfaceRole::Launcher)?;
+        }
+        return Ok(());
+    }
+    if let Some(role) = modal_controller_target(
+        state.surface_visible(SurfaceRole::Screenshot),
+        state.surface_visible(SurfaceRole::OnScreenKeyboard),
+    ) {
+        let changed = match role {
+            SurfaceRole::Screenshot => state.screenshot_controller(action),
+            SurfaceRole::OnScreenKeyboard => state.keyboard_controller(action),
+            _ => unreachable!("modal controller target is a screenshot or keyboard"),
+        };
+        if changed {
+            sync_visibility(shell, state);
+            render_role(shell, state, role)?;
+        }
+        return Ok(());
+    }
+    let focused_surface = shell
+        .surfaces()
+        .find(|surface| surface.window().has_input_focus())
+        .map(|surface| surface.id());
+    let Some(surface) = focused_surface else {
+        return Ok(());
+    };
+    let Some(entry) = shell.surface(surface) else {
+        return Ok(());
+    };
+    let role = entry.role();
+    if matches!(role, SurfaceRole::CodexChat | SurfaceRole::CodexProjectMenu) {
+        if role == SurfaceRole::CodexProjectMenu {
+            codex.project_menu_surface = Some(surface);
+        }
+        let transition = codex
+            .host_mut(surface)
+            .map(|host| step_embedded_codex_controller(host, action))
+            .unwrap_or_default();
+        if transition.changed {
+            codex
+                .present(shell, surface)
+                .map_err(|error| format!("{error:?}"))?;
+        }
+        if transition.open_keyboard {
+            state.set_keyboard_visible(true);
+            sync_visibility(shell, state);
+        }
+        return Ok(());
+    }
+    let (width, height) = entry.window().size();
+    let taskbar = entry.is_taskbar_plugin();
+    if entry.is_desktop_surface() {
+        if select_desktop_surface_for_input(shell, state, surface)
+            && state.desktop_controller(action)
+        {
+            sync_visibility(shell, state);
+            render_role(shell, state, SurfaceRole::Desktop)?;
+        }
+        return Ok(());
+    }
+    if matches!(role, SurfaceRole::Panel | SurfaceRole::Taskbar)
+        && let Some(key) = entry.plugin_key().cloned()
+    {
+        if taskbar {
+            state.set_panel_output(entry.output_name().to_owned());
+            if let Some(display) = shell.surface_display_geometry(surface) {
+                state.set_panel_origin_x(display.x);
+                state.set_panel_origin_y(display.y);
+            }
+        }
+        if state.plugin_panel_host_controller_for(&key, action, width, height) {
+            if taskbar {
+                state.sync_transient_overlays();
+            }
+            sync_visibility(shell, state);
+            if taskbar {
+                sync_panel_popover_anchor(shell, state);
+            }
+            render_role(shell, state, role)?;
+            if taskbar {
+                focus_visible_overlay(shell, state);
+                render_role(shell, state, SurfaceRole::ControlCenter)?;
+                render_role(shell, state, SurfaceRole::WindowPreview)?;
+                render_role(shell, state, SurfaceRole::WindowContextMenu)?;
+            }
+        }
+        return Ok(());
+    }
+    let changed = match role {
+        SurfaceRole::Lock => state.lock_host_controller(action),
+        SurfaceRole::ControlCenter => state.control_controller(action, width, height),
+        SurfaceRole::WindowPreview => state.preview_controller(action),
+        SurfaceRole::WindowContextMenu => false,
+        SurfaceRole::Notification => state.notification_controller(action),
+        SurfaceRole::Desktop => false,
+        SurfaceRole::Launcher => unreachable!("launcher controller input is handled semantically"),
+        SurfaceRole::Screenshot => state.screenshot_controller(action),
+        SurfaceRole::OnScreenKeyboard => state.keyboard_controller(action),
+        _ => false,
+    };
+    if changed {
+        sync_visibility(shell, state);
+        if taskbar {
+            sync_panel_popover_anchor(shell, state);
+        }
+        render_role(shell, state, role)?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn validate_shell_readiness(
+    readiness: &nickel_session_protocol::ShellReadinessSnapshot,
+) -> Result<(), String> {
+    let counts = format!(
+        "outputs={} desktops={} panels={} locks={} launchers={} singletons_ready={} output_roles_ready={} reserved_ordinary_windows={}",
+        readiness.outputs,
+        readiness.desktops,
+        readiness.panels,
+        readiness.locks,
+        readiness.launchers,
+        readiness.required_singletons_ready,
+        readiness.output_roles_ready,
+        readiness.reserved_ordinary_windows,
+    );
+    let expected_panels =
+        if nickel_core::shell_settings::ShellSettings::load_default().bar_on_all_displays {
+            readiness.outputs
+        } else {
+            1
+        };
+    let roles_are_complete = readiness.outputs > 0
+        && readiness.desktops == readiness.outputs
+        && readiness.panels == expected_panels
+        && readiness.locks == readiness.outputs
+        && readiness.launchers == 1
+        && readiness.required_singletons_ready
+        && readiness.output_roles_ready
+        && readiness.reserved_ordinary_windows == 0;
+    let pids_are_authenticated = readiness.expected_shell_pid.is_some()
+        && readiness.expected_shell_pid == readiness.authenticated_shell_pid;
+    if readiness.ready && roles_are_complete && pids_are_authenticated {
+        return Ok(());
+    }
+    Err(format!(
+        "Nickel shell session is not ready ({counts}; expected_shell_pid={:?}; authenticated_shell_pid={:?})",
+        readiness.expected_shell_pid, readiness.authenticated_shell_pid,
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn wait_for_shell_readiness_with<F>(
+    mut query: F,
+    timeout: Duration,
+    retry_interval: Duration,
+) -> Result<nickel_session_protocol::ShellReadinessSnapshot, String>
+where
+    F: FnMut() -> Result<nickel_session_protocol::ShellReadinessSnapshot, String>,
+{
+    let started = Instant::now();
+    loop {
+        let last_failure = match query() {
+            Ok(readiness) => match validate_shell_readiness(&readiness) {
+                Ok(()) => return Ok(readiness),
+                Err(error) => error,
+            },
+            Err(error) => error,
+        };
+        if started.elapsed() >= timeout {
+            return Err(format!(
+                "Nickel shell readiness did not converge within {} ms: {last_failure}",
+                timeout.as_millis()
+            ));
+        }
+        std::thread::sleep(retry_interval.min(timeout.saturating_sub(started.elapsed())));
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn wait_for_shell_readiness() -> Result<(), String> {
+    wait_for_shell_readiness_with(
+        || {
+            platform::shell_readiness().map_err(|error| {
+                format!("Nickel shell could not verify session readiness: {error}")
+            })
+        },
+        Duration::from_secs(2),
+        Duration::from_millis(25),
+    )
+    .map(|_| ())
+}
+
+fn wait_for_initial_display_with(
+    mut wait_step: impl FnMut() -> Result<bool, String>,
+) -> Result<(), String> {
+    while !wait_step()? {}
+    Ok(())
+}
+
+fn wait_for_initial_display(shell: &mut WinitShell) -> Result<(), String> {
+    let mut logged = false;
+    wait_for_initial_display_with(|| {
+        if !shell.display_geometries()?.is_empty() {
+            return Ok(true);
+        }
+        if !logged {
+            tracing::info!("winit shell is waiting for a display instead of restarting");
+            logged = true;
+        }
+        let _ = shell.wait_event_timeout(Duration::from_secs(1));
+        Ok(false)
+    })
+}
+
+fn shell_event_ends_process(event: &ShellEvent) -> bool {
+    matches!(event, ShellEvent::Quit | ShellEvent::CloseRequested(_)) && !cfg!(target_os = "linux")
+}
+
+#[cfg(target_os = "windows")]
+fn windows_test_readiness(shell: &WinitShell) -> nickel_session_protocol::ShellReadinessSnapshot {
+    let surfaces = shell.surfaces().collect::<Vec<_>>();
+    let outputs = surfaces
+        .iter()
+        .map(|surface| surface.output_name())
+        .collect::<std::collections::BTreeSet<_>>()
+        .len() as u16;
+    let count = |role| {
+        surfaces
+            .iter()
+            .filter(|surface| surface.role() == role)
+            .count() as u16
+    };
+    let desktops = count(SurfaceRole::Desktop);
+    let panels = surfaces
+        .iter()
+        .filter(|surface| surface.is_taskbar_plugin())
+        .count() as u16;
+    let locks = count(SurfaceRole::Lock);
+    let launchers = count(SurfaceRole::Launcher);
+    let output_roles_ready = outputs > 0 && desktops == outputs && panels > 0 && locks == outputs;
+    let required_singletons_ready = launchers == 1;
+    let pid = Some(std::process::id());
+    nickel_session_protocol::ShellReadinessSnapshot {
+        expected_shell_pid: pid,
+        authenticated_shell_pid: pid,
+        outputs,
+        desktops,
+        panels,
+        locks,
+        launchers,
+        required_singletons_ready,
+        output_roles_ready,
+        reserved_ordinary_windows: 0,
+        ready: output_roles_ready && required_singletons_ready,
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_test_layouts(
+    shell: &WinitShell,
+    state: &LiveShell,
+) -> Vec<nickel_session_protocol::UiLayoutSurfaceSnapshot> {
+    shell
+        .surfaces()
+        .map(|surface| {
+            let scale = surface.window().scale_factor();
+            let position = surface
+                .window()
+                .outer_position()
+                .unwrap_or_default()
+                .to_logical::<i32>(scale);
+            let size = surface.window().inner_size().to_logical::<u32>(scale);
+            let layout = state.layout_snapshot(
+                surface.role(),
+                surface.plugin_key(),
+                Some(surface.output_name()),
+            );
+            nickel_session_protocol::UiLayoutSurfaceSnapshot {
+                id: surface.test_identity(),
+                title: format!("{:?}", surface.role()),
+                role: format!("{:?}", surface.role()).to_ascii_lowercase(),
+                visible: surface.is_visible(),
+                geometry: nickel_session_protocol::Geometry {
+                    x: position.x,
+                    y: position.y,
+                    width: i32::try_from(size.width).unwrap_or(i32::MAX),
+                    height: i32::try_from(size.height).unwrap_or(i32::MAX),
+                },
+                node_count: layout.as_deref().map_or(0, |value| value.lines().count()),
+                plugin: surface.plugin_key().map(|key| {
+                    nickel_session_protocol::PluginSurfaceIdentity {
+                        plugin_id: key.plugin_id.clone(),
+                        surface_id: key.surface_id.clone(),
+                    }
+                }),
+            }
+        })
+        .collect()
+}
+
+/// Runs the Nickel desktop shell using process command-line arguments.
+pub fn run() -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    if std::env::args_os().nth(1).as_deref()
+        == Some(std::ffi::OsStr::new("--nickel-activate-packaged-app"))
+    {
+        return platform::run_packaged_activation_child();
+    }
+    #[cfg(target_os = "windows")]
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--nickel-launch-broker"))
+    {
+        return windows_launch_broker::run_broker_child();
+    }
+    #[cfg(target_os = "windows")]
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--nickel-file-window")) {
+        let launch = nickel_file::FileLaunch::from_args_os(std::env::args_os().skip(2));
+        return nickel_ui_host::run_with_adapter(
+            launch.into_app(),
+            nickel_file::FileHostAdapter::default(),
+        )
+        .map_err(|error| error.to_string());
+    }
+    #[cfg(target_os = "linux")]
+    platform::prepare_audio_environment();
+    let command_line = CommandLineOptions::parse(std::env::args_os().skip(1))?;
+    nickel_logging::init("nickel-shell").map_err(|error| error.to_string())?;
+    #[cfg(target_os = "linux")]
+    platform::register_session_shell().map_err(|error| {
+        format!("Nickel shell could not authenticate with the session protocol: {error}")
+    })?;
+    #[cfg(not(target_os = "linux"))]
+    platform::register_session_shell().map_err(|error| {
+        format!("Nickel shell could not authenticate with the session protocol: {error}")
+    })?;
+    #[cfg(target_os = "windows")]
+    let mut uwu_supervisor = windows_uwu::UwuSupervisor::start();
+    let started = Instant::now();
+    let mut shell_options = command_line.shell_options();
+    shell_options.bar_on_all_displays =
+        nickel_core::shell_settings::ShellSettings::load_default().bar_on_all_displays;
+    let mut shell = WinitShell::new_with_options(started, shell_options)?;
+    #[cfg(target_os = "windows")]
+    let _windows_test_control = platform::windows_test_control::WindowsTestControl::start(
+        command_line.test_control,
+        shell.event_sender(),
+    )?;
+    wait_for_initial_display(&mut shell)?;
+    shell.set_primary_output_name(platform::configured_primary_output())?;
+    shell.create_shell_surfaces()?;
+    #[cfg(target_os = "windows")]
+    let (mut remote_control, mut remote_control_retry_at) =
+        match windows_remote_control::WindowsRemoteControl::start(shell.remote_cleanup_wake()) {
+            Ok(owner) => (Some(owner), None),
+            Err(error) => {
+                tracing::warn!(%error, "Windows remote control startup deferred; retrying");
+                (None, Some(Instant::now() + Duration::from_secs(1)))
+            }
+        };
+    #[cfg(target_os = "linux")]
+    wait_for_shell_readiness()?;
+    let mut state = LiveShell::new_with_safe_mode(command_line.safe_mode)?;
+    shell.set_plugin_surfaces(
+        state.shell_fixed_surface_keys(),
+        state.shell_panel_surfaces(),
+    )?;
+    let mut feature_settings = OptionalFeatureSettings::load_default();
+    feature_settings.codex_enabled = feature_settings.effective_codex_enabled();
+    let mut codex = CodexSurfaces::new(&feature_settings, state.semantic_theme())?;
+    state.apply_codex_projection(CodexAvailabilityProjection::new(
+        FeatureSupport::Supported,
+        codex.installation,
+        feature_settings.codex_enabled,
+        FeatureHealth::Loading,
+        feature_settings.codex_generation,
+        Some("Checking the selected Codex backend…".into()),
+    ));
+    codex.ensure_project_menu()?;
+    let _ = codex
+        .runtime_snapshot(feature_settings.codex_generation)
+        .save_default();
+    let hotkey_feed = platform::launcher_hotkey_receiver();
+    state.set_global_shortcut_capability(&hotkey_feed.capability);
+    #[cfg(target_os = "windows")]
+    shell.set_shortcut_diagnostics(hotkey_feed.diagnostics.clone());
+    tracing::info!(
+        ownership = ?hotkey_feed.ownership,
+        capability = ?hotkey_feed.capability,
+        "global shortcut adapter initialized"
+    );
+    let hotkey_rx = hotkey_feed.receiver;
+    let event_sender = shell.event_sender();
+    std::thread::Builder::new()
+        .name("nickel-shortcut-events".into())
+        .spawn(move || {
+            while let Ok(shortcut) = hotkey_rx.recv() {
+                tracing::debug!(?shortcut, "forwarding global shortcut to winit shell");
+                if event_sender
+                    .send_event(ShellUserEvent::GlobalShortcut(shortcut))
+                    .is_err()
+                {
+                    tracing::warn!("winit shell stopped accepting global shortcuts");
+                    break;
+                }
+            }
+        })
+        .map_err(|error| error.to_string())?;
+    #[cfg(target_os = "linux")]
+    {
+        let semantic_rx = platform::semantic_target_receiver();
+        let event_sender = shell.event_sender();
+        std::thread::Builder::new()
+            .name("nickel-semantic-target-events".into())
+            .spawn(move || {
+                while let Ok(request) = semantic_rx.recv() {
+                    if event_sender
+                        .send_event(ShellUserEvent::TestControl(request))
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            })
+            .map_err(|error| error.to_string())?;
+    }
+    sync_visibility(&mut shell, &mut state);
+    render_all(&mut shell, &mut state)?;
+    let memory = shell.memory_diagnostics();
+    let presenter_roles = shell.presenter_roles();
+    let images = state.image_cache_diagnostics();
+    tracing::info!(
+        ?presenter_roles,
+        presenters = memory.presenter_caches.presenters,
+        cache_live_entries = memory.presenter_caches.live_entries,
+        cache_live_bytes = memory.presenter_caches.live_bytes,
+        cache_peak_bytes = memory.presenter_caches.peak_cache_bytes,
+        process_rss_bytes = memory.process_rss_bytes,
+        launcher_icon_entries = images.launcher_icon_entries,
+        launcher_icon_bytes = images.launcher_icon_bytes,
+        wallpaper_entries = images.wallpaper_entries,
+        wallpaper_bytes = images.wallpaper_bytes,
+        tray_entries = images.tray_entries,
+        tray_bytes = images.tray_bytes,
+        preview_entries = images.preview_entries,
+        preview_bytes = images.preview_bytes,
+        "shell presenter cache and allocator-visible memory accounting"
+    );
+    println!(
+        "time_to_first_shell_ms={:.3}",
+        started.elapsed().as_secs_f64() * 1_000.0
+    );
+
+    tracing::info!(
+        elapsed_ms = started.elapsed().as_secs_f64() * 1_000.0,
+        "winit Nickel shell presented"
+    );
+    let launcher_warm_started = Instant::now();
+    prewarm_role(&mut shell, &mut state, SurfaceRole::Launcher)?;
+    tracing::info!(
+        elapsed_ms = launcher_warm_started.elapsed().as_secs_f64() * 1_000.0,
+        "winit launcher presenter and frame prewarmed"
+    );
+    if let Err(error) = codex.ensure_project_menu() {
+        tracing::warn!(%error, "Codex integration is unavailable");
+    }
+    let schedule_now = Instant::now();
+    let mut fast_subscription = DomainSubscriptionSchedule::new(
+        schedule_now,
+        Duration::from_millis(100),
+        Duration::from_secs(2),
+    );
+    let mut system_subscription = DomainSubscriptionSchedule::new(
+        schedule_now,
+        Duration::from_secs(1),
+        Duration::from_secs(10),
+    );
+    let mut hover_repaint: Option<(SurfaceRole, Instant)> = None;
+    #[cfg(not(target_os = "windows"))]
+    let mut controller = twinkle_ui::ControllerInput::new();
+    #[cfg(not(target_os = "windows"))]
+    let mut controller_schedule = twinkle_ui::ControllerPollSchedule::new(Instant::now());
+    let mut diagnostic_loop_started = Instant::now();
+    let mut diagnostic_loop_iterations = 0_u64;
+    let mut diagnostic_overdue_after_poll = Vec::new();
+    let mut project_menu_changed_since_refresh = false;
+    loop {
+        #[cfg(target_os = "windows")]
+        uwu_supervisor.poll();
+        #[cfg(target_os = "windows")]
+        if remote_control.is_none()
+            && remote_control_retry_at.is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            match windows_remote_control::WindowsRemoteControl::start(shell.remote_cleanup_wake()) {
+                Ok(owner) => {
+                    tracing::info!("Windows remote control startup retry succeeded");
+                    remote_control = Some(owner);
+                    remote_control_retry_at = None;
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "Windows remote control startup retry failed");
+                    remote_control_retry_at = Some(Instant::now() + Duration::from_secs(1));
+                }
+            }
+        }
+        #[cfg(target_os = "windows")]
+        if let Some(owner) = &mut remote_control {
+            owner.poll(&mut shell, &mut state, &mut codex, &mut feature_settings);
+            owner.reconcile_indicators(&mut shell, state.semantic_theme());
+        }
+        diagnostic_loop_iterations = diagnostic_loop_iterations.saturating_add(1);
+        #[cfg(not(target_os = "windows"))]
+        let now = Instant::now();
+        #[cfg(not(target_os = "windows"))]
+        if controller_schedule.is_due(now) {
+            for action in controller.poll_global(now) {
+                shell.begin_input_observation(Instant::now());
+                let result = handle_controller_action(
+                    &mut shell,
+                    &mut state,
+                    &mut codex,
+                    action,
+                    controller.active_family().unwrap_or_default(),
+                );
+                shell.finish_input_observation();
+                result?;
+            }
+            controller_schedule.mark_polled(now, controller.connected());
+        }
+        let mut approval_redraw = Vec::new();
+        for (owner, snapshot, choice) in state.take_codex_approval_decisions() {
+            let crate::live_shell::CodexApprovalOwner::Winit(id) = owner else {
+                continue;
+            };
+            if let Some(host) = codex.host_mut(id)
+                && host
+                    .application_mut()
+                    .respond_approval_notification(&snapshot, choice)
+            {
+                host.step(HostBatch {
+                    application_changed: true,
+                    events: vec![HostEvent::Poll],
+                    ..HostBatch::default()
+                });
+                approval_redraw.push(id);
+            }
+        }
+        for (owner, snapshot, delivered) in state.take_codex_approval_delivery_updates() {
+            let crate::live_shell::CodexApprovalOwner::Winit(id) = owner else {
+                continue;
+            };
+            if let Some(host) = codex.host_mut(id)
+                && host
+                    .application_mut()
+                    .report_approval_notification_delivery(&snapshot, delivered)
+            {
+                host.step(HostBatch {
+                    application_changed: true,
+                    events: vec![HostEvent::Poll],
+                    ..HostBatch::default()
+                });
+                approval_redraw.push(id);
+            }
+        }
+        for owner in state.take_codex_approval_reviews() {
+            if let crate::live_shell::CodexApprovalOwner::Winit(id) = owner {
+                shell.raise(id);
+            }
+        }
+        let (project_menu_changed, mut due_codex_redraw) = codex.poll_due(Instant::now());
+        due_codex_redraw.extend(approval_redraw);
+        if project_menu_changed
+            && state.surface_visible(SurfaceRole::CodexProjectMenu)
+            && let Some(id) = shell
+                .surfaces()
+                .find(|surface| surface.role() == SurfaceRole::CodexProjectMenu)
+                .map(|surface| surface.id())
+        {
+            codex.project_menu_surface = Some(id);
+            due_codex_redraw.push(id);
+        }
+        state.sync_codex_approval_notifications(codex.approval_notifications());
+        project_menu_changed_since_refresh |= project_menu_changed;
+        for surface in due_codex_redraw {
+            codex
+                .present(&mut shell, surface)
+                .map_err(|error| format!("{error:?}"))?;
+        }
+        let next_deadline = fast_subscription
+            .deadline()
+            .min(system_subscription.deadline());
+        #[cfg(not(target_os = "windows"))]
+        let next_deadline = next_deadline.min(controller_schedule.deadline());
+        let next_deadline = codex
+            .next_deadline()
+            .map(|deadline| deadline.min(next_deadline))
+            .unwrap_or(next_deadline);
+        let next_deadline = state
+            .next_host_deadline()
+            .map(|deadline| deadline.min(next_deadline))
+            .unwrap_or(next_deadline);
+        let next_deadline = hover_repaint
+            .map(|(_, deadline)| deadline.min(next_deadline))
+            .unwrap_or(next_deadline);
+        let next_deadline = shell
+            .next_output_retirement_deadline()
+            .map(|deadline| deadline.min(next_deadline))
+            .unwrap_or(next_deadline);
+        let timeout = next_deadline.saturating_duration_since(Instant::now());
+        #[cfg(target_os = "windows")]
+        let timeout = timeout.min(Duration::from_millis(100));
+        let event = shell.wait_event_timeout(timeout);
+        #[cfg(target_os = "windows")]
+        platform::update_panel_fullscreen_state();
+        if diagnostic_loop_started.elapsed() >= Duration::from_secs(1) {
+            if diagnostic_loop_iterations >= 1 {
+                tracing::info!(
+                    iterations = diagnostic_loop_iterations,
+                    ?timeout,
+                    event_available = event.is_some(),
+                    fast_due = fast_subscription.is_due(Instant::now()),
+                    system_due = system_subscription.is_due(Instant::now()),
+                    host_deadline = ?state.next_host_deadline(),
+                    host_deadline_sources = ?state.host_deadline_sources(),
+                    overdue_after_previous_poll = ?diagnostic_overdue_after_poll,
+                    "diagnostic: winit shell event loop is busy"
+                );
+            }
+            diagnostic_loop_started = Instant::now();
+            diagnostic_loop_iterations = 0;
+        }
+        #[cfg(target_os = "windows")]
+        if let Some(ref event) = event
+            && let Some(owner) = remote_control.as_mut()
+        {
+            owner.observe_shell_event(&shell, &state, event);
+        }
+        #[cfg(target_os = "windows")]
+        if let Some(ref event) = event
+            && remote_control
+                .as_mut()
+                .is_some_and(|owner| owner.indicator_event(&mut shell, event))
+        {
+            continue;
+        }
+        if let Some(ref event) = event
+            && handle_codex_event(&mut codex, &mut shell, event, &mut state)?
+        {
+            continue;
+        }
+        match event {
+            #[cfg(target_os = "windows")]
+            Some(ShellEvent::TestControl(platform::ShellTestRequest::Protocol(request))) => {
+                use nickel_session_protocol::{
+                    Command, ErrorCode, Query, Request, ServerEnvelope, ServerMessage, TestInput,
+                };
+                let request_id = request.envelope.request_id;
+                let message = match request.envelope.request {
+                    Request::Query(Query::ShellRuntimeDiagnostics) => {
+                        let runtime = shell.runtime_diagnostics();
+                        let memory = shell.memory_diagnostics();
+                        let (
+                            input_to_message_us,
+                            input_to_frame_us,
+                            layout_us,
+                            paint_list_us,
+                            scheduled_wakeups,
+                        ) = state.host_runtime_samples();
+                        let host_phases =
+                            nickel_session_protocol::HostPhaseDistributions::from_samples(
+                                &input_to_message_us,
+                                &input_to_frame_us,
+                                &layout_us,
+                                &paint_list_us,
+                                &runtime.warm_present_us,
+                                &runtime.input_to_present_us,
+                            );
+                        ServerMessage::ShellRuntimeDiagnostics(Box::new(
+                            nickel_session_protocol::ShellRuntimeDiagnostics {
+                                input_to_message_us,
+                                input_to_frame_us: input_to_frame_us.clone(),
+                                layout_us,
+                                paint_list_us,
+                                warm_present_us: runtime.warm_present_us,
+                                input_to_visible_us: runtime.input_to_present_us,
+                                scheduled_wakeups,
+                                host_phase_samples_available: !input_to_frame_us.is_empty(),
+                                host_phases,
+                                surfaces: runtime.surfaces,
+                                retained_presenter_bytes: memory.presenter_caches.live_bytes as u64,
+                                frame_allocations: if runtime.warm_present_allocations.is_empty() {
+                                    nickel_session_protocol::AllocationMeasurement {
+                                        count: None,
+                                        sample_count: 0,
+                                        scope: nickel_session_protocol::AllocationScope::Process,
+                                        unavailable_reason: Some(
+                                            "no completed warm native presenter frames".into(),
+                                        ),
+                                    }
+                                } else {
+                                    nickel_session_protocol::AllocationMeasurement {
+                                        count: p95_u64(&runtime.warm_present_allocations),
+                                        sample_count: runtime.warm_present_allocations.len(),
+                                        scope: nickel_session_protocol::AllocationScope::Process,
+                                        unavailable_reason: None,
+                                    }
+                                },
+                                executable_prediction_observations: [[0; 2]; 4],
+                                executable_prediction_descendant_windows: 0,
+                            },
+                        ))
+                    }
+                    Request::Query(Query::ShellReadiness) => {
+                        ServerMessage::ShellReadiness(windows_test_readiness(&shell))
+                    }
+                    Request::Query(Query::UiLayouts) => {
+                        ServerMessage::UiLayouts(windows_test_layouts(&shell, &state))
+                    }
+                    Request::Query(Query::UiLayout { surface, offset }) => {
+                        let inventory = windows_test_layouts(&shell, &state);
+                        let selected = shell
+                            .surfaces()
+                            .find(|entry| entry.test_identity() == surface);
+                        match (
+                            inventory.into_iter().find(|entry| entry.id == surface),
+                            selected,
+                        ) {
+                            (Some(surface), Some(native)) if offset == 0 => state
+                                .layout_snapshot(
+                                    native.role(),
+                                    native.plugin_key(),
+                                    Some(native.output_name()),
+                                )
+                                .map(|layout| {
+                                    let total_nodes = layout.lines().count();
+                                    ServerMessage::UiLayout(
+                                        nickel_session_protocol::UiLayoutSnapshot {
+                                            surface,
+                                            layout,
+                                            offset: 0,
+                                            total_nodes,
+                                            next_offset: None,
+                                        },
+                                    )
+                                })
+                                .unwrap_or_else(|| ServerMessage::Error {
+                                    code: ErrorCode::InvalidRequest,
+                                    message: "surface has no inspectable retained layout".into(),
+                                }),
+                            _ => ServerMessage::Error {
+                                code: ErrorCode::InvalidRequest,
+                                message: "unknown layout surface or unsupported offset".into(),
+                            },
+                        }
+                    }
+                    Request::Query(Query::ShellSemanticTarget { target }) => {
+                        if matches!(
+                            target,
+                            nickel_session_protocol::ShellSemanticTarget::Screenshot { .. }
+                        ) {
+                            ServerMessage::Error {
+                                code: ErrorCode::InvalidRequest,
+                                message: "screenshot semantic actions are unavailable on the Windows host".into(),
+                            }
+                        } else {
+                            state.resolve_semantic_target(&target).map_or_else(
+                                || ServerMessage::Error {
+                                    code: ErrorCode::InvalidRequest,
+                                    message: "semantic target is unavailable".into(),
+                                },
+                                ServerMessage::ShellSemanticTarget,
+                            )
+                        }
+                    }
+                    Request::Command(Command::TestInput {
+                        input: TestInput::ShellPointer { target },
+                    }) => match shell.inject_test_pointer(&target) {
+                        Ok(()) => ServerMessage::Ack,
+                        Err(message) => ServerMessage::Error {
+                            code: ErrorCode::InvalidRequest,
+                            message,
+                        },
+                    },
+                    Request::Command(Command::LogOut) => {
+                        shell.request_test_shutdown();
+                        ServerMessage::Ack
+                    }
+                    _ => ServerMessage::Error {
+                        code: ErrorCode::InvalidRequest,
+                        message: "request is unavailable on the Windows acceptance endpoint".into(),
+                    },
+                };
+                let _ = request.response.send(ServerEnvelope {
+                    request_id,
+                    message,
+                });
+            }
+            #[cfg(target_os = "linux")]
+            Some(ShellEvent::TestControl(request)) => match request {
+                platform::ShellTestRequest::SemanticTarget {
+                    request_id,
+                    target,
+                    reply_path,
+                } => {
+                    if let nickel_session_protocol::ShellSemanticTarget::Screenshot { action } =
+                        target
+                    {
+                        let performed = state.perform_screenshot_semantic_action(action);
+                        platform::respond_semantic_action(request_id, &reply_path, performed);
+                        continue;
+                    }
+                    let target = state.resolve_semantic_target(&target);
+                    platform::respond_semantic_target(request_id, &reply_path, target);
+                }
+                platform::ShellTestRequest::RuntimeDiagnostics {
+                    request_id,
+                    reply_path,
+                } => {
+                    let runtime = shell.runtime_diagnostics();
+                    let memory = shell.memory_diagnostics();
+                    let (
+                        input_to_message_us,
+                        input_to_frame_us,
+                        layout_us,
+                        paint_list_us,
+                        scheduled_wakeups,
+                    ) = state.host_runtime_samples();
+                    let host_phase_samples_available = !input_to_frame_us.is_empty();
+                    let host_phases = nickel_session_protocol::HostPhaseDistributions::from_samples(
+                        &input_to_message_us,
+                        &input_to_frame_us,
+                        &layout_us,
+                        &paint_list_us,
+                        &runtime.warm_present_us,
+                        &runtime.input_to_present_us,
+                    );
+                    let executable_predictions = executable_index::prediction_metrics();
+                    platform::respond_runtime_diagnostics(
+                        request_id,
+                        &reply_path,
+                        nickel_session_protocol::ShellRuntimeDiagnostics {
+                            input_to_message_us,
+                            input_to_frame_us,
+                            layout_us,
+                            paint_list_us,
+                            warm_present_us: runtime.warm_present_us,
+                            input_to_visible_us: runtime.input_to_present_us,
+                            scheduled_wakeups,
+                            host_phase_samples_available,
+                            host_phases,
+                            surfaces: runtime.surfaces,
+                            retained_presenter_bytes: memory.presenter_caches.live_bytes as u64,
+                            frame_allocations: if runtime.warm_present_allocations.is_empty() {
+                                nickel_session_protocol::AllocationMeasurement {
+                                    count: None,
+                                    sample_count: 0,
+                                    scope: nickel_session_protocol::AllocationScope::Process,
+                                    unavailable_reason: Some(
+                                        "no completed warm native presenter frames".into(),
+                                    ),
+                                }
+                            } else {
+                                nickel_session_protocol::AllocationMeasurement {
+                                    count: p95_u64(&runtime.warm_present_allocations),
+                                    sample_count: runtime.warm_present_allocations.len(),
+                                    scope: nickel_session_protocol::AllocationScope::Process,
+                                    unavailable_reason: None,
+                                }
+                            },
+                            executable_prediction_observations: executable_predictions.observations,
+                            executable_prediction_descendant_windows: executable_predictions
+                                .descendant_windows,
+                        },
+                    );
+                }
+            },
+            Some(ShellEvent::GlobalShortcut(shortcut)) => {
+                tracing::debug!(?shortcut, "handling global shortcut");
+                #[cfg(target_os = "windows")]
+                let shortcut = if shortcut == platform::GlobalShortcut::ToggleLauncher
+                    && platform::launcher_window_visible()
+                {
+                    // Focus loss can be delivered before Winit has reconciled a direct Win32
+                    // visibility change. Native HWND visibility is authoritative for a Windows
+                    // key toggle: a launcher the user can see must always close.
+                    platform::GlobalShortcut::HideLauncher
+                } else {
+                    shortcut
+                };
+                shell.begin_input_observation(Instant::now());
+                #[cfg(not(target_os = "linux"))]
+                if matches!(
+                    shortcut,
+                    platform::GlobalShortcut::ToggleLauncher
+                        | platform::GlobalShortcut::ShowLauncher
+                        | platform::GlobalShortcut::Screenshot(_)
+                ) && let Some(point) = platform::active_display_point()
+                {
+                    shell.set_active_output_at(point);
+                }
+                if shortcut == platform::GlobalShortcut::ReloadShellSettings {
+                    let settings = nickel_core::shell_settings::ShellSettings::load_default();
+                    if shell.set_bar_on_all_displays(settings.bar_on_all_displays)? {
+                        sync_visibility(&mut shell, &mut state);
+                    }
+                }
+                if state.global_shortcut(shortcut) {
+                    shell.set_plugin_surfaces(
+                        state.shell_fixed_surface_keys(),
+                        state.shell_panel_surfaces(),
+                    )?;
+                    sync_visibility(&mut shell, &mut state);
+                    state.sync_transient_overlays();
+                    focus_visible_overlay(&mut shell, &state);
+                    render_role(&mut shell, &mut state, SurfaceRole::Desktop)?;
+                    render_role(&mut shell, &mut state, SurfaceRole::Panel)?;
+                    render_role(&mut shell, &mut state, SurfaceRole::Launcher)?;
+                    render_role(&mut shell, &mut state, SurfaceRole::ControlCenter)?;
+                    render_role(&mut shell, &mut state, SurfaceRole::WindowPreview)?;
+                    render_role(&mut shell, &mut state, SurfaceRole::Lock)?;
+                    render_role(&mut shell, &mut state, SurfaceRole::Screenshot)?;
+                }
+                shell.finish_input_observation();
+            }
+            Some(ShellEvent::Input { surface, event }) => {
+                shell.begin_input_observation(Instant::now());
+                let result =
+                    handle_shell_input(&mut shell, &mut state, surface, event, &mut hover_repaint);
+                shell.finish_input_observation();
+                result?;
+            }
+            Some(ShellEvent::FileDrop { surface, path }) => {
+                if select_desktop_surface_for_input(&shell, &mut state, surface)
+                    && state.desktop_file_drop(&path)
+                {
+                    render_role(&mut shell, &mut state, SurfaceRole::Desktop)?;
+                }
+            }
+            Some(ShellEvent::CloseRequested(surface))
+                if shell
+                    .surface(surface)
+                    .is_some_and(|entry| entry.role() == SurfaceRole::Screenshot) =>
+            {
+                state.hide_overlay(SurfaceRole::Screenshot);
+                sync_visibility(&mut shell, &mut state);
+            }
+            Some(ShellEvent::CloseRequested(surface))
+                if shell.surface(surface).is_some_and(|entry| {
+                    entry.plugin_key().is_some_and(|key| {
+                        state
+                            .plugin_panel_placement(key)
+                            .is_some_and(|(kind, _, _, _, _)| {
+                                matches!(
+                                    kind,
+                                    nickel_core::plugins::PluginSurfaceKind::Window
+                                        | nickel_core::plugins::PluginSurfaceKind::Dialog
+                                        | nickel_core::plugins::PluginSurfaceKind::Overlay
+                                )
+                            })
+                    })
+                }) =>
+            {
+                let key = shell
+                    .surface(surface)
+                    .and_then(|entry| entry.plugin_key())
+                    .expect("plugin window close has an owner")
+                    .clone();
+                if let Err(error) = state.close_plugin_window(&key) {
+                    tracing::warn!(plugin = %key.plugin_id, %error, "could not close plugin window");
+                } else {
+                    shell.set_plugin_surfaces(
+                        state.shell_fixed_surface_keys(),
+                        state.shell_panel_surfaces(),
+                    )?;
+                    sync_visibility(&mut shell, &mut state);
+                }
+            }
+            Some(ShellEvent::CloseRequested(surface)) if shell.surface(surface).is_none() => {}
+            Some(ShellEvent::RuntimeTerminated { code }) => {
+                tracing::info!(code, "native shell event source terminated; exiting");
+                break;
+            }
+            Some(event @ (ShellEvent::Quit | ShellEvent::CloseRequested(_)))
+                if shell_event_ends_process(&event) =>
+            {
+                break;
+            }
+            Some(ShellEvent::Quit | ShellEvent::CloseRequested(_)) => {
+                shell.sync_display_geometry()?;
+                sync_visibility(&mut shell, &mut state);
+            }
+            // Winit reports an initial focus loss while a newly shown Wayland
+            // surface is waiting for the compositor's focus configure. Hiding
+            // an overlay here races its first frame and leaves a brief blank
+            // window. Explicit dismissal and Escape remain authoritative.
+            Some(ShellEvent::FocusChanged {
+                surface,
+                focused: false,
+            }) if shell
+                .surface(surface)
+                .is_some_and(|entry| entry.role() == SurfaceRole::ControlCenter) =>
+            {
+                if state.dismiss_ephemeral_on_focus_loss(SurfaceRole::ControlCenter) {
+                    sync_visibility(&mut shell, &mut state);
+                }
+            }
+            Some(ShellEvent::FocusChanged { surface, focused })
+                if shell
+                    .surface(surface)
+                    .is_some_and(|entry| entry.plugin_key().is_some()) =>
+            {
+                let entry = shell.surface(surface).expect("routed plugin surface");
+                let key = entry.plugin_key().expect("plugin owner").clone();
+                let (width, height) = entry.window().size();
+                let is_quick_settings = key == state.active_shell_surface_key("quick-settings");
+                if !focused {
+                    shell.stop_text_input(surface);
+                } else {
+                    shell.set_active_output_from_surface(surface);
+                }
+                let host_changed =
+                    state.plugin_panel_host_window_focus_for(&key, focused, width, height);
+                let dismissed = !focused
+                    && is_quick_settings
+                    && state.dismiss_ephemeral_on_focus_loss(SurfaceRole::ControlCenter);
+                if host_changed || dismissed {
+                    sync_visibility(&mut shell, &mut state);
+                    render_role(&mut shell, &mut state, SurfaceRole::Panel)?;
+                }
+            }
+            Some(ShellEvent::FocusChanged { focused: false, .. }) => {}
+            Some(ShellEvent::FocusChanged {
+                surface,
+                focused: true,
+            }) => {
+                shell.set_active_output_from_surface(surface);
+            }
+            Some(ShellEvent::PointerEntered {
+                surface,
+                entered: false,
+            }) if shell
+                .surface(surface)
+                .is_some_and(|entry| entry.is_taskbar_plugin()) =>
+            {
+                if let Some(output) = shell
+                    .surface(surface)
+                    .map(|entry| entry.output_name().to_owned())
+                {
+                    state.set_panel_output(output);
+                }
+            }
+            Some(ShellEvent::PointerEntered {
+                surface,
+                entered: true,
+            }) if shell
+                .surface(surface)
+                .is_some_and(|entry| entry.is_taskbar_plugin()) =>
+            {
+                state.panel_pointer_entered();
+            }
+            Some(ShellEvent::PointerEntered { surface, entered })
+                if shell
+                    .surface(surface)
+                    .is_some_and(|entry| entry.role() == SurfaceRole::WindowPreview) =>
+            {
+                if state.preview_pointer_entered(entered) {
+                    render_role(&mut shell, &mut state, SurfaceRole::WindowPreview)?;
+                }
+            }
+            Some(ShellEvent::PointerEntered { .. }) => {}
+            Some(ShellEvent::DisplayTopologyChanged) => {
+                shell.sync_display_geometry()?;
+                sync_visibility(&mut shell, &mut state);
+                render_all(&mut shell, &mut state)?;
+            }
+            Some(
+                ShellEvent::LogicalResize { surface, .. } | ShellEvent::PixelResize { surface, .. },
+            ) => {
+                let Some(role) = shell.surface(surface).map(|entry| entry.role()) else {
+                    continue;
+                };
+                if !state.surface_visible(role) {
+                    continue;
+                }
+                let (logical_width, logical_height) = shell
+                    .surface(surface)
+                    .map(|entry| entry.window().size())
+                    .unwrap_or_default();
+                if let Some((commands, damage)) = scene_for_native_surface(
+                    &shell,
+                    &mut state,
+                    surface,
+                    logical_width,
+                    logical_height,
+                ) {
+                    shell.present_with_damage(surface, &commands, damage.as_deref())?;
+                }
+            }
+            Some(ShellEvent::Shown(surface)) => {
+                let role = shell.surface(surface).map(|entry| entry.role());
+                if let Some(
+                    role @ (SurfaceRole::Desktop
+                    | SurfaceRole::Taskbar
+                    | SurfaceRole::Panel
+                    | SurfaceRole::WindowPreview
+                    | SurfaceRole::WindowContextMenu
+                    | SurfaceRole::Lock),
+                ) = role
+                {
+                    state.sync_transient_overlays();
+                    // Wayland recreates the wl_surface when winit shows one of
+                    // these transient windows again. The earlier presenter
+                    // contents do not belong to that new surface, and the
+                    // one-shot initial Exposed handler has already run.
+                    render_role(&mut shell, &mut state, role)?;
+                }
+            }
+            Some(ShellEvent::Redraw(surface)) if shell.mark_initial_exposed(surface) => {
+                let Some(entry) = shell.surface(surface) else {
+                    continue;
+                };
+                let (logical_width, logical_height) = entry.window().size();
+                let role = entry.role();
+                if state.surface_visible(role)
+                    && let Some((commands, damage)) = scene_for_native_surface(
+                        &shell,
+                        &mut state,
+                        surface,
+                        logical_width,
+                        logical_height,
+                    )
+                {
+                    shell.present_with_damage(surface, &commands, damage.as_deref())?;
+                }
+            }
+            Some(ShellEvent::Redraw(_)) => {}
+            // Unhandled events may acquire text-bearing variants over time.
+            // Diagnostics must never format the raw event or its input payload.
+            Some(_) => {}
+            None => {}
+        }
+        if shell
+            .next_output_retirement_deadline()
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            shell.sync_display_geometry()?;
+            sync_visibility(&mut shell, &mut state);
+            render_all(&mut shell, &mut state)?;
+        }
+        if let Some(project_id) = state.take_requested_codex_project() {
+            codex.open_project_by_id(&mut shell, &project_id)?;
+            sync_visibility(&mut shell, &mut state);
+        }
+        if state.surface_visible(SurfaceRole::CodexProjectMenu) {
+            let requests = codex
+                .project_menu_host
+                .as_mut()
+                .map(|host| host.application_mut().take_shell_requests())
+                .unwrap_or_default();
+            for request in requests {
+                if matches!(request, ShellRequest::CloseProjectMenu) {
+                    state.hide_overlay(SurfaceRole::CodexProjectMenu);
+                    sync_visibility(&mut shell, &mut state);
+                }
+                if let ShellRequest::OpenProject { project_id, .. } = request {
+                    if let Err(error) = codex.open_project_by_id(&mut shell, &project_id) {
+                        tracing::warn!(%error,"native project selection rejected");
+                    } else {
+                        state.hide_overlay(SurfaceRole::CodexProjectMenu);
+                        sync_visibility(&mut shell, &mut state);
+                    }
+                }
+            }
+        }
+        let deadline_outcome = state.poll_deadlines(Instant::now());
+        diagnostic_overdue_after_poll = state
+            .host_deadline_sources()
+            .into_iter()
+            .filter(|(_, deadline)| *deadline <= Instant::now())
+            .collect::<Vec<_>>();
+        if deadline_outcome.visibility_changed {
+            sync_visibility(&mut shell, &mut state);
+        }
+        if deadline_outcome.capture_screenshot {
+            let captured = state.capture_screenshot();
+            tracing::debug!(
+                captured,
+                visible = state.surface_visible(SurfaceRole::Screenshot),
+                "screenshot capture deadline handled"
+            );
+            if captured {
+                #[cfg(target_os = "windows")]
+                shell.position_screenshot_on_active_output();
+                sync_visibility(&mut shell, &mut state);
+                focus_visible_overlay(&mut shell, &state);
+                render_role(&mut shell, &mut state, SurfaceRole::Screenshot)?;
+            }
+        }
+        for role in deadline_outcome.redraw {
+            if state.surface_visible(role) {
+                render_role(&mut shell, &mut state, role)?;
+            }
+        }
+        if hover_repaint.is_some_and(|(_, deadline)| Instant::now() >= deadline)
+            && let Some((role, _)) = hover_repaint.take()
+        {
+            render_role(&mut shell, &mut state, role)?;
+        }
+        if fast_subscription.is_due(Instant::now()) {
+            let refresh_now = Instant::now();
+            let project_menu_changed = std::mem::take(&mut project_menu_changed_since_refresh);
+            if project_menu_changed && let Some(host) = codex.project_menu_host.as_mut() {
+                let snapshot = &host.application_mut().state;
+                tracing::info!(
+                    status = ?snapshot.status,
+                    authenticated = snapshot.account.authenticated,
+                    project_count = snapshot.projects.len(),
+                    "Codex project discovery changed"
+                );
+            }
+            if let Some(host) = codex.project_menu_host.as_mut() {
+                let snapshot = &host.application_mut().state;
+                // The panel entry represents the installed integration, not only a healthy,
+                // authenticated connection. Keep it reachable so its UI can explain and recover
+                // from disconnected, incompatible, or signed-out states.
+                let availability_changed = state.apply_codex_projection(codex_projection(
+                    &feature_settings,
+                    codex.installation,
+                    snapshot.status.clone(),
+                    snapshot.account.authenticated,
+                    (!snapshot.provenance.is_empty()).then(|| snapshot.provenance.clone()),
+                ));
+                let menu_changed = project_menu_changed;
+                let projects = match snapshot.status {
+                    ConnectionStatus::Loading => DashboardSection::Loading,
+                    ConnectionStatus::Ready if !snapshot.account.authenticated => {
+                        DashboardSection::Failed {
+                            message: "Sign in to Codex to load projects".into(),
+                            recoverable: true,
+                        }
+                    }
+                    ConnectionStatus::Ready if snapshot.thread_snapshot_available => {
+                        let projects = normalize_dashboard_projects(
+                            &snapshot.projects,
+                            &snapshot.threads,
+                            &snapshot.thread_runtime,
+                        );
+                        if projects.is_empty() {
+                            DashboardSection::Empty
+                        } else {
+                            DashboardSection::Ready(projects)
+                        }
+                    }
+                    ConnectionStatus::Ready => {
+                        let projects = snapshot
+                            .projects
+                            .iter()
+                            .map(|project| DashboardProject {
+                                id: project.id.clone(),
+                                name: project.name.clone(),
+                                roots: project.roots.clone(),
+                                chat_count: None,
+                                activity: ProjectActivity::Unknown,
+                                last_used_at: None,
+                            })
+                            .collect::<Vec<_>>();
+                        if projects.is_empty() {
+                            DashboardSection::Empty
+                        } else {
+                            DashboardSection::Ready(projects)
+                        }
+                    }
+                    ConnectionStatus::Unavailable
+                    | ConnectionStatus::Disconnected
+                    | ConnectionStatus::Incompatible => {
+                        DashboardSection::Unavailable(snapshot.provenance.clone())
+                    }
+                };
+                if state.set_dashboard_projects(projects)
+                    && state.surface_visible(SurfaceRole::Launcher)
+                {
+                    render_role(&mut shell, &mut state, SurfaceRole::Launcher)?;
+                }
+                if availability_changed || menu_changed {
+                    sync_visibility(&mut shell, &mut state);
+                    render_all(&mut shell, &mut state)?;
+                }
+            }
+            codex.resume_requests(&mut shell);
+            let codex_changed = project_menu_changed;
+            let fast_changed = state.refresh_fast();
+            if fast_changed {
+                sync_visibility(&mut shell, &mut state);
+                render_all(&mut shell, &mut state)?;
+            }
+            let _ = codex
+                .runtime_snapshot(feature_settings.codex_generation)
+                .save_default();
+            fast_subscription.observed(refresh_now, fast_changed || codex_changed);
+        }
+        if system_subscription.is_due(Instant::now()) {
+            let refresh_now = Instant::now();
+            let mut requested = OptionalFeatureSettings::load_default();
+            requested.codex_enabled = requested.effective_codex_enabled();
+            if requested != feature_settings {
+                feature_settings = requested;
+                #[cfg(target_os = "windows")]
+                let keyboard_changed = state.apply_windows_keyboard_settings(&feature_settings);
+                #[cfg(not(target_os = "windows"))]
+                let keyboard_changed = false;
+                if codex.apply_settings(&mut shell, &feature_settings) {
+                    if feature_settings.codex_enabled {
+                        state.apply_codex_projection(CodexAvailabilityProjection::new(
+                            FeatureSupport::Supported,
+                            codex.installation,
+                            true,
+                            FeatureHealth::Loading,
+                            feature_settings.codex_generation,
+                            Some("Checking the selected Codex backend…".into()),
+                        ));
+                        if let Err(error) = codex.ensure_project_menu() {
+                            tracing::warn!(%error, "Codex integration could not be enabled");
+                        }
+                    } else {
+                        state.apply_codex_projection(CodexAvailabilityProjection::new(
+                            FeatureSupport::Supported,
+                            codex.installation,
+                            false,
+                            FeatureHealth::Unknown,
+                            feature_settings.codex_generation,
+                            Some("Codex integration is disabled".into()),
+                        ));
+                    }
+                    sync_visibility(&mut shell, &mut state);
+                    render_all(&mut shell, &mut state)?;
+                }
+                if keyboard_changed {
+                    sync_visibility(&mut shell, &mut state);
+                    render_role(&mut shell, &mut state, SurfaceRole::Panel)?;
+                    render_role(&mut shell, &mut state, SurfaceRole::OnScreenKeyboard)?;
+                }
+            }
+            let _ = codex
+                .runtime_snapshot(feature_settings.codex_generation)
+                .save_default();
+            let mut system_changed = state.refresh_system();
+            if let Some(settings) = state.take_preferences_commit() {
+                system_changed |= shell.set_bar_on_all_displays(settings.bar_on_all_displays)?;
+            }
+            let codex_theme_changed = codex.set_theme(state.semantic_theme());
+            let primary_output_changed =
+                shell.set_primary_output_name(state.primary_output_name())?;
+            if system_changed || primary_output_changed || codex_theme_changed {
+                sync_visibility(&mut shell, &mut state);
+                render_all(&mut shell, &mut state)?;
+                if codex_theme_changed {
+                    for surface in codex.chats.iter().map(|chat| chat.id).collect::<Vec<_>>() {
+                        codex.present(&mut shell, surface).map_err(|error| {
+                            format!("could not redraw Codex surface after theme change: {error:?}")
+                        })?;
+                    }
+                }
+            }
+            system_subscription.observed(refresh_now, system_changed);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{
+        CodexRuntimeInput, FeatureEffectiveState, FeatureHealth, FeatureInstallation,
+        codex_runtime_from,
+    };
+    use std::time::{Duration, Instant};
+    use twinkle_ui::ControllerAction;
+
+    #[test]
+    fn mixed_scale_desktop_origins_preserve_physical_adjacency() {
+        let geometry = |x, y, width, height, scale| crate::winit_shell::DisplayGeometry {
+            x,
+            y,
+            width,
+            height,
+            scale,
+        };
+        let outputs = super::desktop_logical_outputs(
+            vec![
+                ("right".into(), geometry(2560, 0, 1920, 1080, 1.0)),
+                ("primary".into(), geometry(0, 0, 2560, 1440, 2.0)),
+                ("below".into(), geometry(0, 1440, 1920, 1080, 1.0)),
+            ],
+            Some("primary"),
+            &std::collections::HashSet::new(),
+            0.0,
+            crate::winit_shell::PanelEdge::Bottom,
+        );
+        let output = |id| outputs.iter().find(|output| output.id == id).unwrap();
+
+        assert_eq!(output("primary").work_area.x, 0.0);
+        assert_eq!(output("primary").work_area.width, 1280.0);
+        assert_eq!(output("right").work_area.x, 1280.0);
+        assert_eq!(output("below").work_area.y, 720.0);
+        assert_eq!(outputs.iter().filter(|output| output.primary).count(), 1);
+
+        let reversed = super::desktop_logical_outputs(
+            vec![
+                ("below".into(), geometry(0, 1440, 1920, 1080, 1.0)),
+                ("primary".into(), geometry(0, 0, 2560, 1440, 2.0)),
+                ("right".into(), geometry(2560, 0, 1920, 1080, 1.0)),
+            ],
+            Some("primary"),
+            &std::collections::HashSet::new(),
+            0.0,
+            crate::winit_shell::PanelEdge::Bottom,
+        );
+        assert_eq!(
+            outputs, reversed,
+            "enumeration order must not alter topology"
+        );
+    }
+
+    #[test]
+    fn desktop_work_area_follows_enabled_taskbar_outputs_and_edge() {
+        let displays = || {
+            ["primary", "secondary"]
+                .into_iter()
+                .enumerate()
+                .map(|(index, name)| {
+                    (
+                        name.into(),
+                        crate::winit_shell::DisplayGeometry {
+                            x: (index * 800) as i32,
+                            y: 0,
+                            width: 800,
+                            height: 600,
+                            scale: 1.0,
+                        },
+                    )
+                })
+                .collect()
+        };
+        let reserved = std::collections::HashSet::from(["primary".to_owned()]);
+        let outputs = super::desktop_logical_outputs(
+            displays(),
+            Some("primary"),
+            &reserved,
+            56.0,
+            crate::winit_shell::PanelEdge::Top,
+        );
+        let primary = outputs
+            .iter()
+            .find(|output| output.id == "primary")
+            .unwrap();
+        let secondary = outputs
+            .iter()
+            .find(|output| output.id == "secondary")
+            .unwrap();
+        assert_eq!(
+            (primary.work_area.y, primary.work_area.height),
+            (56.0, 544.0)
+        );
+        assert_eq!(
+            (secondary.work_area.y, secondary.work_area.height),
+            (0.0, 600.0)
+        );
+    }
+
+    fn embedded_chat() -> EmbeddedUiSurface<ChatApplication> {
+        let backend = ReplayBackend::from_json(r#"{"name":"embedded-shell-host","events":[]}"#)
+            .expect("static replay backend");
+        let mut application = ChatApplication::new(BackendMode::Replay {
+            backend,
+            cwd: "/projects/nickel".into(),
+        })
+        .as_shell_chat(std::path::Path::new("/projects/nickel"));
+        application.state.status = ConnectionStatus::Ready;
+        EmbeddedUiSurface::new(application, 900, 640, Instant::now())
+    }
+
+    fn pointer_button(
+        order: u64,
+        button: twinkle_input::PointerButton,
+        edge: twinkle_input::KeyEdge,
+        point: InputPoint,
+    ) -> InputEvent {
+        InputEvent::Pointer(PointerEvent::Button {
+            device: DeviceId(1),
+            order: EventOrder(order),
+            button,
+            edge,
+            position: Some(point),
+        })
+    }
+
+    fn center(node: &twinkle_ui::AccessibilityNode) -> InputPoint {
+        InputPoint {
+            x: f64::from(node.rect.origin.x + node.rect.size.width / 2.0),
+            y: f64::from(node.rect.origin.y + node.rect.size.height / 2.0),
+        }
+    }
+
+    #[test]
+    fn production_embedded_chat_host_exposes_accessibility_and_restores_text_focus() {
+        let mut surface = embedded_chat();
+        for role in [
+            SemanticRole::Button,
+            SemanticRole::TextField,
+            SemanticRole::Menu,
+        ] {
+            assert!(
+                surface
+                    .accessibility_nodes()
+                    .iter()
+                    .any(|node| node.semantic_role == Some(role)),
+                "missing embedded accessibility role {role:?}"
+            );
+        }
+        assert!(
+            surface
+                .accessibility_nodes()
+                .iter()
+                .any(|node| node.component == "Text"),
+            "embedded accessibility tree omitted visible text"
+        );
+
+        let draft = surface
+            .accessibility_nodes()
+            .iter()
+            .find(|node| node.semantic_role == Some(SemanticRole::TextField))
+            .expect("chat composer text field")
+            .clone();
+        let point = center(&draft);
+        surface.normalized_input(
+            pointer_button(
+                1,
+                twinkle_input::PointerButton::Primary,
+                twinkle_input::KeyEdge::Pressed,
+                point,
+            ),
+            None,
+        );
+        surface.normalized_input(
+            pointer_button(
+                2,
+                twinkle_input::PointerButton::Primary,
+                twinkle_input::KeyEdge::Released,
+                point,
+            ),
+            None,
+        );
+        assert_eq!(surface.inspection().keyboard_focus, Some(draft.id.clone()));
+
+        surface.window_focus(false);
+        assert!(!surface.inspection().window_focused);
+        assert_eq!(surface.inspection().keyboard_focus, Some(draft.id.clone()));
+        surface.window_focus(true);
+        assert!(surface.inspection().window_focused);
+        assert_eq!(surface.inspection().keyboard_focus, Some(draft.id));
+
+        let preedit = surface.normalized_input(
+            InputEvent::Text(TextEvent::Preedit {
+                device: DeviceId(1),
+                order: EventOrder(3),
+                text: "世".into(),
+                selection: Some((0, 3)),
+            }),
+            None,
+        );
+        assert!(preedit.changed);
+        assert!(surface.application_mut().state.draft.is_empty());
+        let commit = surface.normalized_input(
+            InputEvent::Text(TextEvent::Commit {
+                device: DeviceId(1),
+                order: EventOrder(4),
+                text: "世界".into(),
+            }),
+            None,
+        );
+        assert!(commit.changed);
+        assert_eq!(surface.application_mut().state.draft, "世界");
+    }
+
+    #[test]
+    fn production_embedded_chat_host_routes_scroll_context_menu_and_suspend() {
+        let mut surface = embedded_chat();
+        for index in 0..200 {
+            surface.application_mut().state.items.push_back(ChatItem {
+                id: format!("item-{index}"),
+                kind: ChatItemKind::Agent,
+                text: format!("history item {index}"),
+                complete: true,
+            });
+        }
+        surface.step(HostBatch {
+            surface_size: Some((901, 640)),
+            ..HostBatch::default()
+        });
+
+        let conversation = surface
+            .accessibility_nodes()
+            .iter()
+            .find(|node| node.label.as_deref() == Some("Conversation"))
+            .expect("accessible conversation scroll surface")
+            .clone();
+        let scroll = surface.normalized_input(
+            InputEvent::Pointer(PointerEvent::Axis {
+                device: DeviceId(1),
+                order: EventOrder(1),
+                delta: Vector { x: 0.0, y: 1.0 },
+                discrete: Some((0, 1)),
+                position: Some(center(&conversation)),
+            }),
+            None,
+        );
+        assert!(scroll.changed);
+        assert!(!surface.application_mut().state.conversation_pinned);
+
+        let file_menu = surface
+            .accessibility_nodes()
+            .iter()
+            .find(|node| {
+                node.semantic_role == Some(SemanticRole::Menu)
+                    && node.label.as_deref() == Some("File")
+            })
+            .expect("File menu")
+            .clone();
+        assert!(file_menu.actions.contains(&ActionKind::ContextMenu));
+        let menu = surface.normalized_input(
+            pointer_button(
+                2,
+                twinkle_input::PointerButton::Secondary,
+                twinkle_input::KeyEdge::Pressed,
+                center(&file_menu),
+            ),
+            None,
+        );
+        assert!(menu.changed);
+        assert!(surface.accessibility_nodes().iter().any(|node| {
+            node.semantic_role == Some(SemanticRole::MenuItem)
+                && node.label.as_deref() == Some("New conversation")
+        }));
+
+        let primary = pointer_button(
+            3,
+            twinkle_input::PointerButton::Primary,
+            twinkle_input::KeyEdge::Pressed,
+            center(&file_menu),
+        );
+        surface.normalized_input(primary, None);
+        surface.suspend();
+        assert!(surface.inspection().pointer_capture.is_none());
+        assert_eq!(surface.application_mut().state.items.len(), 200);
+        assert!(!surface.accessibility_nodes().is_empty());
+
+        surface.step(HostBatch {
+            events: vec![HostEvent::Ui(UiEvent::FocusGained)],
+            ..HostBatch::default()
+        });
+        assert!(surface.inspection().window_focused);
+    }
+
+    #[test]
+    fn unchanged_domain_subscriptions_back_off_and_changes_reset_the_deadline() {
+        let started = Instant::now();
+        let mut schedule = super::DomainSubscriptionSchedule::new(
+            started,
+            Duration::from_millis(10),
+            Duration::from_millis(40),
+        );
+        schedule.observed(started, false);
+        assert_eq!(schedule.deadline(), started + Duration::from_millis(20));
+        schedule.observed(started, false);
+        assert_eq!(schedule.deadline(), started + Duration::from_millis(40));
+        schedule.observed(started, false);
+        assert_eq!(schedule.deadline(), started + Duration::from_millis(40));
+        assert_eq!(schedule.change_token, 0);
+        schedule.observed(started, true);
+        assert_eq!(schedule.deadline(), started + Duration::from_millis(10));
+        assert_eq!(schedule.change_token, 1);
+    }
+
+    #[test]
+    fn independent_domain_schedules_isolate_unchanged_services() {
+        let started = Instant::now();
+        let mut fast = super::DomainSubscriptionSchedule::new(
+            started,
+            Duration::from_millis(10),
+            Duration::from_millis(80),
+        );
+        let mut system = super::DomainSubscriptionSchedule::new(
+            started,
+            Duration::from_millis(50),
+            Duration::from_millis(200),
+        );
+        fast.observed(started, true);
+        system.observed(started, false);
+        assert_eq!(fast.change_token, 1);
+        assert_eq!(system.change_token, 0);
+        assert_eq!(fast.deadline(), started + Duration::from_millis(10));
+        assert_eq!(system.deadline(), started + Duration::from_millis(100));
+    }
+
+    #[test]
+    fn project_menu_deadline_is_polled_independently_of_fast_subscription() {
+        let mut project_menu = embedded_chat();
+        let due = project_menu.deadline().expect("chat host poll deadline");
+        let mut no_chats = Vec::new();
+
+        let _ = super::poll_due_codex_hosts(Some(&mut project_menu), &mut no_chats, due);
+
+        assert!(
+            project_menu
+                .deadline()
+                .is_some_and(|deadline| deadline > due)
+        );
+    }
+
+    #[test]
+    fn codex_native_project_switcher_has_editable_query_and_discovery_deadline() {
+        let backend = ReplayBackend::from_json(r#"{"name":"native-project-menu","events":[]}"#)
+            .expect("static replay is valid");
+        let application = ChatApplication::new(BackendMode::Replay {
+            backend,
+            cwd: "/projects/nickel".into(),
+        })
+        .as_shell_project_menu();
+        let mut controller = EmbeddedUiSurface::new(application, 360, 420, Instant::now());
+        assert!(
+            controller
+                .host
+                .accessibility_nodes()
+                .iter()
+                .any(|node| { node.semantic_role == Some(SemanticRole::TextField) })
+        );
+        let due = controller.deadline().expect("discovery poll is scheduled");
+        assert!(controller.poll_due(due).is_some());
+    }
+
+    #[test]
+    fn controller_launcher_action_toggles_launcher() {
+        assert_eq!(
+            super::controller_launcher_shortcut(ControllerAction::HostMenu),
+            Some(super::platform::GlobalShortcut::ToggleLauncher)
+        );
+    }
+
+    #[test]
+    fn controller_navigation_does_not_toggle_launcher() {
+        assert_eq!(
+            super::controller_launcher_shortcut(ControllerAction::Confirm),
+            None
+        );
+    }
+
+    #[test]
+    fn screenshot_owns_controller_input_over_visible_keyboard() {
+        use super::SurfaceRole;
+        assert_eq!(
+            super::modal_controller_target(true, true),
+            Some(SurfaceRole::Screenshot)
+        );
+        assert_eq!(
+            super::modal_controller_target(true, false),
+            Some(SurfaceRole::Screenshot)
+        );
+        assert_eq!(
+            super::modal_controller_target(false, true),
+            Some(SurfaceRole::OnScreenKeyboard)
+        );
+        assert_eq!(super::modal_controller_target(false, false), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn every_nonpersistent_wayland_shell_role_has_compositor_visibility_authority() {
+        use nickel_session_protocol::ShellRole;
+
+        for (surface, session) in [
+            (super::SurfaceRole::ControlCenter, ShellRole::ControlCenter),
+            (super::SurfaceRole::Notification, ShellRole::Notification),
+            (super::SurfaceRole::VolumeOsd, ShellRole::VolumeOsd),
+            (super::SurfaceRole::WindowPreview, ShellRole::Preview),
+            (
+                super::SurfaceRole::WindowContextMenu,
+                ShellRole::ContextMenu,
+            ),
+            (super::SurfaceRole::CodexProjectMenu, ShellRole::ProjectMenu),
+            (super::SurfaceRole::Screenshot, ShellRole::Screenshot),
+        ] {
+            assert_eq!(super::session_visibility_role(surface), Some(session));
+        }
+        for persistent in [
+            super::SurfaceRole::Desktop,
+            super::SurfaceRole::Taskbar,
+            super::SurfaceRole::Launcher,
+            super::SurfaceRole::Lock,
+            super::SurfaceRole::CodexChat,
+        ] {
+            assert_eq!(super::session_visibility_role(persistent), None);
+        }
+    }
+
+    #[test]
+    fn ordinary_controller_surfaces_do_not_translate_actions_to_keys() {
+        let source = include_str!("lib.rs");
+        let handler = source
+            .split("fn handle_controller_action(")
+            .nth(1)
+            .and_then(|source| source.split("fn handle_input_event(").next())
+            .expect("controller handler remains inspectable");
+
+        assert!(!handler.contains("KeyCode"));
+        for key_translation in [
+            "control_key(",
+            "preview_key(",
+            "window_menu_key(",
+            "notification_key(",
+            "panel_key(",
+            "screenshot_key(",
+        ] {
+            assert!(!handler.contains(key_translation));
+        }
+        for direct_dispatch in [
+            "control_controller(action, width, height)",
+            "preview_controller(action)",
+            "notification_controller(action)",
+            "plugin_panel_host_controller_for(&key, action, width, height)",
+            "screenshot_controller(action)",
+        ] {
+            assert!(
+                handler.contains(direct_dispatch),
+                "missing direct controller dispatch: {direct_dispatch}"
+            );
+        }
+    }
+
+    use std::path::Path;
+
+    use nickel_codex::{ReplayBackend, ThreadId};
+    use nickel_codex_ui::{BackendMode, ChatApplication, ChatItem, ChatItemKind, ConnectionStatus};
+    use twinkle_input::{
+        DeviceId, EventOrder, InputEvent, Point as InputPoint, PointerEvent, TextEvent, Vector,
+    };
+    use twinkle_ui::{ActionKind, HostBatch, HostEvent, SemanticRole, UiEvent};
+
+    use super::{EmbeddedUiSurface, WriterLeases, codex_project_application_id};
+
+    #[cfg(target_os = "linux")]
+    fn shell_readiness(
+        outputs: u16,
+        desktops: u16,
+        panels: u16,
+        launchers: u16,
+        reserved_ordinary_windows: u16,
+        ready: bool,
+    ) -> nickel_session_protocol::ShellReadinessSnapshot {
+        nickel_session_protocol::ShellReadinessSnapshot {
+            expected_shell_pid: Some(42),
+            authenticated_shell_pid: Some(42),
+            outputs,
+            desktops,
+            panels,
+            locks: outputs,
+            launchers,
+            required_singletons_ready: true,
+            output_roles_ready: true,
+            reserved_ordinary_windows,
+            ready,
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn healthy_shell_readiness_snapshot_is_accepted() {
+        assert!(super::validate_shell_readiness(&shell_readiness(2, 2, 2, 1, 0, true)).is_ok());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn missing_shell_role_fails_closed_with_safe_counts() {
+        let error =
+            super::validate_shell_readiness(&shell_readiness(2, 1, 2, 1, 0, false)).unwrap_err();
+        assert!(error.contains("outputs=2 desktops=1 panels=2 locks=2 launchers=1"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn duplicate_shell_role_fails_closed_with_safe_counts() {
+        let error =
+            super::validate_shell_readiness(&shell_readiness(2, 2, 2, 2, 0, false)).unwrap_err();
+        assert!(error.contains("launchers=2"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn misclassified_shell_role_fails_closed_with_safe_counts() {
+        let error =
+            super::validate_shell_readiness(&shell_readiness(2, 2, 2, 1, 1, false)).unwrap_err();
+        assert!(error.contains("reserved_ordinary_windows=1"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn readiness_barrier_accepts_late_roles_without_exposing_interaction() {
+        let mut attempts = 0;
+        let readiness = super::wait_for_shell_readiness_with(
+            || {
+                attempts += 1;
+                Ok(if attempts < 3 {
+                    shell_readiness(2, 1, 1, 1, 0, false)
+                } else {
+                    shell_readiness(2, 2, 2, 1, 0, true)
+                })
+            },
+            std::time::Duration::from_secs(1),
+            std::time::Duration::ZERO,
+        )
+        .unwrap();
+        assert_eq!(attempts, 3);
+        assert!(readiness.ready);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn readiness_barrier_fails_closed_with_the_last_safe_snapshot() {
+        let error = super::wait_for_shell_readiness_with(
+            || Ok(shell_readiness(2, 1, 2, 1, 0, false)),
+            std::time::Duration::ZERO,
+            std::time::Duration::ZERO,
+        )
+        .unwrap_err();
+        assert!(error.contains("did not converge within 0 ms"));
+        assert!(error.contains("outputs=2 desktops=1 panels=2"));
+    }
+
+    #[test]
+    fn headless_start_waits_in_one_process_until_a_display_returns() {
+        let mut steps = 0;
+        super::wait_for_initial_display_with(|| {
+            steps += 1;
+            Ok(steps == 3)
+        })
+        .unwrap();
+        assert_eq!(steps, 3);
+    }
+
+    #[test]
+    fn linux_output_loss_does_not_end_the_shell_process() {
+        assert_eq!(
+            super::shell_event_ends_process(&super::ShellEvent::Quit),
+            !cfg!(target_os = "linux")
+        );
+    }
+
+    #[test]
+    fn codex_project_identity_is_canonical_and_path_opaque() {
+        let first = codex_project_application_id(Some("project-one"), Path::new("/private/a"));
+        let same = codex_project_application_id(Some("project-one"), Path::new("/private/b"));
+        let other = codex_project_application_id(Some("project-two"), Path::new("/private/a"));
+        assert_eq!(first, same);
+        assert_ne!(first, other);
+        assert!(!first.contains("private"));
+        assert!(first.starts_with("io.nickel.codex.project."));
+    }
+
+    #[test]
+    fn codex_project_identity_has_a_normalized_root_fallback() {
+        let first = codex_project_application_id(None, Path::new("/work/./sample"));
+        let same = codex_project_application_id(None, Path::new("/work/sample"));
+        let other = codex_project_application_id(None, Path::new("/other/sample"));
+        assert_eq!(first, same);
+        assert_ne!(first, other);
+    }
+
+    #[test]
+    fn writer_lease_allows_exactly_one_owner_and_releases_for_retry() {
+        let thread = ThreadId("thread-1".into());
+        let mut leases = WriterLeases::default();
+        assert!(leases.acquire(&thread));
+        assert!(!leases.acquire(&thread));
+        assert!(leases.contains(&thread));
+        assert!(leases.release(&thread));
+        assert!(!leases.contains(&thread));
+        assert!(leases.acquire(&thread));
+    }
+
+    #[test]
+    fn disabled_codex_runtime_has_no_owned_resources() {
+        let runtime = codex_runtime_from(CodexRuntimeInput {
+            enabled: false,
+            generation: 4,
+            status: Some(ConnectionStatus::Ready),
+            authenticated: true,
+            active_windows: 7,
+            cache_entries: 99,
+            source_label: "ignored".into(),
+            diagnostic: None,
+            installation: FeatureInstallation::Installed,
+        });
+        assert_eq!(runtime.codex_generation, 4);
+        assert_eq!(runtime.codex_installation, FeatureInstallation::Installed);
+        assert_eq!(runtime.source_label, "ignored");
+        assert!(runtime.disabled_is_quiescent());
+    }
+
+    #[test]
+    fn codex_runtime_reports_loading_signed_out_failed_and_ready() {
+        let snapshot = |status, authenticated| {
+            codex_runtime_from(CodexRuntimeInput {
+                enabled: true,
+                generation: 8,
+                status,
+                authenticated,
+                active_windows: 1,
+                cache_entries: 3,
+                source_label: "fixture".into(),
+                diagnostic: None,
+                installation: FeatureInstallation::Installed,
+            })
+        };
+        assert_eq!(
+            snapshot(Some(ConnectionStatus::Loading), false).codex_effective,
+            FeatureEffectiveState::Enabling
+        );
+        assert_eq!(
+            snapshot(Some(ConnectionStatus::Ready), false).codex_health,
+            FeatureHealth::SignedOut
+        );
+        assert_eq!(
+            snapshot(Some(ConnectionStatus::Unavailable), false).codex_effective,
+            FeatureEffectiveState::Rejected
+        );
+        let ready = snapshot(Some(ConnectionStatus::Ready), true);
+        assert_eq!(ready.codex_health, FeatureHealth::Ready);
+        assert_eq!(ready.background_workers, 1);
+        assert_eq!(ready.subscriptions, 2);
+        assert_eq!(ready.warm_surfaces, 2);
+        assert_eq!(ready.cache_entries, 3);
+    }
+}
+
+pub mod keyboard_capabilities;
+mod window_preview_capabilities;

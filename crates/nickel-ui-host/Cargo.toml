@@ -14,4 +14,4 @@ nickel-core = { path = "../nickel-core" }
 twinkle_ui = { workspace = true }
 
 [dev-dependencies]
-winit-next.workspace = true
+winit.workspace = true

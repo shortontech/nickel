@@ -73,7 +73,7 @@ the installed `clang-cl` and `llvm-lib` advanced that build to the missing `asse
 but is not a substitute for a supported Windows toolchain or native run.
 
 ```sh
-cargo build -p nickel --no-default-features --features backend-winit \
+cargo build -p nickel -p nickel-tools --no-default-features --features nickel/backend-winit \
   --bin nickel-nested --bin nickel-test-input --bin nickel-nested-acceptance
 ./target/debug/nickel-nested-acceptance
 ```
@@ -105,7 +105,7 @@ the host launcher. The harness now uses scoped Meta input for its launcher
 checks; repeat controller ingress only on an isolated input seat.
 
 ```sh
-cargo test -p nickel --lib \
+cargo test -p nickel-shell -p nickel-linux-session --lib \
   native_xwayland_input_only_requestor_receives_complete_incremental_png -- --ignored --nocapture
 (cd vendor/smithay && cargo test --features xwayland --lib \
   xwayland::xwm::selection::tests --no-default-features)
@@ -146,7 +146,7 @@ regression. The testkit touch scenario exercises separately supplied normalized 
 than envelope self-certification.
 
 ```sh
-cargo test -p nickel --lib session:: -- --test-threads=1
+cargo test -p nickel-linux-session --lib session:: -- --test-threads=1
 ```
 
 Pass: 472 passed, 0 failed, 6 ignored. This covers the integrated session authority route,
@@ -194,9 +194,9 @@ Pass: 1 test, 0 failed (43 filtered out). The public Smithay touch boundary canc
 changed in the completed frame and an unchanged retained contact, then rejects later motion/up.
 
 ```sh
-env RUSTC_WRAPPER= cargo test -p nickel --lib --all-features \
+env RUSTC_WRAPPER= cargo test -p nickel-linux-session --lib --all-features \
   'session::grabs::move_grab::tests'
-env RUSTC_WRAPPER= cargo test -p nickel --lib --all-features \
+env RUSTC_WRAPPER= cargo test -p nickel-shell -p nickel-linux-session --lib --all-features \
   removing_internal_surface_cancels_its_active_move_authority -- --nocapture
 ```
 
@@ -206,13 +206,13 @@ unexpected native-grab loss, maximized restore threshold, and internal-surface t
 build emitted the existing PipeWire SPA plugindir fallback warning. This is not native acceptance.
 
 ```sh
-env RUSTC_WRAPPER= cargo test -p nickel --lib --all-features \
+env RUSTC_WRAPPER= cargo test -p nickel-shell -p nickel-linux-session --lib --all-features \
   client_request_is_independent_but_notification_without_token_is_unknown
-env RUSTC_WRAPPER= cargo test -p nickel --lib --all-features \
+env RUSTC_WRAPPER= cargo test -p nickel-shell -p nickel-linux-session --lib --all-features \
   equal_unknown_notification_stays_pending_until_absolute_deadline
-env RUSTC_WRAPPER= cargo test -p nickel --lib --all-features \
+env RUSTC_WRAPPER= cargo test -p nickel-shell -p nickel-linux-session --lib --all-features \
   internal_move_compensation_restores_only_the_last_owned_placement
-env RUSTC_WRAPPER= cargo test -p nickel --lib --all-features \
+env RUSTC_WRAPPER= cargo test -p nickel-shell -p nickel-linux-session --lib --all-features \
   focused_non_desktop_surface_receives_the_same_normalized_keyboard_path
 ```
 
@@ -234,7 +234,7 @@ Suggested focused commands:
 
 ```sh
 env RUSTC_WRAPPER= cargo test -p nickel-session-protocol --test controller_broker_stateful
-env RUSTC_WRAPPER= cargo test -p nickel --lib --all-features session::
+env RUSTC_WRAPPER= cargo test -p nickel-linux-session --lib --all-features session::
 ```
 
 ## Native acceptance still required

@@ -21,7 +21,7 @@ use windows::Win32::{
         WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
     },
 };
-use winit_next::{
+use winit::{
     dpi::PhysicalPosition,
     event::WindowEvent,
     window::{WindowAttributes, WindowLevel},

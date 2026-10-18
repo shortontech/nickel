@@ -59,7 +59,7 @@ Build the Rust development tools, then start an isolated nested session on
 Linux:
 
 ```sh
-cargo build -p nickel --bin nickel-plugin --bin nickel-nested --bin nickel-test-input --features backend-winit
+cargo build -p nickel -p nickel-tools --bin nickel-plugin --bin nickel-nested --bin nickel-test-input --features nickel/backend-winit
 target/debug/nickel-plugin dev assets/plugins/hello-panel
 ```
 

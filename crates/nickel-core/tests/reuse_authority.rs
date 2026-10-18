@@ -80,8 +80,8 @@ fn logical_rectangle_and_intersection_have_one_shared_authority() {
 
     for consumer in [
         "crates/nickel-core/src/dpi.rs",
-        "crates/nickel/src/session/shell_layout.rs",
-        "crates/nickel/src/platform/linux.rs",
+        "crates/nickel-linux-session/src/session/shell_layout.rs",
+        "crates/nickel-shell/src/platform/linux.rs",
     ] {
         let source = fs::read_to_string(root.join(consumer)).unwrap();
         assert!(
@@ -90,7 +90,8 @@ fn logical_rectangle_and_intersection_have_one_shared_authority() {
         );
     }
     let shell_layout =
-        fs::read_to_string(root.join("crates/nickel/src/session/shell_layout.rs")).unwrap();
+        fs::read_to_string(root.join("crates/nickel-linux-session/src/session/shell_layout.rs"))
+            .unwrap();
     assert!(shell_layout.contains("nickel_core::geometry::LogicalRect"));
 }
 
@@ -152,7 +153,8 @@ fn nickel_core_delegates_configuration_storage_mechanics() {
 #[test]
 fn geometry_effect_entrypoints_publish_desired_state_before_writing() {
     let root = workspace_root();
-    let state = fs::read_to_string(root.join("crates/nickel/src/session/state.rs")).unwrap();
+    let state =
+        fs::read_to_string(root.join("crates/nickel-linux-session/src/session/state.rs")).unwrap();
     let section = |start: &str, end: &str| {
         let start = state
             .find(start)
@@ -192,13 +194,20 @@ fn geometry_effect_entrypoints_publish_desired_state_before_writing() {
 #[test]
 fn xdg_configures_and_repeated_x11_client_requests_use_typed_tracking() {
     let root = workspace_root();
-    let state = fs::read_to_string(root.join("crates/nickel/src/session/state.rs")).unwrap();
-    let resize =
-        fs::read_to_string(root.join("crates/nickel/src/session/grabs/resize_grab.rs")).unwrap();
-    let xdg =
-        fs::read_to_string(root.join("crates/nickel/src/session/handlers/xdg_shell.rs")).unwrap();
-    let x11 =
-        fs::read_to_string(root.join("crates/nickel/src/session/handlers/xwayland.rs")).unwrap();
+    let state =
+        fs::read_to_string(root.join("crates/nickel-linux-session/src/session/state.rs")).unwrap();
+    let resize = fs::read_to_string(
+        root.join("crates/nickel-linux-session/src/session/grabs/resize_grab.rs"),
+    )
+    .unwrap();
+    let xdg = fs::read_to_string(
+        root.join("crates/nickel-linux-session/src/session/handlers/xdg_shell.rs"),
+    )
+    .unwrap();
+    let x11 = fs::read_to_string(
+        root.join("crates/nickel-linux-session/src/session/handlers/xwayland.rs"),
+    )
+    .unwrap();
 
     assert_eq!(
         state.matches("send_pending_configure()").count(),
@@ -224,7 +233,8 @@ fn xdg_configures_and_repeated_x11_client_requests_use_typed_tracking() {
 #[test]
 fn xdg_tracking_extends_equal_revision_requests_and_uses_effective_placement() {
     let root = workspace_root();
-    let state = fs::read_to_string(root.join("crates/nickel/src/session/state.rs")).unwrap();
+    let state =
+        fs::read_to_string(root.join("crates/nickel-linux-session/src/session/state.rs")).unwrap();
     let record = state
         .split("pub(crate) fn record_xdg_desired_geometry")
         .nth(1)
@@ -252,8 +262,10 @@ fn xdg_tracking_extends_equal_revision_requests_and_uses_effective_placement() {
 #[test]
 fn independent_x11_configure_revokes_an_active_operation_before_native_apply() {
     let root = workspace_root();
-    let x11 =
-        fs::read_to_string(root.join("crates/nickel/src/session/handlers/xwayland.rs")).unwrap();
+    let x11 = fs::read_to_string(
+        root.join("crates/nickel-linux-session/src/session/handlers/xwayland.rs"),
+    )
+    .unwrap();
     let accepted = x11
         .split("diagnostic: X11 configure accepted")
         .nth(1)
@@ -276,8 +288,10 @@ fn independent_x11_configure_revokes_an_active_operation_before_native_apply() {
 #[test]
 fn unknown_x11_notify_defers_issued_request_failure_to_bounded_reconciliation() {
     let root = workspace_root();
-    let x11 =
-        fs::read_to_string(root.join("crates/nickel/src/session/handlers/xwayland.rs")).unwrap();
+    let x11 = fs::read_to_string(
+        root.join("crates/nickel-linux-session/src/session/handlers/xwayland.rs"),
+    )
+    .unwrap();
     let notify = x11
         .split("fn configure_notify(")
         .nth(1)
@@ -291,7 +305,8 @@ fn unknown_x11_notify_defers_issued_request_failure_to_bounded_reconciliation() 
     assert!(pending < cancel && cancel < observe);
     assert!(notify.contains("observe_x11_untrusted_notification"));
 
-    let state = fs::read_to_string(root.join("crates/nickel/src/session/state.rs")).unwrap();
+    let state =
+        fs::read_to_string(root.join("crates/nickel-linux-session/src/session/state.rs")).unwrap();
     let binding = state
         .split("fn bind_x11_geometry_request")
         .nth(1)
@@ -306,7 +321,8 @@ fn unknown_x11_notify_defers_issued_request_failure_to_bounded_reconciliation() 
 #[test]
 fn relayout_and_hidden_rescue_require_live_geometry_authority() {
     let root = workspace_root();
-    let state = fs::read_to_string(root.join("crates/nickel/src/session/state.rs")).unwrap();
+    let state =
+        fs::read_to_string(root.join("crates/nickel-linux-session/src/session/state.rs")).unwrap();
     let relayout = state
         .split("pub(crate) fn relayout_maximized_windows")
         .nth(1)
@@ -330,7 +346,8 @@ fn relayout_and_hidden_rescue_require_live_geometry_authority() {
 #[test]
 fn interactive_x11_effects_bind_bounded_requests_before_native_writes() {
     let root = workspace_root();
-    let state = fs::read_to_string(root.join("crates/nickel/src/session/state.rs")).unwrap();
+    let state =
+        fs::read_to_string(root.join("crates/nickel-linux-session/src/session/state.rs")).unwrap();
     for (start, end) in [
         (
             "pub(crate) fn apply_authorized_interactive_resize",
@@ -366,7 +383,8 @@ fn interactive_x11_effects_bind_bounded_requests_before_native_writes() {
 #[test]
 fn mapped_output_rescue_records_displacement_only_after_success() {
     let root = workspace_root();
-    let state = fs::read_to_string(root.join("crates/nickel/src/session/state.rs")).unwrap();
+    let state =
+        fs::read_to_string(root.join("crates/nickel-linux-session/src/session/state.rs")).unwrap();
     let mapped = state
         .split("for (id, window, location, size) in mapped")
         .nth(1)
@@ -383,7 +401,8 @@ fn mapped_output_rescue_records_displacement_only_after_success() {
 #[test]
 fn x11_notify_stays_unknown_and_drag_deadline_is_bounded() {
     let root = workspace_root();
-    let state = fs::read_to_string(root.join("crates/nickel/src/session/state.rs")).unwrap();
+    let state =
+        fs::read_to_string(root.join("crates/nickel-linux-session/src/session/state.rs")).unwrap();
     let causality = state
         .split("pub(crate) fn observe_x11_untrusted_notification")
         .nth(1)
@@ -412,7 +431,8 @@ fn x11_notify_stays_unknown_and_drag_deadline_is_bounded() {
 #[test]
 fn remote_set_bounds_authorizes_exact_geometry_before_effects() {
     let root = workspace_root();
-    let state = fs::read_to_string(root.join("crates/nickel/src/session/state.rs")).unwrap();
+    let state =
+        fs::read_to_string(root.join("crates/nickel-linux-session/src/session/state.rs")).unwrap();
     let action = state
         .split("WindowAction::SetBounds {")
         .nth(2)
@@ -431,7 +451,8 @@ fn remote_set_bounds_authorizes_exact_geometry_before_effects() {
 #[test]
 fn x11_request_eviction_and_teardown_retain_terminal_outcomes() {
     let root = workspace_root();
-    let state = fs::read_to_string(root.join("crates/nickel/src/session/state.rs")).unwrap();
+    let state =
+        fs::read_to_string(root.join("crates/nickel-linux-session/src/session/state.rs")).unwrap();
     let binding = state
         .split("fn bind_x11_geometry_request")
         .nth(1)
@@ -468,8 +489,10 @@ fn x11_request_eviction_and_teardown_retain_terminal_outcomes() {
 #[test]
 fn xdg_resize_anchor_is_authorized_before_mapping_and_expiry_cleans_up() {
     let root = workspace_root();
-    let compositor =
-        fs::read_to_string(root.join("crates/nickel/src/session/handlers/compositor.rs")).unwrap();
+    let compositor = fs::read_to_string(
+        root.join("crates/nickel-linux-session/src/session/handlers/compositor.rs"),
+    )
+    .unwrap();
     let commit = compositor
         .split("resize_grab::handle_commit")
         .nth(1)
@@ -478,7 +501,8 @@ fn xdg_resize_anchor_is_authorized_before_mapping_and_expiry_cleans_up() {
         commit.find("observe_xdg_geometry_commit").unwrap() < commit.find("map_element").unwrap()
     );
 
-    let state = fs::read_to_string(root.join("crates/nickel/src/session/state.rs")).unwrap();
+    let state =
+        fs::read_to_string(root.join("crates/nickel-linux-session/src/session/state.rs")).unwrap();
     let incorporation = state
         .split("pub(crate) fn record_xdg_configure_incorporation")
         .nth(1)

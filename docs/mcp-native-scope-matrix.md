@@ -36,9 +36,9 @@ afterward.
 Build and run from a reachable Wayland session:
 
 ```sh
-cargo test -p nickel --no-default-features --features backend-winit --bin nickel-linux-remote-control-acceptance
-cargo clippy -p nickel --no-default-features --features backend-winit --bin nickel-linux-remote-control-acceptance -- -D warnings
-cargo build -p nickel --no-default-features --features backend-winit --bin nickel-nested --bin nickel-linux-remote-control-acceptance
+cargo test -p nickel-tools --bin nickel-linux-remote-control-acceptance
+cargo clippy -p nickel-tools --bin nickel-linux-remote-control-acceptance -- -D warnings
+cargo build -p nickel -p nickel-tools --no-default-features --features nickel/backend-winit --bin nickel-nested --bin nickel-linux-remote-control-acceptance
 target/debug/nickel-linux-remote-control-acceptance
 ```
 
@@ -322,7 +322,7 @@ Build and run the matching optimized production executable and harness with the
 shared native-build lock:
 
 ```sh
-flock -x /tmp/nickel-mcp-build.lock -c 'cargo build --release -p nickel --no-default-features --features backend-winit --bin nickel-nested --bin nickel-linux-remote-control-acceptance'
+flock -x /tmp/nickel-mcp-build.lock -c 'cargo build --release -p nickel -p nickel-tools --no-default-features --features nickel/backend-winit --bin nickel-nested --bin nickel-linux-remote-control-acceptance'
 flock -x /tmp/nickel-mcp-build.lock -c 'target/release/nickel-linux-remote-control-acceptance --long-churn'
 ```
 
